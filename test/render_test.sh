@@ -206,6 +206,8 @@ if [[ -s "${cache}/sb/bar-claude.png" ]]; then ok "claude bar PNG generated"
 else fail "claude bar PNG generated"; fi
 if [[ -s "${cache}/sb/bar-codex.png" ]]; then ok "codex bar PNG generated"
 else fail "codex bar PNG generated"; fi
+if [[ -s "${cache}/sb/bar-gemini.png" ]]; then ok "gemini tertiary bar PNG generated"
+else fail "gemini tertiary bar PNG generated"; fi
 if [[ -s "${log}" ]]; then ok "sketchybar received --set commands"
 else fail "sketchybar received --set commands"; fi
 if grep -q 'label.color=0xff' "${log}" 2>/dev/null; then
@@ -223,6 +225,12 @@ if [[ "${marker_pixel}" == *"190,149,255"* ]]; then
     ok "plugin draws elapsed marker line"
 else
     fail "plugin draws elapsed marker line" "pixel=${marker_pixel}"
+fi
+gap_pixels=$(magick "${cache}/sb/bar-gemini.png" -format '%[pixel:p{10,7}] %[pixel:p{10,14}]' info: 2>/dev/null || true)
+if [[ "${gap_pixels}" == *"srgba(0,0,0,0)"*"srgba(0,0,0,0)"* ]]; then
+    ok "plugin leaves 1px gaps between tertiary rows"
+else
+    fail "plugin leaves 1px gaps between tertiary rows" "pixels=${gap_pixels}"
 fi
 
 cache=$(mk_cache)

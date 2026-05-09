@@ -182,21 +182,20 @@ render_bar_png() {
 
     local image_h="${CB_BARS_PNG_BAR_H}"
     if (( rows == 3 )); then
-        # Allow a slightly taller image when stacking three rows. Snap to
-        # 22 px which leaves 7+7+7 = 21 px usable (+1 px corner padding).
+        # Allow a slightly taller image when stacking three rows. 22 px gives
+        # us three 6 px bars with a 1 px gap between each row.
         image_h=22
     fi
 
-    # Row boundaries (top..bottom inclusive) per row count. Rows are
-    # contiguous so there is no visible vertical gap.
+    # Row boundaries (top..bottom inclusive) per row count.
     local r1_top r1_bot r2_top r2_bot r3_top r3_bot
     if (( rows == 2 )); then
         r1_top=2; r1_bot=8
         r2_top=10; r2_bot=$(( image_h - 2 ))
     else
-        r1_top=1; r1_bot=7
-        r2_top=8; r2_bot=14
-        r3_top=15; r3_bot=$(( image_h - 1 ))
+        r1_top=1; r1_bot=6
+        r2_top=8; r2_bot=13
+        r3_top=15; r3_bot=20
     fi
 
     # Width fill (round half-up; never blank for nonzero remaining).
