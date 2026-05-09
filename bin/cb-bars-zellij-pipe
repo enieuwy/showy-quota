@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# codexbar-bars — long-running zjstatus pipe loop.
+#
+# Pipes the rendered ANSI strip into zjstatus on a fixed cadence. We use
+# the pipe widget instead of zjstatus's command widget because the command
+# widget crashes under WASMI with std::sync::Mutex initialization errors
+# (single-threaded WASM).
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+# shellcheck disable=SC1091
+. "${SCRIPT_DIR}/../lib/common.sh"
+
+BAR="${SCRIPT_DIR}/cb-bars-zellij-bar"
+[[ -x "${BAR}" ]] || cb_bars_die "missing renderer: ${BAR}"
+
+cb_bars_have zellij || cb_bars_die "zellij is required for pipe mode"
+
+interval="${CB_BARS_ZELLIJ_PIPE_INTERVAL}"
+pipe_name="${CB_BARS_ZELLIJ_PIPE_NAME}"
+
+while :; do
+    if output=$("${BAR}" 2>/dev/null) && [[ -n "${output}" ]]; then
+        printf '%s' "${output}" | zellij pipe --name "${pipe_name}" >/dev/null 2>&1 || true
+    fi
+    sleep "${interval}"
+done

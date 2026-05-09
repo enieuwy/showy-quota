@@ -1,0 +1,170 @@
+#!/usr/bin/env bash
+# codexbar-bars — shared CodexBar JSON fetcher.
+#
+# Returns the cached `codexbar usage --format json --provider all` output.
+# Refreshes the cache when older than CB_BARS_REFRESH_SECONDS, atomically.
+# Always prints the most recent good cache when codexbar fails.
+#
+# Exit 0 whenever any cache content was emitted (fresh or stale).
+# Exit 1 only when no cache exists and the first fetch fails.
+#
+# Flags:
+#   --refresh   Force a refresh regardless of cache age.
+#   --json      Default. Print the cached JSON.
+#   --age       Print cache age in seconds and exit.
+#   --path      Print the cache file path and exit.
+#
+# This script is intentionally narrow: every renderer (zellij, tmux,
+# sketchybar) reads from the same cache file so we never fan out N parallel
+# `codexbar` invocations.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+# shellcheck disable=SC1091
+. "${SCRIPT_DIR}/../lib/common.sh"
+
+mode="json"
+force_refresh=0
+while (($#)); do
+    case "$1" in
+        --refresh) force_refresh=1 ;;
+        --json)    mode="json" ;;
+        --age)     mode="age" ;;
+        --path)    mode="path" ;;
+        -h|--help)
+            sed -n '2,18p' "$0"
+            exit 0
+            ;;
+        *) cb_bars_die "unknown argument: $1" ;;
+    esac
+    shift
+done
+
+mkdir -p "${CB_BARS_CACHE_DIR}"
+
+if [[ "${mode}" == "path" ]]; then
+    printf '%s\n' "${CB_BARS_USAGE_FILE}"
+    exit 0
+fi
+
+if [[ "${mode}" == "age" ]]; then
+    cb_bars_age_seconds "${CB_BARS_USAGE_FILE}"
+    exit 0
+fi
+
+# ── locking primitives ────────────────────────────────────────────────
+
+# Use flock when available (Linux, Homebrew util-linux); else fall back to
+# `mkdir` lock with a 60s lease.
+cb_bars_with_lock() {
+    if cb_bars_have flock; then
+        # subshell + fd 9 so the lock releases on exit.
+        (
+            exec 9>"${CB_BARS_USAGE_LOCK}"
+            if flock -n 9; then
+                "$@"
+            else
+                cb_bars_log "another fetch in flight; using existing cache"
+                return 0
+            fi
+        )
+        return $?
+    fi
+
+    local lock_dir="${CB_BARS_USAGE_LOCK}.d"
+    if mkdir "${lock_dir}" 2>/dev/null; then
+        trap 'rmdir "'"${lock_dir}"'" 2>/dev/null || true' EXIT
+        "$@"
+        local rc=$?
+        rmdir "${lock_dir}" 2>/dev/null || true
+        trap - EXIT
+        return "${rc}"
+    fi
+
+    # Stale lock recovery (older than 60s).
+    local mtime
+    local now
+    now=$(date +%s)
+    if mtime=$(stat -f %m "${lock_dir}" 2>/dev/null) \
+        || mtime=$(stat -c %Y "${lock_dir}" 2>/dev/null); then
+        if (( now - mtime > 60 )); then
+            rmdir "${lock_dir}" 2>/dev/null || true
+            cb_bars_with_lock "$@"
+            return $?
+        fi
+    fi
+    cb_bars_log "another fetch in flight; using existing cache"
+    return 0
+}
+
+# ── core refresh ──────────────────────────────────────────────────────
+
+run_codexbar() {
+    local args=(usage --format json --pretty)
+    if [[ "${CB_BARS_INCLUDE_STATUS}" == "1" ]]; then
+        args+=(--status)
+    fi
+    "${CB_BARS_CODEXBAR_BIN}" "${args[@]}" 2>/dev/null
+}
+
+refresh_cache() {
+    local out tmp rc
+    tmp=$(mktemp "${CB_BARS_CACHE_DIR}/usage.XXXXXX.json")
+
+    if ! cb_bars_have "${CB_BARS_CODEXBAR_BIN}" \
+       && ! command -v "${CB_BARS_CODEXBAR_BIN}" >/dev/null 2>&1; then
+        rm -f "${tmp}"
+        cb_bars_log "codexbar binary not found: ${CB_BARS_CODEXBAR_BIN}"
+        return 1
+    fi
+
+    rc=0
+    out=$(run_codexbar) || rc=$?
+
+    if [[ -z "${out}" ]] || ! printf '%s' "${out}" | head -c 1 | grep -q '\['; then
+        rm -f "${tmp}"
+        cb_bars_log "codexbar produced no usable output (rc=${rc})"
+        return 1
+    fi
+
+    printf '%s' "${out}" > "${tmp}"
+    if cb_bars_json_valid "${tmp}"; then
+        mv "${tmp}" "${CB_BARS_USAGE_FILE}"
+        date +%s > "${CB_BARS_USAGE_STAMP}"
+        chmod 644 "${CB_BARS_USAGE_FILE}" "${CB_BARS_USAGE_STAMP}"
+        cb_bars_log "cache refreshed (${#out} bytes)"
+        return 0
+    fi
+
+    rm -f "${tmp}"
+    cb_bars_log "codexbar JSON failed validation"
+    return 1
+}
+
+cache_is_fresh() {
+    [[ -s "${CB_BARS_USAGE_FILE}" ]] || return 1
+    local age
+    age=$(cb_bars_age_seconds "${CB_BARS_USAGE_FILE}")
+    (( age < CB_BARS_REFRESH_SECONDS ))
+}
+
+if (( force_refresh )) || ! cache_is_fresh; then
+    cb_bars_with_lock refresh_cache || true
+fi
+
+# Always emit whatever we have. Bars must never see an empty payload while
+# the cache file exists.
+if [[ -s "${CB_BARS_USAGE_FILE}" ]]; then
+    cat "${CB_BARS_USAGE_FILE}"
+    exit 0
+fi
+
+# Last-resort: try one direct fetch with no cache write, so first run on a
+# fresh machine still produces output.
+if direct=$(run_codexbar) && [[ -n "${direct}" ]]; then
+    printf '%s' "${direct}"
+    exit 0
+fi
+
+cb_bars_die "no codexbar JSON available and no cache present"

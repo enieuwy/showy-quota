@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+# codexbar-bars — tmux status-line markup renderer.
+#
+# Designed for use in `set -ag status-right ' #(cb-bars-tmux-bar)'`. Prints
+# tmux-format markup to stdout. Strips per-provider blocks are separated by
+# a thin space.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+# shellcheck disable=SC1091
+. "${SCRIPT_DIR}/../lib/common.sh"
+# shellcheck disable=SC1091
+. "${SCRIPT_DIR}/../lib/strip.sh"
+
+cb_bars_have jq || cb_bars_die "jq is required"
+
+FETCH="${CB_BARS_FETCH_BIN:-${SCRIPT_DIR}/cb-bars-fetch}"
+
+# tmux color literals are accepted as #RRGGBB. Wrap a payload with fg.
+tmux_fg() { printf '#[fg=#%s]' "$1"; }
+tmux_reset() { printf '#[default]'; }
+tmux_dim() { printf '#[dim]'; }
+tmux_bold() { printf '#[bold]'; }
+tmux_nodim() { printf '#[nodim]'; }
+tmux_nobold() { printf '#[nobold]'; }
+
+# ── data load ──────────────────────────────────────────────────────
+
+if ! data=$("${FETCH}" 2>/dev/null) || [[ -z "${data}" ]]; then
+    printf '%sAI ?%s' "$(tmux_fg "$(cb_bars_palette unknown)")" "$(tmux_reset)"
+    exit 0
+fi
+
+filtered=$(printf '%s' "${data}" | cb_bars_filter_renderable)
+count=$(printf '%s' "${filtered}" | jq 'length')
+
+if (( count == 0 )); then
+    printf '%s%sAI idle%s' "$(tmux_dim)" "$(tmux_fg "$(cb_bars_palette unknown)")" "$(tmux_reset)"
+    exit 0
+fi
+
+age=$(cb_bars_age_seconds "${CB_BARS_USAGE_FILE}")
+stale=0
+(( age > CB_BARS_REFRESH_SECONDS * 2 )) && stale=1
+
+rows=$(printf '%s' "${filtered}" | jq -r '
+    .[] | [
+        .provider,
+        (.usage.primary.usedPercent // 0),
+        (.usage.primary.resetsAt // ""),
+        (.usage.secondary.usedPercent // -1)
+    ] | map(tostring) | join("\u001f")')
+
+first_chunk=1
+while IFS=$'\x1f' read -r provider p_used p_reset s_used; do
+    [[ -n "${provider}" ]] || continue
+
+    p_remaining=$((100 - p_used))
+    color_key=$(cb_bars_color_key "${p_remaining}")
+    color_hex=$(cb_bars_palette "${color_key}")
+
+    sigil=$(cb_bars_provider_sigil "${provider}")
+    bar=$(cb_bars_block_bar "${p_remaining}")
+
+    minutes=""
+    [[ -n "${p_reset}" ]] && minutes=$(cb_bars_minutes_until "${p_reset}" || true)
+    countdown=$(cb_bars_format_countdown "${minutes}")
+
+    weekly_hint=""
+    if (( s_used >= 0 )); then
+        s_remaining=$((100 - s_used))
+        if (( s_remaining < p_remaining )); then
+            sw_key=$(cb_bars_color_key "${s_remaining}")
+            weekly_hint=" $(tmux_fg "$(cb_bars_palette "${sw_key}")")w$(tmux_reset)"
+        fi
+    fi
+
+    if (( first_chunk )); then first_chunk=0
+    else printf ' '; fi
+
+    (( stale )) && tmux_dim
+    tmux_bold; printf '%s' "${sigil}"; tmux_nobold
+    printf ' '
+    tmux_fg "${color_hex}"; printf '%s' "${bar}"; tmux_reset
+    (( stale )) && tmux_dim
+    printf ' '
+    if [[ -n "${minutes}" && "${minutes}" -lt "${CB_BARS_TIME_WARN_MINUTES}" ]]; then
+        tmux_fg "$(cb_bars_palette bad)"; printf '%s' "${countdown}"; tmux_reset
+    else
+        printf '%s' "${countdown}"
+    fi
+    [[ -n "${weekly_hint}" ]] && printf '%s' "${weekly_hint}"
+    tmux_reset
+done <<< "${rows}"

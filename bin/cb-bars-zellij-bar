@@ -1,0 +1,126 @@
+#!/usr/bin/env bash
+# codexbar-bars — Zellij/zjstatus ANSI strip renderer.
+#
+# Reads the cached codexbar JSON via cb-bars-fetch and prints a compact
+# ANSI strip to stdout. Designed for the zjstatus 'pipe' widget; can also
+# be sourced from any tool that wants an ANSI usage strip.
+#
+# Format per provider:   <SIGIL> █████░░░ <countdown>
+# Multiple providers are space-separated with no trailing newline.
+#
+# Output is colorless when NO_COLOR is set or stdout is not a TTY *and*
+# CB_BARS_FORCE_COLOR is unset (default: emit color so zjstatus pipe
+# rendermode=raw shows the colors).
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+# shellcheck disable=SC1091
+. "${SCRIPT_DIR}/../lib/common.sh"
+# shellcheck disable=SC1091
+. "${SCRIPT_DIR}/../lib/strip.sh"
+
+cb_bars_have jq || cb_bars_die "jq is required"
+
+FETCH="${CB_BARS_FETCH_BIN:-${SCRIPT_DIR}/cb-bars-fetch}"
+
+# ── color helpers ────────────────────────────────────────────────────
+
+want_color=1
+if [[ -n "${NO_COLOR:-}" || "${TERM:-}" == "dumb" ]]; then want_color=0; fi
+if [[ -n "${CB_BARS_FORCE_COLOR:-}" ]]; then want_color=1; fi
+
+# Convert a 6-char hex to ANSI 24-bit foreground escape.
+fg() {
+    (( want_color )) || return 0
+    local hex="$1"
+    local r=$((16#${hex:0:2})) g=$((16#${hex:2:2})) b=$((16#${hex:4:2}))
+    printf '\033[38;2;%d;%d;%dm' "${r}" "${g}" "${b}"
+}
+reset() { (( want_color )) && printf '\033[0m'; return 0; }
+dim()   { (( want_color )) && printf '\033[2m'; return 0; }
+bold()  { (( want_color )) && printf '\033[1m'; return 0; }
+
+# ── data load ────────────────────────────────────────────────────────
+
+if ! data=$("${FETCH}" 2>/dev/null) || [[ -z "${data}" ]]; then
+    fg "$(cb_bars_palette unknown)"; printf 'AI ?'; reset; printf '\n'
+    exit 0
+fi
+
+filtered=$(printf '%s' "${data}" | cb_bars_filter_renderable)
+count=$(printf '%s' "${filtered}" | jq 'length')
+
+if (( count == 0 )); then
+    dim; printf 'AI idle'; reset; printf '\n'
+    exit 0
+fi
+
+# Stale = cache is older than 2x the refresh interval; dim everything.
+age=$(cb_bars_age_seconds "${CB_BARS_USAGE_FILE}")
+stale=0
+(( age > CB_BARS_REFRESH_SECONDS * 2 )) && stale=1
+
+# ── per-provider render ─────────────────────────────────────────────
+
+# Emit one record per provider, fields separated by ASCII unit-separator
+# (0x1f) to preserve empty fields that read+IFS=$'\t' would collapse.
+rows=$(printf '%s' "${filtered}" | jq -r '
+    .[] | [
+        .provider,
+        (.usage.primary.usedPercent // 0),
+        (.usage.primary.resetsAt // ""),
+        (.usage.secondary.usedPercent // -1),
+        (.usage.secondary.resetsAt // ""),
+        (.usage.tertiary.usedPercent // -1),
+        (.usage.tertiary.resetsAt // "")
+    ] | map(tostring) | join("\u001f")')
+
+first_chunk=1
+while IFS=$'\x1f' read -r provider p_used p_reset s_used _s_reset _t_used _t_reset; do
+    [[ -n "${provider}" ]] || continue
+
+    p_remaining=$((100 - p_used))
+    color_key=$(cb_bars_color_key "${p_remaining}")
+    color_hex=$(cb_bars_palette "${color_key}")
+
+    sigil=$(cb_bars_provider_sigil "${provider}")
+    bar=$(cb_bars_block_bar "${p_remaining}")
+
+    minutes=""
+    if [[ -n "${p_reset}" ]]; then
+        minutes=$(cb_bars_minutes_until "${p_reset}" || true)
+    fi
+    countdown=$(cb_bars_format_countdown "${minutes}")
+
+    # Append weekly 1-char hint when secondary present and worse than primary.
+    weekly_hint=""
+    if (( s_used >= 0 )); then
+        s_remaining=$((100 - s_used))
+        if (( s_remaining < p_remaining )); then
+            sw_key=$(cb_bars_color_key "${s_remaining}")
+            weekly_hint="$(fg "$(cb_bars_palette "${sw_key}")")w$(reset)"
+        fi
+    fi
+
+    if (( first_chunk )); then first_chunk=0
+    else printf ' '; fi
+
+    if (( stale )); then dim; fi
+    bold; printf '%s' "${sigil}"; reset
+    (( stale )) && dim
+    printf ' '
+    fg "${color_hex}"; printf '%s' "${bar}"; reset
+    (( stale )) && dim
+    printf ' '
+    if [[ -n "${minutes}" && "${minutes}" -lt "${CB_BARS_TIME_WARN_MINUTES}" ]]; then
+        fg "$(cb_bars_palette bad)"; printf '%s' "${countdown}"; reset
+    else
+        printf '%s' "${countdown}"
+    fi
+    [[ -n "${weekly_hint}" ]] && printf ' %s' "${weekly_hint}"
+    (( stale )) && reset
+done <<< "${rows}"
+
+# Strip CR; emit single newline so zjstatus pipe widget sees a clean record.
+printf '\n'

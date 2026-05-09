@@ -1,0 +1,12 @@
+.DS_Store
+*.swp
+*.bak
+*~
+
+# transient renderer output that ends up in cwd during ad-hoc testing
+/tmp-*.png
+/cache/
+
+# editor / OS scratch
+.vscode/
+.idea/

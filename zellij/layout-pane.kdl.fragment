@@ -1,0 +1,27 @@
+// codexbar-bars — Zellij layout snippet that drives a zjstatus pipe with
+// the CodexBar usage strip. Add inside the appropriate `pane` block of
+// your default layout, alongside (or instead of) other zjstatus widgets.
+//
+// Replace `format_left` / `format_right` placement to taste. The pipe
+// loop is started by `cb-bars-zellij-pipe` running as a hidden pane.
+
+pane size=1 borderless=true {
+    plugin location="file:~/.config/zellij/plugins/zjstatus.wasm" {
+        // Pipe widget is more stable than `command`; it does not crash
+        // under WASMI's single-threaded std::sync::Mutex initialization.
+        pipe_codexbar_format "{output}"
+        pipe_codexbar_rendermode "raw"
+
+        format_left "{pipe_codexbar}"
+        format_center ""
+        format_right ""
+        format_space ""
+    }
+}
+
+// Hidden pane that keeps the pipe loop running. The 1%×1% trick keeps
+// the pane invisible while still letting Zellij start the command.
+pane x="1%" y="1%" width="1%" height="1%" {
+    command "cb-bars-zellij-pipe"
+    close_on_exit false
+}
