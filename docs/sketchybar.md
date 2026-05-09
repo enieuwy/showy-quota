@@ -51,3 +51,12 @@ Set `CB_BARS_PALETTE_GOOD/WARN/BAD/UNKNOWN/TRACK/TEXT` in
 PNGs go to `${CB_BARS_SKETCHYBAR_IMAGE_CACHE}` (default
 `~/.cache/codexbar-bars/sketchybar`). They are byte-compared on each
 refresh; only changed images are written.
+
+## Caveats
+
+- The plugin does not dim or annotate when the cache is stale. Zellij and
+  tmux do; SketchyBar relies on CodexBar's own menu for incident hints.
+- New providers added in CodexBar after sketchybarrc was sourced require
+  `sketchybar --reload` to appear, because items are declared once when
+  this file is sourced. The plugin's timer only updates already-declared
+  items.

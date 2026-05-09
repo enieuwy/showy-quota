@@ -52,7 +52,7 @@ they want freshness data they read `--age`.
 | `codexbar` returns non-JSON                   | Cache is **not** updated; previous value still served|
 | `codexbar` JSON fails `jq` validation         | Same — preserve last good cache                      |
 | Cache file missing **and** `codexbar` fails   | Fetcher exits non-zero; renderers print `AI ?`       |
-| Cache age > `2 × CB_BARS_REFRESH_SECONDS`     | Renderers dim every provider in the strip            |
+| Cache age > `2 × CB_BARS_REFRESH_SECONDS`     | Zellij + tmux dim every provider; SketchyBar unchanged |
 
 ## Why bash and not Python/Go/Rust
 

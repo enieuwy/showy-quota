@@ -65,14 +65,17 @@ stale=0
 
 # Emit one record per provider, fields separated by ASCII unit-separator
 # (0x1f) to preserve empty fields that read+IFS=$'\t' would collapse.
+# CodexBar may emit usedPercent as int OR float; we floor to a 0..100
+# integer so bash arithmetic later cannot trip over decimals.
 rows=$(printf '%s' "${filtered}" | jq -r '
+    def pct(x): if x == null then -1 else ([0, ([100, (x|tonumber|floor)] | min)] | max) end;
     .[] | [
         .provider,
-        (.usage.primary.usedPercent // 0),
+        pct(.usage.primary.usedPercent // 0),
         (.usage.primary.resetsAt // ""),
-        (.usage.secondary.usedPercent // -1),
+        pct(.usage.secondary.usedPercent),
         (.usage.secondary.resetsAt // ""),
-        (.usage.tertiary.usedPercent // -1),
+        pct(.usage.tertiary.usedPercent),
         (.usage.tertiary.resetsAt // "")
     ] | map(tostring) | join("\u001f")')
 

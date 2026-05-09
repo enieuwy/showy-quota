@@ -45,11 +45,12 @@ stale=0
 (( age > CB_BARS_REFRESH_SECONDS * 2 )) && stale=1
 
 rows=$(printf '%s' "${filtered}" | jq -r '
+    def pct(x): if x == null then -1 else ([0, ([100, (x|tonumber|floor)] | min)] | max) end;
     .[] | [
         .provider,
-        (.usage.primary.usedPercent // 0),
+        pct(.usage.primary.usedPercent // 0),
         (.usage.primary.resetsAt // ""),
-        (.usage.secondary.usedPercent // -1)
+        pct(.usage.secondary.usedPercent)
     ] | map(tostring) | join("\u001f")')
 
 first_chunk=1

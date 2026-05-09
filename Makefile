@@ -31,29 +31,40 @@ install-bin:
 	@for src in $(BIN_SOURCES); do \
 		name=$$(basename $$src); \
 		target="$(BIN_DIR)/$$name"; \
-		if [ -L "$$target" ] || [ ! -e "$$target" ]; then \
-			ln -sf "$$src" "$$target"; \
-			printf 'linked %s -> %s\n' "$$target" "$$src"; \
-		else \
+		if [ -L "$$target" ]; then \
+			cur=$$(readlink "$$target"); \
+			if [ "$$cur" = "$$src" ]; then \
+				printf 'noop  %s -> %s (already current)\n' "$$target" "$$src"; \
+				continue; \
+			fi; \
+			printf 'retarget %s\n  was: %s\n  now: %s\n' "$$target" "$$cur" "$$src" >&2; \
+		elif [ -e "$$target" ]; then \
 			printf 'refusing to clobber %s (not a symlink)\n' "$$target" >&2; \
 			exit 1; \
 		fi; \
+		ln -sfn "$$src" "$$target" || { printf 'ln failed: %s\n' "$$target" >&2; exit 1; }; \
+		printf 'linked %s -> %s\n' "$$target" "$$src"; \
 	done
 
 install-sketchybar:
 	@mkdir -p "$(SBAR_ITEMS)" "$(SBAR_PLUGINS)"
-	@src="$(REPO)/sketchybar/items/cb_bars.sh"; target="$(SBAR_ITEMS)/cb_bars.sh"; \
-	if [ -L "$$target" ] || [ ! -e "$$target" ]; then \
-		ln -sf "$$src" "$$target"; printf 'linked %s\n' "$$target"; \
-	else \
-		printf 'refusing to clobber %s\n' "$$target" >&2; exit 1; \
-	fi
-	@src="$(REPO)/sketchybar/plugins/cb_bars.sh"; target="$(SBAR_PLUGINS)/cb_bars.sh"; \
-	if [ -L "$$target" ] || [ ! -e "$$target" ]; then \
-		ln -sf "$$src" "$$target"; printf 'linked %s\n' "$$target"; \
-	else \
-		printf 'refusing to clobber %s\n' "$$target" >&2; exit 1; \
-	fi
+	@for pair in \
+		"$(REPO)/sketchybar/items/cb_bars.sh:$(SBAR_ITEMS)/cb_bars.sh" \
+		"$(REPO)/sketchybar/plugins/cb_bars.sh:$(SBAR_PLUGINS)/cb_bars.sh"; do \
+		src=$${pair%%:*}; target=$${pair##*:}; \
+		if [ -L "$$target" ]; then \
+			cur=$$(readlink "$$target"); \
+			if [ "$$cur" = "$$src" ]; then \
+				printf 'noop  %s -> %s (already current)\n' "$$target" "$$src"; \
+				continue; \
+			fi; \
+			printf 'retarget %s\n  was: %s\n  now: %s\n' "$$target" "$$cur" "$$src" >&2; \
+		elif [ -e "$$target" ]; then \
+			printf 'refusing to clobber %s\n' "$$target" >&2; exit 1; \
+		fi; \
+		ln -sfn "$$src" "$$target" || { printf 'ln failed: %s\n' "$$target" >&2; exit 1; }; \
+		printf 'linked %s\n' "$$target"; \
+	done
 
 uninstall: ## Remove every symlink that this Makefile would create.
 	@for src in $(BIN_SOURCES); do \

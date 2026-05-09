@@ -158,6 +158,137 @@ else
     fail "label.color is well-formed"
 fi
 
+# ── schema drift / edge JSON ────────────────────────────────────────
+
+printf '\nschema drift\n'
+
+# 1. Float usedPercent must not crash bash arithmetic.
+out=$(run_renderer cb-bars-zellij-bar codexbar-realistic.json)
+assert_contains "float usedPercent renders codex"      "CX" "${out}"
+assert_contains "float usedPercent renders claude"     "CL" "${out}"
+
+out=$(run_renderer cb-bars-tmux-bar codexbar-realistic.json)
+assert_contains "tmux float usedPercent renders codex" "CX" "${out}"
+
+# 2. Provider with usage.primary but no resetsAt must render '?' not crash.
+out=$(run_renderer cb-bars-zellij-bar codexbar-no-reset.json)
+assert_contains "no-reset fixture still renders codex" "CX" "${out}"
+assert_contains "no-reset fixture shows '?' countdown" "?"  "${out}"
+
+# 3. Non-array JSON must be rejected by the fetcher (refresh path).
+printf '\ncache fetcher\n'
+
+cache=$(mk_cache)
+rc=0
+out=$(
+    PATH="${stub_dir}:${PATH}" \
+    CB_BARS_NO_CONFIG=1 \
+    CB_BARS_CACHE_DIR="${cache}" \
+    CB_BARS_TEST_FIXTURE="${FIXTURE_DIR}/codexbar-non-array.json" \
+    "${REPO_ROOT}/bin/cb-bars-fetch" 2>&1
+) || rc=$?
+if (( rc != 0 )) && ! [[ -f "${cache}/usage.json" ]]; then
+    ok "fetcher rejects non-array JSON"
+else
+    fail "fetcher rejects non-array JSON" "rc=${rc}; cache exists: $([[ -f ${cache}/usage.json ]] && echo yes)"
+fi
+
+# 4. Missing codexbar binary, no cache → fetcher fails with diagnostic.
+missing_bin="${TMP}/no-such-codexbar"
+cache=$(mk_cache)
+rc=0
+out=$(
+    CB_BARS_NO_CONFIG=1 \
+    CB_BARS_CACHE_DIR="${cache}" \
+    CB_BARS_CODEXBAR_BIN="${missing_bin}" \
+    "${REPO_ROOT}/bin/cb-bars-fetch" 2>&1
+) || rc=$?
+if (( rc != 0 )); then
+    ok "fetcher fails when codexbar missing and cache empty"
+else
+    fail "fetcher fails when codexbar missing and cache empty"
+fi
+
+# 5. Missing codexbar binary, but stale cache exists → serve stale.
+cache=$(mk_cache)
+cp "${FIXTURE_DIR}/codexbar-mixed.json" "${cache}/usage.json"
+rc=0
+out=$(
+    CB_BARS_NO_CONFIG=1 \
+    CB_BARS_CACHE_DIR="${cache}" \
+    CB_BARS_CODEXBAR_BIN="${missing_bin}" \
+    "${REPO_ROOT}/bin/cb-bars-fetch" 2>/dev/null
+) || rc=$?
+if (( rc == 0 )) && printf '%s' "${out}" | jq -e 'type == "array"' >/dev/null 2>&1; then
+    ok "fetcher serves stale cache when codexbar disappears"
+else
+    fail "fetcher serves stale cache when codexbar disappears" "rc=${rc}"
+fi
+
+# 6. Stale-cache dimming kicks in for terminal renderers.
+printf '\nstale cache dimming\n'
+
+cache=$(mk_cache)
+cp "${FIXTURE_DIR}/codexbar-mixed.json" "${cache}/usage.json"
+# Backdate cache to 1988 so age is decades, well beyond 2 * default REFRESH_SECONDS.
+touch -t 198801010000 "${cache}/usage.json"
+# Use a bogus codexbar bin so fetch cannot refresh the backdated cache.
+ansi_dim=$'\x1b[2m'
+out=$(
+    CB_BARS_NO_CONFIG=1 \
+    CB_BARS_CACHE_DIR="${cache}" \
+    CB_BARS_CODEXBAR_BIN="${TMP}/no-such-codexbar" \
+    CB_BARS_FORCE_COLOR=1 \
+    "${REPO_ROOT}/bin/cb-bars-zellij-bar"
+)
+assert_contains "zellij dims when cache is stale"      "${ansi_dim}" "${out}"
+
+# 7. Concurrent fetch — only one codexbar invocation across simultaneous
+#    callers. We exercise both lock paths via CB_BARS_FORCE_NO_FLOCK.
+printf '\nconcurrent fetch\n'
+
+slow_dir="${TMP}/slow"
+mkdir -p "${slow_dir}"
+cat > "${slow_dir}/codexbar" <<EOF
+#!/bin/sh
+[ -n "\${CB_BARS_TEST_COUNTER:-}" ] && printf 'x' >> "\${CB_BARS_TEST_COUNTER}"
+sleep 1
+cat "${FIXTURE_DIR}/codexbar-mixed.json"
+EOF
+chmod +x "${slow_dir}/codexbar"
+
+for path_label in flock mkdir; do
+    if [[ "${path_label}" == "flock" ]]; then
+        force_no_flock=""
+    else
+        force_no_flock=1
+    fi
+    cache=$(mk_cache)
+    counter="${cache}/cb-call-count"
+    : > "${counter}"
+    for _ in 1 2 3 4; do
+        (
+            CB_BARS_NO_CONFIG=1 \
+            CB_BARS_CACHE_DIR="${cache}" \
+            CB_BARS_CODEXBAR_BIN="${slow_dir}/codexbar" \
+            CB_BARS_FORCE_NO_FLOCK="${force_no_flock}" \
+            CB_BARS_TEST_COUNTER="${counter}" \
+            "${REPO_ROOT}/bin/cb-bars-fetch" >/dev/null 2>&1
+        ) &
+    done
+    wait
+    calls=$(wc -c < "${counter}" | tr -d ' ')
+    if (( calls == 1 )); then
+        ok "${path_label} path: codexbar invoked exactly once across 4 callers"
+    else
+        fail "${path_label} path: codexbar invoked exactly once across 4 callers" "got ${calls} calls"
+    fi
+    if [[ -s "${cache}/usage.json" ]]; then
+        ok "${path_label} path: cache populated"
+    else
+        fail "${path_label} path: cache populated"
+    fi
+done
 # ── summary ──────────────────────────────────────────────────────────
 
 printf '\n%d passed, %d failed\n' "${PASSED}" "${FAILED}"

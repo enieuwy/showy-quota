@@ -1,11 +1,11 @@
 // codexbar-bars — Zellij keybind for an on-demand detail pane.
 //
 // Add inside an existing keybinds block in your zellij config. Adjust
-// the mode/key to taste. The pane runs `codexbar usage` (text mode) on
-// a 30 s loop and closes itself when dismissed.
+// the mode/key to taste. The pane runs a tiny shell loop (no `watch`
+// dependency) re-invoking `codexbar usage` every 30 s.
 
 bind "Alt /" {
-    NewPane "watch" "-n" "30" "codexbar" "usage" {
+    NewPane "sh" "-c" "while :; do clear; codexbar usage; sleep 30; done" {
         close_on_exit true
         floating true
         height "36"

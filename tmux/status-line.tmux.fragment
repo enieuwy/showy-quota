@@ -1,13 +1,16 @@
 # codexbar-bars — tmux status-right snippet.
 #
 # Add to ~/.tmux.conf. This appends the CodexBar usage strip to the
-# existing status-right instead of replacing it. The fragment relies on
-# `cb-bars-tmux-bar` being on the PATH used by the tmux server (typically
-# the one inherited at `tmux start-server` time, not interactive shells).
+# existing status-right instead of replacing it.
+#
+# IMPORTANT: tmux runs `#(...)` under the tmux server's startup PATH —
+# typically NOT your interactive shell's. Use an absolute path or add
+# `set-environment -g PATH "$HOME/.local/bin:$PATH"` near the top of
+# your config.
 #
 # Optional global settings (uncomment to taste):
 # set -g status-position top
 # set -g status-interval 30
 # set -g status-right-length 200
 
-set -ag status-right ' #(cb-bars-tmux-bar)'
+set -ag status-right ' #(/Users/REPLACE_ME/.local/bin/cb-bars-tmux-bar)'

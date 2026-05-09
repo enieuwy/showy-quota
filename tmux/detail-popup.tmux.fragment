@@ -1,6 +1,8 @@
 # codexbar-bars — tmux popup keybinding for an on-demand detail panel.
 #
-# Add to ~/.tmux.conf. Adjust the prefix-relative key to taste. The popup
-# runs `codexbar usage` on a 30 s loop and closes when dismissed.
+# Add to ~/.tmux.conf. Adjust the prefix-relative key to taste. Uses a
+# tiny shell loop to avoid depending on `watch(1)`, which is not on
+# default macOS.
 
-bind-key '/' display-popup -E -h 36 -w 92 -T "CodexBar usage" 'watch -n 30 codexbar usage'
+bind-key '/' display-popup -E -h 36 -w 92 -T "CodexBar usage" \
+    'while :; do clear; codexbar usage; sleep 30; done'

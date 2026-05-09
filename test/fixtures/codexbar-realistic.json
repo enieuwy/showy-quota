@@ -1,0 +1,57 @@
+[
+  {
+    "provider": "codex",
+    "version": "0.6.0",
+    "source": "openai-web",
+    "status": {
+      "indicator": "none",
+      "description": "Operational",
+      "updatedAt": "2099-01-01T17:55:00Z",
+      "url": "https://status.openai.com/"
+    },
+    "usage": {
+      "primary":   { "usedPercent": 28.4, "windowMinutes": 300, "resetsAt": "2099-01-01T19:15:00Z" },
+      "secondary": { "usedPercent": 59.7, "windowMinutes": 10080, "resetsAt": "2099-01-08T17:00:00Z" },
+      "tertiary":  null,
+      "updatedAt": "2099-01-01T18:10:22Z",
+      "identity": {
+        "providerID": "codex",
+        "accountEmail": "user@example.com",
+        "accountOrganization": null,
+        "loginMethod": "plus"
+      },
+      "accountEmail": "user@example.com",
+      "accountOrganization": null,
+      "loginMethod": "plus"
+    },
+    "credits": { "remaining": 112.4, "updatedAt": "2099-01-01T18:10:21Z" },
+    "antigravityPlanInfo": null,
+    "openaiDashboard": {
+      "signedInEmail": "user@example.com",
+      "codeReviewRemainingPercent": 100,
+      "creditEvents": [],
+      "dailyBreakdown": [],
+      "updatedAt": "2099-01-01T18:10:21Z"
+    },
+    "futureUnknownTopLevelField": { "anything": "goes here" }
+  },
+  {
+    "provider": "claude",
+    "source": "web",
+    "version": "2.1.137",
+    "usage": {
+      "primary":   { "usedPercent": 7.0,  "windowMinutes": 300,   "resetsAt": "2099-01-01T05:40:01Z", "resetDescription": "Jan 1 at 1:40PM" },
+      "secondary": { "usedPercent": 17.2, "windowMinutes": 10080, "resetsAt": "2099-01-06T04:00:00Z", "resetDescription": "Jan 6 at 12:00PM" },
+      "tertiary":  null,
+      "extraRateWindows": [
+        { "id": "claude-design", "title": "Designs", "window": { "usedPercent": 0, "windowMinutes": 10080 } }
+      ],
+      "identity": {
+        "providerID": "claude",
+        "accountEmail": "user@example.com",
+        "loginMethod": "Claude Pro"
+      },
+      "providerCost": { "currencyCode": "USD", "limit": 20, "period": "Monthly", "used": 0 }
+    }
+  }
+]

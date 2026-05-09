@@ -11,12 +11,19 @@
 set -uo pipefail
 
 # When this script is symlinked into the user's plugins dir, follow the
-# link to find the original repo root.
+# chain to the original repo. Iterates because dotfile managers commonly
+# create relative or chained symlinks.
 resolve_repo_root() {
     local self="${BASH_SOURCE[0]}"
-    if [[ -L "${self}" ]]; then
-        self=$(readlink "${self}")
-    fi
+    while [[ -L "${self}" ]]; do
+        local link
+        link=$(readlink "${self}")
+        if [[ "${link}" == /* ]]; then
+            self="${link}"
+        else
+            self="$(cd -- "$(dirname -- "${self}")" && pwd -P)/${link}"
+        fi
+    done
     local dir
     dir=$(cd -- "$(dirname -- "${self}")" && pwd -P)
     cd -- "${dir}/../.." && pwd -P
@@ -72,21 +79,30 @@ provider_icon_png() {
     local out="${CACHE_DIR}/icon-${pid}.png"
     [[ -s "${out}" ]] && { printf '%s\n' "${out}"; return 0; }
 
+    # Per-process tmp file in the same directory so `mv` is atomic.
+    local tmp
+    tmp=$(mktemp "${CACHE_DIR}/.icon-${pid}.XXXXXX") || return 1
+
     local svg="${CB_BARS_CODEXBAR_RESOURCES}/ProviderIcon-${pid}.svg"
     if [[ ! -r "${svg}" ]]; then
         # Render a small grey circle with sigil text as a fallback.
         local sigil
         sigil=$(cb_bars_provider_sigil "${pid}")
-        magick -size 64x64 xc:none \
-               -fill "$(mhex "${UNKNOWN_HEX}")" \
-               -draw "circle 32,32 32,4" \
-               -fill "$(mhex "$(cb_bars_palette text)")" \
-               -gravity center -pointsize 28 -annotate 0 "${sigil}" \
-               "PNG32:${out}" >/dev/null 2>&1 || return 1
+        if ! magick -size 64x64 xc:none \
+                    -fill "$(mhex "${UNKNOWN_HEX}")" \
+                    -draw "circle 32,32 32,4" \
+                    -fill "$(mhex "$(cb_bars_palette text)")" \
+                    -gravity center -pointsize 28 -annotate 0 "${sigil}" \
+                    "PNG32:${tmp}" >/dev/null 2>&1; then
+            rm -f "${tmp}"; return 1
+        fi
     else
-        magick -background none -density 300 "${svg}" \
-               -resize 64x64 "PNG32:${out}" >/dev/null 2>&1 || return 1
+        if ! magick -background none -density 300 "${svg}" \
+                    -resize 64x64 "PNG32:${tmp}" >/dev/null 2>&1; then
+            rm -f "${tmp}"; return 1
+        fi
     fi
+    mv -f "${tmp}" "${out}"
     printf '%s\n' "${out}"
 }
 
@@ -167,7 +183,8 @@ render_bar_png() {
         add_fill "${f3}" "${r3_top}" "${r3_bot}" "${c3}"
     fi
 
-    local tmp="${out}.tmp"
+    local tmp
+    tmp=$(mktemp "${CACHE_DIR}/.bar-${pid}.XXXXXX") || return 1
     if magick "${args[@]}" "PNG32:${tmp}" >/dev/null 2>&1; then
         if [[ ! -f "${out}" ]] || ! cmp -s "${tmp}" "${out}"; then
             mv -f "${tmp}" "${out}"
@@ -201,13 +218,14 @@ data=$("${FETCH}" 2>/dev/null || printf '[]')
 # We only render providers that have usage.primary; everything else gets
 # implicitly hidden because it was never registered as an item.
 rows=$(printf '%s' "${data}" | jq -r '
+    def pct(x): if x == null then 0 else ([0, ([100, (x|tonumber|floor)] | min)] | max) end;
     [ .[] | select((.error // null) == null and (.usage.primary // null) != null) ]
     | .[] | [
         .provider,
-        (100 - (.usage.primary.usedPercent // 0)),
+        (100 - pct(.usage.primary.usedPercent // 0)),
         (.usage.primary.resetsAt // ""),
-        (if .usage.secondary then (100 - (.usage.secondary.usedPercent // 0)) else "" end),
-        (if .usage.tertiary  then (100 - (.usage.tertiary.usedPercent  // 0)) else "" end)
+        (if .usage.secondary then (100 - pct(.usage.secondary.usedPercent)) else "" end),
+        (if .usage.tertiary  then (100 - pct(.usage.tertiary.usedPercent))  else "" end)
     ] | map(tostring) | join("\u001f")')
 
 while IFS=$'\x1f' read -r pid rem_p p_reset rem_s rem_t; do

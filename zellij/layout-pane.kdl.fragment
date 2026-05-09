@@ -2,8 +2,9 @@
 // the CodexBar usage strip. Add inside the appropriate `pane` block of
 // your default layout, alongside (or instead of) other zjstatus widgets.
 //
-// Replace `format_left` / `format_right` placement to taste. The pipe
-// loop is started by `cb-bars-zellij-pipe` running as a hidden pane.
+// IMPORTANT: Zellij resolves `command "..."` against the PATH it inherited
+// at session start, NOT your interactive shell PATH. macOS GUI launches
+// commonly omit ~/.local/bin. Use the absolute path to be safe.
 
 pane size=1 borderless=true {
     plugin location="file:~/.config/zellij/plugins/zjstatus.wasm" {
@@ -21,7 +22,8 @@ pane size=1 borderless=true {
 
 // Hidden pane that keeps the pipe loop running. The 1%×1% trick keeps
 // the pane invisible while still letting Zellij start the command.
+// If you installed elsewhere, edit the path below.
 pane x="1%" y="1%" width="1%" height="1%" {
-    command "cb-bars-zellij-pipe"
+    command "/Users/REPLACE_ME/.local/bin/cb-bars-zellij-pipe"
     close_on_exit false
 }

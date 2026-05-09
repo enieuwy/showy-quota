@@ -40,10 +40,11 @@ cb_bars_load_config
 
 : "${CB_BARS_CODEXBAR_RESOURCES:=/Applications/CodexBar.app/Contents/Resources}"
 : "${CB_BARS_SKETCHYBAR_IMAGE_CACHE:=${CB_BARS_CACHE_DIR}/sketchybar}"
-: "${CB_BARS_SKETCHYBAR_CLICK:=open -b com.steipete.CodexBar}"
+: "${CB_BARS_SKETCHYBAR_CLICK:=open -b com.steipete.codexbar}"
 : "${CB_BARS_SKETCHYBAR_UPDATE_FREQ:=120}"
 
-: "${CB_BARS_ZELLIJ_PIPE_NAME:=zjstatus::pipe::pipe_codexbar}"
+: "${CB_BARS_ZELLIJ_WIDGET:=pipe_codexbar}"
+: "${CB_BARS_ZELLIJ_PIPE_NAME:=cb-bars}"
 : "${CB_BARS_ZELLIJ_PIPE_INTERVAL:=10}"
 
 : "${CB_BARS_USAGE_FILE:=${CB_BARS_CACHE_DIR}/usage.json}"
@@ -84,10 +85,11 @@ cb_bars_reset_epoch() {
     local raw="$1"
     [[ -n "${raw}" && "${raw}" != "null" ]] || return 1
 
-    # Normalize: strip fractional, collapse +HH:MM → +HHMM, replace Z.
+    # Normalize: strip fractional seconds (regardless of suffix style),
+    # collapse +HH:MM → +HHMM, replace Z with +0000.
     local cleaned
     cleaned=$(printf '%s' "${raw}" \
-        | sed -E 's/\.[0-9]+(Z|[+-][0-9]{2}:[0-9]{2})$/\1/' \
+        | sed -E 's/\.[0-9]+(Z|[+-][0-9]{2}:?[0-9]{2})?$/\1/' \
         | sed -E 's/Z$/+0000/' \
         | sed -E 's/([+-][0-9]{2}):([0-9]{2})$/\1\2/')
 

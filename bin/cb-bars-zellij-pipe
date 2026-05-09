@@ -18,11 +18,17 @@ BAR="${SCRIPT_DIR}/cb-bars-zellij-bar"
 cb_bars_have zellij || cb_bars_die "zellij is required for pipe mode"
 
 interval="${CB_BARS_ZELLIJ_PIPE_INTERVAL}"
+widget="${CB_BARS_ZELLIJ_WIDGET}"
 pipe_name="${CB_BARS_ZELLIJ_PIPE_NAME}"
 
+# zjstatus consumes the protocol from the payload itself:
+#   zjstatus::pipe::<widget>::<output>
+# `--name` only routes the message to plugins listening on that name;
+# zjstatus listens on any name, so we just use a stable id for clarity.
 while :; do
     if output=$("${BAR}" 2>/dev/null) && [[ -n "${output}" ]]; then
-        printf '%s' "${output}" | zellij pipe --name "${pipe_name}" >/dev/null 2>&1 || true
+        zellij pipe --name "${pipe_name}" -- \
+            "zjstatus::pipe::${widget}::${output}" >/dev/null 2>&1 || true
     fi
     sleep "${interval}"
 done

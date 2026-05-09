@@ -57,45 +57,73 @@ fi
 
 # Use flock when available (Linux, Homebrew util-linux); else fall back to
 # `mkdir` lock with a 60s lease.
+#
+# Returns:
+#   0 = lock was held and the callee ran;
+#   2 = lock was held by another worker; caller should wait for cache.
 cb_bars_with_lock() {
-    if cb_bars_have flock; then
+    if [[ -z "${CB_BARS_FORCE_NO_FLOCK:-}" ]] && cb_bars_have flock; then
+        local rc=2
         # subshell + fd 9 so the lock releases on exit.
         (
             exec 9>"${CB_BARS_USAGE_LOCK}"
             if flock -n 9; then
                 "$@"
             else
-                cb_bars_log "another fetch in flight; using existing cache"
-                return 0
+                cb_bars_log "another fetch in flight (flock); will wait"
+                exit 2
             fi
-        )
-        return $?
+        ) && rc=$? || rc=$?
+        return "${rc}"
     fi
 
     local lock_dir="${CB_BARS_USAGE_LOCK}.d"
     if mkdir "${lock_dir}" 2>/dev/null; then
         trap 'rmdir "'"${lock_dir}"'" 2>/dev/null || true' EXIT
-        "$@"
-        local rc=$?
+        local rc=0
+        "$@" || rc=$?
         rmdir "${lock_dir}" 2>/dev/null || true
         trap - EXIT
         return "${rc}"
     fi
 
-    # Stale lock recovery (older than 60s).
-    local mtime
-    local now
+    # Stale lock recovery (older than 60s). Only the winner of `rmdir`
+    # proceeds; loser treats the lock as still held and waits.
+    local mtime now
     now=$(date +%s)
     if mtime=$(stat -f %m "${lock_dir}" 2>/dev/null) \
         || mtime=$(stat -c %Y "${lock_dir}" 2>/dev/null); then
         if (( now - mtime > 60 )); then
-            rmdir "${lock_dir}" 2>/dev/null || true
-            cb_bars_with_lock "$@"
-            return $?
+            if rmdir "${lock_dir}" 2>/dev/null; then
+                # We removed the stale lock; immediately try to claim it.
+                if mkdir "${lock_dir}" 2>/dev/null; then
+                    trap 'rmdir "'"${lock_dir}"'" 2>/dev/null || true' EXIT
+                    local rc=0
+                    "$@" || rc=$?
+                    rmdir "${lock_dir}" 2>/dev/null || true
+                    trap - EXIT
+                    return "${rc}"
+                fi
+            fi
         fi
     fi
-    cb_bars_log "another fetch in flight; using existing cache"
-    return 0
+    cb_bars_log "another fetch in flight (mkdir); will wait"
+    return 2
+}
+
+# Block up to N tenths of a second for the cache file to appear or refresh.
+# Used by callers that lost the lock; protects against the cold-start case
+# where there is no cache yet.
+cb_bars_wait_for_cache() {
+    local max_tenths="${1:-50}"   # 5.0 s
+    local i
+    for (( i=0; i<max_tenths; i++ )); do
+        if [[ -s "${CB_BARS_USAGE_FILE}" ]] && cb_bars_json_valid "${CB_BARS_USAGE_FILE}"; then
+            return 0
+        fi
+        sleep 0.1
+    done
+    return 1
 }
 
 # ── core refresh ──────────────────────────────────────────────────────
@@ -112,8 +140,7 @@ refresh_cache() {
     local out tmp rc
     tmp=$(mktemp "${CB_BARS_CACHE_DIR}/usage.XXXXXX.json")
 
-    if ! cb_bars_have "${CB_BARS_CODEXBAR_BIN}" \
-       && ! command -v "${CB_BARS_CODEXBAR_BIN}" >/dev/null 2>&1; then
+    if ! command -v "${CB_BARS_CODEXBAR_BIN}" >/dev/null 2>&1; then
         rm -f "${tmp}"
         cb_bars_log "codexbar binary not found: ${CB_BARS_CODEXBAR_BIN}"
         return 1
@@ -122,7 +149,8 @@ refresh_cache() {
     rc=0
     out=$(run_codexbar) || rc=$?
 
-    if [[ -z "${out}" ]] || ! printf '%s' "${out}" | head -c 1 | grep -q '\['; then
+    # Validate first byte without piping (pipefail-safe).
+    if [[ -z "${out}" || "${out:0:1}" != '[' ]]; then
         rm -f "${tmp}"
         cb_bars_log "codexbar produced no usable output (rc=${rc})"
         return 1
@@ -149,21 +177,22 @@ cache_is_fresh() {
     (( age < CB_BARS_REFRESH_SECONDS ))
 }
 
+lock_rc=0
 if (( force_refresh )) || ! cache_is_fresh; then
-    cb_bars_with_lock refresh_cache || true
+    cb_bars_with_lock refresh_cache || lock_rc=$?
 fi
 
-# Always emit whatever we have. Bars must never see an empty payload while
-# the cache file exists.
+# Lost the lock contest? Briefly wait for the holder's refresh, but only
+# when our own cache is empty/invalid — if we already have a usable cache
+# we serve it immediately.
+if (( lock_rc == 2 )) && ! [[ -s "${CB_BARS_USAGE_FILE}" ]]; then
+    cb_bars_wait_for_cache 100 || true   # up to 10 s
+fi
+
+# Always emit whatever we have. Bars must never see an empty payload
+# while the cache file exists.
 if [[ -s "${CB_BARS_USAGE_FILE}" ]]; then
     cat "${CB_BARS_USAGE_FILE}"
-    exit 0
-fi
-
-# Last-resort: try one direct fetch with no cache write, so first run on a
-# fresh machine still produces output.
-if direct=$(run_codexbar) && [[ -n "${direct}" ]]; then
-    printf '%s' "${direct}"
     exit 0
 fi
 

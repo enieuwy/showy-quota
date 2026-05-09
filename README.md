@@ -82,10 +82,16 @@ Reload Zellij to pick up the new layout.
 ### tmux wiring
 
 ```sh
-echo 'set -ag status-right " #(cb-bars-tmux-bar)"' >> ~/.tmux.conf
-echo 'bind-key "/" display-popup -E -h 36 -w 92 -T "CodexBar usage" "watch -n 30 codexbar usage"' >> ~/.tmux.conf
+# Use the absolute path — tmux's PATH at server start typically lacks ~/.local/bin.
+CB_BIN="$HOME/.local/bin"
+printf 'set -ag status-right " #(%s/cb-bars-tmux-bar)"\n' "$CB_BIN" >> ~/.tmux.conf
+printf 'bind-key "/" display-popup -E -h 36 -w 92 -T "CodexBar usage" %s\n' \
+    "'while :; do clear; codexbar usage; sleep 30; done'" >> ~/.tmux.conf
 tmux source ~/.tmux.conf
 ```
+
+No `watch(1)` dependency — the popup uses a tiny shell loop so this works on a
+stock macOS install.
 
 ## Configuration
 
@@ -102,7 +108,7 @@ Useful knobs:
 | `CB_BARS_PROVIDERS`               | empty (use whatever CodexBar enables)  | Comma-list filter, e.g. `claude,codex`                |
 | `CB_BARS_TIME_WARN_MINUTES`       | `30`                                   | Threshold for red countdown labels                    |
 | `CB_BARS_PALETTE_GOOD/WARN/BAD`   | Catppuccin Macchiato                   | 6-char hex (no `#`)                                   |
-| `CB_BARS_SKETCHYBAR_CLICK`        | `open -b com.steipete.CodexBar`        | Click action on a SketchyBar item                     |
+| `CB_BARS_SKETCHYBAR_CLICK`        | `open -b com.steipete.codexbar`        | Click action on a SketchyBar item                     |
 | `CB_BARS_CODEXBAR_RESOURCES`      | `/Applications/CodexBar.app/...`       | Where to find provider SVGs                           |
 
 ## Verification
@@ -136,6 +142,15 @@ Cache lives at `${XDG_CACHE_HOME:-~/.cache}/codexbar-bars/usage.json`.
   primary + an optional `w` worse-than-primary hint for secondary).
   SketchyBar shows up to three stacked bars when the provider exposes a
   tertiary window.
+- **Stale-cache dimming is terminal-only.** When the cache is older than
+  `2 × CB_BARS_REFRESH_SECONDS`, the Zellij and tmux strips dim every
+  provider chunk. SketchyBar continues to render at full strength —
+  CodexBar's own menu icon will reflect upstream incidents.
+- **New providers require a SketchyBar reload.** The item set is built
+  when sketchybarrc sources `cb_bars.sh`. If you enable a new provider in
+  CodexBar later, run `sketchybar --reload` (or quit + relaunch) to make
+  the new icon/bar/label triple appear. Zellij and tmux pick up new
+  providers automatically on the next refresh.
 - No Linux-side provider for browser-cookie providers — same constraint
   as CodexBar itself.
 
