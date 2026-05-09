@@ -1,0 +1,11 @@
+[
+  {
+    "provider": "codex",
+    "source": "openai-web",
+    "usage": {
+      "primary": { "usedPercent": 6, "windowMinutes": 300, "resetDescription": "Resets 11:59 PM" },
+      "secondary": { "usedPercent": 67, "windowMinutes": 10080, "resetsAt": "2099-01-08T22:43:32Z" },
+      "tertiary": null
+    }
+  }
+]

@@ -253,7 +253,7 @@ rows=$(printf '%s' "${filtered}" | jq -r '
     .[] | [
         .provider,
         (100 - pct(.usage.primary.usedPercent)),
-        (.usage.primary.resetsAt // ""),
+        (.usage.primary.resetsAt // .usage.primary.resetDescription // ""),
         (if .usage.secondary then (100 - pct(.usage.secondary.usedPercent)) else "" end),
         (if .usage.tertiary  then (100 - pct(.usage.tertiary.usedPercent))  else "" end)
     ] | map(tostring) | join("\u001f")')

@@ -125,8 +125,8 @@ out=$(run_renderer cb-bars-zellij-bar codexbar-error-only.json)
 assert_contains "all-error fixture renders 'AI idle'"  "AI idle" "${out}"
 
 out=$(run_renderer cb-bars-zellij-bar codexbar-low.json)
-# Bad-palette ed8796 = decimal RGB 237;135;150 inside the truecolor escape.
-assert_contains "low-remaining fixture uses BAD palette" "237;135;150" "${out}"
+# Bad-palette ee5396 = decimal RGB 238;83;150 inside the truecolor escape.
+assert_contains "low-remaining fixture uses BAD palette" "238;83;150" "${out}"
 
 # ── tmux renderer ────────────────────────────────────────────────────
 
@@ -184,7 +184,7 @@ PATH="${stub_dir}:${PATH}" \
     "${REPO_ROOT}/sketchybar/items/cb_bars.sh"
 item_log="$(< "${log}")"
 assert_contains "icon item reserves visible width" "cb_bars.claude.icon" "${item_log}"
-assert_contains "icon item sets width" "width=20" "${item_log}"
+assert_contains "icon item sets width" "width=22" "${item_log}"
 assert_contains "bar item sets width" "width=84" "${item_log}"
 assert_contains "bar item enables background image drawing" "background.image.drawing=on" "${item_log}"
 
@@ -240,7 +240,7 @@ printf '\nschema drift\n'
 out=$(run_renderer cb-bars-zellij-bar codexbar-realistic.json)
 assert_contains "float usedPercent renders codex"      "CX" "${out}"
 assert_contains "float usedPercent renders claude"     "CL" "${out}"
-assert_contains "float usedPercent uses GOOD palette" "166;218;149" "${out}"
+assert_contains "float usedPercent uses GOOD palette" "37;190;106" "${out}"
 
 out=$(run_renderer cb-bars-tmux-bar codexbar-realistic.json)
 assert_contains "tmux float usedPercent renders codex" "CX" "${out}"
@@ -249,6 +249,10 @@ assert_contains "tmux float usedPercent renders codex" "CX" "${out}"
 out=$(run_renderer cb-bars-zellij-bar codexbar-no-reset.json)
 assert_contains "no-reset fixture still renders codex" "CX" "${out}"
 assert_contains "no-reset fixture shows '?' countdown" "?"  "${out}"
+
+out=$(run_renderer cb-bars-zellij-bar codexbar-reset-description.json)
+assert_contains "resetDescription fixture renders codex" "CX" "${out}"
+assert_not_contains "resetDescription fixture avoids '?' countdown" "?" "${out}"
 
 # 3. Non-array JSON must be rejected by the fetcher (refresh path).
 printf '\ncache fetcher\n'

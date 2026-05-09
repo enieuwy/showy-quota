@@ -83,11 +83,11 @@ rows=$(printf '%s' "${filtered}" | jq -r '
     | [
         .provider,
         pct(.usage.primary.usedPercent),
-        (.usage.primary.resetsAt // ""),
+        (.usage.primary.resetsAt // .usage.primary.resetDescription // ""),
         pct(.usage.secondary.usedPercent),
-        (.usage.secondary.resetsAt // ""),
+        (.usage.secondary.resetsAt // .usage.secondary.resetDescription // ""),
         pct(.usage.tertiary.usedPercent),
-        (.usage.tertiary.resetsAt // "")
+        (.usage.tertiary.resetsAt // .usage.tertiary.resetDescription // "")
     ] | map(tostring) | join("\u001f")')
 
 first_chunk=1

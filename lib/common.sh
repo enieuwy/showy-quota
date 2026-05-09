@@ -28,12 +28,12 @@ cb_bars_load_config
 : "${CB_BARS_PROVIDERS:=}"
 : "${CB_BARS_INCLUDE_STATUS:=0}"
 
-: "${CB_BARS_PALETTE_GOOD:=a6da95}"
-: "${CB_BARS_PALETTE_WARN:=eed49f}"
-: "${CB_BARS_PALETTE_BAD:=ed8796}"
-: "${CB_BARS_PALETTE_UNKNOWN:=6e738d}"
-: "${CB_BARS_PALETTE_TRACK:=363a4f}"
-: "${CB_BARS_PALETTE_TEXT:=cad3f5}"
+: "${CB_BARS_PALETTE_GOOD:=25be6a}"
+: "${CB_BARS_PALETTE_WARN:=f0af00}"
+: "${CB_BARS_PALETTE_BAD:=ee5396}"
+: "${CB_BARS_PALETTE_UNKNOWN:=6c7086}"
+: "${CB_BARS_PALETTE_TRACK:=3a3a4a}"
+: "${CB_BARS_PALETTE_TEXT:=f2f4f8}"
 
 : "${CB_BARS_GOOD_MIN_REMAINING:=40}"
 : "${CB_BARS_WARN_MIN_REMAINING:=15}"
@@ -45,9 +45,9 @@ cb_bars_load_config
 : "${CB_BARS_SKETCHYBAR_UPDATE_FREQ:=120}"
 : "${CB_BARS_PNG_BAR_W:=80}"
 : "${CB_BARS_PNG_BAR_H:=18}"
-: "${CB_BARS_SKETCHYBAR_ICON_WIDTH:=20}"
-: "${CB_BARS_SKETCHYBAR_ICON_PADDING_LEFT:=3}"
-: "${CB_BARS_SKETCHYBAR_ICON_SCALE:=0.35}"
+: "${CB_BARS_SKETCHYBAR_ICON_WIDTH:=22}"
+: "${CB_BARS_SKETCHYBAR_ICON_PADDING_LEFT:=5}"
+: "${CB_BARS_SKETCHYBAR_ICON_SCALE:=0.28}"
 : "${CB_BARS_SKETCHYBAR_BAR_WIDTH:=$((CB_BARS_PNG_BAR_W + 4))}"
 
 : "${CB_BARS_ZELLIJ_WIDGET:=pipe_codexbar}"
@@ -87,6 +87,46 @@ cb_bars_age_seconds() {
     printf '%s\n' $((now - mtime))
 }
 
+cb_bars_parse_local_epoch() {
+    local fmt="$1" value="$2"
+    if date -j -f "${fmt}" "${value}" '+%s' 2>/dev/null; then
+        return 0
+    fi
+    if cb_bars_have gdate; then
+        gdate -d "${value}" '+%s' 2>/dev/null && return 0
+    fi
+    date -d "${value}" '+%s' 2>/dev/null
+}
+
+cb_bars_reset_description_epoch() {
+    local raw="$1"
+    [[ -n "${raw}" && "${raw}" != "null" ]] || return 1
+    local desc="${raw#Resets }"
+    [[ "${desc}" != "${raw}" ]] || desc="${raw#resets }"
+    [[ "${desc}" != "${raw}" ]] || return 1
+
+    local epoch
+    for fmt in '%b %d, %Y %I:%M %p' '%B %d, %Y %I:%M %p'; do
+        if epoch=$(cb_bars_parse_local_epoch "${fmt}" "${desc}"); then
+            printf '%s\n' "${epoch}"
+            return 0
+        fi
+    done
+
+    local today now
+    today=$(date '+%Y-%m-%d')
+    if epoch=$(cb_bars_parse_local_epoch '%Y-%m-%d %I:%M %p' "${today} ${desc}"); then
+        now=$(date +%s)
+        if (( epoch < now )); then
+            epoch=$((epoch + 86400))
+        fi
+        printf '%s\n' "${epoch}"
+        return 0
+    fi
+
+    return 1
+}
+
 # Convert ISO8601 'resetsAt' (with Z, fractional seconds, ±HH:MM offset, etc.)
 # to a unix epoch. Prints nothing on failure.
 cb_bars_reset_epoch() {
@@ -112,6 +152,7 @@ cb_bars_reset_epoch() {
     if date -d "${raw}" '+%s' 2>/dev/null; then
         return 0
     fi
+    cb_bars_reset_description_epoch "${raw}" && return 0
     return 1
 }
 
