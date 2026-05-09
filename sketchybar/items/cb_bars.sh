@@ -77,9 +77,13 @@
                        icon.drawing=off \
                        label.drawing=off \
                        background.image="cb_bars.${pid}.icon" \
+                       background.image.drawing=on \
                        background.image.scale=0.6 \
-                       background.image.padding_left=2 \
-                       background.image.padding_right=2 \
+                       background.color=0x00000000 \
+                       background.height=0 \
+                       padding_left=6 \
+                       padding_right=0 \
+                       width="${CB_BARS_SKETCHYBAR_ICON_WIDTH}" \
                        click_script="${CLICK}"
 
         sketchybar --add item "cb_bars.${pid}.bar" left \
@@ -87,8 +91,13 @@
                        icon.drawing=off \
                        label.drawing=off \
                        background.image="cb_bars.${pid}.bar" \
-                       background.image.padding_left=2 \
-                       background.image.padding_right=2 \
+                       background.image.drawing=on \
+                       background.image.scale=1.0 \
+                       background.color=0x00000000 \
+                       background.height=0 \
+                       padding_left=2 \
+                       padding_right=2 \
+                       width="${CB_BARS_SKETCHYBAR_BAR_WIDTH}" \
                        click_script="${CLICK}"
 
         sketchybar --add item "cb_bars.${pid}.label" left \
@@ -97,6 +106,8 @@
                        label.font.size=11 \
                        label.padding_left=0 \
                        label.padding_right=4 \
+                       background.color=0x00000000 \
+                       background.height=0 \
                        click_script="${CLICK}"
 
         bracket_items+=("cb_bars.${pid}.icon" "cb_bars.${pid}.bar" "cb_bars.${pid}.label")

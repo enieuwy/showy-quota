@@ -43,6 +43,10 @@ cb_bars_load_config
 : "${CB_BARS_SKETCHYBAR_IMAGE_CACHE:=${CB_BARS_CACHE_DIR}/sketchybar}"
 : "${CB_BARS_SKETCHYBAR_CLICK:=open -b com.steipete.codexbar}"
 : "${CB_BARS_SKETCHYBAR_UPDATE_FREQ:=120}"
+: "${CB_BARS_PNG_BAR_W:=80}"
+: "${CB_BARS_PNG_BAR_H:=18}"
+: "${CB_BARS_SKETCHYBAR_ICON_WIDTH:=24}"
+: "${CB_BARS_SKETCHYBAR_BAR_WIDTH:=$((CB_BARS_PNG_BAR_W + 4))}"
 
 : "${CB_BARS_ZELLIJ_WIDGET:=pipe_codexbar}"
 : "${CB_BARS_ZELLIJ_PIPE_NAME:=cb-bars}"

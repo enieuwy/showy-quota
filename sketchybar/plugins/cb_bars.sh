@@ -277,15 +277,15 @@ while IFS=$'\x1f' read -r pid rem_p p_reset rem_s rem_t; do
     current_providers+="${pid}"$'\n'
 
     args=(
-        --set "cb_bars.${pid}.label" drawing=on label="${label}" label.color="${color}"
+        --set "cb_bars.${pid}.label" drawing=on label="${label}" label.color="${color}" background.color=0x00000000 background.height=0
     )
     if [[ -n "${icon}" && -s "${icon}" ]]; then
-        args+=( --set "cb_bars.${pid}.icon" drawing=on background.image="${icon}" )
+        args+=( --set "cb_bars.${pid}.icon" drawing=on background.image="${icon}" background.image.drawing=on background.image.scale=0.6 background.color=0x00000000 background.height=0 padding_left=6 padding_right=0 width="${CB_BARS_SKETCHYBAR_ICON_WIDTH}" )
     else
         args+=( --set "cb_bars.${pid}.icon" drawing=off )
     fi
     if [[ -n "${bar}" && -s "${bar}" ]]; then
-        args+=( --set "cb_bars.${pid}.bar" drawing=on background.image="${bar}" )
+        args+=( --set "cb_bars.${pid}.bar" drawing=on background.image="${bar}" background.image.drawing=on background.image.scale=1.0 background.color=0x00000000 background.height=0 padding_left=2 padding_right=2 width="${CB_BARS_SKETCHYBAR_BAR_WIDTH}" )
     else
         args+=( --set "cb_bars.${pid}.bar" drawing=off )
     fi

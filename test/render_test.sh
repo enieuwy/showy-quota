@@ -173,6 +173,24 @@ assert_contains "filter restricts to claude"           "CL" "${out}"
 assert_not_contains "filter excludes codex"            "CX" "${out}"
 assert_not_contains "filter excludes gemini"           "GE" "${out}"
 
+# ── sketchybar item declaration (without sketchybar daemon) ───────────
+
+printf '\nsketchybar item declaration\n'
+
+cache=$(mk_cache)
+log="${TMP}/sb-items.log"
+PATH="${stub_dir}:${PATH}" \
+    CB_BARS_NO_CONFIG=1 \
+    CB_BARS_CACHE_DIR="${cache}" \
+    CB_BARS_TEST_FIXTURE="${FIXTURE_DIR}/codexbar-mixed.json" \
+    CB_BARS_TEST_LOG="${log}" \
+    "${REPO_ROOT}/sketchybar/items/cb_bars.sh"
+item_log="$(< "${log}")"
+assert_contains "icon item reserves visible width" "cb_bars.claude.icon" "${item_log}"
+assert_contains "icon item sets width" "width=24" "${item_log}"
+assert_contains "bar item sets width" "width=84" "${item_log}"
+assert_contains "bar item enables background image drawing" "background.image.drawing=on" "${item_log}"
+
 # ── sketchybar plugin (without sketchybar daemon) ────────────────────
 
 printf '\nsketchybar plugin (PNG generation)\n'
@@ -197,6 +215,11 @@ if grep -q 'label.color=0xff' "${log}" 2>/dev/null; then
     ok "label.color is well-formed (0xffRRGGBB)"
 else
     fail "label.color is well-formed"
+fi
+if grep -q 'width=84' "${log}" 2>/dev/null; then
+    ok "plugin repairs bar item width"
+else
+    fail "plugin repairs bar item width"
 fi
 
 cache=$(mk_cache)
