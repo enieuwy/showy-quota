@@ -398,6 +398,26 @@ for path_label in flock mkdir; do
     fi
 done
 
+cache=$(mk_cache)
+counter="${cache}/recovered-lock-call-count"
+: > "${counter}"
+mkdir "${cache}/usage.lock.d"
+printf '%s\n' 999999 > "${cache}/usage.lock.d/owner.pid"
+rc=0
+out=$(
+    CB_BARS_NO_CONFIG=1 \
+    CB_BARS_CACHE_DIR="${cache}" \
+    CB_BARS_CODEXBAR_BIN="${slow_dir}/codexbar" \
+    CB_BARS_FORCE_NO_FLOCK=1 \
+    CB_BARS_TEST_COUNTER="${counter}" \
+    "${REPO_ROOT}/bin/cb-bars-fetch" 2>/dev/null
+) || rc=$?
+if (( rc == 0 )) && printf '%s' "${out}" | jq -e 'type == "array"' >/dev/null 2>&1; then
+    ok "mkdir path: recovers dead owner lock"
+else
+    fail "mkdir path: recovers dead owner lock" "rc=${rc}"
+fi
+
 printf '\nforced refresh lock wait\n'
 cache=$(mk_cache)
 cp "${FIXTURE_DIR}/codexbar-low.json" "${cache}/usage.json"

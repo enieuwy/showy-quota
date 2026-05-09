@@ -17,15 +17,14 @@ FORCE         ?= 0
 REPO          := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
 BIN_NAMES     := cb-bars-fetch cb-bars-tmux-bar cb-bars-zellij-bar cb-bars-zellij-pipe
 
-.PHONY: help install install-bin install-sketchybar uninstall test lint clean
+.PHONY: help install install-bin install-sketchybar install-all uninstall test lint clean
 
 help: ## Show this help.
 	@awk 'BEGIN{FS=":.*##"}/^[a-zA-Z_-]+:.*##/{printf "  \033[36m%-20s\033[0m %s\n",$$1,$$2}' $(MAKEFILE_LIST)
 
-install: install-bin install-sketchybar ## Symlink scripts into the user's standard paths.
-	@printf '\nInstalled. Source the SketchyBar item from your sketchybarrc:\n'
-	@printf '  source "$$ITEM_DIR/cb_bars.sh"\n'
-	@printf 'And reload sketchybar.\n'
+install: install-bin ## Symlink shared scripts into the user's standard bin path.
+	@printf '\nInstalled shared cb-bars scripts into $(BIN_DIR).\n'
+	@printf 'SketchyBar is opt-in: run `make install-sketchybar`, then source "$$ITEM_DIR/cb_bars.sh".\n'
 
 install-bin:
 	@mkdir -p "$(BIN_DIR)"
@@ -75,6 +74,8 @@ install-sketchybar:
 		printf 'linked %s\n' "$$target"; \
 	done
 
+
+install-all: install-bin install-sketchybar ## Install shared scripts and every optional integration.
 uninstall: ## Remove symlinks that this Makefile created.
 	@for name in $(BIN_NAMES); do \
 		src="$(REPO)/bin/$$name"; \

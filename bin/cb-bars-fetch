@@ -76,9 +76,58 @@ CB_BARS_HELD_LOCK_DIR=""
 
 cb_bars_release_mkdir_lock() {
     if [[ -n "${CB_BARS_HELD_LOCK_DIR:-}" ]]; then
+        rm -f -- "${CB_BARS_HELD_LOCK_DIR}/owner.pid"
         rmdir -- "${CB_BARS_HELD_LOCK_DIR}" 2>/dev/null || true
         CB_BARS_HELD_LOCK_DIR=""
     fi
+}
+
+cb_bars_run_with_mkdir_lock() {
+    local lock_dir="$1"
+    shift
+    CB_BARS_HELD_LOCK_DIR="${lock_dir}"
+    if ! printf '%s\n' "$$" > "${lock_dir}/owner.pid"; then
+        cb_bars_release_mkdir_lock
+        return 1
+    fi
+    trap cb_bars_release_mkdir_lock EXIT
+    local rc=0
+    "$@" || rc=$?
+    cb_bars_release_mkdir_lock
+    trap - EXIT
+    return "${rc}"
+}
+
+cb_bars_recover_mkdir_lock() {
+    local lock_dir="$1"
+    local owner_file="${lock_dir}/owner.pid"
+    local owner_pid=""
+
+    if [[ -r "${owner_file}" ]]; then
+        IFS= read -r owner_pid < "${owner_file}" || owner_pid=""
+        if [[ "${owner_pid}" =~ ^[0-9]+$ ]] && ! kill -0 "${owner_pid}" 2>/dev/null; then
+            rm -f -- "${owner_file}"
+            if rmdir -- "${lock_dir}" 2>/dev/null; then
+                cb_bars_log "recovered dead mkdir lock owned by pid ${owner_pid}"
+                return 0
+            fi
+        fi
+        return 1
+    fi
+
+    # Crash window: mkdir succeeded but owner.pid was never written.
+    local now mtime max_age
+    now=$(date +%s)
+    max_age=$(( (CB_BARS_LOCK_WAIT_TENTHS + 9) / 10 ))
+    (( max_age < 1 )) && max_age=1
+    if mtime=$(stat -f %m "${lock_dir}" 2>/dev/null) \
+        || mtime=$(stat -c %Y "${lock_dir}" 2>/dev/null); then
+        if (( now - mtime > max_age )) && rmdir -- "${lock_dir}" 2>/dev/null; then
+            cb_bars_log "recovered ownerless mkdir lock"
+            return 0
+        fi
+    fi
+    return 1
 }
 
 cb_bars_with_lock() {
@@ -99,25 +148,28 @@ cb_bars_with_lock() {
 
     local lock_dir="${CB_BARS_USAGE_LOCK}.d"
     if mkdir -- "${lock_dir}" 2>/dev/null; then
-        CB_BARS_HELD_LOCK_DIR="${lock_dir}"
-        trap cb_bars_release_mkdir_lock EXIT
-        local rc=0
-        "$@" || rc=$?
-        cb_bars_release_mkdir_lock
-        trap - EXIT
-        return "${rc}"
+        cb_bars_run_with_mkdir_lock "${lock_dir}" "$@"
+        return $?
+    fi
+
+    if cb_bars_recover_mkdir_lock "${lock_dir}" && mkdir -- "${lock_dir}" 2>/dev/null; then
+        cb_bars_run_with_mkdir_lock "${lock_dir}" "$@"
+        return $?
     fi
 
     cb_bars_log "another fetch in flight (mkdir); will wait"
     return 2
 }
 
-cache_mtime() {
-    local path="$1"
-    [[ -f "${path}" ]] || { printf '0\n'; return; }
-    stat -f %m "${path}" 2>/dev/null \
-        || stat -c %Y "${path}" 2>/dev/null \
-        || printf '0\n'
+cache_token() {
+    [[ -s "${CB_BARS_USAGE_FILE}" ]] || { printf '\n'; return; }
+    if [[ -s "${CB_BARS_USAGE_STAMP}" ]]; then
+        printf 'stamp:%s\n' "$(< "${CB_BARS_USAGE_STAMP}")"
+        return
+    fi
+    stat -f 'file:%i:%m:%z' "${CB_BARS_USAGE_FILE}" 2>/dev/null \
+        || stat -c 'file:%i:%Y:%s' "${CB_BARS_USAGE_FILE}" 2>/dev/null \
+        || printf 'file:unknown\n'
 }
 
 # Block up to N tenths of a second for the cache file to appear or refresh.
@@ -125,15 +177,15 @@ cache_mtime() {
 # where there is no cache yet.
 cb_bars_wait_for_cache() {
     local max_tenths="${1:-50}"   # 5.0 s
-    local min_mtime="${2:-0}"
-    local i mtime
+    local previous_token="${2:-}"
+    local i token
     for (( i=0; i<max_tenths; i++ )); do
         if [[ -s "${CB_BARS_USAGE_FILE}" ]] && cb_bars_json_valid "${CB_BARS_USAGE_FILE}"; then
-            if (( min_mtime <= 0 )); then
+            if [[ -z "${previous_token}" ]]; then
                 return 0
             fi
-            mtime=$(cache_mtime "${CB_BARS_USAGE_FILE}")
-            if (( mtime > min_mtime )); then
+            token=$(cache_token)
+            if [[ "${token}" != "${previous_token}" ]]; then
                 return 0
             fi
         fi
@@ -153,7 +205,7 @@ run_codexbar() {
 }
 
 refresh_cache() {
-    local out tmp rc
+    local out tmp stamp_tmp rc
     if ! tmp=$(mktemp "${CB_BARS_CACHE_DIR}/usage.XXXXXX.json"); then
         cb_bars_log "could not create temporary cache file"
         return 1
@@ -176,9 +228,19 @@ refresh_cache() {
 
     printf '%s' "${out}" > "${tmp}"
     if cb_bars_json_valid "${tmp}"; then
+        if ! stamp_tmp=$(mktemp "${CB_BARS_CACHE_DIR}/usage-stamp.XXXXXX"); then
+            rm -f "${tmp}"
+            cb_bars_log "could not create temporary stamp file"
+            return 1
+        fi
+        printf '%s.%s.%s\n' "$(date +%s)" "$$" "${RANDOM}" > "${stamp_tmp}" || {
+            rm -f "${tmp}" "${stamp_tmp}"
+            cb_bars_log "could not write temporary stamp file"
+            return 1
+        }
         mv "${tmp}" "${CB_BARS_USAGE_FILE}"
-        date +%s > "${CB_BARS_USAGE_STAMP}"
-        chmod 644 "${CB_BARS_USAGE_FILE}" "${CB_BARS_USAGE_STAMP}"
+        mv "${stamp_tmp}" "${CB_BARS_USAGE_STAMP}"
+        chmod 644 "${CB_BARS_USAGE_FILE}" "${CB_BARS_USAGE_STAMP}" 2>/dev/null || true
         cb_bars_log "cache refreshed (${#out} bytes)"
         return 0
     fi
@@ -197,7 +259,7 @@ cache_is_fresh() {
 }
 
 lock_rc=0
-pre_refresh_mtime=$(cache_mtime "${CB_BARS_USAGE_FILE}")
+pre_refresh_token=$(cache_token)
 if (( force_refresh )) || ! cache_is_fresh; then
     cb_bars_with_lock refresh_cache || lock_rc=$?
 fi
@@ -207,7 +269,7 @@ fi
 # observe the forced refresh instead of immediately returning stale bytes.
 if (( lock_rc == 2 )); then
     if (( force_refresh )); then
-        cb_bars_wait_for_cache "${CB_BARS_LOCK_WAIT_TENTHS}" "${pre_refresh_mtime}" \
+        cb_bars_wait_for_cache "${CB_BARS_LOCK_WAIT_TENTHS}" "${pre_refresh_token}" \
             || cb_bars_die "forced refresh did not publish a newer cache"
     elif ! [[ -s "${CB_BARS_USAGE_FILE}" ]] || ! cb_bars_json_valid "${CB_BARS_USAGE_FILE}"; then
         cb_bars_wait_for_cache "${CB_BARS_LOCK_WAIT_TENTHS}" || true

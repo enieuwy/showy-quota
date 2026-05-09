@@ -45,12 +45,14 @@ icons are bundled in this repo.
 
 ```sh
 cd /path/to/codexbar-bars
-make install                   # symlinks bin/* into ~/.local/bin and
-                               # SketchyBar pieces into ~/.config/sketchybar
+make install                   # symlinks bin/* into ~/.local/bin only
 ```
 
 `make install` refuses to clobber existing files and refuses to retarget
 existing symlinks unless you explicitly run with `FORCE=1`.
+
+`make install` does **not** wire any UI by default. Each bar integration is
+opt-in so tmux/Zellij users do not get SketchyBar files, and vice versa.
 
 To uninstall:
 
@@ -60,10 +62,12 @@ make uninstall
 
 ### SketchyBar wiring
 
-Add to `~/.config/sketchybar/sketchybarrc`, after `ITEM_DIR` and
-`PLUGIN_DIR` are defined:
+Install the SketchyBar item/plugin, then add the item declaration to
+`~/.config/sketchybar/sketchybarrc` after `ITEM_DIR` and `PLUGIN_DIR` are
+defined:
 
 ```sh
+make install-sketchybar
 source "$ITEM_DIR/cb_bars.sh"
 ```
 
