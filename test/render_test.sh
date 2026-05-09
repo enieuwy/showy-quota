@@ -250,6 +250,17 @@ fi
 assert_contains "plugin uses status-tinted icon" "icon-codex-major.png" "$(< "${log}")"
 
 cache=$(mk_cache)
+log="${TMP}/sb-idle.log"
+PATH="${stub_dir}:${PATH}" \
+    CB_BARS_NO_CONFIG=1 \
+    CB_BARS_CACHE_DIR="${cache}" \
+    CB_BARS_SKETCHYBAR_IMAGE_CACHE="${cache}/sb" \
+    CB_BARS_TEST_FIXTURE="${FIXTURE_DIR}/codexbar-idle-no-reset.json" \
+    CB_BARS_TEST_LOG="${log}" \
+    "${REPO_ROOT}/sketchybar/plugins/cb_bars.sh"
+assert_contains "plugin uses idle label when reset missing at 100%" "label=idle" "$(< "${log}")"
+
+cache=$(mk_cache)
 log="${TMP}/sb-filter.log"
 PATH="${stub_dir}:${PATH}" \
     CB_BARS_NO_CONFIG=1 \
@@ -284,6 +295,10 @@ out=$(run_renderer cb-bars-zellij-bar codexbar-reset-description.json)
 assert_contains "resetDescription fixture renders codex" "CX" "${out}"
 assert_not_contains "resetDescription fixture avoids '?' countdown" "?" "${out}"
 
+
+out=$(run_renderer cb-bars-zellij-bar codexbar-idle-no-reset.json)
+assert_contains "idle-no-reset fixture renders claude" "CL" "${out}"
+assert_contains "idle-no-reset fixture shows idle label" "idle" "${out}"
 # 3. Non-array JSON must be rejected by the fetcher (refresh path).
 printf '\ncache fetcher\n'
 

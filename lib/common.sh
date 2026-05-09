@@ -189,6 +189,19 @@ cb_bars_format_countdown() {
     fi
 }
 
+cb_bars_primary_label() {
+    local minutes="$1" remaining="$2" reset_value="${3:-}"
+    if [[ -n "${minutes}" ]]; then
+        cb_bars_format_countdown "${minutes}"
+        return
+    fi
+    if [[ -z "${reset_value}" && "${remaining}" =~ ^-?[0-9]+$ ]] && (( remaining >= 100 )); then
+        printf 'idle'
+        return
+    fi
+    cb_bars_format_countdown "${minutes}"
+}
+
 # Map remaining-percent → palette key (good|warn|bad|unknown).
 cb_bars_color_key() {
     local remaining="$1"

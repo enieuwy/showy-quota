@@ -273,9 +273,9 @@ render_bar_png() {
 # ── label rendering ──────────────────────────────────────────────────
 
 label_for_minutes() {
-    local minutes="$1"
+    local minutes="$1" remaining="$2" reset_value="${3:-}"
     local label
-    label=$(cb_bars_format_countdown "${minutes}")
+    label=$(cb_bars_primary_label "${minutes}" "${remaining}" "${reset_value}")
     local color="${TEXT_ARGB}"
     if [[ -n "${minutes}" && "${minutes}" -lt "${CB_BARS_TIME_WARN_MINUTES}" ]] 2>/dev/null; then
         color=$(argb_from_hex "${BAD_HEX}")
@@ -338,7 +338,7 @@ while IFS=$'\x1f' read -r pid rem_p p_reset rem_s s_reset s_window rem_t t_reset
         minutes=$(cb_bars_minutes_until "${p_reset}" || true)
     fi
     label=""; color=""
-    { IFS= read -r label; IFS= read -r color; } < <(label_for_minutes "${minutes}") || true
+    { IFS= read -r label; IFS= read -r color; } < <(label_for_minutes "${minutes}" "${rem_p}" "${p_reset}") || true
     [[ -n "${color}" ]] || color="${TEXT_ARGB}"
 
     current_providers+="${pid}"$'\n'

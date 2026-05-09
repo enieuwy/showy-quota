@@ -105,7 +105,7 @@ while IFS=$'\x1f' read -r provider p_used p_reset s_used _s_reset _t_used _t_res
     if [[ -n "${p_reset}" ]]; then
         minutes=$(cb_bars_minutes_until "${p_reset}" || true)
     fi
-    countdown=$(cb_bars_format_countdown "${minutes}")
+    countdown=$(cb_bars_primary_label "${minutes}" "${p_remaining}" "${p_reset}")
 
     # Append weekly 1-char hint when secondary present and worse than primary.
     weekly_hint=""
