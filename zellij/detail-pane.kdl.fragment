@@ -1,4 +1,4 @@
-// codexbar-bars — Zellij keybind for an on-demand detail pane.
+// showy-bar — Zellij keybind for an on-demand detail pane.
 //
 // Add inside an existing keybinds block in your zellij config. Adjust
 // the mode/key to taste. The pane runs a tiny shell loop (no `watch`

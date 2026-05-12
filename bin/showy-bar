@@ -1,0 +1,334 @@
+#!/usr/bin/env bash
+# showy-bar — browse, preview, and persist palette themes.
+
+set -euo pipefail
+
+SCRIPT_PATH="${BASH_SOURCE[0]}"
+while [[ -L "${SCRIPT_PATH}" ]]; do
+    link=$(readlink "${SCRIPT_PATH}")
+    if [[ "${link}" == /* ]]; then
+        SCRIPT_PATH="${link}"
+    else
+        SCRIPT_PATH="$(cd -- "$(dirname -- "${SCRIPT_PATH}")" && pwd -P)/${link}"
+    fi
+done
+SCRIPT_DIR="$(cd -- "$(dirname -- "${SCRIPT_PATH}")" && pwd -P)"
+REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd -P)"
+CONFIG_DIR="${XDG_CONFIG_HOME:-${HOME}/.config}/showy-bar"
+CONFIG_FILE="${CONFIG_DIR}/config.env"
+RENDERER="${SCRIPT_DIR}/showy-bar-zellij-bar"
+THEME_NAME_RE='^[A-Za-z0-9._-]+$'
+
+usage() {
+    printf '%s\n' \
+        'Usage: showy-bar [--set <name>|--unset|--current|--list|--preview <name>]' \
+        '' \
+        'With no flags, opens an interactive theme selector when fzf and a TTY are available.' \
+        'Without fzf or a TTY, prints a deterministic theme list and exact set/unset commands.' \
+        '' \
+        'Flags:' \
+        '  --set <name>      Persist SHOWY_BAR_THEME=<name> in config.env' \
+        '  --unset           Remove the active SHOWY_BAR_THEME= line from config.env' \
+        '  --current         Print the persisted theme name, or (none)' \
+        '  --list            Print available theme names, one per line' \
+        '  --preview <name>  Print one ANSI preview strip for a theme' \
+        '  -h, --help        Show this help'
+}
+
+usage_error() {
+    printf 'showy-bar: %s\n\n' "$1" >&2
+    usage >&2
+    exit 2
+}
+
+die() {
+    printf 'showy-bar: %s\n' "$1" >&2
+    exit 1
+}
+
+list_theme_names() {
+    local dir path name
+    local -a names=()
+    declare -A seen=()
+
+    for dir in "${CONFIG_DIR}/themes" "${REPO_ROOT}/share/themes"; do
+        [[ -d "${dir}" ]] || continue
+        for path in "${dir}"/*.env; do
+            [[ -e "${path}" ]] || continue
+            name="${path##*/}"
+            name="${name%.env}"
+            if [[ -z "${seen["${name}"]+x}" ]]; then
+                seen["${name}"]=1
+                names+=("${name}")
+            fi
+        done
+    done
+
+    ((${#names[@]} > 0)) || return 0
+    printf '%s\n' "${names[@]}" | LC_ALL=C sort
+}
+
+find_theme_path() {
+    local name="$1" path
+    [[ "${name}" =~ ${THEME_NAME_RE} ]] || return 1
+    for path in \
+        "${CONFIG_DIR}/themes/${name}.env" \
+        "${REPO_ROOT}/share/themes/${name}.env"
+    do
+        if [[ -r "${path}" ]]; then
+            printf '%s\n' "${path}"
+            return 0
+        fi
+    done
+    return 1
+}
+
+print_available_themes() {
+    local name any=0
+    while IFS= read -r name; do
+        if (( ! any )); then
+            printf 'available themes:\n'
+            any=1
+        fi
+        printf '  %s\n' "${name}"
+    done < <(list_theme_names)
+    (( any )) || printf 'available themes: (none)\n'
+}
+
+validate_theme_or_die() {
+    local name="$1"
+    if [[ -z "${name}" ]]; then
+        die 'theme name is required'
+    fi
+    if [[ ! "${name}" =~ ${THEME_NAME_RE} ]]; then
+        printf 'showy-bar: invalid theme name: %s\n' "${name}" >&2
+        printf 'showy-bar: names may contain only A-Z, a-z, 0-9, dot, underscore, and dash\n' >&2
+        print_available_themes >&2
+        exit 1
+    fi
+    if ! find_theme_path "${name}" >/dev/null; then
+        printf 'showy-bar: unknown theme: %s\n' "${name}" >&2
+        print_available_themes >&2
+        exit 1
+    fi
+}
+
+strip_matching_quotes() {
+    local value="$1"
+    if (( ${#value} >= 2 )) && [[ "${value}" == \"*\" && "${value}" == *\" ]]; then
+        value="${value:1:${#value}-2}"
+    elif (( ${#value} >= 2 )) && [[ "${value}" == \'*\' && "${value}" == *\' ]]; then
+        value="${value:1:${#value}-2}"
+    fi
+    printf '%s' "${value}"
+}
+
+current_theme_value() {
+    local line value current=""
+    [[ -r "${CONFIG_FILE}" ]] || return 0
+
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+        if [[ "${line}" =~ ^[[:space:]]*SHOWY_BAR_THEME= ]]; then
+            value="${line#*=}"
+            value="${value%%[[:space:]]*}"
+            value=$(strip_matching_quotes "${value}")
+            current="${value}"
+        fi
+    done < "${CONFIG_FILE}"
+
+    [[ -n "${current}" ]] && printf '%s\n' "${current}"
+
+    return 0
+}
+
+print_current_theme() {
+    local current
+    current=$(current_theme_value)
+    printf '%s\n' "${current:-(none)}"
+}
+
+write_config_lines() {
+    local mode="$1" theme="${2:-}"
+    local tmp line indent="" last_index
+    local -a lines=()
+    local match_index=-1
+    local i
+
+    if [[ -f "${CONFIG_FILE}" ]]; then
+        while IFS= read -r line || [[ -n "${line}" ]]; do
+            lines+=("${line}")
+        done < "${CONFIG_FILE}"
+    fi
+
+    for i in "${!lines[@]}"; do
+        if [[ "${lines[$i]}" =~ ^([[:space:]]*)SHOWY_BAR_THEME= ]]; then
+            match_index="${i}"
+            indent="${BASH_REMATCH[1]}"
+        fi
+    done
+
+    if [[ "${mode}" == "unset" && "${match_index}" == -1 ]]; then
+        return 0
+    fi
+
+    tmp=$(mktemp "${CONFIG_FILE}.tmp.XXXXXX") || die "cannot create temporary config next to ${CONFIG_FILE}"
+    if ! {
+        for i in "${!lines[@]}"; do
+            if [[ "${i}" == "${match_index}" ]]; then
+                if [[ "${mode}" == "set" ]]; then
+                    printf '%sSHOWY_BAR_THEME=%s\n' "${indent}" "${theme}"
+                fi
+            else
+                printf '%s\n' "${lines[$i]}"
+            fi
+        done
+
+        if [[ "${mode}" == "set" && "${match_index}" == -1 ]]; then
+            if ((${#lines[@]} > 0)); then
+                last_index=$((${#lines[@]} - 1))
+                [[ -z "${lines[$last_index]}" ]] || printf '\n'
+            fi
+            printf 'SHOWY_BAR_THEME=%s\n' "${theme}"
+        fi
+    } > "${tmp}"; then
+        rm -f -- "${tmp}"
+        die "cannot write temporary config next to ${CONFIG_FILE}"
+    fi
+
+    if ! mv -f -- "${tmp}" "${CONFIG_FILE}"; then
+        die "cannot replace ${CONFIG_FILE}; temporary file left at ${tmp}"
+    fi
+}
+
+set_theme() {
+    local name="$1"
+    validate_theme_or_die "${name}"
+    mkdir -p -- "${CONFIG_DIR}" || die "cannot create ${CONFIG_DIR}"
+    write_config_lines set "${name}"
+}
+
+unset_theme() {
+    [[ -e "${CONFIG_FILE}" ]] || return 0
+    write_config_lines unset
+}
+
+ordered_theme_names() {
+    local current="${1:-}" name
+    local printed_current=0
+
+    if [[ -n "${current}" ]] && find_theme_path "${current}" >/dev/null; then
+        printf '%s\n' "${current}"
+        printed_current=1
+    fi
+
+    while IFS= read -r name; do
+        if (( printed_current )) && [[ "${name}" == "${current}" ]]; then
+            continue
+        fi
+        printf '%s\n' "${name}"
+    done < <(list_theme_names)
+}
+
+print_fallback_selector() {
+    local current="$1" name any=0
+    printf 'Current theme: %s\n' "${current:-(none)}"
+    printf '\nAvailable themes:\n'
+    while IFS= read -r name; do
+        any=1
+        printf '  %s\n' "${name}"
+    done < <(ordered_theme_names "${current}")
+    (( any )) || printf '  (none)\n'
+    printf '\nSet a theme:\n  showy-bar --set <name>\n'
+    printf 'Unset persisted theme:\n  showy-bar --unset\n'
+}
+
+run_fzf_selector() {
+    local current="$1" selection preview_cmd unset_cmd
+    printf -v preview_cmd '%q --preview {}' "${SCRIPT_PATH}"
+    printf -v unset_cmd '%q --unset' "${SCRIPT_PATH}"
+
+    if selection=$(ordered_theme_names "${current}" | fzf \
+        --prompt='theme> ' \
+        --header='enter: save  esc: cancel  ctrl-x: clear theme  arrows/hjkl: browse' \
+        --preview="${preview_cmd}" \
+        --preview-window='right,60%,wrap' \
+        --bind='h:up,j:down,k:up,l:down,up:up,down:down' \
+        --bind="ctrl-x:execute(${unset_cmd})+abort"); then
+        [[ -n "${selection}" ]] && set_theme "${selection}"
+    fi
+}
+
+run_selector() {
+    local current
+    current=$(current_theme_value)
+    if [[ -z "${SHOWY_BAR_TEST_NO_FZF:-}" ]] && [[ -t 0 ]] && command -v fzf >/dev/null 2>&1; then
+        run_fzf_selector "${current}"
+    else
+        print_fallback_selector "${current}"
+    fi
+}
+
+preview_fixture_json() {
+    cat <<'JSON'
+[
+  {"provider":"claude","usage":{
+    "primary":  {"usedPercent":17,"resetsAt":"2099-01-01T03:29:00Z","windowMinutes":300},
+    "secondary":{"usedPercent":70,"resetsAt":"2099-01-03T00:00:00Z","windowMinutes":10080}
+  }},
+  {"provider":"codex","usage":{
+    "primary":  {"usedPercent":92,"resetsAt":"2099-01-01T00:23:00Z","windowMinutes":10080},
+    "secondary":{"usedPercent":35,"resetsAt":"2099-01-04T12:00:00Z","windowMinutes":10080}
+  }}
+]
+JSON
+}
+
+preview_theme() {
+    local name="$1"
+    validate_theme_or_die "${name}"
+
+    SHOWY_BAR_THEME="${name}" \
+        SHOWY_BAR_NO_CONFIG=1 \
+        SHOWY_BAR_FORCE_COLOR=1 \
+        SHOWY_BAR_NOW_EPOCH=4070908800 \
+        "${RENDERER}" --json - < <(preview_fixture_json)
+}
+
+main() {
+    if (($# == 0)); then
+        run_selector
+        return 0
+    fi
+
+    case "$1" in
+        --set)
+            (($# == 2)) || usage_error '--set requires exactly one theme name'
+            set_theme "$2"
+            ;;
+        --unset)
+            (($# == 1)) || usage_error '--unset does not accept arguments'
+            unset_theme
+            ;;
+        --current)
+            (($# == 1)) || usage_error '--current does not accept arguments'
+            print_current_theme
+            ;;
+        --list)
+            (($# == 1)) || usage_error '--list does not accept arguments'
+            list_theme_names
+            ;;
+        --preview)
+            (($# == 2)) || usage_error '--preview requires exactly one theme name'
+            preview_theme "$2"
+            ;;
+        -h|--help)
+            (($# == 1)) || usage_error '--help does not accept arguments'
+            usage
+            ;;
+        *)
+            usage_error "unknown argument: $1"
+            ;;
+    esac
+}
+
+main "$@"

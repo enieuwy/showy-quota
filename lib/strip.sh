@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# codexbar-bars — strip rendering helpers used by both the Zellij ANSI
+# showy-bar — strip rendering helpers used by both the Zellij ANSI
 # renderer and the tmux markup renderer.
 #
 # Sourced after lib/common.sh.
 
 # Provider id → short two-or-three letter sigil shown when no Nerd Font icon
 # is available. Keep these stable so users can recognize them in the strip.
-cb_bars_provider_sigil() {
+showy_bar_provider_sigil() {
     case "$1" in
         codex)         printf 'CX' ;;
         claude)        printf 'CL' ;;
@@ -43,11 +43,11 @@ cb_bars_provider_sigil() {
 }
 
 # Filter the cached JSON down to renderable provider records, honoring
-# CB_BARS_PROVIDERS and CB_BARS_PROVIDERS_EXCLUDE when set. Reads from stdin,
+# SHOWY_BAR_PROVIDERS and SHOWY_BAR_PROVIDERS_EXCLUDE when set. Reads from stdin,
 # writes JSON array to stdout.
-cb_bars_filter_renderable() {
-    local allow="${CB_BARS_PROVIDERS:-}"
-    local exclude="${CB_BARS_PROVIDERS_EXCLUDE:-}"
+showy_bar_filter_renderable() {
+    local allow="${SHOWY_BAR_PROVIDERS:-}"
+    local exclude="${SHOWY_BAR_PROVIDERS_EXCLUDE:-}"
     jq --arg allow "${allow}" --arg exclude "${exclude}" '
         def list($raw):
             $raw
@@ -68,7 +68,7 @@ cb_bars_filter_renderable() {
 
 # Render a single window slot as JSON: { used_pct, remaining_pct, reset_at,
 # window_minutes, color }.
-cb_bars_window_jq() {
+showy_bar_window_jq() {
     cat <<'JQ'
 def window_obj(slot):
     if (slot // null) == null then null
@@ -85,7 +85,7 @@ JQ
 
 # Build a compact bar (8 cells of unicode block) for a 0..100 percentage.
 # Args: $1 = percent (int 0..100). Echoes 8 chars.
-cb_bars_block_bar() {
+showy_bar_block_bar() {
     local pct="${1:-0}"
     [[ "${pct}" =~ ^-?[0-9]+$ ]] || pct=0
     (( pct < 0 )) && pct=0
@@ -106,7 +106,7 @@ cb_bars_block_bar() {
 
 # Choose the dominant color for a provider record (uses the lowest of all
 # windows' remaining-percents).
-cb_bars_provider_color_key() {
+showy_bar_provider_color_key() {
     local jq_in="$1"
     local lowest
     lowest=$(printf '%s' "${jq_in}" | jq -r '
@@ -115,5 +115,5 @@ cb_bars_provider_color_key() {
         | map(select(. != null and (.usedPercent | type == "number")) | (100 - pct(.usedPercent)))
         | (min // 0)
     ')
-    cb_bars_color_key "${lowest}"
+    showy_bar_color_key "${lowest}"
 }

@@ -2,20 +2,20 @@
 
 ## Output shape
 
-`bin/cb-bars-tmux-bar` emits tmux-format markup, the same per-provider
+`bin/showy-bar-tmux-bar` emits tmux-format markup, the same per-provider
 shape as the Zellij renderer except using `#[fg=#RRGGBB]` / `#[bold]` /
 `#[default]` instead of ANSI escape sequences.
 
 ## status-right
 
-Append to your existing `status-right` so `codexbar-bars` cohabits with
+Append to your existing `status-right` so `showy-bar` cohabits with
 whatever else you display:
 
 ```tmux
-if -F '#{m:*cb-bars-tmux-bar*,#{status-right}}' '' 'set -ag status-right " #(/Users/REPLACE_ME/.local/bin/cb-bars-tmux-bar)"'
+if -F '#{m:*showy-bar-tmux-bar*,#{status-right}}' '' 'set -ag status-right " #(/Users/REPLACE_ME/.local/bin/showy-bar-tmux-bar)"'
 ```
 
-Use the absolute path to `cb-bars-tmux-bar`; tmux's startup PATH often
+Use the absolute path to `showy-bar-tmux-bar`; tmux's startup PATH often
 does not include `~/.local/bin`. The guard prevents duplicate segments
 when `.tmux.conf` is sourced repeatedly.
 
@@ -23,7 +23,7 @@ when `.tmux.conf` is sourced repeatedly.
 
 tmux invokes the script on its own schedule (default 15 s). The script
 itself reads from the shared cache, so it is fast (≤ 50 ms typical).
-Tighten the cache TTL with `CB_BARS_REFRESH_SECONDS` if you want the
+Tighten the cache TTL with `SHOWY_BAR_REFRESH_SECONDS` if you want the
 strip to track provider state more aggressively.
 
 ## PATH gotchas

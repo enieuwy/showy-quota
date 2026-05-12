@@ -1,16 +1,17 @@
 # Architecture
 
-`codexbar-bars` is intentionally tiny. There are three layers:
+`showy-bar` is intentionally tiny. There are three layers:
 
-1. **Data plane.** A single shell script, `bin/cb-bars-fetch`, that owns the
+1. **Data plane.** A single shell script, `bin/showy-bar-fetch`, that owns the
    on-disk cache and is the only place that ever invokes `codexbar`.
-2. **Renderers.** Three independent scripts that read the cache and emit
-   format-specific output:
-   - `bin/cb-bars-zellij-bar` → ANSI strip
-   - `bin/cb-bars-tmux-bar` → tmux markup
-   - `sketchybar/plugins/cb_bars.sh` → SketchyBar item updates + PNGs
+2. **Renderers / state surfaces.** Independent scripts that read the cache and
+   emit format-specific output or stable integration state:
+   - `bin/showy-bar-state` → provider/layout state JSON for external coordinators
+   - `bin/showy-bar-zellij-bar` → ANSI strip
+   - `bin/showy-bar-tmux-bar` → tmux markup
+   - `sketchybar/plugins/showy_bar.sh` → SketchyBar item updates + PNGs
 3. **Presentation.** SketchyBar items, Zellij layout/keybind, tmux
-   status-right snippet — declared once, never re-evaluated by this repo.
+   status-right snippet, and optional external layout managers.
 
 ```
                 ┌─────────────────────────────────────────────┐
@@ -19,22 +20,23 @@
                                            │ (slow; 1–10 s cold)
                                            ▼
                 ┌─────────────────────────────────────────────┐
-                │   bin/cb-bars-fetch (flock + atomic write)  │
-                │   ~/.cache/codexbar-bars/usage.json         │
+                │   bin/showy-bar-fetch (flock + atomic write)  │
+                │   ~/.cache/showy-bar/usage.json         │
                 └──────────────────────────┬──────────────────┘
                                            │ (cheap; pure JSON read)
-                ┌──────────────────────────┼──────────────────┐
-                ▼                          ▼                  ▼
-   sketchybar/plugins/cb_bars.sh   cb-bars-zellij-bar   cb-bars-tmux-bar
-        │                                │                  │
-        ▼                                ▼                  ▼
-   sketchybar --set …                 ANSI strip        tmux #[…] markup
-   PNGs in image cache               (zjstatus pipe)   (status-right)
+                ┌──────────────┬───────────┴──────────┬──────────────────┐
+                ▼              ▼                      ▼                  ▼
+        showy-bar-state   sketchybar/plugins/   showy-bar-zellij-bar   showy-bar-tmux-bar
+         state JSON          showy_bar.sh          ANSI strip        tmux #[…] markup
+                               │                (zjstatus pipe)   (status-right)
+                               ▼
+                         sketchybar --set …
+                         PNGs in image cache
 ```
 
 ## Cache contract
 
-- File: `${XDG_CACHE_HOME:-$HOME/.cache}/codexbar-bars/usage.json`
+- File: `${XDG_CACHE_HOME:-$HOME/.cache}/showy-bar/usage.json`
 - Stamp file: same path with `.updated-at` suffix.
 - Lock file: same path with `.lock` suffix; either an `flock`-held
   descriptor or an owner-scoped `mkdir` lock.
@@ -53,7 +55,7 @@ they want freshness data they read `--age`.
 | `codexbar` returns non-JSON                   | Cache is **not** updated; previous value still served|
 | `codexbar` JSON fails `jq` validation         | Same — preserve last good cache                      |
 | Cache file missing **and** `codexbar` fails   | Fetcher exits non-zero; renderers print `AI ?`       |
-| Cache age > `2 × CB_BARS_REFRESH_SECONDS`     | Zellij + tmux dim every provider; SketchyBar unchanged |
+| Cache age > `2 × SHOWY_BAR_REFRESH_SECONDS`     | Zellij + tmux dim every provider; SketchyBar unchanged |
 
 ## Why bash and not Python/Go/Rust
 
@@ -70,7 +72,7 @@ filename of its bundled SVG (`ProviderIcon-<id>.svg`). The SketchyBar
 plugin uses these one-to-one — no remapping table.
 
 The Zellij and tmux strips render a 2-letter sigil per provider via
-`cb_bars_provider_sigil` (`lib/strip.sh`). New CodexBar providers fall
+`showy_bar_provider_sigil` (`lib/strip.sh`). New CodexBar providers fall
 back to the first two letters of the id.
 
 ## Adding a new SketchyBar provider
@@ -80,3 +82,22 @@ content. So: enable the provider in CodexBar and wait for the next refresh
 cycle. Zellij and tmux will render the new provider automatically. For
 SketchyBar, reload the bar after the new provider appears in the cache so
 the icon/bar/label item triple is declared. No code change required.
+
+## External layout managers
+
+`bin/showy-bar-state` is the public bridge for configs that need CodexBar's
+filtered provider count without duplicating CodexBar or renderer internals.
+It honors `SHOWY_BAR_PROVIDERS` / `SHOWY_BAR_PROVIDERS_EXCLUDE` and emits:
+
+- `available`: whether a valid cache was read.
+- `providers`: filtered provider ids in render order.
+- `providerCount`: `providers | length`.
+- `sketchybar.compactRecommended`: `providerCount >=
+  SHOWY_BAR_SKETCHYBAR_COMPACT_PROVIDER_COUNT`.
+
+Consumers should treat `available=false` as "leave the current layout alone";
+it means no last-known-good cache exists yet.
+
+The SketchyBar plugin triggers `showy_bar_provider_change` when that filtered
+provider set changes, so configs can subscribe without polling if they want
+immediate layout reconciliation.

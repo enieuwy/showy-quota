@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+# showy-bar — stable state surface for layout managers and adapters.
+#
+# Reads the shared CodexBar cache through showy-bar-fetch, applies the same
+# renderable-provider filtering as every bar renderer, and emits compact JSON
+# that external coordinators can consume without knowing CodexBar's schema.
+#
+# Flags:
+#   --json       Default. Print the full state JSON.
+#   --count      Print only the filtered provider count.
+#   --providers  Print filtered provider ids, one per line.
+
+set -euo pipefail
+
+SCRIPT_PATH="${BASH_SOURCE[0]}"
+while [[ -L "${SCRIPT_PATH}" ]]; do
+    link=$(readlink "${SCRIPT_PATH}")
+    if [[ "${link}" == /* ]]; then
+        SCRIPT_PATH="${link}"
+    else
+        SCRIPT_PATH="$(cd -- "$(dirname -- "${SCRIPT_PATH}")" && pwd -P)/${link}"
+    fi
+done
+SCRIPT_DIR="$(cd -- "$(dirname -- "${SCRIPT_PATH}")" && pwd -P)"
+# shellcheck disable=SC1091
+. "${SCRIPT_DIR}/../lib/common.sh"
+# shellcheck disable=SC1091
+. "${SCRIPT_DIR}/../lib/strip.sh"
+
+mode="json"
+while (($#)); do
+    case "$1" in
+        --json)      mode="json" ;;
+        --count)     mode="count" ;;
+        --providers) mode="providers" ;;
+        -h|--help)
+            printf '%s\n' \
+                'Usage: showy-bar-state [--json|--count|--providers]' \
+                '' \
+                'Emits filtered CodexBar provider state for external layout managers.'
+            exit 0
+            ;;
+        *) showy_bar_die "unknown argument: $1" ;;
+    esac
+    shift
+done
+
+showy_bar_have jq || showy_bar_die "jq is required"
+
+FETCH="${SHOWY_BAR_FETCH_BIN:-${SCRIPT_DIR}/showy-bar-fetch}"
+threshold="${SHOWY_BAR_SKETCHYBAR_COMPACT_PROVIDER_COUNT:-5}"
+if [[ ! "${threshold}" =~ ^[0-9]+$ ]]; then
+    threshold=5
+fi
+
+data=""
+available=false
+if data=$("${FETCH}" 2>/dev/null) && [[ -n "${data}" ]]; then
+    available=true
+fi
+
+if [[ "${available}" == true ]]; then
+    providers_json=$(printf '%s' "${data}" | showy_bar_filter_renderable | jq -c '[ .[].provider ]')
+else
+    providers_json='[]'
+fi
+
+case "${mode}" in
+    count)
+        printf '%s\n' "${providers_json}" | jq 'length'
+        ;;
+    providers)
+        printf '%s\n' "${providers_json}" | jq -r '.[]'
+        ;;
+    json)
+        jq -n \
+            --argjson providers "${providers_json}" \
+            --argjson available "${available}" \
+            --argjson compact_threshold "${threshold}" \
+            '{
+                available: $available,
+                providers: $providers,
+                providerCount: ($providers | length),
+                sketchybar: {
+                    itemPrefix: "showy_bar",
+                    bracket: "showy_bar_bracket",
+                    compactProviderThreshold: $compact_threshold,
+                    compactRecommended: (($providers | length) >= $compact_threshold)
+                }
+            }'
+        ;;
+esac

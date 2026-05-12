@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# codexbar-bars — long-running zjstatus pipe loop.
+# showy-bar — long-running zjstatus pipe loop.
 #
 # Pipes the rendered ANSI strip into zjstatus on a fixed cadence. We use
 # the pipe widget instead of zjstatus's command widget because the command
@@ -21,14 +21,14 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${SCRIPT_PATH}")" && pwd -P)"
 # shellcheck disable=SC1091
 . "${SCRIPT_DIR}/../lib/common.sh"
 
-BAR="${SCRIPT_DIR}/cb-bars-zellij-bar"
-[[ -x "${BAR}" ]] || cb_bars_die "missing renderer: ${BAR}"
+BAR="${SCRIPT_DIR}/showy-bar-zellij-bar"
+[[ -x "${BAR}" ]] || showy_bar_die "missing renderer: ${BAR}"
 
-cb_bars_have "${CB_BARS_ZELLIJ_BIN}" || cb_bars_die "zellij is required for pipe mode: ${CB_BARS_ZELLIJ_BIN}"
+showy_bar_have "${SHOWY_BAR_ZELLIJ_BIN}" || showy_bar_die "zellij is required for pipe mode: ${SHOWY_BAR_ZELLIJ_BIN}"
 
-interval="${CB_BARS_ZELLIJ_PIPE_INTERVAL}"
-widget="${CB_BARS_ZELLIJ_WIDGET}"
-pipe_name="${CB_BARS_ZELLIJ_PIPE_NAME}"
+interval="${SHOWY_BAR_ZELLIJ_PIPE_INTERVAL}"
+widget="${SHOWY_BAR_ZELLIJ_WIDGET}"
+pipe_name="${SHOWY_BAR_ZELLIJ_PIPE_NAME}"
 
 # zjstatus consumes the protocol from the payload itself:
 #   zjstatus::pipe::<widget>::<output>
@@ -36,7 +36,7 @@ pipe_name="${CB_BARS_ZELLIJ_PIPE_NAME}"
 # zjstatus listens on any name, so we just use a stable id for clarity.
 while :; do
     if output=$("${BAR}" 2>/dev/null) && [[ -n "${output}" ]]; then
-        "${CB_BARS_ZELLIJ_BIN}" pipe --name "${pipe_name}" -- \
+        "${SHOWY_BAR_ZELLIJ_BIN}" pipe --name "${pipe_name}" -- \
             "zjstatus::pipe::${widget}::${output}" >/dev/null 2>&1 || true
     fi
     sleep "${interval}"

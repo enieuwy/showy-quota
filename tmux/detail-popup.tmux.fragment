@@ -1,4 +1,4 @@
-# codexbar-bars — tmux popup keybinding for an on-demand detail panel.
+# showy-bar — tmux popup keybinding for an on-demand detail panel.
 #
 # Add to ~/.tmux.conf. Adjust the prefix-relative key to taste. Uses a
 # tiny shell loop to avoid depending on `watch(1)`, which is not on

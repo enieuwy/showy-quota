@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# codexbar-bars — SketchyBar plugin: render per-provider icon + bar PNGs
+# showy-bar — SketchyBar plugin: render per-provider icon + bar PNGs
 # and update each provider's items.
 #
-# Invoked by the cb_bars.trigger item every CB_BARS_SKETCHYBAR_UPDATE_FREQ
+# Invoked by the showy_bar.trigger item every SHOWY_BAR_SKETCHYBAR_UPDATE_FREQ
 # seconds. Reads the shared codexbar JSON cache, generates a small PNG
 # strip per provider (track + primary + secondary [+ tertiary]), and
 # writes it to the user's image cache. SketchyBar then reads the PNG by
@@ -35,11 +35,11 @@ REPO_ROOT="$(resolve_repo_root)"
 # shellcheck disable=SC1091
 . "${REPO_ROOT}/lib/strip.sh"
 
-FETCH="${CB_BARS_FETCH_BIN:-${REPO_ROOT}/bin/cb-bars-fetch}"
-CACHE_DIR="${CB_BARS_SKETCHYBAR_IMAGE_CACHE}"
+FETCH="${SHOWY_BAR_FETCH_BIN:-${REPO_ROOT}/bin/showy-bar-fetch}"
+CACHE_DIR="${SHOWY_BAR_SKETCHYBAR_IMAGE_CACHE}"
 mkdir -p "${CACHE_DIR}" || exit 0
 STATE_FILE="${CACHE_DIR}/providers.txt"
-CLICK="${CB_BARS_SKETCHYBAR_CLICK}"
+CLICK="${SHOWY_BAR_SKETCHYBAR_CLICK}"
 
 read_state_providers() {
     [[ -f "${STATE_FILE}" ]] || return 0
@@ -71,43 +71,43 @@ write_state_providers() {
 remove_provider_items() {
     local pid="$1"
     sketchybar \
-        --remove "cb_bars.${pid}.icon" \
-        --remove "cb_bars.${pid}.bar" \
-        --remove "cb_bars.${pid}.label" >/dev/null 2>&1 || true
+        --remove "showy_bar.${pid}.icon" \
+        --remove "showy_bar.${pid}.bar" \
+        --remove "showy_bar.${pid}.label" >/dev/null 2>&1 || true
 }
 
 declare_provider_items() {
     local pid="$1"
-    sketchybar --add item "cb_bars.${pid}.icon" left \
-               --set "cb_bars.${pid}.icon" \
+    sketchybar --add item "showy_bar.${pid}.icon" left \
+               --set "showy_bar.${pid}.icon" \
                    icon.drawing=off \
                    label.drawing=off \
-                   background.image="cb_bars.${pid}.icon" \
+                   background.image="showy_bar.${pid}.icon" \
                    background.image.drawing=on \
-                   background.image.scale="${CB_BARS_SKETCHYBAR_ICON_SCALE}" \
+                   background.image.scale="${SHOWY_BAR_SKETCHYBAR_ICON_SCALE}" \
                    background.color=0x00000000 \
                    background.height=0 \
-                   padding_left="${CB_BARS_SKETCHYBAR_ICON_PADDING_LEFT}" \
+                   padding_left="${SHOWY_BAR_SKETCHYBAR_ICON_PADDING_LEFT}" \
                    padding_right=0 \
-                   width="${CB_BARS_SKETCHYBAR_ICON_WIDTH}" \
+                   width="${SHOWY_BAR_SKETCHYBAR_ICON_WIDTH}" \
                    click_script="${CLICK}" >/dev/null 2>&1 || true
 
-    sketchybar --add item "cb_bars.${pid}.bar" left \
-               --set "cb_bars.${pid}.bar" \
+    sketchybar --add item "showy_bar.${pid}.bar" left \
+               --set "showy_bar.${pid}.bar" \
                    icon.drawing=off \
                    label.drawing=off \
-                   background.image="cb_bars.${pid}.bar" \
+                   background.image="showy_bar.${pid}.bar" \
                    background.image.drawing=on \
                    background.image.scale=1.0 \
                    background.color=0x00000000 \
                    background.height=0 \
                    padding_left=2 \
                    padding_right=2 \
-                   width="${CB_BARS_SKETCHYBAR_BAR_WIDTH}" \
+                   width="${SHOWY_BAR_SKETCHYBAR_BAR_WIDTH}" \
                    click_script="${CLICK}" >/dev/null 2>&1 || true
 
-    sketchybar --add item "cb_bars.${pid}.label" left \
-               --set "cb_bars.${pid}.label" \
+    sketchybar --add item "showy_bar.${pid}.label" left \
+               --set "showy_bar.${pid}.label" \
                    icon.drawing=off \
                    label.font.size=11 \
                    label.padding_left=0 \
@@ -116,23 +116,61 @@ declare_provider_items() {
                    background.height=0 \
                    click_script="${CLICK}" >/dev/null 2>&1 || true
 }
+sketchybar_item_exists() {
+    sketchybar --query "$1" >/dev/null 2>&1
+}
+
+provider_items_declared() {
+    local pid="$1"
+    sketchybar_item_exists "showy_bar.${pid}.icon" \
+        && sketchybar_item_exists "showy_bar.${pid}.bar" \
+        && sketchybar_item_exists "showy_bar.${pid}.label"
+}
+
+declared_items_present() {
+    local providers="${1-}" pid
+    while IFS= read -r pid; do
+        [[ -n "${pid}" ]] || continue
+        provider_items_declared "${pid}" || return 1
+    done <<< "${providers}"
+    [[ -z "${providers}" ]] || sketchybar_item_exists showy_bar_bracket
+}
+
 
 recreate_bracket() {
     local providers="${1-}" pid
     local bracket_items=()
-    sketchybar --remove cb_bars_bracket >/dev/null 2>&1 || true
+    sketchybar --remove showy_bar_bracket >/dev/null 2>&1 || true
 
     while IFS= read -r pid; do
         [[ -n "${pid}" ]] || continue
-        bracket_items+=("cb_bars.${pid}.icon" "cb_bars.${pid}.bar" "cb_bars.${pid}.label")
+        bracket_items+=("showy_bar.${pid}.icon" "showy_bar.${pid}.bar" "showy_bar.${pid}.label")
     done <<< "${providers}"
 
     (( ${#bracket_items[@]} > 0 )) || return 0
-    sketchybar --add bracket cb_bars_bracket "${bracket_items[@]}" \
-               --set cb_bars_bracket \
-                   background.color="${CB_BARS_SKETCHYBAR_PILL_COLOR}" \
-                   background.corner_radius="${CB_BARS_SKETCHYBAR_PILL_RADIUS}" \
-                   background.height="${CB_BARS_SKETCHYBAR_PILL_HEIGHT}" >/dev/null 2>&1 || true
+    sketchybar --add bracket showy_bar_bracket "${bracket_items[@]}" \
+               --set showy_bar_bracket \
+                   background.color="${SHOWY_BAR_SKETCHYBAR_PILL_COLOR}" \
+                   background.corner_radius="${SHOWY_BAR_SKETCHYBAR_PILL_RADIUS}" \
+                   background.height="${SHOWY_BAR_SKETCHYBAR_PILL_HEIGHT}" >/dev/null 2>&1 || true
+}
+
+trigger_provider_change() {
+    local providers="${1-}" pid
+    local provider_count=0 provider_csv=""
+
+    while IFS= read -r pid; do
+        [[ -n "${pid}" ]] || continue
+        if [[ -n "${provider_csv}" ]]; then
+            provider_csv+=","
+        fi
+        provider_csv+="${pid}"
+        provider_count=$((provider_count + 1))
+    done <<< "${providers}"
+
+    sketchybar --trigger showy_bar_provider_change \
+        SHOWY_BAR_PROVIDER_COUNT="${provider_count}" \
+        SHOWY_BAR_PROVIDERS="${provider_csv}" >/dev/null 2>&1 || true
 }
 
 clear_declared_items() {
@@ -142,24 +180,24 @@ clear_declared_items() {
         [[ -n "${pid}" ]] || continue
         remove_provider_items "${pid}"
     done <<< "${declared}"
-    sketchybar --remove cb_bars_bracket >/dev/null 2>&1 || true
-    write_state_providers "" || cb_bars_log "failed to clear sketchybar provider state"
+    sketchybar --remove showy_bar_bracket >/dev/null 2>&1 || true
+    write_state_providers "" || showy_bar_log "failed to clear sketchybar provider state"
 }
 
-cb_bars_have jq || {
-    cb_bars_log "jq required for sketchybar plugin"
+showy_bar_have jq || {
+    showy_bar_log "jq required for sketchybar plugin"
     clear_declared_items
     exit 0
 }
-cb_bars_have magick || {
-    cb_bars_log "magick (ImageMagick 7+) required for sketchybar plugin"
+showy_bar_have magick || {
+    showy_bar_log "magick (ImageMagick 7+) required for sketchybar plugin"
     clear_declared_items
     exit 0
 }
 
 # Bar geometry. Bars sit inside SketchyBar's pill; tweak via env.
-: "${CB_BARS_PNG_BAR_W:=80}"
-: "${CB_BARS_PNG_BAR_H:=18}"
+: "${SHOWY_BAR_PNG_BAR_W:=80}"
+: "${SHOWY_BAR_PNG_BAR_H:=18}"
 
 # ── ARGB helpers ─────────────────────────────────────────────────────
 
@@ -169,13 +207,16 @@ argb_from_hex() { printf '0xff%s' "$1"; }
 # 6-char hex → '#RRGGBB' for ImageMagick.
 mhex() { printf '#%s' "$1"; }
 
-PRIMARY_WARN_HEX="$(cb_bars_role_palette primary warn)"
-PRIMARY_BAD_HEX="$(cb_bars_role_palette primary bad)"
-PRIMARY_UNKNOWN_HEX="$(cb_bars_role_palette primary unknown)"
-TRACK_HEX="$(cb_bars_palette track)"
-TEXT_HEX="$(cb_bars_palette text)"
-TEXT_ARGB="$(argb_from_hex "${TEXT_HEX}")"
-ELAPSED_HEX="$(cb_bars_palette elapsed)"
+PRIMARY_WARN_HEX="$(showy_bar_role_palette primary warn)"
+PRIMARY_BAD_HEX="$(showy_bar_role_palette primary bad)"
+PRIMARY_UNKNOWN_HEX="$(showy_bar_role_palette primary unknown)"
+TRACK_HEX="$(showy_bar_palette track)"
+ICON_TEXT_HEX="$(showy_bar_palette icon_text)"
+COUNTDOWN_HEX="$(showy_bar_palette countdown)"
+COUNTDOWN_ARGB="$(argb_from_hex "${COUNTDOWN_HEX}")"
+COUNTDOWN_WARN_HEX="$(showy_bar_palette countdown_warn)"
+COUNTDOWN_WARN_ARGB="$(argb_from_hex "${COUNTDOWN_WARN_HEX}")"
+ELAPSED_HEX="$(showy_bar_palette elapsed)"
 
 status_color_for_indicator() {
     case "${1:-none}" in
@@ -225,11 +266,11 @@ ICON_CACHE_VERSION="2"
 render_fallback_icon_png() {
     local pid="$1" tmp="$2"
     local sigil
-    sigil=$(cb_bars_provider_sigil "${pid}")
+    sigil=$(showy_bar_provider_sigil "${pid}")
     magick -size 64x64 xc:none \
         -fill "$(mhex "${PRIMARY_UNKNOWN_HEX}")" \
         -draw "circle 32,32 32,4" \
-        -fill "$(mhex "${TEXT_HEX}")" \
+        -fill "$(mhex "${ICON_TEXT_HEX}")" \
         -gravity center -pointsize 28 -annotate 0 "${sigil}" \
         "PNG32:${tmp}" >/dev/null 2>&1
 }
@@ -277,7 +318,7 @@ provider_icon_png() {
     local tmp normal_tmp
     normal_tmp=$(mktemp "${CACHE_DIR}/.icon-${pid}.normal.XXXXXX") || return 1
 
-    local svg="${CB_BARS_CODEXBAR_RESOURCES}/ProviderIcon-${pid}.svg"
+    local svg="${SHOWY_BAR_CODEXBAR_RESOURCES}/ProviderIcon-${pid}.svg"
     if [[ ! -r "${svg}" ]]; then
         if ! render_fallback_icon_png "${pid}" "${normal_tmp}"; then
             rm -f "${normal_tmp}"; return 1
@@ -294,7 +335,7 @@ provider_icon_png() {
     if [[ -n "${status_color}" ]]; then
         tint_color="${status_color}"
     elif should_tint_dark_icon_png "${normal_tmp}"; then
-        tint_color="${TEXT_HEX}"
+        tint_color="${ICON_TEXT_HEX}"
     fi
 
     if [[ -n "${tint_color}" ]]; then
@@ -328,7 +369,7 @@ render_bar_png() {
     local rows=2
     (( has_t )) && rows=3
 
-    local image_h="${CB_BARS_PNG_BAR_H}"
+    local image_h="${SHOWY_BAR_PNG_BAR_H}"
     if (( rows == 3 )); then
         # Allow a slightly taller image when stacking three rows. 22 px gives
         # us three 6 px bars with a 1 px gap between each row.
@@ -349,7 +390,7 @@ render_bar_png() {
     # Width fill (round half-up; never blank for nonzero remaining).
     fill_w() {
         local pct="${1:-0}"
-        local w="${CB_BARS_PNG_BAR_W}"
+        local w="${SHOWY_BAR_PNG_BAR_W}"
         awk -v p="${pct}" -v w="${w}" 'BEGIN {
             f = int((p / 100.0) * w + 0.5);
             if (p > 0 && f == 0) f = 1;
@@ -364,15 +405,15 @@ render_bar_png() {
     (( has_t )) && f3=$(fill_w "${rem_t}")
 
     local c1 c2 c3
-    c1=$(cb_bars_role_color primary "${rem_p}")
-    c2=$(cb_bars_role_color secondary "${rem_s}")
-    (( has_t )) && c3=$(cb_bars_role_color tertiary "${rem_t}")
+    c1=$(showy_bar_role_color primary "${rem_p}")
+    c2=$(showy_bar_role_color secondary "${rem_s}")
+    (( has_t )) && c3=$(showy_bar_role_color tertiary "${rem_t}")
 
-    local args=( -size "${CB_BARS_PNG_BAR_W}x${image_h}" xc:none )
+    local args=( -size "${SHOWY_BAR_PNG_BAR_W}x${image_h}" xc:none )
 
     add_track() {
         args+=( -fill "$(mhex "${TRACK_HEX}")"
-                -draw "roundrectangle 0,$1 $((CB_BARS_PNG_BAR_W - 1)),$2 3,3" )
+                -draw "roundrectangle 0,$1 $((SHOWY_BAR_PNG_BAR_W - 1)),$2 3,3" )
     }
     add_fill() {
         local fill="$1" top="$2" bot="$3" hex="$4"
@@ -384,7 +425,7 @@ render_bar_png() {
         local marker="$1" top="$2" bot="$3"
         [[ "${marker}" =~ ^[0-9]+$ ]] || return 0
         (( marker < 0 )) && marker=0
-        (( marker >= CB_BARS_PNG_BAR_W )) && marker=$((CB_BARS_PNG_BAR_W - 1))
+        (( marker >= SHOWY_BAR_PNG_BAR_W )) && marker=$((SHOWY_BAR_PNG_BAR_W - 1))
         args+=( -fill "$(mhex "${ELAPSED_HEX}")"
                 -draw "rectangle ${marker},${top} ${marker},${bot}" )
     }
@@ -423,10 +464,10 @@ render_bar_png() {
 label_for_minutes() {
     local minutes="$1" remaining="$2" reset_value="${3:-}"
     local label
-    label=$(cb_bars_primary_label "${minutes}" "${remaining}" "${reset_value}")
-    local color="${TEXT_ARGB}"
-    if [[ -n "${minutes}" && "${minutes}" -lt "${CB_BARS_TIME_WARN_MINUTES}" ]] 2>/dev/null; then
-        color=$(argb_from_hex "${BAD_HEX}")
+    label=$(showy_bar_primary_label "${minutes}" "${remaining}" "${reset_value}")
+    local color="${COUNTDOWN_ARGB}"
+    if [[ -n "${minutes}" && "${minutes}" -lt "${SHOWY_BAR_TIME_WARN_MINUTES}" ]] 2>/dev/null; then
+        color="${COUNTDOWN_WARN_ARGB}"
     fi
     printf '%s\n%s\n' "${label}" "${color}"
 }
@@ -441,27 +482,43 @@ elapsed_marker_x() {
     (( window_minutes > 0 )) || return 1
 
     local reset_epoch duration start_epoch now elapsed marker
-    reset_epoch=$(cb_bars_reset_epoch "${reset_at}") || return 1
+    reset_epoch=$(showy_bar_reset_epoch "${reset_at}") || return 1
     duration=$((window_minutes * 60))
     start_epoch=$((reset_epoch - duration))
     now=$(date +%s)
     elapsed=$((now - start_epoch))
     (( elapsed < 0 )) && elapsed=0
     (( elapsed > duration )) && elapsed="${duration}"
-    marker=$(( (duration - elapsed) * CB_BARS_PNG_BAR_W / duration ))
+    marker=$(( (duration - elapsed) * SHOWY_BAR_PNG_BAR_W / duration ))
     (( marker < 0 )) && marker=0
-    (( marker >= CB_BARS_PNG_BAR_W )) && marker=$((CB_BARS_PNG_BAR_W - 1))
+    (( marker >= SHOWY_BAR_PNG_BAR_W )) && marker=$((SHOWY_BAR_PNG_BAR_W - 1))
     printf '%s\n' "${marker}"
 }
-filtered=$(printf '%s' "${data}" | cb_bars_filter_renderable)
+filtered=$(printf '%s' "${data}" | showy_bar_filter_renderable)
 desired_providers=$(printf '%s' "${filtered}" | jq -r '.[].provider')
 declared_providers="$(read_state_providers)"
 declared_item_providers="${declared_providers}"
 force_redeclare=0
-if [[ "${CB_BARS_SKETCHYBAR_FORCE_REDECLARE:-0}" == "1" ]]; then
+expected_live_providers=""
+while IFS= read -r pid; do
+    [[ -n "${pid}" ]] || continue
+    if provider_list_contains "${declared_item_providers}" "${pid}"; then
+        if [[ -n "${expected_live_providers}" ]]; then
+            expected_live_providers+=$'\n'
+        fi
+        expected_live_providers+="${pid}"
+    fi
+done <<< "${desired_providers}"
+
+if [[ "${SHOWY_BAR_SKETCHYBAR_FORCE_REDECLARE:-0}" == "1" ]]; then
     force_redeclare=1
     declared_item_providers=""
+elif [[ -n "${expected_live_providers}" ]] && ! declared_items_present "${expected_live_providers}"; then
+    force_redeclare=1
+    declared_item_providers=""
+    showy_bar_log "sketchybar items missing; forcing redeclare"
 fi
+
 
 if (( force_redeclare )) || [[ "${desired_providers}" != "${declared_providers}" ]]; then
     while IFS= read -r pid; do
@@ -475,7 +532,8 @@ if (( force_redeclare )) || [[ "${desired_providers}" != "${declared_providers}"
     done <<< "${desired_providers}"
 
     recreate_bracket "${desired_providers}"
-    write_state_providers "${desired_providers}" || cb_bars_log "failed to update sketchybar provider state"
+    write_state_providers "${desired_providers}" || showy_bar_log "failed to update sketchybar provider state"
+    trigger_provider_change "${desired_providers}"
 fi
 
 rows=$(printf '%s' "${filtered}" | jq -r '
@@ -504,25 +562,25 @@ while IFS=$'\x1f' read -r pid rem_p p_reset rem_s s_reset s_window rem_t t_reset
 
     minutes=""
     if [[ -n "${p_reset}" ]]; then
-        minutes=$(cb_bars_minutes_until "${p_reset}" || true)
+        minutes=$(showy_bar_minutes_until "${p_reset}" || true)
     fi
     label=""; color=""
     icon_click=$(click_script_for_status "${status}" "${status_url}")
     { IFS= read -r label; IFS= read -r color; } < <(label_for_minutes "${minutes}" "${rem_p}" "${p_reset}") || true
-    [[ -n "${color}" ]] || color="${TEXT_ARGB}"
+    [[ -n "${color}" ]] || color="${COUNTDOWN_ARGB}"
 
     args=(
-        --set "cb_bars.${pid}.label" drawing=on label="${label}" label.color="${color}" background.color=0x00000000 background.height=0
+        --set "showy_bar.${pid}.label" drawing=on label="${label}" label.color="${color}" background.color=0x00000000 background.height=0
     )
     if [[ -n "${icon}" && -s "${icon}" ]]; then
-        args+=( --set "cb_bars.${pid}.icon" drawing=on background.image="${icon}" background.image.drawing=on background.image.scale="${CB_BARS_SKETCHYBAR_ICON_SCALE}" background.color=0x00000000 background.height=0 padding_left="${CB_BARS_SKETCHYBAR_ICON_PADDING_LEFT}" padding_right=0 width="${CB_BARS_SKETCHYBAR_ICON_WIDTH}" click_script="${icon_click}" )
+        args+=( --set "showy_bar.${pid}.icon" drawing=on background.image="${icon}" background.image.drawing=on background.image.scale="${SHOWY_BAR_SKETCHYBAR_ICON_SCALE}" background.color=0x00000000 background.height=0 padding_left="${SHOWY_BAR_SKETCHYBAR_ICON_PADDING_LEFT}" padding_right=0 width="${SHOWY_BAR_SKETCHYBAR_ICON_WIDTH}" click_script="${icon_click}" )
     else
-        args+=( --set "cb_bars.${pid}.icon" drawing=off click_script="${CLICK}" )
+        args+=( --set "showy_bar.${pid}.icon" drawing=off click_script="${CLICK}" )
     fi
     if [[ -n "${bar}" && -s "${bar}" ]]; then
-        args+=( --set "cb_bars.${pid}.bar" drawing=on background.image="${bar}" background.image.drawing=on background.image.scale=1.0 background.color=0x00000000 background.height=0 padding_left=2 padding_right=2 width="${CB_BARS_SKETCHYBAR_BAR_WIDTH}" )
+        args+=( --set "showy_bar.${pid}.bar" drawing=on background.image="${bar}" background.image.drawing=on background.image.scale=1.0 background.color=0x00000000 background.height=0 padding_left=2 padding_right=2 width="${SHOWY_BAR_SKETCHYBAR_BAR_WIDTH}" )
     else
-        args+=( --set "cb_bars.${pid}.bar" drawing=off )
+        args+=( --set "showy_bar.${pid}.bar" drawing=off )
     fi
 
     if (( ${#args[@]} > 0 )); then

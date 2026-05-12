@@ -1,4 +1,4 @@
-// codexbar-bars — Zellij layout snippet that drives a zjstatus pipe with
+// showy-bar — Zellij layout snippet that drives a zjstatus pipe with
 // the CodexBar usage strip. Add inside a layout or tab block. The visible
 // status pane and `floating_panes` block below must be siblings.
 //
@@ -11,10 +11,10 @@ pane size=1 borderless=true {
     plugin location="file:~/.config/zellij/plugins/zjstatus.wasm" {
         // Pipe widget is more stable than `command`; it does not crash
         // under WASMI's single-threaded std::sync::Mutex initialization.
-        pipe_codexbar_format "{output}"
-        pipe_codexbar_rendermode "raw"
+        pipe_showy_bar_format "{output}"
+        pipe_showy_bar_rendermode "raw"
 
-        format_left "{pipe_codexbar}"
+        format_left "{pipe_showy_bar}"
         format_center ""
         format_right ""
         format_space ""
@@ -26,7 +26,7 @@ pane size=1 borderless=true {
 // `pane`. If you installed elsewhere, edit the path below.
 floating_panes {
     pane x="99%" y="99%" width="1%" height="1%" {
-        command "/Users/REPLACE_ME/.local/bin/cb-bars-zellij-pipe"
+        command "/Users/REPLACE_ME/.local/bin/showy-bar-zellij-pipe"
         close_on_exit false
     }
 }

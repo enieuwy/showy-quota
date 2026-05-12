@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# codexbar-bars — shared CodexBar JSON fetcher.
+# showy-bar — shared CodexBar JSON fetcher.
 #
 # Returns cached `codexbar usage --format json` output.
-# Refreshes the cache when older than CB_BARS_REFRESH_SECONDS, atomically.
+# Refreshes the cache when older than SHOWY_BAR_REFRESH_SECONDS, atomically.
 # Always prints the most recent good cache when codexbar fails.
 #
 # Exit 0 whenever any cache content was emitted (fresh or stale).
@@ -45,20 +45,20 @@ while (($#)); do
             sed -n '2,18p' "$0"
             exit 0
             ;;
-        *) cb_bars_die "unknown argument: $1" ;;
+        *) showy_bar_die "unknown argument: $1" ;;
     esac
     shift
 done
 
-mkdir -p "${CB_BARS_CACHE_DIR}"
+mkdir -p "${SHOWY_BAR_CACHE_DIR}"
 
 if [[ "${mode}" == "path" ]]; then
-    printf '%s\n' "${CB_BARS_USAGE_FILE}"
+    printf '%s\n' "${SHOWY_BAR_USAGE_FILE}"
     exit 0
 fi
 
 if [[ "${mode}" == "age" ]]; then
-    cb_bars_age_seconds "${CB_BARS_USAGE_FILE}"
+    showy_bar_age_seconds "${SHOWY_BAR_USAGE_FILE}"
     exit 0
 fi
 
@@ -72,33 +72,33 @@ fi
 # Returns:
 #   0 = lock was held and the callee ran;
 #   2 = lock was held by another worker; caller should wait for cache.
-CB_BARS_HELD_LOCK_DIR=""
+SHOWY_BAR_HELD_LOCK_DIR=""
 
-cb_bars_release_mkdir_lock() {
-    if [[ -n "${CB_BARS_HELD_LOCK_DIR:-}" ]]; then
-        rm -f -- "${CB_BARS_HELD_LOCK_DIR}/owner.pid"
-        rmdir -- "${CB_BARS_HELD_LOCK_DIR}" 2>/dev/null || true
-        CB_BARS_HELD_LOCK_DIR=""
+showy_bar_release_mkdir_lock() {
+    if [[ -n "${SHOWY_BAR_HELD_LOCK_DIR:-}" ]]; then
+        rm -f -- "${SHOWY_BAR_HELD_LOCK_DIR}/owner.pid"
+        rmdir -- "${SHOWY_BAR_HELD_LOCK_DIR}" 2>/dev/null || true
+        SHOWY_BAR_HELD_LOCK_DIR=""
     fi
 }
 
-cb_bars_run_with_mkdir_lock() {
+showy_bar_run_with_mkdir_lock() {
     local lock_dir="$1"
     shift
-    CB_BARS_HELD_LOCK_DIR="${lock_dir}"
+    SHOWY_BAR_HELD_LOCK_DIR="${lock_dir}"
     if ! printf '%s\n' "$$" > "${lock_dir}/owner.pid"; then
-        cb_bars_release_mkdir_lock
+        showy_bar_release_mkdir_lock
         return 1
     fi
-    trap cb_bars_release_mkdir_lock EXIT
+    trap showy_bar_release_mkdir_lock EXIT
     local rc=0
     "$@" || rc=$?
-    cb_bars_release_mkdir_lock
+    showy_bar_release_mkdir_lock
     trap - EXIT
     return "${rc}"
 }
 
-cb_bars_recover_mkdir_lock() {
+showy_bar_recover_mkdir_lock() {
     local lock_dir="$1"
     local owner_file="${lock_dir}/owner.pid"
     local owner_pid=""
@@ -108,7 +108,7 @@ cb_bars_recover_mkdir_lock() {
         if [[ "${owner_pid}" =~ ^[0-9]+$ ]] && ! kill -0 "${owner_pid}" 2>/dev/null; then
             rm -f -- "${owner_file}"
             if rmdir -- "${lock_dir}" 2>/dev/null; then
-                cb_bars_log "recovered dead mkdir lock owned by pid ${owner_pid}"
+                showy_bar_log "recovered dead mkdir lock owned by pid ${owner_pid}"
                 return 0
             fi
         fi
@@ -118,69 +118,69 @@ cb_bars_recover_mkdir_lock() {
     # Crash window: mkdir succeeded but owner.pid was never written.
     local now mtime max_age
     now=$(date +%s)
-    max_age=$(( (CB_BARS_LOCK_WAIT_TENTHS + 9) / 10 ))
+    max_age=$(( (SHOWY_BAR_LOCK_WAIT_TENTHS + 9) / 10 ))
     (( max_age < 1 )) && max_age=1
     if mtime=$(stat -f %m "${lock_dir}" 2>/dev/null) \
         || mtime=$(stat -c %Y "${lock_dir}" 2>/dev/null); then
         if (( now - mtime > max_age )) && rmdir -- "${lock_dir}" 2>/dev/null; then
-            cb_bars_log "recovered ownerless mkdir lock"
+            showy_bar_log "recovered ownerless mkdir lock"
             return 0
         fi
     fi
     return 1
 }
 
-cb_bars_with_lock() {
-    if [[ -z "${CB_BARS_FORCE_NO_FLOCK:-}" ]] && cb_bars_have flock; then
+showy_bar_with_lock() {
+    if [[ -z "${SHOWY_BAR_FORCE_NO_FLOCK:-}" ]] && showy_bar_have flock; then
         local rc=2
         # subshell + fd 9 so the lock releases on exit.
         (
-            exec 9>"${CB_BARS_USAGE_LOCK}"
+            exec 9>"${SHOWY_BAR_USAGE_LOCK}"
             if flock -n 9; then
                 "$@"
             else
-                cb_bars_log "another fetch in flight (flock); will wait"
+                showy_bar_log "another fetch in flight (flock); will wait"
                 exit 2
             fi
         ) && rc=$? || rc=$?
         return "${rc}"
     fi
 
-    local lock_dir="${CB_BARS_USAGE_LOCK}.d"
+    local lock_dir="${SHOWY_BAR_USAGE_LOCK}.d"
     if mkdir -- "${lock_dir}" 2>/dev/null; then
-        cb_bars_run_with_mkdir_lock "${lock_dir}" "$@"
+        showy_bar_run_with_mkdir_lock "${lock_dir}" "$@"
         return $?
     fi
 
-    if cb_bars_recover_mkdir_lock "${lock_dir}" && mkdir -- "${lock_dir}" 2>/dev/null; then
-        cb_bars_run_with_mkdir_lock "${lock_dir}" "$@"
+    if showy_bar_recover_mkdir_lock "${lock_dir}" && mkdir -- "${lock_dir}" 2>/dev/null; then
+        showy_bar_run_with_mkdir_lock "${lock_dir}" "$@"
         return $?
     fi
 
-    cb_bars_log "another fetch in flight (mkdir); will wait"
+    showy_bar_log "another fetch in flight (mkdir); will wait"
     return 2
 }
 
 cache_token() {
-    [[ -s "${CB_BARS_USAGE_FILE}" ]] || { printf '\n'; return; }
-    if [[ -s "${CB_BARS_USAGE_STAMP}" ]]; then
-        printf 'stamp:%s\n' "$(< "${CB_BARS_USAGE_STAMP}")"
+    [[ -s "${SHOWY_BAR_USAGE_FILE}" ]] || { printf '\n'; return; }
+    if [[ -s "${SHOWY_BAR_USAGE_STAMP}" ]]; then
+        printf 'stamp:%s\n' "$(< "${SHOWY_BAR_USAGE_STAMP}")"
         return
     fi
-    stat -f 'file:%i:%m:%z' "${CB_BARS_USAGE_FILE}" 2>/dev/null \
-        || stat -c 'file:%i:%Y:%s' "${CB_BARS_USAGE_FILE}" 2>/dev/null \
+    stat -f 'file:%i:%m:%z' "${SHOWY_BAR_USAGE_FILE}" 2>/dev/null \
+        || stat -c 'file:%i:%Y:%s' "${SHOWY_BAR_USAGE_FILE}" 2>/dev/null \
         || printf 'file:unknown\n'
 }
 
 # Block up to N tenths of a second for the cache file to appear or refresh.
 # Used by callers that lost the lock; protects against the cold-start case
 # where there is no cache yet.
-cb_bars_wait_for_cache() {
+showy_bar_wait_for_cache() {
     local max_tenths="${1:-50}"   # 5.0 s
     local previous_token="${2:-}"
     local i token
     for (( i=0; i<max_tenths; i++ )); do
-        if [[ -s "${CB_BARS_USAGE_FILE}" ]] && cb_bars_json_valid "${CB_BARS_USAGE_FILE}"; then
+        if [[ -s "${SHOWY_BAR_USAGE_FILE}" ]] && showy_bar_json_valid "${SHOWY_BAR_USAGE_FILE}"; then
             if [[ -z "${previous_token}" ]]; then
                 return 0
             fi
@@ -198,21 +198,21 @@ cb_bars_wait_for_cache() {
 
 run_codexbar() {
     local args=(usage --format json --pretty)
-    if [[ "${CB_BARS_INCLUDE_STATUS}" == "1" ]]; then
+    if [[ "${SHOWY_BAR_INCLUDE_STATUS}" == "1" ]]; then
         args+=(--status)
     fi
-    "${CB_BARS_CODEXBAR_BIN}" "${args[@]}" 2>/dev/null
+    "${SHOWY_BAR_CODEXBAR_BIN}" "${args[@]}" 2>/dev/null
 }
 
 refresh_cache() {
     local out tmp stamp_tmp rc
-    if ! tmp=$(mktemp "${CB_BARS_CACHE_DIR}/usage.XXXXXX.json"); then
-        cb_bars_log "could not create temporary cache file"
+    if ! tmp=$(mktemp "${SHOWY_BAR_CACHE_DIR}/usage.XXXXXX.json"); then
+        showy_bar_log "could not create temporary cache file"
         return 1
     fi
-    if ! command -v "${CB_BARS_CODEXBAR_BIN}" >/dev/null 2>&1; then
+    if ! command -v "${SHOWY_BAR_CODEXBAR_BIN}" >/dev/null 2>&1; then
         rm -f "${tmp}"
-        cb_bars_log "codexbar binary not found: ${CB_BARS_CODEXBAR_BIN}"
+        showy_bar_log "codexbar binary not found: ${SHOWY_BAR_CODEXBAR_BIN}"
         return 1
     fi
 
@@ -222,46 +222,46 @@ refresh_cache() {
     # Validate first byte without piping (pipefail-safe).
     if [[ -z "${out}" || "${out:0:1}" != '[' ]]; then
         rm -f "${tmp}"
-        cb_bars_log "codexbar produced no usable output (rc=${rc})"
+        showy_bar_log "codexbar produced no usable output (rc=${rc})"
         return 1
     fi
 
     printf '%s' "${out}" > "${tmp}"
-    if cb_bars_json_valid "${tmp}"; then
-        if ! stamp_tmp=$(mktemp "${CB_BARS_CACHE_DIR}/usage-stamp.XXXXXX"); then
+    if showy_bar_json_valid "${tmp}"; then
+        if ! stamp_tmp=$(mktemp "${SHOWY_BAR_CACHE_DIR}/usage-stamp.XXXXXX"); then
             rm -f "${tmp}"
-            cb_bars_log "could not create temporary stamp file"
+            showy_bar_log "could not create temporary stamp file"
             return 1
         fi
         printf '%s.%s.%s\n' "$(date +%s)" "$$" "${RANDOM}" > "${stamp_tmp}" || {
             rm -f "${tmp}" "${stamp_tmp}"
-            cb_bars_log "could not write temporary stamp file"
+            showy_bar_log "could not write temporary stamp file"
             return 1
         }
-        mv "${tmp}" "${CB_BARS_USAGE_FILE}"
-        mv "${stamp_tmp}" "${CB_BARS_USAGE_STAMP}"
-        chmod 644 "${CB_BARS_USAGE_FILE}" "${CB_BARS_USAGE_STAMP}" 2>/dev/null || true
-        cb_bars_log "cache refreshed (${#out} bytes)"
+        mv "${tmp}" "${SHOWY_BAR_USAGE_FILE}"
+        mv "${stamp_tmp}" "${SHOWY_BAR_USAGE_STAMP}"
+        chmod 644 "${SHOWY_BAR_USAGE_FILE}" "${SHOWY_BAR_USAGE_STAMP}" 2>/dev/null || true
+        showy_bar_log "cache refreshed (${#out} bytes)"
         return 0
     fi
 
     rm -f "${tmp}"
-    cb_bars_log "codexbar JSON failed validation"
+    showy_bar_log "codexbar JSON failed validation"
     return 1
 }
 
 cache_is_fresh() {
-    [[ -s "${CB_BARS_USAGE_FILE}" ]] || return 1
-    cb_bars_json_valid "${CB_BARS_USAGE_FILE}" || return 1
+    [[ -s "${SHOWY_BAR_USAGE_FILE}" ]] || return 1
+    showy_bar_json_valid "${SHOWY_BAR_USAGE_FILE}" || return 1
     local age
-    age=$(cb_bars_age_seconds "${CB_BARS_USAGE_FILE}")
-    (( age < CB_BARS_REFRESH_SECONDS ))
+    age=$(showy_bar_age_seconds "${SHOWY_BAR_USAGE_FILE}")
+    (( age < SHOWY_BAR_REFRESH_SECONDS ))
 }
 
 lock_rc=0
 pre_refresh_token=$(cache_token)
 if (( force_refresh )) || ! cache_is_fresh; then
-    cb_bars_with_lock refresh_cache || lock_rc=$?
+    showy_bar_with_lock refresh_cache || lock_rc=$?
 fi
 
 # Lost the lock contest? Wait for the holder on cold/invalid cache. For
@@ -269,18 +269,18 @@ fi
 # observe the forced refresh instead of immediately returning stale bytes.
 if (( lock_rc == 2 )); then
     if (( force_refresh )); then
-        cb_bars_wait_for_cache "${CB_BARS_LOCK_WAIT_TENTHS}" "${pre_refresh_token}" \
-            || cb_bars_die "forced refresh did not publish a newer cache"
-    elif ! [[ -s "${CB_BARS_USAGE_FILE}" ]] || ! cb_bars_json_valid "${CB_BARS_USAGE_FILE}"; then
-        cb_bars_wait_for_cache "${CB_BARS_LOCK_WAIT_TENTHS}" || true
+        showy_bar_wait_for_cache "${SHOWY_BAR_LOCK_WAIT_TENTHS}" "${pre_refresh_token}" \
+            || showy_bar_die "forced refresh did not publish a newer cache"
+    elif ! [[ -s "${SHOWY_BAR_USAGE_FILE}" ]] || ! showy_bar_json_valid "${SHOWY_BAR_USAGE_FILE}"; then
+        showy_bar_wait_for_cache "${SHOWY_BAR_LOCK_WAIT_TENTHS}" || true
     fi
 fi
 
 # Always emit the most recent valid cache. Bars must never see malformed
 # payloads as successful output.
-if [[ -s "${CB_BARS_USAGE_FILE}" ]] && cb_bars_json_valid "${CB_BARS_USAGE_FILE}"; then
-    cat "${CB_BARS_USAGE_FILE}"
+if [[ -s "${SHOWY_BAR_USAGE_FILE}" ]] && showy_bar_json_valid "${SHOWY_BAR_USAGE_FILE}"; then
+    cat "${SHOWY_BAR_USAGE_FILE}"
     exit 0
 fi
 
-cb_bars_die "no codexbar JSON available and no cache present"
+showy_bar_die "no codexbar JSON available and no cache present"
