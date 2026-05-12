@@ -1,10 +1,6 @@
-// showy-bar — Zellij layout snippet that drives a zjstatus pipe with
-// the CodexBar usage strip. Add inside a layout or tab block. The visible
-// status pane and `floating_panes` block below must be siblings.
-//
-// IMPORTANT: Zellij resolves `command "..."` against the PATH it inherited
-// at session start, NOT your interactive shell PATH. macOS GUI launches
-// commonly omit ~/.local/bin. Use the absolute path to be safe.
+// showy-bar — Zellij layout snippet for the visible zjstatus pipe widget.
+// Add inside a layout or tab block. The pipe feeder runs externally, started
+// by the terminal wrapper, not as a Zellij pane.
 
 // Requires zjstatus.wasm installed at the configured path. See docs/zellij.md.
 pane size=1 borderless=true {
@@ -18,15 +14,5 @@ pane size=1 borderless=true {
         format_center ""
         format_right ""
         format_space ""
-    }
-}
-
-// Hidden floating pane that keeps the pipe loop running. Keep this
-// `floating_panes` block at layout/tab scope, not nested inside another
-// `pane`. If you installed elsewhere, edit the path below.
-floating_panes {
-    pane x="99%" y="99%" width="1%" height="1%" {
-        command "/Users/REPLACE_ME/.local/bin/showy-bar-zellij-pipe"
-        close_on_exit false
     }
 }

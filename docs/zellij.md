@@ -22,14 +22,19 @@ provider chunk is dimmed.
 
 The pipe widget is more stable than the `command` widget under WASMI,
 which crashes when `std::sync::Mutex::new()` runs on a single-threaded
-WASM target. `bin/showy-bar-zellij-pipe` runs as a hidden 1%×1% pane and
+WASM target. The pipe feeder runs as an external background process,
+started by the terminal wrapper script with `ZELLIJ_SESSION_NAME` set, and
 re-emits the strip every `SHOWY_BAR_ZELLIJ_PIPE_INTERVAL` seconds.
 
 ## Layout snippet
 
 See `zellij/layout-pane.kdl.fragment`. Paste the fragment at layout or tab
-scope. The visible widget pane and `floating_panes` block must be siblings;
-do not nest `floating_panes` inside another `pane`.
+scope. It includes only the visible widget pane; it no longer includes a
+`floating_panes` block because the feeder runs externally.
+
+The recommended setup uses `clean-tab.kdl`, a simple tab layout without
+hidden floating panes, for `NewTab` keybindings.
+
 The plugin line assumes `zjstatus.wasm` exists at
 `~/.config/zellij/plugins/zjstatus.wasm`; install zjstatus there or edit
 the `plugin location=...` path before using the fragment.
