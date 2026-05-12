@@ -283,26 +283,21 @@ recolor_icon_png() {
 }
 
 should_tint_dark_icon_png() {
-    local png="$1" stats r g b
-    stats=$(magick "${png}" txt:- 2>/dev/null | awk -F '[(), ]+' '
-        BEGIN { r = 0; g = 0; b = 0; n = 0 }
-        /^#/ { next }
-        ($6 + 0) <= 0 { next }
-        { r += $3; g += $4; b += $5; n++ }
-        END {
-            if (n == 0) exit 1
-            printf "%.6f %.6f %.6f\n", r / (255 * n), g / (255 * n), b / (255 * n)
-        }'
-    ) || return 1
-    read -r r g b <<< "${stats}"
-    awk -v r="${r}" -v g="${g}" -v b="${b}" 'BEGIN {
-        mean = (r + g + b) / 3;
-        min = r; max = r;
-        if (g < min) min = g; if (b < min) min = b;
-        if (g > max) max = g; if (b > max) max = b;
-        exit ! (mean < 0.15 && (max - min) < 0.03);
-    }'
+    local png="$1" stats r g b mean min max
+    stats=$(magick "${png}" -alpha off -colorspace RGB -channel RGB -separate +channel -format '%[fx:round(1000*mean/QuantumRange)] ' info: 2>/dev/null) || return 1
+    read -r r g b <<< "${stats}" || return 1
+    [[ -n "${r}" && -n "${g}" && -n "${b}" ]] || return 1
+
+    mean=$(( (r + g + b) / 3 ))
+    min=$r
+    max=$r
+    (( g < min )) && min=$g
+    (( b < min )) && min=$b
+    (( g > max )) && max=$g
+    (( b > max )) && max=$b
+    (( mean < 150 && (max - min) < 30 ))
 }
+
 
 
 provider_icon_png() {
@@ -391,12 +386,14 @@ render_bar_png() {
     fill_w() {
         local pct="${1:-0}"
         local w="${SHOWY_BAR_PNG_BAR_W}"
-        awk -v p="${pct}" -v w="${w}" 'BEGIN {
-            f = int((p / 100.0) * w + 0.5);
-            if (p > 0 && f == 0) f = 1;
-            if (f < 0) f = 0; if (f > w) f = w;
-            print f;
-        }'
+        [[ "${pct}" =~ ^[0-9]+$ ]] || pct=0
+        (( pct < 0 )) && pct=0
+        (( pct > 100 )) && pct=100
+        local f=$(( (pct * w + 50) / 100 ))
+        (( pct > 0 && f == 0 )) && f=1
+        (( f < 0 )) && f=0
+        (( f > w )) && f=$w
+        printf '%s\n' "${f}"
     }
 
     local f1 f2 f3

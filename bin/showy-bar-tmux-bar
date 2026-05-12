@@ -95,11 +95,11 @@ while IFS=$'\x1f' read -r provider p_used p_reset s_used; do
     tmux_fg "${color_hex}"; printf '%s' "${bar}"; tmux_reset
     (( stale )) && tmux_dim
     printf ' '
+    time_color=$(showy_bar_palette countdown)
     if [[ -n "${minutes}" && "${minutes}" -lt "${SHOWY_BAR_TIME_WARN_MINUTES}" ]]; then
-        tmux_fg "$(showy_bar_role_palette primary bad)"; printf '%s' "${countdown}"; tmux_reset
-    else
-        printf '%s' "${countdown}"
+        time_color=$(showy_bar_palette countdown_warn)
     fi
+    tmux_fg "${time_color}"; printf '%s' "${countdown}"; tmux_reset
     [[ -n "${weekly_hint}" ]] && printf '%s' "${weekly_hint}"
     tmux_reset
 done <<< "${rows}"

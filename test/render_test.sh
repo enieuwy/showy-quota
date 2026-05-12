@@ -439,7 +439,10 @@ assert_not_contains "theme preview omits countdown padding" " 3:29 " "${out}"
 assert_not_contains "theme preview omits old weekly hint glyph" " w " "${out}"
 
 out=$(run_theme "${theme_preview_xdg}" --preview dracula)
-assert_contains "theme preview changes when browsing dracula" "80;250;123m" "${out}"
+assert_contains "theme preview uses Dracula primary purple RGB" "189;147;249m" "${out}"
+
+out=$(run_theme "${theme_preview_xdg}" --preview nord)
+assert_contains "theme preview uses Nord frost primary RGB" "136;192;208m" "${out}"
 
 out=$(run_theme "${theme_preview_xdg}" --preview default)
 assert_contains "theme preview default uses original good RGB" "37;190;106m" "${out}"
@@ -1023,11 +1026,21 @@ cache=$(mk_cache)
 cp "${FIXTURE_DIR}/codexbar-low.json" "${cache}/usage.json"
 touch -t 198801010000 "${cache}/usage.json"
 counter="${cache}/timeout-call-count"
+expected_stale=$(< "${cache}/usage.json")
 : > "${counter}"
+timeout_dir="${TMP}/slow-refresh"
+mkdir -p "${timeout_dir}"
+cat > "${timeout_dir}/codexbar" <<'EOF'
+#!/bin/sh
+[ -n "${SHOWY_BAR_TEST_COUNTER:-}" ] && printf 'x' >> "${SHOWY_BAR_TEST_COUNTER}"
+sleep 5
+cat "${SHOWY_BAR_TEST_FIXTURE:-${FIXTURE_DIR}/codexbar-mixed.json}"
+EOF
+chmod +x "${timeout_dir}/codexbar"
 (
     SHOWY_BAR_NO_CONFIG=1 \
     SHOWY_BAR_CACHE_DIR="${cache}" \
-    SHOWY_BAR_CODEXBAR_BIN="${slow_dir}/codexbar" \
+    SHOWY_BAR_CODEXBAR_BIN="${timeout_dir}/codexbar" \
     SHOWY_BAR_FORCE_NO_FLOCK=1 \
     SHOWY_BAR_TEST_COUNTER="${counter}" \
     SHOWY_BAR_TEST_FIXTURE="${FIXTURE_DIR}/codexbar-realistic.json" \
@@ -1039,18 +1052,18 @@ rc=0
 out=$(
     SHOWY_BAR_NO_CONFIG=1 \
     SHOWY_BAR_CACHE_DIR="${cache}" \
-    SHOWY_BAR_CODEXBAR_BIN="${slow_dir}/codexbar" \
+    SHOWY_BAR_CODEXBAR_BIN="${timeout_dir}/codexbar" \
     SHOWY_BAR_FORCE_NO_FLOCK=1 \
-    SHOWY_BAR_LOCK_WAIT_TENTHS=1 \
+    SHOWY_BAR_LOCK_WAIT_TENTHS=0 \
     SHOWY_BAR_TEST_COUNTER="${counter}" \
     SHOWY_BAR_TEST_FIXTURE="${FIXTURE_DIR}/codexbar-realistic.json" \
     "${REPO_ROOT}/bin/showy-bar-fetch" --refresh 2>/dev/null
 ) || rc=$?
 wait "${holder_pid}" || true
-if (( rc != 0 )) && [[ -z "${out}" ]]; then
-    ok "forced refresh timeout does not emit stale cache"
+if (( rc == 0 )) && [[ "${out}" == "${expected_stale}" ]]; then
+    ok "forced refresh timeout falls back to stale cache"
 else
-    fail "forced refresh timeout does not emit stale cache" "rc=${rc}; out=${out}"
+    fail "forced refresh timeout falls back to stale cache" "rc=${rc}; out=${out}"
 fi
 # ── summary ──────────────────────────────────────────────────────────
 

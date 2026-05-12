@@ -255,23 +255,42 @@ showy_bar_color_key() {
     fi
 }
 
+showy_bar_scale_component() {
+    local value="$1" factor_num="$2" factor_den="$3"
+    local scaled=$(( (value * factor_num) / factor_den ))
+    (( scaled < 0 )) && scaled=0
+    (( scaled > 255 )) && scaled=255
+    printf '%02x' "${scaled}"
+}
+
 showy_bar_scale_hex() {
     local hex="$1"
     local factor="${2:-1}"
     [[ "${hex}" =~ ^[[:xdigit:]]{6}$ ]] || showy_bar_die "invalid palette hex: ${hex}"
-    [[ "${factor}" =~ ^[0-9]+([.][0-9]+)?$ ]] || showy_bar_die "invalid palette scale: ${factor}"
+    [[ "${factor}" =~ ^([0-9]+([.][0-9]+)?|[.][0-9]+)$ ]] || showy_bar_die "invalid palette scale: ${factor}"
+
+    local factor_num factor_den=1 factor_int factor_frac
+    if [[ "${factor}" == *.* ]]; then
+        factor_int="${factor%%.*}"
+        factor_frac="${factor#*.}"
+        [[ -n "${factor_int}" ]] || factor_int=0
+        factor_num=$((10#${factor_int}${factor_frac}))
+        factor_den=1
+        local i
+        for (( i=0; i<${#factor_frac}; i++ )); do
+            factor_den=$((factor_den * 10))
+        done
+    else
+        factor_num=$((10#${factor}))
+    fi
+
     local r=$((16#${hex:0:2}))
     local g=$((16#${hex:2:2}))
     local b=$((16#${hex:4:2}))
-    awk -v r="${r}" -v g="${g}" -v b="${b}" -v factor="${factor}" 'BEGIN {
-        rr = int(r * factor)
-        gg = int(g * factor)
-        bb = int(b * factor)
-        if (rr > 255) rr = 255
-        if (gg > 255) gg = 255
-        if (bb > 255) bb = 255
-        printf "%02x%02x%02x\n", rr, gg, bb
-    }'
+    printf '%s%s%s\n' \
+        "$(showy_bar_scale_component "${r}" "${factor_num}" "${factor_den}")" \
+        "$(showy_bar_scale_component "${g}" "${factor_num}" "${factor_den}")" \
+        "$(showy_bar_scale_component "${b}" "${factor_num}" "${factor_den}")"
 }
 
 # Hex color (no '#') for a global palette token.

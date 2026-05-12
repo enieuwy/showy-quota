@@ -206,7 +206,7 @@ run_codexbar() {
 
 refresh_cache() {
     local out tmp stamp_tmp rc
-    if ! tmp=$(mktemp "${SHOWY_BAR_CACHE_DIR}/usage.XXXXXX.json"); then
+    if ! tmp=$(mktemp "${SHOWY_BAR_CACHE_DIR}/usage.XXXXXX"); then
         showy_bar_log "could not create temporary cache file"
         return 1
     fi
@@ -265,12 +265,17 @@ if (( force_refresh )) || ! cache_is_fresh; then
 fi
 
 # Lost the lock contest? Wait for the holder on cold/invalid cache. For
-# explicit --refresh, wait for a newer valid cache so concurrent callers
-# observe the forced refresh instead of immediately returning stale bytes.
+# explicit --refresh, prefer a newer cache but fall back to the last valid
+# one if the refresher never publishes.
 if (( lock_rc == 2 )); then
     if (( force_refresh )); then
-        showy_bar_wait_for_cache "${SHOWY_BAR_LOCK_WAIT_TENTHS}" "${pre_refresh_token}" \
-            || showy_bar_die "forced refresh did not publish a newer cache"
+        if ! showy_bar_wait_for_cache "${SHOWY_BAR_LOCK_WAIT_TENTHS}" "${pre_refresh_token}"; then
+            if [[ -s "${SHOWY_BAR_USAGE_FILE}" ]] && showy_bar_json_valid "${SHOWY_BAR_USAGE_FILE}"; then
+                showy_bar_log "forced refresh timed out; using existing cache"
+            else
+                showy_bar_die "forced refresh did not publish a valid cache"
+            fi
+        fi
     elif ! [[ -s "${SHOWY_BAR_USAGE_FILE}" ]] || ! showy_bar_json_valid "${SHOWY_BAR_USAGE_FILE}"; then
         showy_bar_wait_for_cache "${SHOWY_BAR_LOCK_WAIT_TENTHS}" || true
     fi

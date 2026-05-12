@@ -23,6 +23,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${SCRIPT_PATH}")" && pwd -P)"
 
 BAR="${SCRIPT_DIR}/showy-bar-zellij-bar"
 [[ -x "${BAR}" ]] || showy_bar_die "missing renderer: ${BAR}"
+export SHOWY_BAR_FORCE_COLOR=1
 
 showy_bar_have "${SHOWY_BAR_ZELLIJ_BIN}" || showy_bar_die "zellij is required for pipe mode: ${SHOWY_BAR_ZELLIJ_BIN}"
 

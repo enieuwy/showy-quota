@@ -126,7 +126,7 @@ Each preview uses the same two-provider fixture with `3:29` and `23m`
 countdowns, good/warn/bad remaining-usage colors, and different pacing-marker
 positions visible. SketchyBar previews are composed from the plugin-generated
 provider icon/bar PNGs using CodexBar's bundled provider SVG logos. Terminal
-previews are real Alacritty captures of `showy-bar --preview`.
+previews show the deterministic `showy-bar --preview` output.
 
 | theme name | SketchyBar image | terminal / Zellij image |
 |---|---|---|

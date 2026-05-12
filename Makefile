@@ -124,6 +124,7 @@ lint: ## Run shellcheck if available.
 		printf 'shellcheck not installed; skipping\n'; \
 	fi
 
+
 clean: ## Remove the user-cache directory used by this repo.
 	@rm -rf "$${XDG_CACHE_HOME:-$$HOME/.cache}/showy-bar"
 	@printf 'cleared %s\n' "$${XDG_CACHE_HOME:-$$HOME/.cache}/showy-bar"
