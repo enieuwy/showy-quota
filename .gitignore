@@ -10,3 +10,4 @@
 # editor / OS scratch
 .vscode/
 .idea/
+.agents/
