@@ -65,21 +65,55 @@ fi
 # ── locking primitives ────────────────────────────────────────────────
 
 # Use flock when available (Linux, Homebrew util-linux); else fall back to
-# an owner-scoped `mkdir` lock. The fallback intentionally does not steal
-# old lock directories by age: a slow CodexBar refresh is safer than
-# concurrent refresh fan-out. Waiters serve existing cache or fail.
+# an owner-scoped `mkdir` lock. The fallback recovers lock directories whose
+# owner is dead, stopped/zombied, or older than the refresh hard ceiling so
+# renderers do not repaint stale cache forever.
 #
 # Returns:
 #   0 = lock was held and the callee ran;
-#   2 = lock was held by another worker; caller should wait for cache.
+#   2 = lock was held by another worker; caller may wait for cache;
+#   3 = mkdir lock owner is ambiguous; caller should wait then retry recovery.
 SHOWY_BAR_HELD_LOCK_DIR=""
 
 showy_bar_release_mkdir_lock() {
     if [[ -n "${SHOWY_BAR_HELD_LOCK_DIR:-}" ]]; then
-        rm -f -- "${SHOWY_BAR_HELD_LOCK_DIR}/owner.pid"
-        rmdir -- "${SHOWY_BAR_HELD_LOCK_DIR}" 2>/dev/null || true
+        local owner_file="${SHOWY_BAR_HELD_LOCK_DIR}/owner.pid"
+        local owner_pid=""
+        if [[ ! -e "${owner_file}" ]]; then
+            rmdir -- "${SHOWY_BAR_HELD_LOCK_DIR}" 2>/dev/null || true
+        elif [[ -r "${owner_file}" ]] && IFS= read -r owner_pid < "${owner_file}" && [[ "${owner_pid}" == "$$" ]]; then
+            rm -f -- "${owner_file}"
+            rmdir -- "${SHOWY_BAR_HELD_LOCK_DIR}" 2>/dev/null || true
+        else
+            showy_bar_log "not releasing mkdir lock now owned by pid ${owner_pid:-unknown}"
+        fi
         SHOWY_BAR_HELD_LOCK_DIR=""
     fi
+}
+
+showy_bar_process_state() {
+    local pid="$1"
+    local state=""
+    if state=$(ps -o state= -p "${pid}" 2>/dev/null) \
+        || state=$(ps -o stat= -p "${pid}" 2>/dev/null); then
+        state="${state#"${state%%[![:space:]]*}"}"
+        state="${state%%[[:space:]]*}"
+        printf '%s\n' "${state}"
+        return 0
+    fi
+    return 1
+}
+
+showy_bar_lock_age_seconds() {
+    local lock_dir="$1"
+    local now mtime
+    now=$(showy_bar_now_epoch)
+    if mtime=$(stat -f %m "${lock_dir}" 2>/dev/null) \
+        || mtime=$(stat -c %Y "${lock_dir}" 2>/dev/null); then
+        printf '%s\n' $((now - mtime))
+        return 0
+    fi
+    return 1
 }
 
 showy_bar_run_with_mkdir_lock() {
@@ -102,32 +136,62 @@ showy_bar_recover_mkdir_lock() {
     local lock_dir="$1"
     local owner_file="${lock_dir}/owner.pid"
     local owner_pid=""
+    local stale_reason="ownerless"
+    local lock_age=""
+    local hard_max_age="${SHOWY_BAR_REFRESH_SECONDS:-120}"
+    [[ "${hard_max_age}" =~ ^[0-9]+$ ]] || hard_max_age=120
+    (( hard_max_age < 60 )) && hard_max_age=60
 
     if [[ -r "${owner_file}" ]]; then
         IFS= read -r owner_pid < "${owner_file}" || owner_pid=""
-        if [[ "${owner_pid}" =~ ^[0-9]+$ ]] && ! kill -0 "${owner_pid}" 2>/dev/null; then
-            rm -f -- "${owner_file}"
-            if rmdir -- "${lock_dir}" 2>/dev/null; then
-                showy_bar_log "recovered dead mkdir lock owned by pid ${owner_pid}"
-                return 0
+        if [[ "${owner_pid}" =~ ^[0-9]+$ ]]; then
+            if ! kill -0 "${owner_pid}" 2>/dev/null; then
+                rm -f -- "${owner_file}"
+                if rmdir -- "${lock_dir}" 2>/dev/null; then
+                    showy_bar_log "recovered dead mkdir lock owned by pid ${owner_pid}"
+                    return 0
+                fi
             fi
+
+            local owner_state=""
+            owner_state=$(showy_bar_process_state "${owner_pid}" || true)
+            if [[ "${owner_state}" == [TZ]* ]]; then
+                rm -f -- "${owner_file}"
+                if rmdir -- "${lock_dir}" 2>/dev/null; then
+                    showy_bar_log "recovered stopped mkdir lock owned by pid ${owner_pid} (state ${owner_state})"
+                    return 0
+                fi
+            fi
+
+            if lock_age=$(showy_bar_lock_age_seconds "${lock_dir}") && (( lock_age >= hard_max_age )); then
+                rm -f -- "${owner_file}"
+                if rmdir -- "${lock_dir}" 2>/dev/null; then
+                    showy_bar_log "recovered aged mkdir lock owned by pid ${owner_pid} (age ${lock_age}s)"
+                    return 0
+                fi
+            fi
+            return 1
         fi
-        return 1
+        stale_reason="malformed-owner"
+    elif [[ -e "${owner_file}" ]]; then
+        stale_reason="unreadable-owner"
     fi
 
-    # Crash window: mkdir succeeded but owner.pid was never written.
-    local now mtime max_age
-    now=$(date +%s)
+    # Crash windows: mkdir succeeded but owner.pid was never written,
+    # was truncated before the PID landed, or is not readable. Only steal
+    # these ambiguous locks after the normal wait horizon has elapsed.
+    local max_age
     max_age=$(( (SHOWY_BAR_LOCK_WAIT_TENTHS + 9) / 10 ))
     (( max_age < 1 )) && max_age=1
-    if mtime=$(stat -f %m "${lock_dir}" 2>/dev/null) \
-        || mtime=$(stat -c %Y "${lock_dir}" 2>/dev/null); then
-        if (( now - mtime > max_age )) && rmdir -- "${lock_dir}" 2>/dev/null; then
-            showy_bar_log "recovered ownerless mkdir lock"
+    if lock_age=$(showy_bar_lock_age_seconds "${lock_dir}") && (( lock_age >= max_age )); then
+        rm -f -- "${owner_file}"
+        if rmdir -- "${lock_dir}" 2>/dev/null; then
+            showy_bar_log "recovered ${stale_reason} mkdir lock"
             return 0
         fi
     fi
-    return 1
+    [[ "${stale_reason}" == "ownerless" ]] && return 1
+    return 3
 }
 
 showy_bar_with_lock() {
@@ -152,9 +216,19 @@ showy_bar_with_lock() {
         return $?
     fi
 
-    if showy_bar_recover_mkdir_lock "${lock_dir}" && mkdir -- "${lock_dir}" 2>/dev/null; then
-        showy_bar_run_with_mkdir_lock "${lock_dir}" "$@"
-        return $?
+    local recover_rc=0
+    if showy_bar_recover_mkdir_lock "${lock_dir}"; then
+        if mkdir -- "${lock_dir}" 2>/dev/null; then
+            showy_bar_run_with_mkdir_lock "${lock_dir}" "$@"
+            return $?
+        fi
+    else
+        recover_rc=$?
+    fi
+
+    if (( recover_rc == 3 )); then
+        showy_bar_log "ambiguous mkdir lock owner; will wait"
+        return 3
     fi
 
     showy_bar_log "another fetch in flight (mkdir); will wait"
@@ -250,12 +324,26 @@ refresh_cache() {
     return 1
 }
 
-cache_is_fresh() {
+cache_is_valid() {
     [[ -s "${SHOWY_BAR_USAGE_FILE}" ]] || return 1
-    showy_bar_json_valid "${SHOWY_BAR_USAGE_FILE}" || return 1
+    showy_bar_json_valid "${SHOWY_BAR_USAGE_FILE}"
+}
+
+
+cache_is_fresh() {
+    cache_is_valid || return 1
     local age
     age=$(showy_bar_age_seconds "${SHOWY_BAR_USAGE_FILE}")
     (( age < SHOWY_BAR_REFRESH_SECONDS ))
+}
+
+retry_refresh_after_lock_wait() {
+    lock_rc=0
+    showy_bar_log "retrying refresh after lock wait"
+    showy_bar_with_lock refresh_cache || lock_rc=$?
+    if (( lock_rc == 2 || lock_rc == 3 )); then
+        showy_bar_wait_for_cache "${SHOWY_BAR_LOCK_WAIT_TENTHS}" || true
+    fi
 }
 
 lock_rc=0
@@ -264,26 +352,30 @@ if (( force_refresh )) || ! cache_is_fresh; then
     showy_bar_with_lock refresh_cache || lock_rc=$?
 fi
 
-# Lost the lock contest? Wait for the holder on cold/invalid cache. For
-# explicit --refresh, prefer a newer cache but fall back to the last valid
-# one if the refresher never publishes.
-if (( lock_rc == 2 )); then
-    if (( force_refresh )); then
+# Lost the lock contest? Wait for the holder on cold/invalid cache. Ambiguous
+# mkdir owners cannot publish a cache, so wait the normal horizon, retry
+# recovery, then fall back to an existing valid cache only if retry fails.
+if (( lock_rc == 2 || lock_rc == 3 )); then
+    if (( force_refresh || lock_rc == 3 )); then
         if ! showy_bar_wait_for_cache "${SHOWY_BAR_LOCK_WAIT_TENTHS}" "${pre_refresh_token}"; then
-            if [[ -s "${SHOWY_BAR_USAGE_FILE}" ]] && showy_bar_json_valid "${SHOWY_BAR_USAGE_FILE}"; then
-                showy_bar_log "forced refresh timed out; using existing cache"
-            else
+            retry_refresh_after_lock_wait
+            if cache_is_valid; then
+                if [[ "$(cache_token)" == "${pre_refresh_token}" ]]; then
+                    showy_bar_log "refresh timed out; using existing cache"
+                fi
+            elif (( force_refresh )); then
                 showy_bar_die "forced refresh did not publish a valid cache"
             fi
         fi
-    elif ! [[ -s "${SHOWY_BAR_USAGE_FILE}" ]] || ! showy_bar_json_valid "${SHOWY_BAR_USAGE_FILE}"; then
+    elif ! cache_is_valid; then
         showy_bar_wait_for_cache "${SHOWY_BAR_LOCK_WAIT_TENTHS}" || true
+        cache_is_valid || retry_refresh_after_lock_wait
     fi
 fi
 
 # Always emit the most recent valid cache. Bars must never see malformed
 # payloads as successful output.
-if [[ -s "${SHOWY_BAR_USAGE_FILE}" ]] && showy_bar_json_valid "${SHOWY_BAR_USAGE_FILE}"; then
+if cache_is_valid; then
     cat "${SHOWY_BAR_USAGE_FILE}"
     exit 0
 fi

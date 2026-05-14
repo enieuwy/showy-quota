@@ -175,7 +175,8 @@ if (( count == 0 )); then
     exit 0
 fi
 
-# Stale = cache is older than 2x the refresh interval; dim everything.
+# Stale = cache is older than 2x the refresh interval; render quota state
+# as last-known data and mark countdowns unknown rather than dimming chunks.
 stale=0
 if [[ -z "${json_input}" ]]; then
     age=$(showy_bar_age_seconds "${SHOWY_BAR_USAGE_FILE}")
@@ -215,30 +216,36 @@ while IFS=$'\x1f' read -r provider p_used p_reset _p_window s_used s_reset s_win
     sigil=$(showy_bar_provider_sigil "${provider}")
 
     minutes=""
-    if [[ -n "${p_reset}" ]]; then
+    if (( ! stale )) && [[ -n "${p_reset}" ]]; then
         minutes=$(showy_bar_minutes_until "${p_reset}" || true)
     fi
-    countdown=$(showy_bar_primary_label "${minutes}" "${p_remaining}" "${p_reset}")
+    countdown=$(showy_bar_primary_label "${minutes}" "${p_remaining}" "${p_reset}" "${stale}")
 
     time_color=$(showy_bar_palette countdown)
-    if [[ -n "${minutes}" && "${minutes}" -lt "${SHOWY_BAR_TIME_WARN_MINUTES}" ]]; then
+    if (( stale )); then
+        time_color=$(showy_bar_palette countdown_warn)
+    elif [[ -n "${minutes}" && "${minutes}" -lt "${SHOWY_BAR_TIME_WARN_MINUTES}" ]]; then
         time_color=$(showy_bar_palette countdown_warn)
     fi
 
     if (( first_chunk )); then first_chunk=0
     else printf ' '; fi
 
-    if (( stale )); then dim; fi
+    marker_reset="${s_reset}"
+    marker_window="${s_window}"
+    if (( stale )); then
+        marker_reset=""
+        marker_window=""
+    fi
     chunk_bg=$(showy_bar_palette bg)
     surface_color=$(showy_bar_palette surface)
     primary_color=$(showy_bar_role_color primary "${p_remaining}")
     style_text '' "${primary_color}" "${chunk_bg}"
     style_text "${sigil}" "${chunk_bg}" "${primary_color}" bold
     style_text '▕' "${chunk_bg}" "${primary_color}"
-    dual_metric_bar "${p_remaining}" "${s_remaining}" "${s_reset}" "${s_window}"
+    dual_metric_bar "${p_remaining}" "${s_remaining}" "${marker_reset}" "${marker_window}"
     style_text "${countdown}" "${time_color}" "${surface_color}" bold
     style_text '' "${surface_color}" "${chunk_bg}"
-    (( stale )) && reset
 done <<< "${rows}"
 
 # Strip CR; emit single newline so zjstatus pipe widget sees a clean record.

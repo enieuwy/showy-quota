@@ -6,6 +6,10 @@
 shape as the Zellij renderer except using `#[fg=#RRGGBB]` / `#[bold]` /
 `#[default]` instead of ANSI escape sequences.
 
+When the cache is older than `2 × SHOWY_BAR_REFRESH_SECONDS`, quota colors
+remain the last-known values and each countdown is rendered as `?` using
+`SHOWY_BAR_PALETTE_COUNTDOWN_WARN`; the secondary `w` hint is suppressed.
+
 ## status-right
 
 Append to your existing `status-right` so `showy-bar` cohabits with

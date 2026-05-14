@@ -270,6 +270,30 @@ seed_sketchybar_live_items() {
     fi
 }
 
+process_state() {
+    local pid="$1"
+    local state=""
+    if state=$(ps -o state= -p "${pid}" 2>/dev/null) \
+        || state=$(ps -o stat= -p "${pid}" 2>/dev/null); then
+        state="${state#"${state%%[![:space:]]*}"}"
+        state="${state%%[[:space:]]*}"
+        printf '%s\n' "${state}"
+        return 0
+    fi
+    return 1
+}
+
+wait_for_state_prefix() {
+    local pid="$1" prefix="$2"
+    local state
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        state=$(process_state "${pid}" || true)
+        [[ "${state}" == "${prefix}"* ]] && return 0
+        sleep 0.1
+    done
+    return 1
+}
+
 
 assert_contains() {
     local label="$1" needle="$2" haystack="$3"
@@ -395,6 +419,15 @@ assert_equals "countdown clock form pads minutes" "12:05" "${out}"
 
 out=$(run_common_eval 'showy_bar_format_countdown 2880' SHOWY_BAR_NO_CONFIG=1)
 assert_equals "countdown days unchanged" "2d" "${out}"
+
+out=$(run_common_eval 'showy_bar_primary_label 12 88 "2099-01-01T00:12:00Z" 0' SHOWY_BAR_NO_CONFIG=1)
+assert_equals "primary label keeps live countdown behavior" "12m" "${out}"
+
+out=$(run_common_eval 'showy_bar_primary_label "" 100 "" 0' SHOWY_BAR_NO_CONFIG=1)
+assert_equals "primary label keeps live idle behavior" "idle" "${out}"
+
+out=$(run_common_eval 'showy_bar_primary_label 12 88 "2099-01-01T00:12:00Z" 1' SHOWY_BAR_NO_CONFIG=1)
+assert_equals "primary label marks stale cache unknown" "?" "${out}"
 
 
 # ── theme CLI ─────────────────────────────────────────────────────────
@@ -966,8 +999,8 @@ else
     fail "fetcher serves stale cache when codexbar disappears" "rc=${rc}"
 fi
 
-# 6. Stale-cache dimming kicks in for terminal renderers.
-printf '\nstale cache dimming\n'
+# 6. Stale-cache rendering marks countdowns unknown without dimming quota color.
+printf '\nstale cache rendering\n'
 
 cache=$(mk_cache)
 cp "${FIXTURE_DIR}/codexbar-mixed.json" "${cache}/usage.json"
@@ -975,6 +1008,11 @@ cp "${FIXTURE_DIR}/codexbar-mixed.json" "${cache}/usage.json"
 touch -t 198801010000 "${cache}/usage.json"
 # Use a bogus codexbar bin so fetch cannot refresh the backdated cache.
 ansi_dim=$'\x1b[2m'
+countdown_warn_rgb=$(hex_to_rgb_csv "$(run_common_eval 'showy_bar_palette countdown_warn' SHOWY_BAR_NO_CONFIG=1)")
+countdown_warn_sgr="${countdown_warn_rgb//,/;}"
+surface_rgb=$(hex_to_rgb_csv "$(run_common_eval 'showy_bar_palette surface' SHOWY_BAR_NO_CONFIG=1)")
+surface_sgr="${surface_rgb//,/;}"
+printf -v stale_countdown_escape '\033[38;2;%sm\033[48;2;%sm?' "${countdown_warn_sgr}" "${surface_sgr}"
 out=$(
     SHOWY_BAR_NO_CONFIG=1 \
     SHOWY_BAR_CACHE_DIR="${cache}" \
@@ -982,7 +1020,40 @@ out=$(
     SHOWY_BAR_FORCE_COLOR=1 \
     "${REPO_ROOT}/bin/showy-bar-zellij-bar"
 )
-assert_contains "zellij dims when cache is stale"      "${ansi_dim}" "${out}"
+assert_not_contains "zellij does not dim stale cache" "${ansi_dim}" "${out}"
+assert_contains "zellij stale countdown uses warn palette" "${stale_countdown_escape}" "${out}"
+question_stripped="${out//\?/}"
+question_count=$(( ${#out} - ${#question_stripped} ))
+if (( question_count == 3 )); then
+    ok "zellij marks every stale provider countdown unknown"
+else
+    fail "zellij marks every stale provider countdown unknown" "question_count=${question_count}"
+fi
+
+out=$(
+    SHOWY_BAR_NO_CONFIG=1 \
+    SHOWY_BAR_CACHE_DIR="${cache}" \
+    SHOWY_BAR_CODEXBAR_BIN="${TMP}/no-such-codexbar" \
+    "${REPO_ROOT}/bin/showy-bar-tmux-bar"
+)
+assert_not_contains "tmux does not dim stale cache" "#[dim]" "${out}"
+assert_contains "tmux stale countdown uses warn palette" "#[fg=#ee5396]?" "${out}"
+assert_not_contains "tmux stale cache suppresses weekly hint" "]w" "${out}"
+
+stale_past_fixture="${TMP}/codexbar-stale-past.json"
+printf '%s\n' '[{"provider":"claude","usage":{"primary":{"usedPercent":17,"windowMinutes":300,"resetsAt":"1988-01-01T00:00:00Z"}}}]' > "${stale_past_fixture}"
+cache=$(mk_cache)
+cp "${stale_past_fixture}" "${cache}/usage.json"
+touch -t 198801010000 "${cache}/usage.json"
+out=$(
+    SHOWY_BAR_NO_CONFIG=1 \
+    SHOWY_BAR_CACHE_DIR="${cache}" \
+    SHOWY_BAR_CODEXBAR_BIN="${TMP}/no-such-codexbar" \
+    SHOWY_BAR_FORCE_COLOR=1 \
+    "${REPO_ROOT}/bin/showy-bar-zellij-bar"
+)
+assert_contains "zellij stale absolute reset shows unknown countdown" "?" "${out}"
+assert_not_contains "zellij stale absolute reset does not show now" "now" "${out}"
 
 # 7. Concurrent fetch — only one codexbar invocation across simultaneous
 #    callers. We exercise both lock paths via SHOWY_BAR_FORCE_NO_FLOCK.
@@ -1070,6 +1141,134 @@ else
     fail "mkdir path: recovers dead owner lock" "rc=${rc}"
 fi
 
+cache=$(mk_cache)
+counter="${cache}/recovered-stopped-lock-call-count"
+: > "${counter}"
+sleep 30 &
+owner_pid=$!
+kill -STOP "${owner_pid}" 2>/dev/null || true
+mkdir "${cache}/usage.lock.d"
+printf '%s\n' "${owner_pid}" > "${cache}/usage.lock.d/owner.pid"
+rc=0
+if wait_for_state_prefix "${owner_pid}" T; then
+    out=$(
+        SHOWY_BAR_NO_CONFIG=1 \
+        SHOWY_BAR_CACHE_DIR="${cache}" \
+        SHOWY_BAR_CODEXBAR_BIN="${slow_dir}/codexbar" \
+        SHOWY_BAR_FORCE_NO_FLOCK=1 \
+        SHOWY_BAR_TEST_COUNTER="${counter}" \
+        "${REPO_ROOT}/bin/showy-bar-fetch" 2>/dev/null
+    ) || rc=$?
+else
+    rc=99
+    out=""
+fi
+kill -KILL "${owner_pid}" 2>/dev/null || true
+wait "${owner_pid}" 2>/dev/null || true
+if (( rc == 0 )) && printf '%s' "${out}" | jq -e 'type == "array"' >/dev/null 2>&1; then
+    ok "mkdir path: recovers stopped owner lock"
+else
+    fail "mkdir path: recovers stopped owner lock" "rc=${rc}"
+fi
+
+cache=$(mk_cache)
+counter="${cache}/recovered-aged-lock-call-count"
+: > "${counter}"
+sleep 30 &
+owner_pid=$!
+mkdir "${cache}/usage.lock.d"
+printf '%s\n' "${owner_pid}" > "${cache}/usage.lock.d/owner.pid"
+touch -t 198801010000 "${cache}/usage.lock.d"
+rc=0
+out=$(
+    SHOWY_BAR_NO_CONFIG=1 \
+    SHOWY_BAR_CACHE_DIR="${cache}" \
+    SHOWY_BAR_CODEXBAR_BIN="${slow_dir}/codexbar" \
+    SHOWY_BAR_FORCE_NO_FLOCK=1 \
+    SHOWY_BAR_TEST_COUNTER="${counter}" \
+    "${REPO_ROOT}/bin/showy-bar-fetch" 2>/dev/null
+) || rc=$?
+kill -KILL "${owner_pid}" 2>/dev/null || true
+wait "${owner_pid}" 2>/dev/null || true
+if (( rc == 0 )) && printf '%s' "${out}" | jq -e 'type == "array"' >/dev/null 2>&1; then
+    ok "mkdir path: recovers aged live owner lock"
+else
+    fail "mkdir path: recovers aged live owner lock" "rc=${rc}"
+fi
+
+for owner_case in empty malformed; do
+    cache=$(mk_cache)
+    counter="${cache}/recovered-${owner_case}-lock-call-count"
+    : > "${counter}"
+    mkdir "${cache}/usage.lock.d"
+    if [[ "${owner_case}" == "empty" ]]; then
+        : > "${cache}/usage.lock.d/owner.pid"
+    else
+        printf '%s\n' not-a-pid > "${cache}/usage.lock.d/owner.pid"
+    fi
+    touch -t 198801010000 "${cache}/usage.lock.d"
+    rc=0
+    out=$(
+        SHOWY_BAR_NO_CONFIG=1 \
+        SHOWY_BAR_CACHE_DIR="${cache}" \
+        SHOWY_BAR_CODEXBAR_BIN="${slow_dir}/codexbar" \
+        SHOWY_BAR_FORCE_NO_FLOCK=1 \
+        SHOWY_BAR_LOCK_WAIT_TENTHS=1 \
+        SHOWY_BAR_TEST_COUNTER="${counter}" \
+        "${REPO_ROOT}/bin/showy-bar-fetch" 2>/dev/null
+    ) || rc=$?
+    if (( rc == 0 )) && printf '%s' "${out}" | jq -e 'type == "array"' >/dev/null 2>&1; then
+        ok "mkdir path: recovers ${owner_case} owner lock"
+    else
+        fail "mkdir path: recovers ${owner_case} owner lock" "rc=${rc}"
+    fi
+done
+
+cache=$(mk_cache)
+counter="${cache}/retry-empty-lock-call-count"
+: > "${counter}"
+mkdir "${cache}/usage.lock.d"
+: > "${cache}/usage.lock.d/owner.pid"
+rc=0
+out=$(
+    SHOWY_BAR_NO_CONFIG=1 \
+    SHOWY_BAR_CACHE_DIR="${cache}" \
+    SHOWY_BAR_CODEXBAR_BIN="${slow_dir}/codexbar" \
+    SHOWY_BAR_FORCE_NO_FLOCK=1 \
+    SHOWY_BAR_LOCK_WAIT_TENTHS=10 \
+    SHOWY_BAR_TEST_COUNTER="${counter}" \
+    "${REPO_ROOT}/bin/showy-bar-fetch" 2>/dev/null
+) || rc=$?
+if (( rc == 0 )) && printf '%s' "${out}" | jq -e 'type == "array"' >/dev/null 2>&1; then
+    ok "mkdir path: retries empty owner lock after wait"
+else
+    fail "mkdir path: retries empty owner lock after wait" "rc=${rc}"
+fi
+
+cache=$(mk_cache)
+cp "${FIXTURE_DIR}/codexbar-low.json" "${cache}/usage.json"
+touch -t 198801010000 "${cache}/usage.json"
+counter="${cache}/retry-stale-empty-lock-call-count"
+: > "${counter}"
+mkdir "${cache}/usage.lock.d"
+: > "${cache}/usage.lock.d/owner.pid"
+rc=0
+out=$(
+    SHOWY_BAR_NO_CONFIG=1 \
+    SHOWY_BAR_CACHE_DIR="${cache}" \
+    SHOWY_BAR_CODEXBAR_BIN="${slow_dir}/codexbar" \
+    SHOWY_BAR_FORCE_NO_FLOCK=1 \
+    SHOWY_BAR_LOCK_WAIT_TENTHS=10 \
+    SHOWY_BAR_TEST_COUNTER="${counter}" \
+    SHOWY_BAR_TEST_FIXTURE="${FIXTURE_DIR}/codexbar-realistic.json" \
+    "${REPO_ROOT}/bin/showy-bar-fetch" 2>/dev/null
+) || rc=$?
+if (( rc == 0 )) && grep -F -q 'futureUnknownTopLevelField' <<< "${out}"; then
+    ok "mkdir path: retries stale empty owner lock before fallback"
+else
+    fail "mkdir path: retries stale empty owner lock before fallback" "rc=${rc}; out=${out}"
+fi
+
 printf '\nforced refresh lock wait\n'
 cache=$(mk_cache)
 cp "${FIXTURE_DIR}/codexbar-low.json" "${cache}/usage.json"
@@ -1110,6 +1309,30 @@ if (( calls == 1 )); then
     ok "forced refresh invokes codexbar once across 4 callers"
 else
     fail "forced refresh invokes codexbar once across 4 callers" "got ${calls} calls"
+fi
+
+cache=$(mk_cache)
+cp "${FIXTURE_DIR}/codexbar-low.json" "${cache}/usage.json"
+touch -t 198801010000 "${cache}/usage.json"
+counter="${cache}/forced-refresh-empty-lock-call-count"
+: > "${counter}"
+mkdir "${cache}/usage.lock.d"
+: > "${cache}/usage.lock.d/owner.pid"
+rc=0
+out=$(
+    SHOWY_BAR_NO_CONFIG=1 \
+    SHOWY_BAR_CACHE_DIR="${cache}" \
+    SHOWY_BAR_CODEXBAR_BIN="${slow_dir}/codexbar" \
+    SHOWY_BAR_FORCE_NO_FLOCK=1 \
+    SHOWY_BAR_LOCK_WAIT_TENTHS=10 \
+    SHOWY_BAR_TEST_COUNTER="${counter}" \
+    SHOWY_BAR_TEST_FIXTURE="${FIXTURE_DIR}/codexbar-realistic.json" \
+    "${REPO_ROOT}/bin/showy-bar-fetch" --refresh 2>/dev/null
+) || rc=$?
+if (( rc == 0 )) && grep -F -q 'futureUnknownTopLevelField' <<< "${out}"; then
+    ok "forced refresh retries empty owner lock before stale fallback"
+else
+    fail "forced refresh retries empty owner lock before stale fallback" "rc=${rc}; out=${out}"
 fi
 
 cache=$(mk_cache)

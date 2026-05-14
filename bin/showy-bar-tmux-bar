@@ -31,7 +31,6 @@ tmux_fg() { printf '#[fg=#%s]' "$1"; }
 tmux_reset() { printf '#[default]'; }
 tmux_dim() { printf '#[dim]'; }
 tmux_bold() { printf '#[bold]'; }
-tmux_nodim() { printf '#[nodim]'; }
 tmux_nobold() { printf '#[nobold]'; }
 
 # ── data load ──────────────────────────────────────────────────────
@@ -75,11 +74,13 @@ while IFS=$'\x1f' read -r provider p_used p_reset s_used; do
     bar=$(showy_bar_block_bar "${p_remaining}")
 
     minutes=""
-    [[ -n "${p_reset}" ]] && minutes=$(showy_bar_minutes_until "${p_reset}" || true)
-    countdown=$(showy_bar_primary_label "${minutes}" "${p_remaining}" "${p_reset}")
+    if (( ! stale )) && [[ -n "${p_reset}" ]]; then
+        minutes=$(showy_bar_minutes_until "${p_reset}" || true)
+    fi
+    countdown=$(showy_bar_primary_label "${minutes}" "${p_remaining}" "${p_reset}" "${stale}")
 
     weekly_hint=""
-    if (( s_used >= 0 )); then
+    if (( ! stale && s_used >= 0 )); then
         s_remaining=$((100 - s_used))
         if (( s_remaining < p_remaining )); then
             weekly_hint=" $(tmux_fg "$(showy_bar_role_color secondary "${s_remaining}")")w$(tmux_reset)"
@@ -89,14 +90,14 @@ while IFS=$'\x1f' read -r provider p_used p_reset s_used; do
     if (( first_chunk )); then first_chunk=0
     else printf ' '; fi
 
-    (( stale )) && tmux_dim
     tmux_bold; printf '%s' "${sigil}"; tmux_nobold
     printf ' '
     tmux_fg "${color_hex}"; printf '%s' "${bar}"; tmux_reset
-    (( stale )) && tmux_dim
     printf ' '
     time_color=$(showy_bar_palette countdown)
-    if [[ -n "${minutes}" && "${minutes}" -lt "${SHOWY_BAR_TIME_WARN_MINUTES}" ]]; then
+    if (( stale )); then
+        time_color=$(showy_bar_palette countdown_warn)
+    elif [[ -n "${minutes}" && "${minutes}" -lt "${SHOWY_BAR_TIME_WARN_MINUTES}" ]]; then
         time_color=$(showy_bar_palette countdown_warn)
     fi
     tmux_fg "${time_color}"; printf '%s' "${countdown}"; tmux_reset

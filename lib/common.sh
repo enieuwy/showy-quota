@@ -237,7 +237,11 @@ showy_bar_format_countdown() {
 }
 
 showy_bar_primary_label() {
-    local minutes="$1" remaining="$2" reset_value="${3:-}"
+    local minutes="$1" remaining="$2" reset_value="${3:-}" stale="${4:-0}"
+    if [[ "${stale}" == "1" ]]; then
+        printf '?'
+        return
+    fi
     if [[ -n "${minutes}" ]]; then
         showy_bar_format_countdown "${minutes}"
         return
