@@ -75,6 +75,12 @@ The Zellij and tmux strips render a 2-letter sigil per provider via
 `showy_bar_provider_sigil` (`lib/strip.sh`). New CodexBar providers fall
 back to the first two letters of the id.
 
+Provider render order is deterministic. `SHOWY_BAR_PROVIDERS`, when set, is
+both an allow-list and the render order. Otherwise `SHOWY_BAR_PROVIDER_ORDER`
+ranks providers without filtering them; missing providers are skipped, and
+unlisted providers render after the ranked providers sorted by id. The default
+rank is `codex,claude,opencode,gemini`.
+
 ## Adding a new SketchyBar provider
 
 CodexBar discovers providers; this repo discovers them via the cache

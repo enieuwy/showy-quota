@@ -151,8 +151,9 @@ Useful knobs:
 | Variable                          | Default                                | Effect                                                |
 |-----------------------------------|----------------------------------------|-------------------------------------------------------|
 | `SHOWY_BAR_REFRESH_SECONDS`         | `120`                                  | Upper bound on how often `codexbar` itself is invoked |
-| `SHOWY_BAR_PROVIDERS`               | empty (render CodexBar's enabled providers) | Comma-list allow-list, e.g. `claude,codex`            |
+| `SHOWY_BAR_PROVIDERS`               | empty (render CodexBar's enabled providers) | Ordered comma-list allow-list, e.g. `codex,claude`   |
 | `SHOWY_BAR_PROVIDERS_EXCLUDE`       | empty                                  | Comma-list exclude-list applied after the allow-list  |
+| `SHOWY_BAR_PROVIDER_ORDER`          | `codex,claude,opencode,gemini`         | Stable render order without filtering; missing providers are skipped |
 | `SHOWY_BAR_INCLUDE_STATUS`          | `1`                                    | Include CodexBar status for outage-tinted logos and status-page icon clicks |
 | `SHOWY_BAR_TIME_WARN_MINUTES`       | `30`                                   | Threshold for red countdown labels                    |
 | `SHOWY_BAR_THEME`                   | empty                                  | Load `~/.config/showy-bar/themes/<name>.env` or the built-in `share/themes/<name>.env` palette |

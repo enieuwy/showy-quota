@@ -48,6 +48,7 @@ showy_bar_load_config
 : "${SHOWY_BAR_CODEXBAR_BIN:=codexbar}"
 : "${SHOWY_BAR_PROVIDERS:=}"
 : "${SHOWY_BAR_PROVIDERS_EXCLUDE:=}"
+: "${SHOWY_BAR_PROVIDER_ORDER:=codex,claude,opencode,gemini}"
 : "${SHOWY_BAR_INCLUDE_STATUS:=1}"
 
 : "${SHOWY_BAR_PALETTE_PRIMARY_GOOD:=25be6a}"

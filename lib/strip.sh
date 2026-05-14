@@ -43,26 +43,38 @@ showy_bar_provider_sigil() {
 }
 
 # Filter the cached JSON down to renderable provider records, honoring
-# SHOWY_BAR_PROVIDERS and SHOWY_BAR_PROVIDERS_EXCLUDE when set. Reads from stdin,
-# writes JSON array to stdout.
+# SHOWY_BAR_PROVIDERS, SHOWY_BAR_PROVIDERS_EXCLUDE, and provider ordering when
+# set. Reads from stdin, writes JSON array to stdout.
 showy_bar_filter_renderable() {
     local allow="${SHOWY_BAR_PROVIDERS:-}"
     local exclude="${SHOWY_BAR_PROVIDERS_EXCLUDE:-}"
-    jq --arg allow "${allow}" --arg exclude "${exclude}" '
+    local order="${SHOWY_BAR_PROVIDER_ORDER:-}"
+    jq --arg allow "${allow}" --arg exclude "${exclude}" --arg order "${order}" '
         def list($raw):
             $raw
             | split(",")
             | map(gsub("^\\s+|\\s+$"; ""))
             | map(select(length > 0));
+        def pos($items; $provider):
+            ($items | index($provider)) as $idx
+            | if $idx == null then 1000000 else $idx end;
         (list($allow)) as $allow_list
         | (list($exclude)) as $exclude_list
+        | (list($order)) as $order_list
         | [ .[] | select(
             (.error // null) == null
             and (.provider | type == "string" and test("^[A-Za-z0-9_.-]+$"))
             and (.usage.primary.usedPercent | type == "number")
             and (.provider as $p | (($allow_list | length) == 0 or ($allow_list | index($p) != null)))
             and (.provider as $p | ($exclude_list | index($p) == null))
-        ) ]
+        ) ] as $filtered
+        | if ($allow_list | length) > 0 then
+            $filtered | sort_by([(.provider as $p | pos($allow_list; $p)), .provider])
+          elif ($order_list | length) > 0 then
+            $filtered | sort_by([(.provider as $p | pos($order_list; $p)), .provider])
+          else
+            $filtered
+          end
     '
 }
 

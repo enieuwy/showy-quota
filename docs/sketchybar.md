@@ -23,6 +23,11 @@ Plus:
 Provider adds/removals reconcile against that filtered set on the next plugin
 tick; no `sketchybar --reload` is required after the initial install.
 
+Provider order is stable across additions/removals. Set
+`SHOWY_BAR_PROVIDER_ORDER` to rank providers without filtering them; missing
+providers are skipped. Set `SHOWY_BAR_PROVIDERS` when you want an ordered
+allow-list instead.
+
 
 ## Layout state
 
@@ -74,14 +79,16 @@ instead.
 
 ## Provider filters
 
-`SHOWY_BAR_PROVIDERS` is an allow-list. `SHOWY_BAR_PROVIDERS_EXCLUDE` removes
-providers from that result afterward, so the exclude list wins on overlap.
+`SHOWY_BAR_PROVIDERS` is an ordered allow-list. `SHOWY_BAR_PROVIDERS_EXCLUDE`
+removes providers from that result afterward, so the exclude list wins on
+overlap. When `SHOWY_BAR_PROVIDERS` is empty, `SHOWY_BAR_PROVIDER_ORDER` ranks
+the providers CodexBar currently reports without filtering them.
 
 Examples:
 
-- empty / empty → every provider CodexBar currently reports
-- include only → only those providers
-- exclude only → everything except those providers
+- no filters → every provider CodexBar currently reports, ranked by `SHOWY_BAR_PROVIDER_ORDER`
+- include only → only those providers, in include-list order
+- exclude only → everything except those providers, still ranked by provider order
 - include + exclude → the include set minus the exclude set
 
 ## Native bar layout

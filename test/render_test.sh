@@ -581,13 +581,30 @@ assert_contains "include+exclude keeps claude"         "CL" "${out}"
 assert_not_contains "include+exclude drops codex"      "CX" "${out}"
 assert_not_contains "include+exclude drops gemini"     "GE" "${out}"
 
+order_fixture="${TMP}/codexbar-order.json"
+printf '%s\n' \
+    '[' \
+    '{"provider":"gemini","usage":{"primary":{"usedPercent":0}}},' \
+    '{"provider":"claude","usage":{"primary":{"usedPercent":10}}},' \
+    '{"provider":"opencode","usage":{"primary":{"usedPercent":20}}},' \
+    '{"provider":"codex","usage":{"primary":{"usedPercent":30}}}' \
+    ']' > "${order_fixture}"
+out=$(run_state "${order_fixture}")
+assert_equals "default provider order ignores source order" "codex,claude,opencode,gemini" "$(printf '%s' "${out}" | jq -r '.providers | join(",")')"
+
+out=$(run_state codexbar-mixed.json SHOWY_BAR_PROVIDER_ORDER=gemini,claude)
+assert_equals "provider order skips missing providers without filtering" "gemini,claude,codex" "$(printf '%s' "${out}" | jq -r '.providers | join(",")')"
+
+out=$(run_state codexbar-mixed.json SHOWY_BAR_PROVIDER_ORDER=codex,claude,gemini SHOWY_BAR_PROVIDERS=gemini,claude)
+assert_equals "allow-list order overrides provider order" "gemini,claude" "$(printf '%s' "${out}" | jq -r '.providers | join(",")')"
+
 # ── state surface ─────────────────────────────────────────────────────
 printf '\ncodexbar state\n'
 
 out=$(run_state codexbar-mixed.json)
 assert_equals "state marks cache available" "true" "$(printf '%s' "${out}" | jq -r '.available')"
 assert_equals "state provider count honors renderable filter" "3" "$(printf '%s' "${out}" | jq -r '.providerCount')"
-assert_equals "state provider order matches render order" "claude,codex,gemini" "$(printf '%s' "${out}" | jq -r '.providers | join(",")')"
+assert_equals "state provider order matches render order" "codex,claude,gemini" "$(printf '%s' "${out}" | jq -r '.providers | join(",")')"
 assert_equals "state compact recommendation defaults below threshold" "false" "$(printf '%s' "${out}" | jq -r '.sketchybar.compactRecommended')"
 
 out=$(run_state codexbar-mixed.json SHOWY_BAR_SKETCHYBAR_COMPACT_PROVIDER_COUNT=3)
@@ -631,7 +648,7 @@ item_log="$(< "${log}")"
 assert_contains "bootstrap ignores stale provider state" "--add item showy_bar.gemini.icon left" "${item_log}"
 
 cache=$(mk_cache)
-seed_sketchybar_state "${cache}" claude codex gemini
+seed_sketchybar_state "${cache}" codex claude gemini
 log="${TMP}/sb-items-empty.log"
 run_sketchybar_items codexbar-mixed.json "${cache}" "${log}" SHOWY_BAR_PROVIDERS_EXCLUDE='claude,codex,gemini'
 item_log="$(< "${log}")"
@@ -784,17 +801,17 @@ printf '\nsketchybar plugin (lifecycle diff)\n'
 
 cache=$(mk_cache)
 seed_sketchybar_live_items "${cache}" claude codex
-seed_sketchybar_state "${cache}" claude codex
+seed_sketchybar_state "${cache}" codex claude
 log="${TMP}/sb-add.log"
 run_sketchybar_plugin codexbar-mixed.json "${cache}" "${log}"
 plugin_log="$(< "${log}")"
 assert_contains "plugin adds newly visible provider" "--add item showy_bar.gemini.label left" "${plugin_log}"
 assert_not_contains "plugin does not re-add declared providers" "--add item showy_bar.codex.label left" "${plugin_log}"
 assert_contains "plugin rebuilds bracket with added native provider" "showy_bar.gemini.icon showy_bar.gemini.primary showy_bar.gemini.secondary showy_bar.gemini.tertiary showy_bar.gemini.secondary_marker showy_bar.gemini.tertiary_marker showy_bar.gemini.slot showy_bar.gemini.label --set showy_bar_bracket" "${plugin_log}"
-assert_contains "plugin triggers provider-change event" "--trigger showy_bar_provider_change SHOWY_BAR_PROVIDER_COUNT=3 SHOWY_BAR_PROVIDERS=claude,codex,gemini" "${plugin_log}"
+assert_contains "plugin triggers provider-change event" "--trigger showy_bar_provider_change SHOWY_BAR_PROVIDER_COUNT=3 SHOWY_BAR_PROVIDERS=codex,claude,gemini" "${plugin_log}"
 
 cache=$(mk_cache)
-seed_sketchybar_state "${cache}" claude codex gemini
+seed_sketchybar_state "${cache}" codex claude gemini
 log="${TMP}/sb-redeclare.log"
 run_sketchybar_plugin codexbar-mixed.json "${cache}" "${log}"
 plugin_log="$(< "${log}")"
@@ -804,7 +821,7 @@ assert_contains "plugin redeclares missing bracket when state matches" "--add br
 drop_fixture="${TMP}/codexbar-no-gemini.json"
 jq '[ .[] | select(.provider != "gemini") ]' "${FIXTURE_DIR}/codexbar-mixed.json" > "${drop_fixture}"
 cache=$(mk_cache)
-seed_sketchybar_state "${cache}" claude codex gemini
+seed_sketchybar_state "${cache}" codex claude gemini
 log="${TMP}/sb-remove.log"
 run_sketchybar_plugin "${drop_fixture}" "${cache}" "${log}"
 plugin_log="$(< "${log}")"
@@ -813,8 +830,8 @@ assert_contains "plugin removes dropped provider native rows" "--remove showy_ba
 assert_contains "plugin removes dropped provider native markers" "--remove showy_bar.gemini.secondary_marker --remove showy_bar.gemini.tertiary_marker --remove showy_bar.gemini.slot --remove showy_bar.gemini.label" "${plugin_log}"
 
 cache=$(mk_cache)
-seed_sketchybar_state "${cache}" claude codex gemini
-seed_sketchybar_live_items "${cache}" claude codex gemini
+seed_sketchybar_state "${cache}" codex claude gemini
+seed_sketchybar_live_items "${cache}" codex claude gemini
 log="${TMP}/sb-unchanged.log"
 run_sketchybar_plugin codexbar-mixed.json "${cache}" "${log}"
 plugin_log="$(< "${log}")"
