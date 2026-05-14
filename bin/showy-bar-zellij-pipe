@@ -58,9 +58,9 @@ send_pipe() {
 
 # zjstatus consumes the protocol from the payload itself:
 #   zjstatus::pipe::<widget>::<output>
-# Direct the pipe at the zjstatus plugin. Broadcasting to every plugin can
-# leave the CLI pipe blocked by an unrelated plugin's backpressure, which pins
-# this feeder after the first update.
+# Broadcast by default because zjstatus pipe widgets are configured per plugin
+# instance. Bound each helper so another plugin's CLI-pipe backpressure cannot
+# pin this feeder after an early or unlucky update.
 while :; do
     if output=$("${BAR}" 2>/dev/null) && [[ -n "${output}" ]]; then
         send_pipe "zjstatus::pipe::${widget}::${output}" || true
