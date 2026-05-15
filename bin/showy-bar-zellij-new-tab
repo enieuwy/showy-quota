@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# showy-bar — create a Zellij tab and immediately repaint zjstatus.
+#
+# Run this from a terminal-emulator or wrapper keybinding. It keeps the repaint
+# outside Zellij's `Run` pane lifecycle while preserving `zellij action new-tab`
+# arguments.
+
+set -euo pipefail
+
+SCRIPT_PATH="${BASH_SOURCE[0]}"
+while [[ -L "${SCRIPT_PATH}" ]]; do
+    link=$(readlink "${SCRIPT_PATH}")
+    if [[ "${link}" == /* ]]; then
+        SCRIPT_PATH="${link}"
+    else
+        SCRIPT_PATH="$(cd -- "$(dirname -- "${SCRIPT_PATH}")" && pwd -P)/${link}"
+    fi
+done
+SCRIPT_DIR="$(cd -- "$(dirname -- "${SCRIPT_PATH}")" && pwd -P)"
+# shellcheck disable=SC1091
+. "${SCRIPT_DIR}/../lib/common.sh"
+
+showy_bar_have "${SHOWY_BAR_ZELLIJ_BIN}" || showy_bar_die "zellij is required for new-tab mode: ${SHOWY_BAR_ZELLIJ_BIN}"
+
+zellij_args=()
+if [[ -n "${ZELLIJ_SESSION_NAME:-}" ]]; then
+    zellij_args+=(--session "${ZELLIJ_SESSION_NAME}")
+fi
+
+"${SHOWY_BAR_ZELLIJ_BIN}" "${zellij_args[@]}" action new-tab "$@"
+"${SCRIPT_DIR}/showy-bar-zellij-kick" >/dev/null 2>&1 || true

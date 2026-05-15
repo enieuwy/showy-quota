@@ -15,7 +15,7 @@ SBAR_PLUGINS  ?= $(SKETCHYBAR)/plugins
 FORCE         ?= 0
 
 REPO          := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
-BIN_NAMES     := showy-bar-fetch showy-bar-state showy-bar showy-bar-tmux-bar showy-bar-zellij-bar showy-bar-zellij-pipe
+BIN_NAMES     := showy-bar-fetch showy-bar-state showy-bar showy-bar-tmux-bar showy-bar-zellij-bar showy-bar-zellij-pipe showy-bar-zellij-kick showy-bar-zellij-new-tab
 
 .PHONY: help install install-bin install-sketchybar install-all uninstall test lint clean
 
@@ -115,6 +115,8 @@ lint: ## Run shellcheck if available.
 			"$(REPO)/bin/showy-bar-tmux-bar" \
 			"$(REPO)/bin/showy-bar-zellij-bar" \
 			"$(REPO)/bin/showy-bar-zellij-pipe" \
+			"$(REPO)/bin/showy-bar-zellij-kick" \
+			"$(REPO)/bin/showy-bar-zellij-new-tab" \
 			"$(REPO)/lib/common.sh" \
 			"$(REPO)/lib/strip.sh" \
 			"$(REPO)/sketchybar/items/showy_bar.sh" \

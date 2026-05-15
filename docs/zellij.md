@@ -24,9 +24,41 @@ because reset-time parsing is skipped while stale.
 
 The pipe widget is more stable than the `command` widget under WASMI,
 which crashes when `std::sync::Mutex::new()` runs on a single-threaded
-WASM target. The pipe feeder runs as an external background process,
-started by the terminal wrapper script with `ZELLIJ_SESSION_NAME` set, and
-re-emits the strip every `SHOWY_BAR_ZELLIJ_PIPE_INTERVAL` seconds.
+WASM target. The pipe feeder runs as an external background process:
+
+```sh
+showy-bar-zellij-pipe
+```
+
+Start one feeder for each Zellij session (usually from the terminal wrapper
+that launches the session, with `ZELLIJ_SESSION_NAME` set). It re-emits the
+strip every `SHOWY_BAR_ZELLIJ_PIPE_INTERVAL` seconds; it does not watch
+Zellij session metadata or subscribe to tab events.
+
+New tab-local zjstatus instances start with empty pipe state until the next
+feeder tick. For immediate paint after creating a tab or plugin, send a
+one-shot update:
+
+```sh
+showy-bar-zellij-kick
+```
+
+For new-tab bindings outside Zellij, prefer the convenience wrapper:
+
+```sh
+showy-bar-zellij-new-tab --layout clean-tab
+```
+
+That is equivalent to `zellij action new-tab ...` followed by
+`showy-bar-zellij-kick`, and keeps the repaint outside Zellij's pane lifecycle.
+Avoid a Zellij `Run "showy-bar-zellij-kick"` keybinding for this path: `Run`
+opens a transient pane and is visibly slower than invoking the wrapper from
+the terminal emulator or session-launching wrapper.
+
+Mode-bound Zellij `NewTab` keys (for example tab-mode `n` or tmux-mode `c`)
+cannot trigger an external kick. If immediate paint matters for those paths,
+also bind a direct terminal-emulator key to `showy-bar-zellij-new-tab` (or to
+`zellij action new-tab ...` followed by `showy-bar-zellij-kick`).
 
 ## Layout snippet
 
