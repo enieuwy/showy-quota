@@ -83,25 +83,28 @@ plugin tick without another reload.
 
 ### Zellij wiring
 
-Two pieces:
+Three pieces:
 
-1. **Pipe loop** — paste `zellij/layout-pane.kdl.fragment` into your
-   default layout (the `pane size=1` widget plus the tiny floating command
-   pane that runs `showy-bar-zellij-pipe`). Install `zjstatus.wasm` first; see
-   [`docs/zellij.md`](docs/zellij.md).
-2. **Detail keybind** — paste `zellij/detail-pane.kdl.fragment` into your
+1. **Widget pane** — paste `zellij/layout-pane.kdl.fragment` into your
+   default layout. It declares the visible `zjstatus` pipe widget only.
+   Install `zjstatus.wasm` first; see [`docs/zellij.md`](docs/zellij.md).
+2. **Pipe loop** — start `showy-bar-zellij-pipe` for each Zellij session
+   (for example from the terminal wrapper that launches the session, with
+   `ZELLIJ_SESSION_NAME` set).
+3. **Detail keybind** — paste `zellij/detail-pane.kdl.fragment` into your
    keybinds block. Default is `Alt /`.
 
-Reload Zellij to pick up the new layout.
+Reload Zellij to pick up the new layout/keybind, then start the pipe loop.
 
 ### tmux wiring
 
 ```sh
 # Use the absolute path — tmux's PATH at server start typically lacks ~/.local/bin.
 CB_BIN="$HOME/.local/bin"
-printf 'set -ag status-right " #(%s/showy-bar-tmux-bar)"\n' "$CB_BIN" >> ~/.tmux.conf
-printf 'bind-key "/" display-popup -E -h 36 -w 92 -T "CodexBar usage" %s\n' \
-    "'while :; do clear; codexbar usage; sleep 30; done'" >> ~/.tmux.conf
+cat >> ~/.tmux.conf <<TMUX
+if -F '#{m:*showy-bar-tmux-bar*,#{status-right}}' '' 'set -ag status-right " #(${CB_BIN}/showy-bar-tmux-bar)"'
+bind-key "/" display-popup -E -h 36 -w 92 -T "CodexBar usage" 'config="\${XDG_CONFIG_HOME:-\$HOME/.config}/showy-bar/config.env"; [ -r "\$config" ] && . "\$config"; while :; do clear; "\${SHOWY_BAR_CODEXBAR_BIN:-codexbar}" usage; sleep 30; done'
+TMUX
 tmux source ~/.tmux.conf
 ```
 

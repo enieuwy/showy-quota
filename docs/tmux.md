@@ -2,9 +2,15 @@
 
 ## Output shape
 
-`bin/showy-bar-tmux-bar` emits tmux-format markup, the same per-provider
-shape as the Zellij renderer except using `#[fg=#RRGGBB]` / `#[bold]` /
-`#[default]` instead of ANSI escape sequences.
+`bin/showy-bar-tmux-bar` emits tmux-format markup. Format per provider:
+
+```
+<SIGIL> <8-cell primary bar> <countdown>[ w]
+```
+
+The bar is primary-window remaining usage only. When the secondary window has
+less remaining usage than primary, a colored `w` hint is appended after the
+countdown. Colors are emitted as `#[fg=#RRGGBB]` / `#[bold]` / `#[default]`.
 
 When the cache is older than `2 × SHOWY_BAR_REFRESH_SECONDS`, quota colors
 remain the last-known values and each countdown is rendered as `?` using
@@ -40,6 +46,6 @@ macOS, or via `tmux set-environment -g PATH ...`).
 
 ## Detail popup
 
-`bind-key '/' display-popup -E -h 36 -w 92 -T "CodexBar usage" 'while :; do clear; codexbar usage; sleep 30; done'`
+`bind-key '/' display-popup -E -h 36 -w 92 -T "CodexBar usage" 'config="${XDG_CONFIG_HOME:-$HOME/.config}/showy-bar/config.env"; [ -r "$config" ] && . "$config"; while :; do clear; "${SHOWY_BAR_CODEXBAR_BIN:-codexbar}" usage; sleep 30; done'`
 
 Hit `<prefix>/` to open. CodexBar's text mode is the detail view.

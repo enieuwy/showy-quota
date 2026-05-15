@@ -2,16 +2,18 @@
 //
 // Add inside an existing keybinds block in your zellij config. Adjust
 // the mode/key to taste. The pane runs a tiny shell loop (no `watch`
-// dependency) re-invoking `codexbar usage` every 30 s.
+// dependency) re-invoking the configured CodexBar CLI every 30 s.
 
-bind "Alt /" {
-    NewPane "sh" "-c" "while :; do clear; codexbar usage; sleep 30; done" {
-        close_on_exit true
-        floating true
-        height "36"
-        width "92"
-        x "center"
-        y "center"
-        name "CodexBar usage"
+shared {
+    bind "Alt /" {
+        Run "sh" "-c" "config=\"${XDG_CONFIG_HOME:-$HOME/.config}/showy-bar/config.env\"; [ -r \"$config\" ] && . \"$config\"; while :; do clear; \"${SHOWY_BAR_CODEXBAR_BIN:-codexbar}\" usage; sleep 30; done" {
+            close_on_exit true
+            floating true
+            height "36"
+            width "92"
+            x "center"
+            y "center"
+            name "CodexBar usage"
+        }
     }
 }

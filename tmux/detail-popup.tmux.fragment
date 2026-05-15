@@ -5,4 +5,4 @@
 # default macOS.
 
 bind-key '/' display-popup -E -h 36 -w 92 -T "CodexBar usage" \
-    'while :; do clear; codexbar usage; sleep 30; done'
+    'config="${XDG_CONFIG_HOME:-$HOME/.config}/showy-bar/config.env"; [ -r "$config" ] && . "$config"; while :; do clear; "${SHOWY_BAR_CODEXBAR_BIN:-codexbar}" usage; sleep 30; done'

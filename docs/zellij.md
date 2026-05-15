@@ -75,6 +75,8 @@ the `plugin location=...` path before using the fragment.
 
 ## Detail pane
 
-The keybind (`zellij/detail-pane.kdl.fragment`) opens a floating pane
-running `while :; do clear; codexbar usage; sleep 30; done`. CodexBar's
-text mode is the detail view — there is no custom detail-watch in this repo.
+The keybind (`zellij/detail-pane.kdl.fragment`) opens a floating pane. The
+pane sources `${XDG_CONFIG_HOME:-$HOME/.config}/showy-bar/config.env` when it
+exists, then runs `while :; do clear;
+"${SHOWY_BAR_CODEXBAR_BIN:-codexbar}" usage; sleep 30; done`. CodexBar's text
+mode is the detail view — there is no custom detail-watch in this repo.
