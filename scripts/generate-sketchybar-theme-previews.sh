@@ -1,5 +1,6 @@
 #!/bin/bash
-# Generate README SketchyBar theme previews from the real plugin PNG renderer.
+# Generate README SketchyBar theme previews from real plugin-rendered icons
+# and SVG-native rows that mirror the SketchyBar slider layout.
 
 set -euo pipefail
 
@@ -9,6 +10,9 @@ OUT_DIR="${SHOWY_BAR_SKETCH_PREVIEW_OUT_DIR:-${REPO_ROOT}/docs/images/themes}"
 BASH_BIN="${SHOWY_BAR_SKETCH_PREVIEW_BASH_BIN:-/opt/homebrew/bin/bash}"
 CODEXBAR_RESOURCES="${SHOWY_BAR_CODEXBAR_RESOURCES:-/Applications/CodexBar.app/Contents/Resources}"
 NOW_EPOCH="4070908800"
+BAR_W=80
+ROW_H=6
+ROW_RX=3
 
 if [[ ! -x "${BASH_BIN}" ]]; then
     BASH_BIN="$(command -v bash || true)"
@@ -65,10 +69,16 @@ EOF
 
 palette_value() {
     local theme="$1" key="$2"
-    # shellcheck disable=SC2016
     SHOWY_BAR_THEME="${theme}" \
         SHOWY_BAR_NO_CONFIG=1 \
-        "${BASH_BIN}" -c '. ./lib/common.sh; showy_bar_palette "$1"' _ "${key}"
+        "${BASH_BIN}" -c '. "$1"; showy_bar_palette "$2"' _ "${REPO_ROOT}/lib/common.sh" "${key}"
+}
+
+role_color() {
+    local theme="$1" role="$2" remaining="$3"
+    SHOWY_BAR_THEME="${theme}" \
+        SHOWY_BAR_NO_CONFIG=1 \
+        "${BASH_BIN}" -c '. "$1"; showy_bar_role_color "$2" "$3"' _ "${REPO_ROOT}/lib/common.sh" "${role}" "${remaining}"
 }
 
 png_data_uri() {
@@ -83,30 +93,81 @@ strip_png_metadata() {
     mv -f -- "${tmp}" "${path}"
 }
 
+elapsed_marker_x() {
+    local reset_at="$1" window_minutes="$2" width="${3:-${BAR_W}}"
+    local reset_epoch duration start_epoch elapsed marker
+    [[ -n "${reset_at}" && "${window_minutes}" =~ ^[0-9]+$ ]] || return 1
+    (( window_minutes > 0 )) || return 1
+
+    reset_epoch=$(SHOWY_BAR_NO_CONFIG=1 "${BASH_BIN}" -c '. "$1"; showy_bar_reset_epoch "$2"' _ "${REPO_ROOT}/lib/common.sh" "${reset_at}") || return 1
+    duration=$((window_minutes * 60))
+    start_epoch=$((reset_epoch - duration))
+    elapsed=$((NOW_EPOCH - start_epoch))
+    (( elapsed < 0 )) && elapsed=0
+    (( elapsed > duration )) && elapsed="${duration}"
+    marker=$(( (duration - elapsed) * width / duration ))
+    (( marker < 0 )) && marker=0
+    (( marker >= width )) && marker=$((width - 1))
+    printf '%s\n' "${marker}"
+}
+
+draw_usage_row() {
+    local x="$1" y="$2" remaining="$3" fill_hex="$4" track_hex="$5"
+    local fill_w
+    [[ "${remaining}" =~ ^[0-9]+$ ]] || remaining=0
+    (( remaining > 100 )) && remaining=100
+    fill_w=$((BAR_W * remaining / 100))
+    (( remaining > 0 && fill_w == 0 )) && fill_w=1
+
+    printf '<rect x="%s" y="%s" width="%s" height="%s" rx="%s" fill="#%s"/>\n' \
+        "${x}" "${y}" "${BAR_W}" "${ROW_H}" "${ROW_RX}" "${track_hex}"
+    if (( fill_w > 0 )); then
+        printf '<rect x="%s" y="%s" width="%s" height="%s" rx="%s" fill="#%s"/>\n' \
+            "${x}" "${y}" "${fill_w}" "${ROW_H}" "${ROW_RX}" "${fill_hex}"
+    fi
+}
+
+draw_marker() {
+    local x="$1" y="$2" marker="$3" elapsed_hex="$4"
+    [[ "${marker}" =~ ^[0-9]+$ ]] || return 0
+    printf '<rect x="%s" y="%s" width="1" height="%s" fill="#%s"/>\n' \
+        "$((x + marker))" "${y}" "${ROW_H}" "${elapsed_hex}"
+}
+
+draw_provider() {
+    local theme="$1" cache_dir="$2" provider="$3" icon_x="$4" bar_x="$5" label_x="$6" label="$7" label_hex="$8" rem_p="$9"
+    local rem_s="${10}" s_reset="${11}" s_window="${12}"
+    local icon primary_hex secondary_hex track_hex elapsed_hex marker
+
+    icon="$(png_data_uri "${cache_dir}/icon-v2-${provider}.png")"
+    primary_hex="$(role_color "${theme}" primary "${rem_p}")"
+    secondary_hex="$(role_color "${theme}" secondary "${rem_s}")"
+    track_hex="$(palette_value "${theme}" track)"
+    elapsed_hex="$(palette_value "${theme}" elapsed)"
+    marker="$(elapsed_marker_x "${s_reset}" "${s_window}" "${BAR_W}" || true)"
+
+    printf '<image href="%s" x="%s" y="3" width="22" height="22" preserveAspectRatio="xMidYMid meet"/>\n' "${icon}" "${icon_x}"
+    draw_usage_row "${bar_x}" 7 "${rem_p}" "${primary_hex}" "${track_hex}"
+    draw_usage_row "${bar_x}" 15 "${rem_s}" "${secondary_hex}" "${track_hex}"
+    draw_marker "${bar_x}" 15 "${marker}" "${elapsed_hex}"
+    printf '<text x="%s" y="14" dominant-baseline="middle" font-family="SF Pro Text, SF Pro, -apple-system, BlinkMacSystemFont, Helvetica, Arial, sans-serif" font-size="12" font-weight="600" fill="#%s">%s</text>\n' "${label_x}" "${label_hex}" "${label}"
+}
+
 render_svg() {
     local theme="$1" cache_dir="$2" out_file="$3"
     local countdown countdown_warn
-    local claude_icon claude_bar codex_icon codex_bar
 
     countdown="$(palette_value "${theme}" countdown)"
     countdown_warn="$(palette_value "${theme}" countdown_warn)"
-    claude_icon="$(png_data_uri "${cache_dir}/icon-v2-claude.png")"
-    claude_bar="$(png_data_uri "${cache_dir}/bar-claude.png")"
-    codex_icon="$(png_data_uri "${cache_dir}/icon-v2-codex.png")"
-    codex_bar="$(png_data_uri "${cache_dir}/bar-codex.png")"
 
-    cat > "${out_file}" <<EOF
-<svg xmlns="http://www.w3.org/2000/svg" width="324" height="28" viewBox="0 0 324 28" role="img">
-<title>${theme} SketchyBar rendered preview</title>
-<rect x="0" y="0" width="324" height="28" rx="14" fill="transparent"/>
-<image href="${claude_icon}" x="0" y="3" width="22" height="22" preserveAspectRatio="xMidYMid meet"/>
-<image href="${claude_bar}" x="27" y="5" width="80" height="18" preserveAspectRatio="none"/>
-<text x="115" y="14" dominant-baseline="middle" font-family="SF Pro Text, SF Pro, -apple-system, BlinkMacSystemFont, Helvetica, Arial, sans-serif" font-size="12" font-weight="600" fill="#${countdown}">3:29</text>
-<image href="${codex_icon}" x="167" y="3" width="22" height="22" preserveAspectRatio="xMidYMid meet"/>
-<image href="${codex_bar}" x="194" y="5" width="80" height="18" preserveAspectRatio="none"/>
-<text x="282" y="14" dominant-baseline="middle" font-family="SF Pro Text, SF Pro, -apple-system, BlinkMacSystemFont, Helvetica, Arial, sans-serif" font-size="12" font-weight="600" fill="#${countdown_warn}">23m</text>
-</svg>
-EOF
+    {
+        printf '<svg xmlns="http://www.w3.org/2000/svg" width="324" height="28" viewBox="0 0 324 28" role="img">\n'
+        printf '<title>%s SketchyBar rendered preview</title>\n' "${theme}"
+        printf '<rect x="0" y="0" width="324" height="28" rx="14" fill="transparent"/>\n'
+        draw_provider "${theme}" "${cache_dir}" claude 0 27 115 '3:29' "${countdown}" 83 30 '2099-01-03T00:00:00Z' 10080
+        draw_provider "${theme}" "${cache_dir}" codex 167 194 282 '23m' "${countdown_warn}" 8 65 '2099-01-04T12:00:00Z' 10080
+        printf '</svg>\n'
+    } > "${out_file}"
     chmod 0644 "${out_file}"
 }
 
@@ -132,9 +193,7 @@ render_theme() {
         "${BASH_BIN}" "${REPO_ROOT}/sketchybar/plugins/showy_bar.sh"
 
     strip_png_metadata "${cache_dir}/icon-v2-claude.png"
-    strip_png_metadata "${cache_dir}/bar-claude.png"
     strip_png_metadata "${cache_dir}/icon-v2-codex.png"
-    strip_png_metadata "${cache_dir}/bar-codex.png"
 
     render_svg "${theme}" "${cache_dir}" "${svg_out}"
     printf 'rendered %s\n' "${svg_out}"
