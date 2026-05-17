@@ -1541,6 +1541,7 @@ for idx in 1 2 3 4; do
         SHOWY_BAR_NO_CONFIG=1 \
         SHOWY_BAR_CACHE_DIR="${cache}" \
         SHOWY_BAR_CODEXBAR_BIN="${slow_dir}/codexbar" \
+        SHOWY_BAR_LOCK_WAIT_TENTHS=300 \
         SHOWY_BAR_TEST_COUNTER="${counter}" \
         SHOWY_BAR_TEST_FIXTURE="${FIXTURE_DIR}/codexbar-realistic.json" \
         "${REPO_ROOT}/bin/showy-bar-fetch" --refresh > "${out_file}" 2>/dev/null
