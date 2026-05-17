@@ -11,3 +11,6 @@
 .vscode/
 .idea/
 .agents/
+
+# oracle reviews and other transient AI artifacts
+docs/reviews/

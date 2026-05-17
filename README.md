@@ -23,6 +23,40 @@ No provider auth code, no extra config beyond a single optional env file. By
 default, showy-bar probes `http://127.0.0.1:8080/usage` for `codexbar serve`
 and falls back to spawning the CLI on refresh.
 
+## Quickstart
+
+1. **Install and enable CodexBar.** It is the only thing that talks to providers.
+
+   ```sh
+   brew install --cask steipete/tap/codexbar          # macOS
+   # CLI tarball / Linux: https://github.com/steipete/CodexBar/releases
+   codexbar usage --format json | jq length           # should print 1 or more
+   ```
+
+   On macOS, cookie-based providers also need Full Disk Access for CodexBar in
+   **System Settings → Privacy & Security**. If `jq length` prints `0`, fix
+   CodexBar before continuing — showy-bar has nothing to paint without it.
+
+2. **Install showy-bar.**
+
+   ```sh
+   git clone https://github.com/enieuwy/showy-bar && cd showy-bar
+   make doctor                                        # verifies bash 4+, jq, codexbar
+   make install                                       # symlinks bin/* into ~/.local/bin
+   ```
+
+3. **Wire exactly one UI.** `make install` does not put anything on a bar.
+   Pick the one you use:
+
+   - **SketchyBar:** `make install-sketchybar`, then add
+     `source "$ITEM_DIR/showy_bar.sh"` to your `sketchybarrc` and reload.
+   - **tmux:** paste the snippet in [tmux wiring](#tmux-wiring) into `~/.tmux.conf`.
+   - **Zellij:** install `zjstatus.wasm`, paste the layout fragment, start
+     `showy-bar-zellij-pipe`. See [`docs/zellij.md`](docs/zellij.md).
+
+Stuck? `bin/showy-bar --diagnose` (or `make diagnose`) prints exactly the
+state a bug report needs.
+
 ## Requirements
 
 - **macOS** for SketchyBar. Zellij/tmux bars also work on Linux when the
@@ -56,22 +90,20 @@ icons are bundled in this repo.
 
 ## Install
 
+See [Quickstart](#quickstart) for the 3-step path. Detail flags:
+
 ```sh
-cd /path/to/showy-bar
-make install                   # symlinks bin/* into ~/.local/bin only
+make doctor                    # bash 4+, jq, codexbar present
+make install                   # symlinks bin/* into ~/.local/bin
+make install-sketchybar        # optional; SketchyBar item + plugin only
+make install-all               # both
+make uninstall                 # remove every symlink this Makefile created
 ```
 
 `make install` refuses to clobber existing files and refuses to retarget
-existing symlinks unless you explicitly run with `FORCE=1`.
-
-`make install` does **not** wire any UI by default. Each bar integration is
-opt-in so tmux/Zellij users do not get SketchyBar files, and vice versa.
-
-To uninstall:
-
-```sh
-make uninstall
-```
+existing symlinks unless you explicitly run with `FORCE=1`. It does **not**
+wire any UI — each bar integration is opt-in so tmux/Zellij users do not get
+SketchyBar files, and vice versa.
 
 ### SketchyBar wiring
 
@@ -135,27 +167,7 @@ SHOWY_BAR_THEME=catppuccin-mocha-blue
 Built-ins include Default, Carbonfox, Catppuccin variants, Dracula, Gruvbox
 Dark, Nord, and Tokyo Night.
 
-### Theme gallery
-
-Each preview uses the same two-provider fixture with `3:29` and `23m`
-countdowns, good/warn/bad remaining-usage colors, and different pacing-marker
-positions visible. SketchyBar previews are static renderings of the same
-icon/row layout. Terminal previews show the deterministic `showy-bar --preview`
-output.
-
-| theme name | SketchyBar image | terminal / Zellij image |
-|---|---|---|
-| `carbonfox` | <img src="docs/images/themes/carbonfox-sketchybar.svg" alt="carbonfox SketchyBar preview" width="420"> | <img src="docs/images/themes/carbonfox-terminal.png" alt="carbonfox terminal preview" width="420"> |
-| `catppuccin-frappe` | <img src="docs/images/themes/catppuccin-frappe-sketchybar.svg" alt="catppuccin-frappe SketchyBar preview" width="420"> | <img src="docs/images/themes/catppuccin-frappe-terminal.png" alt="catppuccin-frappe terminal preview" width="420"> |
-| `catppuccin-latte` | <img src="docs/images/themes/catppuccin-latte-sketchybar.svg" alt="catppuccin-latte SketchyBar preview" width="420"> | <img src="docs/images/themes/catppuccin-latte-terminal.png" alt="catppuccin-latte terminal preview" width="420"> |
-| `catppuccin-macchiato` | <img src="docs/images/themes/catppuccin-macchiato-sketchybar.svg" alt="catppuccin-macchiato SketchyBar preview" width="420"> | <img src="docs/images/themes/catppuccin-macchiato-terminal.png" alt="catppuccin-macchiato terminal preview" width="420"> |
-| `catppuccin-mocha` | <img src="docs/images/themes/catppuccin-mocha-sketchybar.svg" alt="catppuccin-mocha SketchyBar preview" width="420"> | <img src="docs/images/themes/catppuccin-mocha-terminal.png" alt="catppuccin-mocha terminal preview" width="420"> |
-| `catppuccin-mocha-blue` | <img src="docs/images/themes/catppuccin-mocha-blue-sketchybar.svg" alt="catppuccin-mocha-blue SketchyBar preview" width="420"> | <img src="docs/images/themes/catppuccin-mocha-blue-terminal.png" alt="catppuccin-mocha-blue terminal preview" width="420"> |
-| `default` | <img src="docs/images/themes/default-sketchybar.svg" alt="default SketchyBar preview" width="420"> | <img src="docs/images/themes/default-terminal.png" alt="default terminal preview" width="420"> |
-| `dracula` | <img src="docs/images/themes/dracula-sketchybar.svg" alt="dracula SketchyBar preview" width="420"> | <img src="docs/images/themes/dracula-terminal.png" alt="dracula terminal preview" width="420"> |
-| `gruvbox-dark` | <img src="docs/images/themes/gruvbox-dark-sketchybar.svg" alt="gruvbox-dark SketchyBar preview" width="420"> | <img src="docs/images/themes/gruvbox-dark-terminal.png" alt="gruvbox-dark terminal preview" width="420"> |
-| `nord` | <img src="docs/images/themes/nord-sketchybar.svg" alt="nord SketchyBar preview" width="420"> | <img src="docs/images/themes/nord-terminal.png" alt="nord terminal preview" width="420"> |
-| `tokyonight` | <img src="docs/images/themes/tokyonight-sketchybar.svg" alt="tokyonight SketchyBar preview" width="420"> | <img src="docs/images/themes/tokyonight-terminal.png" alt="tokyonight terminal preview" width="420"> |
+See [Theme gallery](#theme-gallery) further down for visual comparisons.
 
 Useful knobs:
 
@@ -188,17 +200,41 @@ per-role colors.
 ## Verification
 
 ```sh
-make test                         # smoke tests over JSON fixtures
+make doctor                         # bash 4+, jq, codexbar present
+make test                           # smoke tests over JSON fixtures
+make diagnose                       # printable bug-report state (= `bin/showy-bar --diagnose`)
 bin/showy-bar-fetch | jq length     # 1+ if CodexBar has providers enabled
-bin/showy-bar-state                  # JSON state for layout managers
-bin/showy-bar --list            # available palette themes
-bin/showy-bar --preview default # deterministic ANSI theme preview
+bin/showy-bar-state                 # JSON state for layout managers
+bin/showy-bar --list                # available palette themes
+bin/showy-bar --preview default     # deterministic ANSI theme preview
 bin/showy-bar-zellij-bar            # ANSI strip
 bin/showy-bar-tmux-bar              # tmux markup
 ```
 
 Cache lives at `${XDG_CACHE_HOME:-~/.cache}/showy-bar/usage.json`.
 `make clean` clears it.
+
+## Theme gallery
+
+Each preview uses the same two-provider fixture with `3:29` and `23m`
+countdowns, good/warn/bad remaining-usage colors, and different pacing-marker
+positions visible. SketchyBar previews are static renderings of the same
+icon/row layout. Terminal previews show the deterministic
+`showy-bar --preview` output.
+
+| theme name | SketchyBar image | terminal / Zellij image |
+|---|---|---|
+| `carbonfox` | <img src="docs/images/themes/carbonfox-sketchybar.svg" alt="carbonfox SketchyBar preview" width="420"> | <img src="docs/images/themes/carbonfox-terminal.png" alt="carbonfox terminal preview" width="420"> |
+| `catppuccin-frappe` | <img src="docs/images/themes/catppuccin-frappe-sketchybar.svg" alt="catppuccin-frappe SketchyBar preview" width="420"> | <img src="docs/images/themes/catppuccin-frappe-terminal.png" alt="catppuccin-frappe terminal preview" width="420"> |
+| `catppuccin-latte` | <img src="docs/images/themes/catppuccin-latte-sketchybar.svg" alt="catppuccin-latte SketchyBar preview" width="420"> | <img src="docs/images/themes/catppuccin-latte-terminal.png" alt="catppuccin-latte terminal preview" width="420"> |
+| `catppuccin-macchiato` | <img src="docs/images/themes/catppuccin-macchiato-sketchybar.svg" alt="catppuccin-macchiato SketchyBar preview" width="420"> | <img src="docs/images/themes/catppuccin-macchiato-terminal.png" alt="catppuccin-macchiato terminal preview" width="420"> |
+| `catppuccin-mocha` | <img src="docs/images/themes/catppuccin-mocha-sketchybar.svg" alt="catppuccin-mocha SketchyBar preview" width="420"> | <img src="docs/images/themes/catppuccin-mocha-terminal.png" alt="catppuccin-mocha terminal preview" width="420"> |
+| `catppuccin-mocha-blue` | <img src="docs/images/themes/catppuccin-mocha-blue-sketchybar.svg" alt="catppuccin-mocha-blue SketchyBar preview" width="420"> | <img src="docs/images/themes/catppuccin-mocha-blue-terminal.png" alt="catppuccin-mocha-blue terminal preview" width="420"> |
+| `default` | <img src="docs/images/themes/default-sketchybar.svg" alt="default SketchyBar preview" width="420"> | <img src="docs/images/themes/default-terminal.png" alt="default terminal preview" width="420"> |
+| `dracula` | <img src="docs/images/themes/dracula-sketchybar.svg" alt="dracula SketchyBar preview" width="420"> | <img src="docs/images/themes/dracula-terminal.png" alt="dracula terminal preview" width="420"> |
+| `gruvbox-dark` | <img src="docs/images/themes/gruvbox-dark-sketchybar.svg" alt="gruvbox-dark SketchyBar preview" width="420"> | <img src="docs/images/themes/gruvbox-dark-terminal.png" alt="gruvbox-dark terminal preview" width="420"> |
+| `nord` | <img src="docs/images/themes/nord-sketchybar.svg" alt="nord SketchyBar preview" width="420"> | <img src="docs/images/themes/nord-terminal.png" alt="nord terminal preview" width="420"> |
+| `tokyonight` | <img src="docs/images/themes/tokyonight-sketchybar.svg" alt="tokyonight SketchyBar preview" width="420"> | <img src="docs/images/themes/tokyonight-terminal.png" alt="tokyonight terminal preview" width="420"> |
 
 ## How it stays cheap
 

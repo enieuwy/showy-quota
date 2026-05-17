@@ -1,0 +1,49 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bash jq shellcheck
+
+      - name: Install dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install bash jq shellcheck
+
+      - name: Print versions
+        run: |
+          bash --version | head -n1
+          jq --version
+          shellcheck --version | head -n3
+
+      # showy-bar requires Homebrew bash on macOS, but the macOS image's
+      # default /bin/bash is 3.2. Force-run make with the Homebrew bash from
+      # brew install above by prepending its bin to PATH.
+      - name: Set PATH (macOS Homebrew bash)
+        if: runner.os == 'macOS'
+        run: |
+          BREW_PREFIX=$(brew --prefix)
+          echo "$BREW_PREFIX/bin" >> "$GITHUB_PATH"
+
+      - name: make lint
+        run: make lint
+
+      - name: make test
+        run: make test
