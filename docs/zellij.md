@@ -20,6 +20,20 @@ remain the last-known values, each countdown is rendered as `?` using
 `SHOWY_BAR_PALETTE_COUNTDOWN_WARN`, and elapsed reset markers are hidden
 because reset-time parsing is skipped while stale.
 
+## Font requirements
+
+Each provider chunk is wrapped in Powerline-Extra end caps: U+E0B6
+(`SHOWY_BAR_CAP_LEFT`, default ``) and U+E0B4
+(`SHOWY_BAR_CAP_RIGHT`, default ``). Any Nerd Font ships these;
+with a non-Nerd font configure your terminal to fall back to a
+Powerline-Extra font for the U+E0A0–U+E0D4 range, or set either
+`SHOWY_BAR_CAP_*` env var to an empty string for a flat edge. Common
+alternatives are `` / `` (slant) and `` / ``
+(flame).
+
+The bar body itself uses only Unicode Block Elements (`▀`,
+`▕`, `▏`), which every monospace font carries.
+
 ## Pipe vs command widget
 
 The pipe widget is more stable than the `command` widget under WASMI,

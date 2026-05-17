@@ -53,6 +53,15 @@ while (($#)); do
     shift
 done
 
+# ── caps ──────────────────────────────────────────────────────────────────
+#
+# Powerline-Extra glyphs by default (U+E0B6 / U+E0B4); requires a Nerd
+# Font or any font with the Powerline Extra range. Override or blank
+# either side to taste; common alternatives are '' / ''
+# (slant) or '' / '' (flame). Empty string = no cap on
+# that side.
+CAP_LEFT="${SHOWY_BAR_CAP_LEFT-}"
+CAP_RIGHT="${SHOWY_BAR_CAP_RIGHT-}"
 # ── color helpers ────────────────────────────────────────────────────
 
 want_color=1
@@ -240,12 +249,12 @@ while IFS=$'\x1f' read -r provider p_used p_reset _p_window s_used s_reset s_win
     chunk_bg=$(showy_bar_palette bg)
     surface_color=$(showy_bar_palette surface)
     primary_color=$(showy_bar_role_color primary "${p_remaining}")
-    style_text '' "${primary_color}" "${chunk_bg}"
+    style_text "${CAP_LEFT}" "${primary_color}" "${chunk_bg}"
     style_text "${sigil}" "${chunk_bg}" "${primary_color}" bold
     style_text '▕' "${chunk_bg}" "${primary_color}"
     dual_metric_bar "${p_remaining}" "${s_remaining}" "${marker_reset}" "${marker_window}"
     style_text "${countdown}" "${time_color}" "${surface_color}" bold
-    style_text '' "${surface_color}" "${chunk_bg}"
+    style_text "${CAP_RIGHT}" "${surface_color}" "${chunk_bg}"
 done <<< "${rows}"
 
 # Strip CR; emit single newline so zjstatus pipe widget sees a clean record.

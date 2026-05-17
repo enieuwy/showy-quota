@@ -298,7 +298,9 @@ showy_bar_have magick && HAVE_MAGICK=1
 # Bar geometry. Bars sit inside SketchyBar's pill; tweak via env.
 : "${SHOWY_BAR_PNG_BAR_W:=80}"
 NATIVE_ROW_HEIGHT=6
-NATIVE_ROW_RADIUS=3
+# Default 3 == NATIVE_ROW_HEIGHT/2 → fully rounded ends. Set to 0 for a
+# squared track; intermediate values yield partial rounding.
+NATIVE_ROW_RADIUS="${SHOWY_BAR_SKETCHYBAR_ROW_RADIUS:-3}"
 
 # ── ARGB helpers ─────────────────────────────────────────────────────
 

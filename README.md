@@ -38,6 +38,10 @@ single optional env file.
 - SketchyBar integration also needs `sketchybar` on the PATH. Font icon mode
   needs `sketchybar-app-font`; SVG fallback icons need ImageMagick 7+
   (`magick`). Native usage rows do not need `magick`.
+- The Zellij renderer wraps each provider chunk in Powerline-Extra end
+  caps (U+E0B6 / U+E0B4). Any Nerd Font ships these; with a non-Nerd
+  font, set `SHOWY_BAR_CAP_LEFT=` / `SHOWY_BAR_CAP_RIGHT=` to blank
+  them. tmux uses only Unicode Block Elements and needs no special font.
 - Optional: `flock` for inter-process locking; falls back to an owner-scoped
   `mkdir` lock when missing.
 
