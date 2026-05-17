@@ -1534,32 +1534,50 @@ counter="${cache}/cb-call-count"
 : > "${counter}"
 pids=()
 outputs=()
+errors=()
 for idx in 1 2 3 4; do
     out_file="${cache}/refresh.${idx}.json"
+    err_file="${cache}/refresh.${idx}.err"
     outputs+=("${out_file}")
+    errors+=("${err_file}")
     (
         SHOWY_BAR_NO_CONFIG=1 \
         SHOWY_BAR_CACHE_DIR="${cache}" \
         SHOWY_BAR_CODEXBAR_BIN="${slow_dir}/codexbar" \
+        SHOWY_BAR_DEBUG=1 \
         SHOWY_BAR_LOCK_WAIT_TENTHS=300 \
         SHOWY_BAR_TEST_COUNTER="${counter}" \
         SHOWY_BAR_TEST_FIXTURE="${FIXTURE_DIR}/codexbar-realistic.json" \
-        "${REPO_ROOT}/bin/showy-bar-fetch" --refresh > "${out_file}" 2>/dev/null
+        "${REPO_ROOT}/bin/showy-bar-fetch" --refresh > "${out_file}" 2> "${err_file}"
     ) &
     pids+=("$!")
 done
 
 all_fresh=1
+bad_idx=()
 for idx in "${!pids[@]}"; do
     if wait "${pids[$idx]}" && grep -F -q 'futureUnknownTopLevelField' "${outputs[$idx]}"; then
         :
     else
         all_fresh=0
+        bad_idx+=("${idx}")
     fi
 done
 if (( all_fresh )); then
     ok "forced refresh callers wait for refreshed cache"
 else
+    for idx in "${bad_idx[@]}"; do
+        out_file="${outputs[$idx]}"
+        err_file="${errors[$idx]}"
+        out_size=$(wc -c < "${out_file}" 2>/dev/null | tr -d ' ' || printf '?')
+        printf '  caller %s: out_size=%s first_byte=%q\n' \
+            "$((idx + 1))" "${out_size}" \
+            "$(head -c1 "${out_file}" 2>/dev/null || printf '')" >&2
+        if [[ -s "${err_file}" ]]; then
+            printf '  caller %s stderr (last 20 lines):\n' "$((idx + 1))" >&2
+            tail -n 20 "${err_file}" | sed 's/^/    /' >&2
+        fi
+    done
     fail "forced refresh callers wait for refreshed cache"
 fi
 calls=$(wc -c < "${counter}" | tr -d ' ')
