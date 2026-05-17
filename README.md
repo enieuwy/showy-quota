@@ -1,5 +1,11 @@
 # showy-bar
 
+<p align="center">
+  <img src="docs/images/hero-termius.png" alt="showy-bar zellij strip running inside Termius on iPhone 16 Pro, showing four AI provider countdowns" width="720">
+</p>
+
+<p align="center"><sub>showy-bar's Zellij strip on an iPhone — four AI providers, real quotas, mid-session.</sub></p>
+
 Always-on AI coding-quota strips for **SketchyBar**, **Zellij**, and **tmux**,
 driven by [CodexBar](https://github.com/steipete/CodexBar) CLI JSON or its
 localhost `codexbar serve` endpoint.
