@@ -1,6 +1,10 @@
 # showy-bar
 
 <p align="center">
+  <img src="docs/images/hero-desktop.png" alt="showy-bar running across SketchyBar and a Zellij terminal on macOS" width="960">
+</p>
+
+<p align="center">
   <img src="docs/images/hero-termius.png" alt="showy-bar zellij strip running inside Termius on iPhone 16 Pro, showing four AI provider countdowns" width="720">
 </p>
 
