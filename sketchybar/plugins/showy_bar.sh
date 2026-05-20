@@ -111,6 +111,21 @@ declare_marker_item() {
                    click_script="${CLICK}" >/dev/null 2>&1 || true
 }
 
+declare_stale_item() {
+    sketchybar --remove showy_bar.stale >/dev/null 2>&1 || true
+    sketchybar --add item showy_bar.stale left \
+               --set showy_bar.stale \
+                   drawing=off \
+                   label="${SHOWY_BAR_STALE_GLYPH}" \
+                   label.color="${COUNTDOWN_WARN_ARGB}" \
+                   icon.drawing=off \
+                   background.color=0x00000000 \
+                   background.height=0 \
+                   padding_left=4 \
+                   padding_right=2 \
+                   click_script="${CLICK}" >/dev/null 2>&1 || true
+}
+
 declare_provider_items() {
     local pid="$1"
     remove_provider_items "${pid}"
@@ -226,17 +241,22 @@ declared_items_present() {
         [[ -n "${pid}" ]] || continue
         provider_items_declared "${pid}" || return 1
     done <<< "${providers}"
-    [[ -z "${providers}" ]] || sketchybar_item_exists showy_bar_bracket
+    [[ -z "${providers}" ]] || {
+        sketchybar_item_exists showy_bar.stale \
+            && sketchybar_item_exists showy_bar_bracket
+    }
 }
 
 
 recreate_bracket() {
     local providers="${1-}" pid
     local bracket_items=()
+    local has_provider=0
     sketchybar --remove showy_bar_bracket >/dev/null 2>&1 || true
 
     while IFS= read -r pid; do
         [[ -n "${pid}" ]] || continue
+        has_provider=1
         bracket_items+=(
             "showy_bar.${pid}.icon"
             "showy_bar.${pid}.primary"
@@ -249,7 +269,14 @@ recreate_bracket() {
         )
     done <<< "${providers}"
 
-    (( ${#bracket_items[@]} > 0 )) || return 0
+    if (( ! has_provider )); then
+        sketchybar --remove showy_bar.stale >/dev/null 2>&1 || true
+        return 0
+    fi
+
+    bracket_items+=("showy_bar.stale")
+
+    declare_stale_item
     sketchybar --add bracket showy_bar_bracket "${bracket_items[@]}" \
                --set showy_bar_bracket \
                    background.color="${SHOWY_BAR_SKETCHYBAR_PILL_COLOR}" \
@@ -283,6 +310,7 @@ clear_declared_items() {
         remove_provider_items "${pid}"
     done <<< "${declared}"
     sketchybar --remove showy_bar_bracket >/dev/null 2>&1 || true
+    sketchybar --remove showy_bar.stale >/dev/null 2>&1 || true
     write_state_providers "" || showy_bar_log "failed to clear sketchybar provider state"
 }
 
@@ -320,6 +348,7 @@ COUNTDOWN_HEX="$(showy_bar_palette countdown)"
 COUNTDOWN_ARGB="$(argb_from_hex "${COUNTDOWN_HEX}")"
 COUNTDOWN_WARN_HEX="$(showy_bar_palette countdown_warn)"
 COUNTDOWN_WARN_ARGB="$(argb_from_hex "${COUNTDOWN_WARN_HEX}")"
+STALE_ARGB="$(argb_from_hex "$(showy_bar_palette stale)")"
 ELAPSED_HEX="$(showy_bar_palette elapsed)"
 ELAPSED_ARGB="$(argb_from_hex "${ELAPSED_HEX}")"
 
@@ -520,6 +549,11 @@ label_for_minutes() {
 # ── main ─────────────────────────────────────────────────────────────
 
 data=$("${FETCH}" 2>/dev/null || printf '[]')
+if showy_bar_cache_stale_for "${SHOWY_BAR_USAGE_FILE}"; then
+    stale=1
+else
+    stale=0
+fi
 
 elapsed_marker_x() {
     local reset_at="$1" window_minutes="$2"
@@ -651,6 +685,17 @@ while IFS=$'\x1f' read -r pid rem_p p_reset rem_s s_reset s_window rem_t t_reset
     fi
     { IFS= read -r label; IFS= read -r color; } < <(label_for_minutes "${minutes}" "${rem_p}" "${p_reset}") || true
     [[ -n "${color}" ]] || color="${COUNTDOWN_ARGB}"
+    primary_highlight="$(argb_from_hex "$(showy_bar_role_color primary "${rem_p_pct}")")"
+    secondary_highlight="$(argb_from_hex "$(showy_bar_role_color secondary "${rem_s_pct}")")"
+    tertiary_highlight="$(argb_from_hex "$(showy_bar_role_color tertiary "${rem_t_pct}")")"
+    if (( stale )); then
+        color="${STALE_ARGB}"
+        primary_highlight="${STALE_ARGB}"
+        secondary_highlight="${STALE_ARGB}"
+        tertiary_highlight="${STALE_ARGB}"
+        marker_s_pct=""
+        marker_t_pct=""
+    fi
 
     primary_item="showy_bar.${pid}.primary"
     secondary_item="showy_bar.${pid}.secondary"
@@ -676,12 +721,12 @@ while IFS=$'\x1f' read -r pid rem_p p_reset rem_s s_reset s_window rem_t t_reset
     fi
 
     args+=(
-        --set "${primary_item}" drawing=on slider.percentage="${rem_p_pct}" slider.highlight_color="$(argb_from_hex "$(showy_bar_role_color primary "${rem_p_pct}")")" slider.background.color="${TRACK_ARGB}" slider.background.height="${NATIVE_ROW_HEIGHT}" slider.background.corner_radius="${NATIVE_ROW_RADIUS}" slider.knob.drawing=off background.color=0x00000000 background.height=0 padding_left=0 padding_right=0 width=0 y_offset="${primary_y}" click_script="${primary_click}"
-        --set "${secondary_item}" drawing=on slider.percentage="${rem_s_pct}" slider.highlight_color="$(argb_from_hex "$(showy_bar_role_color secondary "${rem_s_pct}")")" slider.background.color="${TRACK_ARGB}" slider.background.height="${NATIVE_ROW_HEIGHT}" slider.background.corner_radius="${NATIVE_ROW_RADIUS}" slider.knob.drawing=off background.color=0x00000000 background.height=0 padding_left=0 padding_right=0 width=0 y_offset="${secondary_y}" click_script="${secondary_click}"
+        --set "${primary_item}" drawing=on slider.percentage="${rem_p_pct}" slider.highlight_color="${primary_highlight}" slider.background.color="${TRACK_ARGB}" slider.background.height="${NATIVE_ROW_HEIGHT}" slider.background.corner_radius="${NATIVE_ROW_RADIUS}" slider.knob.drawing=off background.color=0x00000000 background.height=0 padding_left=0 padding_right=0 width=0 y_offset="${primary_y}" click_script="${primary_click}"
+        --set "${secondary_item}" drawing=on slider.percentage="${rem_s_pct}" slider.highlight_color="${secondary_highlight}" slider.background.color="${TRACK_ARGB}" slider.background.height="${NATIVE_ROW_HEIGHT}" slider.background.corner_radius="${NATIVE_ROW_RADIUS}" slider.knob.drawing=off background.color=0x00000000 background.height=0 padding_left=0 padding_right=0 width=0 y_offset="${secondary_y}" click_script="${secondary_click}"
     )
 
     if (( has_t )); then
-        args+=( --set "${tertiary_item}" drawing=on slider.percentage="${rem_t_pct}" slider.highlight_color="$(argb_from_hex "$(showy_bar_role_color tertiary "${rem_t_pct}")")" slider.background.color="${TRACK_ARGB}" slider.background.height="${NATIVE_ROW_HEIGHT}" slider.background.corner_radius="${NATIVE_ROW_RADIUS}" slider.knob.drawing=off background.color=0x00000000 background.height=0 padding_left=0 padding_right=0 width=0 y_offset="${tertiary_y}" click_script="${tertiary_click}" )
+        args+=( --set "${tertiary_item}" drawing=on slider.percentage="${rem_t_pct}" slider.highlight_color="${tertiary_highlight}" slider.background.color="${TRACK_ARGB}" slider.background.height="${NATIVE_ROW_HEIGHT}" slider.background.corner_radius="${NATIVE_ROW_RADIUS}" slider.knob.drawing=off background.color=0x00000000 background.height=0 padding_left=0 padding_right=0 width=0 y_offset="${tertiary_y}" click_script="${tertiary_click}" )
     else
         args+=( --set "${tertiary_item}" drawing=off slider.percentage=0 background.color=0x00000000 background.height=0 padding_left=0 padding_right=0 width=0 y_offset="${tertiary_y}" click_script="${tertiary_click}" )
     fi
@@ -704,3 +749,8 @@ while IFS=$'\x1f' read -r pid rem_p p_reset rem_s s_reset s_window rem_t t_reset
         sketchybar "${args[@]}" >/dev/null 2>&1 || true
     fi
 done <<< "${rows}"
+if (( stale )); then
+    sketchybar --set showy_bar.stale drawing=on label="${SHOWY_BAR_STALE_GLYPH}" label.color="${COUNTDOWN_WARN_ARGB}" icon.drawing=off background.color=0x00000000 background.height=0 padding_left=4 padding_right=2 click_script="${CLICK}" >/dev/null 2>&1 || true
+else
+    sketchybar --set showy_bar.stale drawing=off >/dev/null 2>&1 || true
+fi

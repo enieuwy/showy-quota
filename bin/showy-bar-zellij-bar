@@ -97,13 +97,14 @@ style_text() {
 
 dual_metric_bar() {
     local p_remaining="$1" s_remaining="$2" s_reset="$3" s_window="$4"
+    local primary_override="${5:-}" secondary_override="${6:-}"
     local width="${SHOWY_BAR_ZELLIJ_BAR_WIDTH:-12}"
     [[ "${width}" =~ ^[0-9]+$ ]] || width=12
     (( width < 8 )) && width=8
 
     local primary_color secondary_color bg_color surface_color elapsed_color
-    primary_color=$(showy_bar_role_color primary "${p_remaining}")
-    secondary_color=$(showy_bar_role_color secondary "${s_remaining}")
+    primary_color="${primary_override:-$(showy_bar_role_color primary "${p_remaining}")}"
+    secondary_color="${secondary_override:-$(showy_bar_role_color secondary "${s_remaining}")}"
     bg_color=$(showy_bar_palette bg)
     surface_color=$(showy_bar_palette surface)
     elapsed_color=$(showy_bar_palette elapsed)
@@ -157,11 +158,10 @@ if (( count == 0 )); then
 fi
 
 # Stale = cache is older than 2x the refresh interval; render quota state
-# as last-known data and mark countdowns unknown rather than dimming chunks.
+# as last-known data with a single leading frozen-snapshot marker.
 stale=0
-if [[ -z "${json_input}" ]]; then
-    age=$(showy_bar_age_seconds "${SHOWY_BAR_USAGE_FILE}")
-    (( age > SHOWY_BAR_REFRESH_SECONDS * 2 )) && stale=1
+if [[ -z "${json_input}" ]] && showy_bar_cache_stale_for "${SHOWY_BAR_USAGE_FILE}"; then
+    stale=1
 fi
 
 # ── per-provider render ─────────────────────────────────────────────
@@ -185,6 +185,9 @@ rows=$(printf '%s' "${filtered}" | jq -r '
     ] | map(tostring) | join("\u001f")')
 
 first_chunk=1
+chunk_bg=$(showy_bar_palette bg)
+stale_color=$(showy_bar_palette stale)
+countdown_warn=$(showy_bar_palette countdown_warn)
 while IFS=$'\x1f' read -r provider p_used p_reset _p_window s_used s_reset s_window; do
     [[ -n "${provider}" ]] || continue
 
@@ -197,14 +200,21 @@ while IFS=$'\x1f' read -r provider p_used p_reset _p_window s_used s_reset s_win
     sigil=$(showy_bar_provider_sigil "${provider}")
 
     minutes=""
-    if (( ! stale )) && [[ -n "${p_reset}" ]]; then
+    if [[ -n "${p_reset}" ]]; then
         minutes=$(showy_bar_minutes_until "${p_reset}" || true)
+        if (( stale )) && [[ "${minutes}" == "0" ]]; then
+            reset_epoch=$(showy_bar_reset_epoch "${p_reset}" || true)
+            now_epoch=$(showy_bar_now_epoch)
+            if [[ -n "${reset_epoch}" ]] && (( reset_epoch <= now_epoch )); then
+                minutes=""
+            fi
+        fi
     fi
-    countdown=$(showy_bar_primary_label "${minutes}" "${p_remaining}" "${p_reset}" "${stale}")
+    countdown=$(showy_bar_primary_label "${minutes}" "${p_remaining}" "${p_reset}")
 
     time_color=$(showy_bar_palette countdown)
     if (( stale )); then
-        time_color=$(showy_bar_palette countdown_warn)
+        time_color="${stale_color}"
     elif [[ -n "${minutes}" && "${minutes}" -lt "${SHOWY_BAR_TIME_WARN_MINUTES}" ]]; then
         time_color=$(showy_bar_palette countdown_warn)
     fi
@@ -218,16 +228,26 @@ while IFS=$'\x1f' read -r provider p_used p_reset _p_window s_used s_reset s_win
         marker_reset=""
         marker_window=""
     fi
-    chunk_bg=$(showy_bar_palette bg)
     surface_color=$(showy_bar_palette surface)
     primary_color=$(showy_bar_role_color primary "${p_remaining}")
+    secondary_color=$(showy_bar_role_color secondary "${s_remaining}")
+    if (( stale )); then
+        primary_color="${stale_color}"
+        secondary_color="${stale_color}"
+    fi
+    separator_fg="${chunk_bg}"
+    separator_bg="${primary_color}"
     style_text "${CAP_LEFT}" "${primary_color}" "${chunk_bg}"
     style_text "${sigil}" "${chunk_bg}" "${primary_color}" bold
-    style_text '▕' "${chunk_bg}" "${primary_color}"
-    dual_metric_bar "${p_remaining}" "${s_remaining}" "${marker_reset}" "${marker_window}"
+    style_text '▕' "${separator_fg}" "${separator_bg}"
+    dual_metric_bar "${p_remaining}" "${s_remaining}" "${marker_reset}" "${marker_window}" "${primary_color}" "${secondary_color}"
     style_text "${countdown}" "${time_color}" "${surface_color}" bold
     style_text "${CAP_RIGHT}" "${surface_color}" "${chunk_bg}"
 done <<< "${rows}"
+if (( stale )); then
+    printf ' '
+    style_text "${SHOWY_BAR_STALE_GLYPH}" "${countdown_warn}" "${chunk_bg}" bold
+fi
 
 # Strip CR; emit single newline so zjstatus pipe widget sees a clean record.
 printf '\n'

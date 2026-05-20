@@ -71,7 +71,9 @@ showy_bar_load_config
 : "${SHOWY_BAR_PALETTE_ICON_TEXT:=f2f4f8}"
 : "${SHOWY_BAR_PALETTE_COUNTDOWN:=7b8496}"
 : "${SHOWY_BAR_PALETTE_COUNTDOWN_WARN:=${SHOWY_BAR_PALETTE_PRIMARY_BAD}}"
+: "${SHOWY_BAR_PALETTE_STALE:=${SHOWY_BAR_PALETTE_PRIMARY_UNKNOWN}}"
 : "${SHOWY_BAR_PALETTE_ELAPSED:=be95ff}"
+: "${SHOWY_BAR_STALE_GLYPH:=⚠}"
 
 : "${SHOWY_BAR_GOOD_MIN_REMAINING:=40}"
 : "${SHOWY_BAR_WARN_MIN_REMAINING:=15}"
@@ -141,6 +143,14 @@ showy_bar_age_seconds() {
     elif mtime=$(stat -c %Y "${path}" 2>/dev/null); then :
     else mtime="${now}"; fi
     printf '%s\n' $((now - mtime))
+}
+
+showy_bar_stale_after_seconds() { printf '%s\n' $((SHOWY_BAR_REFRESH_SECONDS * 2)); }
+
+showy_bar_cache_stale_for() {
+    local age
+    age=$(showy_bar_age_seconds "$1")
+    (( age > SHOWY_BAR_REFRESH_SECONDS * 2 ))
 }
 
 showy_bar_parse_local_epoch() {
@@ -245,11 +255,7 @@ showy_bar_format_countdown() {
 }
 
 showy_bar_primary_label() {
-    local minutes="$1" remaining="$2" reset_value="${3:-}" stale="${4:-0}"
-    if [[ "${stale}" == "1" ]]; then
-        printf '?'
-        return
-    fi
+    local minutes="$1" remaining="$2" reset_value="${3:-}"
     if [[ -n "${minutes}" ]]; then
         showy_bar_format_countdown "${minutes}"
         return
@@ -320,7 +326,8 @@ showy_bar_palette() {
         icon_text)      printf '%s' "${SHOWY_BAR_PALETTE_ICON_TEXT}" ;;
         countdown)      printf '%s' "${SHOWY_BAR_PALETTE_COUNTDOWN}" ;;
         countdown_warn) printf '%s' "${SHOWY_BAR_PALETTE_COUNTDOWN_WARN}" ;;
-        elapsed) printf '%s' "${SHOWY_BAR_PALETTE_ELAPSED}" ;;
+        stale)          printf '%s' "${SHOWY_BAR_PALETTE_STALE}" ;;
+        elapsed)        printf '%s' "${SHOWY_BAR_PALETTE_ELAPSED}" ;;
         *)       showy_bar_die "unknown global palette token: $1" ;;
     esac
 }

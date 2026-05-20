@@ -16,9 +16,16 @@ in the lower half. Colors are emitted as tmux `#[fg=#RRGGBB,bg=#RRGGBB]`
 markup; the markup is longer than the visible strip but does not consume
 status-line columns.
 
-When the cache is older than `2 × SHOWY_BAR_REFRESH_SECONDS`, quota colors
-remain the last-known values and each countdown is rendered as `?` using
-`SHOWY_BAR_PALETTE_COUNTDOWN_WARN`; elapsed markers are hidden.
+When the cache is older than `2 × SHOWY_BAR_REFRESH_SECONDS`, tmux gets one
+trailing `SHOWY_BAR_STALE_GLYPH` (default `⚠`) after the last provider. The
+cap glyphs, sigil background, separator, bar fill cells, and countdown
+foreground use `SHOWY_BAR_PALETTE_STALE`; sigil letters and the strip
+background stay unchanged, and elapsed markers are hidden.
+
+```text
+fresh: #[…]CL▕▀▀▀▀▀▀▀▀▀▀▀▀▏12m
+stale: #[…]CL▕▀▀▀▀▀▀▀▀▀▀▀▀▏12m #[…]⚠   # data-bearing colors greyed
+```
 
 ## status-right
 

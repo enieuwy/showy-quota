@@ -208,6 +208,12 @@ run_state() {
         "${REPO_ROOT}/bin/showy-bar-state"
 }
 
+run_state_with_usage_file() {
+    local fixture="$1" usage_file="$2"
+    shift 2
+    run_state "${fixture}" SHOWY_BAR_USAGE_FILE="${usage_file}" "$@"
+}
+
 run_theme() {
     local xdg="$1"
     shift
@@ -315,6 +321,7 @@ seed_sketchybar_live_items() {
     done
     if (($# > 0)); then
         : > "${cache}/sb-state/showy_bar_bracket"
+        : > "${cache}/sb-state/showy_bar.stale"
     fi
 }
 
@@ -475,7 +482,7 @@ out=$(run_common_eval 'showy_bar_primary_label "" 100 "" 0' SHOWY_BAR_NO_CONFIG=
 assert_equals "primary label keeps live idle behavior" "idle" "${out}"
 
 out=$(run_common_eval 'showy_bar_primary_label 12 88 "2099-01-01T00:12:00Z" 1' SHOWY_BAR_NO_CONFIG=1)
-assert_equals "primary label marks stale cache unknown" "?" "${out}"
+assert_equals "primary label ignores legacy stale arg" "12m" "${out}"
 
 
 # ── theme CLI ─────────────────────────────────────────────────────────
@@ -699,6 +706,20 @@ assert_equals "state provider count honors renderable filter" "3" "$(printf '%s'
 assert_equals "state provider order matches render order" "codex,claude,gemini" "$(printf '%s' "${out}" | jq -r '.providers | join(",")')"
 assert_equals "state compact recommendation defaults below threshold" "false" "$(printf '%s' "${out}" | jq -r '.sketchybar.compactRecommended')"
 
+state_usage_cache=$(mk_cache)
+state_usage_file="${state_usage_cache}/usage-explicit.json"
+out=$(run_state_with_usage_file codexbar-mixed.json "${state_usage_file}")
+assert_equals "state marks fresh cache not stale" "false" "$(printf '%s' "${out}" | jq -r '.stale')"
+assert_equals "state exposes cache age" "true" "$(printf '%s' "${out}" | jq -r '.cacheAgeSeconds | type == "number"')"
+assert_equals "state exposes stale-after threshold" "240" "$(printf '%s' "${out}" | jq -r '.staleAfterSeconds')"
+
+state_usage_cache=$(mk_cache)
+state_usage_file="${state_usage_cache}/usage-explicit.json"
+cp "${FIXTURE_DIR}/codexbar-mixed.json" "${state_usage_file}"
+touch -t 198801010000 "${state_usage_file}"
+out=$(run_state_with_usage_file codexbar-mixed.json "${state_usage_file}" SHOWY_BAR_CODEXBAR_BIN="${TMP}/no-such-codexbar-state" SHOWY_BAR_CODEXBAR_SERVE_URL='')
+assert_equals "state marks stale cache stale" "true" "$(printf '%s' "${out}" | jq -r '.stale')"
+
 out=$(run_state codexbar-mixed.json SHOWY_BAR_SKETCHYBAR_COMPACT_PROVIDER_COUNT=3)
 assert_equals "state compact threshold is configurable" "true" "$(printf '%s' "${out}" | jq -r '.sketchybar.compactRecommended')"
 
@@ -719,6 +740,7 @@ out=$(
 )
 assert_equals "state reports unavailable without cache" "false" "$(printf '%s' "${out}" | jq -r '.available')"
 assert_equals "state keeps unavailable provider count empty" "0" "$(printf '%s' "${out}" | jq -r '.providerCount')"
+assert_equals "state cache age null when absent" "null" "$(printf '%s' "${out}" | jq -r '.cacheAgeSeconds')"
 
 # ── sketchybar bootstrap (without sketchybar daemon) ────────────────────
 
@@ -733,6 +755,8 @@ assert_contains "bootstrap synchronously adds provider items" "--add item showy_
 assert_contains "bootstrap adds native primary slider" "--add slider showy_bar.claude.primary left 80" "${item_log}"
 assert_contains "bootstrap adds native marker overlay" "--add slider showy_bar.claude.secondary_marker left 80" "${item_log}"
 assert_contains "bootstrap recreates bracket immediately" "--add bracket showy_bar_bracket" "${item_log}"
+assert_contains "bootstrap declares stale indicator" "--add item showy_bar.stale left" "${item_log}"
+assert_contains "bootstrap places stale item rightmost in bracket" "showy_bar.gemini.label showy_bar.stale --set showy_bar_bracket" "${item_log}"
 assert_contains "bootstrap preserves icon width" "width=22" "${item_log}"
 assert_contains "bootstrap preserves native bar slot width" "showy_bar.claude.slot icon.drawing=off" "${item_log}"
 assert_contains "bootstrap preserves native bar width" "width=84" "${item_log}"
@@ -799,6 +823,7 @@ else
     fail "plugin repairs native bar slot width"
 fi
 plugin_log="$(< "${log}")"
+assert_contains "plugin keeps stale indicator off on fresh cache" "--set showy_bar.stale drawing=off" "${plugin_log}"
 assert_contains "plugin updates native primary row percentage" "--set showy_bar.claude.primary drawing=on slider.percentage=83" "${plugin_log}"
 assert_contains "plugin updates native secondary row percentage" "--set showy_bar.claude.secondary drawing=on slider.percentage=81" "${plugin_log}"
 assert_contains "plugin hides missing tertiary row" "--set showy_bar.claude.tertiary drawing=off" "${plugin_log}"
@@ -818,6 +843,17 @@ if compgen -G "${cache}/sb/bar-*.png" >/dev/null; then
 else
     ok "plugin no longer writes provider bar PNGs"
 fi
+
+cache=$(mk_cache)
+cp "${FIXTURE_DIR}/codexbar-mixed.json" "${cache}/usage.json"
+touch -t 198801010000 "${cache}/usage.json"
+log="${TMP}/sb-stale.log"
+run_sketchybar_plugin codexbar-mixed.json "${cache}" "${log}" SHOWY_BAR_CODEXBAR_BIN="${TMP}/no-such-codexbar-plugin" SHOWY_BAR_CODEXBAR_SERVE_URL=''
+plugin_log="$(< "${log}")"
+assert_contains "plugin shows stale indicator" "--set showy_bar.stale drawing=on label=⚠ label.color=0xffee5396" "${plugin_log}"
+assert_contains "plugin greys stale provider primary" "--set showy_bar.claude.primary drawing=on slider.percentage=83 slider.highlight_color=0xff6c7086" "${plugin_log}"
+assert_contains "plugin greys stale provider label" "label.color=0xff6c7086" "${plugin_log}"
+assert_contains "plugin hides stale marker" "--set showy_bar.claude.secondary_marker drawing=off" "${plugin_log}"
 
 cache=$(mk_cache)
 log="${TMP}/sb-no-magick.log"
@@ -930,7 +966,7 @@ else
     fail "plugin re-adds declared providers ahead of new providers in sort order" \
         "codex line=${add_codex_before_gemini} gemini line=${add_gemini_label}"
 fi
-assert_contains "plugin rebuilds bracket with added native provider" "showy_bar.gemini.icon showy_bar.gemini.primary showy_bar.gemini.secondary showy_bar.gemini.tertiary showy_bar.gemini.secondary_marker showy_bar.gemini.tertiary_marker showy_bar.gemini.slot showy_bar.gemini.label --set showy_bar_bracket" "${plugin_log}"
+assert_contains "plugin rebuilds bracket with added native provider" "showy_bar.gemini.icon showy_bar.gemini.primary showy_bar.gemini.secondary showy_bar.gemini.tertiary showy_bar.gemini.secondary_marker showy_bar.gemini.tertiary_marker showy_bar.gemini.slot showy_bar.gemini.label showy_bar.stale --set showy_bar_bracket" "${plugin_log}"
 assert_contains "plugin triggers provider-change event" "--trigger showy_bar_provider_change SHOWY_BAR_PROVIDER_COUNT=3 SHOWY_BAR_PROVIDERS=codex,claude,gemini" "${plugin_log}"
 
 cache=$(mk_cache)
@@ -1234,7 +1270,7 @@ else
     fail "fetcher serves stale cache when codexbar disappears" "rc=${rc}"
 fi
 
-# 6. Stale-cache rendering marks countdowns unknown without dimming quota color.
+# 6. Stale-cache rendering marks one frozen-snapshot indicator and greys data.
 printf '\nstale cache rendering\n'
 
 cache=$(mk_cache)
@@ -1243,38 +1279,48 @@ cp "${FIXTURE_DIR}/codexbar-mixed.json" "${cache}/usage.json"
 touch -t 198801010000 "${cache}/usage.json"
 # Use a bogus codexbar bin so fetch cannot refresh the backdated cache.
 ansi_dim=$'\x1b[2m'
-countdown_warn_rgb=$(hex_to_rgb_csv "$(run_common_eval 'showy_bar_palette countdown_warn' SHOWY_BAR_NO_CONFIG=1)")
-countdown_warn_sgr="${countdown_warn_rgb//,/;}"
+stale_rgb=$(hex_to_rgb_csv "$(run_common_eval 'showy_bar_palette stale' SHOWY_BAR_NO_CONFIG=1)")
+stale_sgr="${stale_rgb//,/;}"
 surface_rgb=$(hex_to_rgb_csv "$(run_common_eval 'showy_bar_palette surface' SHOWY_BAR_NO_CONFIG=1)")
 surface_sgr="${surface_rgb//,/;}"
-printf -v stale_countdown_escape '\033[38;2;%sm\033[48;2;%sm?' "${countdown_warn_sgr}" "${surface_sgr}"
+bg_rgb=$(hex_to_rgb_csv "$(run_common_eval 'showy_bar_palette bg' SHOWY_BAR_NO_CONFIG=1)")
+bg_sgr="${bg_rgb//,/;}"
+countdown_warn_rgb=$(hex_to_rgb_csv "$(run_common_eval 'showy_bar_palette countdown_warn' SHOWY_BAR_NO_CONFIG=1)")
+countdown_warn_sgr="${countdown_warn_rgb//,/;}"
+printf -v stale_half_escape '\033[38;2;%sm\033[48;2;%sm▀' "${stale_sgr}" "${stale_sgr}"
+printf -v stale_sigil_bg_escape '\033[48;2;%smCL' "${stale_sgr}"
+printf -v stale_countdown_escape '\033[38;2;%sm\033[48;2;%sm12m' "${stale_sgr}" "${surface_sgr}"
+printf -v stale_separator_escape '\033[38;2;%sm\033[48;2;%sm▕' "${bg_sgr}" "${stale_sgr}"
+printf -v trailing_stale_escape ' \033[1m\033[38;2;%sm\033[48;2;%sm⚠' "${countdown_warn_sgr}" "${bg_sgr}"
 out=$(
     SHOWY_BAR_NO_CONFIG=1 \
     SHOWY_BAR_CACHE_DIR="${cache}" \
     SHOWY_BAR_CODEXBAR_BIN="${TMP}/no-such-codexbar" \
     SHOWY_BAR_CODEXBAR_SERVE_URL='' \
     SHOWY_BAR_FORCE_COLOR=1 \
+    SHOWY_BAR_NOW_EPOCH=4070928480 \
     "${REPO_ROOT}/bin/showy-bar-zellij-bar"
 )
+assert_contains "zellij shows trailing stale indicator" "${trailing_stale_escape}" "${out}"
+assert_contains "zellij greys stale half-block cells" "${stale_half_escape}" "${out}"
+assert_contains "zellij greys stale sigil background" "${stale_sigil_bg_escape}" "${out}"
+assert_contains "zellij keeps separator on stale background" "${stale_separator_escape}" "${out}"
+assert_contains "zellij greys stale countdown" "${stale_countdown_escape}" "${out}"
 assert_not_contains "zellij does not dim stale cache" "${ansi_dim}" "${out}"
-assert_contains "zellij stale countdown uses warn palette" "${stale_countdown_escape}" "${out}"
-question_stripped="${out//\?/}"
-question_count=$(( ${#out} - ${#question_stripped} ))
-if (( question_count == 3 )); then
-    ok "zellij marks every stale provider countdown unknown"
-else
-    fail "zellij marks every stale provider countdown unknown" "question_count=${question_count}"
-fi
+assert_contains "zellij stale cache preserves valid countdown text" "12m" "${out}"
 
 out=$(
     SHOWY_BAR_NO_CONFIG=1 \
     SHOWY_BAR_CACHE_DIR="${cache}" \
     SHOWY_BAR_CODEXBAR_BIN="${TMP}/no-such-codexbar" \
     SHOWY_BAR_CODEXBAR_SERVE_URL='' \
+    SHOWY_BAR_NOW_EPOCH=4070928480 \
     "${REPO_ROOT}/bin/showy-bar-tmux-bar"
 )
 assert_not_contains "tmux does not dim stale cache" "#[dim]" "${out}"
-assert_contains "tmux stale countdown uses warn palette" "#[fg=#ee5396,bg=#2a2a2a,bold]?" "${out}"
+assert_contains "tmux shows trailing stale indicator" "#[fg=#161616,bg=#161616] #[default]#[fg=#ee5396,bg=#161616,bold]⚠" "${out}"
+assert_contains "tmux keeps separator on stale background" "#[fg=#161616,bg=#6c7086]▕" "${out}"
+assert_contains "tmux greys stale countdown" "#[fg=#6c7086,bg=#2a2a2a,bold]12m" "${out}"
 assert_not_contains "tmux stale cache has no weekly hint" "]w" "${out}"
 
 stale_past_fixture="${TMP}/codexbar-stale-past.json"

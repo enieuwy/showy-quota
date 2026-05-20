@@ -65,6 +65,17 @@ else
     providers_json='[]'
 fi
 
+cache_age="null"
+if [[ -f "${SHOWY_BAR_USAGE_FILE}" ]]; then
+    cache_age=$(showy_bar_age_seconds "${SHOWY_BAR_USAGE_FILE}")
+fi
+stale_after=$(showy_bar_stale_after_seconds)
+if [[ "${cache_age}" != "null" ]] && (( cache_age > stale_after )); then
+    stale_flag=true
+else
+    stale_flag=false
+fi
+
 case "${mode}" in
     count)
         printf '%s\n' "${providers_json}" | jq 'length'
@@ -76,10 +87,16 @@ case "${mode}" in
         jq -n \
             --argjson providers "${providers_json}" \
             --argjson available "${available}" \
+            --argjson stale "${stale_flag}" \
+            --arg cache_age "${cache_age}" \
+            --arg stale_after "${stale_after}" \
             --arg compact_threshold "${threshold}" \
             '($compact_threshold | tonumber) as $compact_threshold_num
             | {
                 available: $available,
+                stale: $stale,
+                cacheAgeSeconds: (if $cache_age == "null" then null else ($cache_age | tonumber) end),
+                staleAfterSeconds: ($stale_after | tonumber),
                 providers: $providers,
                 providerCount: ($providers | length),
                 sketchybar: {

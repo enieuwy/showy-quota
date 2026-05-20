@@ -115,21 +115,26 @@ primary palette at `0.55` by default, so the 7d/monthly rows keep the original
 dimmed ai-quota look unless you override `SHOWY_BAR_PALETTE_SECONDARY_*` or
 `SHOWY_BAR_PALETTE_TERTIARY_*` directly. `SHOWY_BAR_PALETTE_TRACK`,
 `SHOWY_BAR_PALETTE_ICON_TEXT`, `SHOWY_BAR_PALETTE_COUNTDOWN`,
-`SHOWY_BAR_PALETTE_COUNTDOWN_WARN`, and `SHOWY_BAR_PALETTE_ELAPSED`
-stay global across rows. Countdown labels use `SHOWY_BAR_PALETTE_COUNTDOWN`
-unless the reset time is inside `SHOWY_BAR_TIME_WARN_MINUTES`, then they use
-`SHOWY_BAR_PALETTE_COUNTDOWN_WARN`.
+`SHOWY_BAR_PALETTE_COUNTDOWN_WARN`, `SHOWY_BAR_PALETTE_STALE`, and
+`SHOWY_BAR_PALETTE_ELAPSED` stay global across rows. Countdown labels use
+`SHOWY_BAR_PALETTE_COUNTDOWN` unless the reset time is inside
+`SHOWY_BAR_TIME_WARN_MINUTES`, then they use `SHOWY_BAR_PALETTE_COUNTDOWN_WARN`.
 
 Use `showy-bar` to browse named palettes and persist `SHOWY_BAR_THEME`
 without hand-editing the config file.
+
+## Stale snapshot
+
+When `${SHOWY_BAR_USAGE_FILE}` is older than
+`2 × SHOWY_BAR_REFRESH_SECONDS`, the plugin turns on the trailing
+`showy_bar.stale` item inside `showy_bar_bracket`. The item renders
+`SHOWY_BAR_STALE_GLYPH` (default `⚠`) in `SHOWY_BAR_PALETTE_COUNTDOWN_WARN`.
+Provider sliders and countdown labels switch to `SHOWY_BAR_PALETTE_STALE`;
+provider icons keep their normal status tint, and elapsed marker overlays are
+hidden so stale reset timing is not presented as live.
 
 ## Cache
 
 Only SVG fallback icons are PNG-cached in `${SHOWY_BAR_SKETCHYBAR_IMAGE_CACHE}`
 (default `~/.cache/showy-bar/sketchybar`). Native bars and mapped font icons
 are not rasterized.
-
-## Caveats
-
-- The plugin does not change styling when the cache is stale; Zellij and tmux
-  degrade stale terminal strips by rendering countdowns as `?`.

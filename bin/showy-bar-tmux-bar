@@ -54,13 +54,14 @@ tmux_style_text() {
 
 tmux_dual_metric_bar() {
     local p_remaining="$1" s_remaining="$2" s_reset="$3" s_window="$4"
+    local primary_override="${5:-}" secondary_override="${6:-}"
     local width="${SHOWY_BAR_TMUX_BAR_WIDTH:-${SHOWY_BAR_ZELLIJ_BAR_WIDTH:-12}}"
     [[ "${width}" =~ ^[0-9]+$ ]] || width=12
     (( width < 8 )) && width=8
 
     local primary_color secondary_color bg_color surface_color elapsed_color
-    primary_color=$(showy_bar_role_color primary "${p_remaining}")
-    secondary_color=$(showy_bar_role_color secondary "${s_remaining}")
+    primary_color="${primary_override:-$(showy_bar_role_color primary "${p_remaining}")}"
+    secondary_color="${secondary_override:-$(showy_bar_role_color secondary "${s_remaining}")}"
     bg_color=$(showy_bar_palette bg)
     surface_color=$(showy_bar_palette surface)
     elapsed_color=$(showy_bar_palette elapsed)
@@ -101,9 +102,10 @@ if (( count == 0 )); then
     exit 0
 fi
 
-age=$(showy_bar_age_seconds "${SHOWY_BAR_USAGE_FILE}")
 stale=0
-(( age > SHOWY_BAR_REFRESH_SECONDS * 2 )) && stale=1
+if showy_bar_cache_stale_for "${SHOWY_BAR_USAGE_FILE}"; then
+    stale=1
+fi
 
 rows=$(printf '%s' "${filtered}" | jq -r '
     def pct(x): if x == null then -1 else ([0, ([100, (x|tonumber|floor)] | min)] | max) end;
@@ -120,6 +122,9 @@ rows=$(printf '%s' "${filtered}" | jq -r '
     ] | map(tostring) | join("\u001f")')
 
 first_chunk=1
+chunk_bg=$(showy_bar_palette bg)
+stale_color=$(showy_bar_palette stale)
+countdown_warn=$(showy_bar_palette countdown_warn)
 while IFS=$'\x1f' read -r provider p_used p_reset _p_window s_used s_reset s_window; do
     [[ -n "${provider}" ]] || continue
 
@@ -132,14 +137,21 @@ while IFS=$'\x1f' read -r provider p_used p_reset _p_window s_used s_reset s_win
     sigil=$(showy_bar_provider_sigil "${provider}")
 
     minutes=""
-    if (( ! stale )) && [[ -n "${p_reset}" ]]; then
+    if [[ -n "${p_reset}" ]]; then
         minutes=$(showy_bar_minutes_until "${p_reset}" || true)
+        if (( stale )) && [[ "${minutes}" == "0" ]]; then
+            reset_epoch=$(showy_bar_reset_epoch "${p_reset}" || true)
+            now_epoch=$(showy_bar_now_epoch)
+            if [[ -n "${reset_epoch}" ]] && (( reset_epoch <= now_epoch )); then
+                minutes=""
+            fi
+        fi
     fi
-    countdown=$(showy_bar_primary_label "${minutes}" "${p_remaining}" "${p_reset}" "${stale}")
+    countdown=$(showy_bar_primary_label "${minutes}" "${p_remaining}" "${p_reset}")
 
     time_color=$(showy_bar_palette countdown)
     if (( stale )); then
-        time_color=$(showy_bar_palette countdown_warn)
+        time_color="${stale_color}"
     elif [[ -n "${minutes}" && "${minutes}" -lt "${SHOWY_BAR_TIME_WARN_MINUTES}" ]]; then
         time_color=$(showy_bar_palette countdown_warn)
     fi
@@ -154,13 +166,23 @@ while IFS=$'\x1f' read -r provider p_used p_reset _p_window s_used s_reset s_win
         marker_window=""
     fi
 
-    chunk_bg=$(showy_bar_palette bg)
     surface_color=$(showy_bar_palette surface)
     primary_color=$(showy_bar_role_color primary "${p_remaining}")
+    secondary_color=$(showy_bar_role_color secondary "${s_remaining}")
+    if (( stale )); then
+        primary_color="${stale_color}"
+        secondary_color="${stale_color}"
+    fi
+    separator_fg="${chunk_bg}"
+    separator_bg="${primary_color}"
     tmux_style_text "${CAP_LEFT}" "${primary_color}" "${chunk_bg}"
     tmux_style_text "${sigil}" "${chunk_bg}" "${primary_color}" bold
-    tmux_style_text '▕' "${chunk_bg}" "${primary_color}"
-    tmux_dual_metric_bar "${p_remaining}" "${s_remaining}" "${marker_reset}" "${marker_window}"
+    tmux_style_text '▕' "${separator_fg}" "${separator_bg}"
+    tmux_dual_metric_bar "${p_remaining}" "${s_remaining}" "${marker_reset}" "${marker_window}" "${primary_color}" "${secondary_color}"
     tmux_style_text "${countdown}" "${time_color}" "${surface_color}" bold
     tmux_style_text "${CAP_RIGHT}" "${surface_color}" "${chunk_bg}"
 done <<< "${rows}"
+if (( stale )); then
+    tmux_style_text ' ' "$(showy_bar_palette bg)" "$(showy_bar_palette bg)"
+    tmux_style_text "${SHOWY_BAR_STALE_GLYPH}" "${countdown_warn}" "${chunk_bg}" bold
+fi

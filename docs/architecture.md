@@ -49,6 +49,13 @@ The fetcher prints the cache content to stdout regardless of whether it
 just refreshed or served stale bytes. Callers must not differentiate; if
 they want freshness data they read `--age`.
 
+Freshness is a shared render concern, not a per-provider state. A cache is
+stale exactly when `showy_bar_age_seconds "${SHOWY_BAR_USAGE_FILE}"` is greater
+than `SHOWY_BAR_REFRESH_SECONDS * 2`. Zellij, tmux, SketchyBar, and
+`showy-bar-state` all consume that same rule: renderers show one trailing stale
+indicator and grey frozen data, while the state surface reports the boolean and
+threshold.
+
 Refreshes try `${SHOWY_BAR_CODEXBAR_SERVE_URL%/}/usage` first with `curl`; the
 default base URL is `http://127.0.0.1:8080`. Set
 `SHOWY_BAR_CODEXBAR_SERVE_URL=` to skip the HTTP probe. Connection failures,
@@ -69,7 +76,7 @@ CodexBar's text UI, not the compact cache-backed renderer output.
 | CodexBar CLI returns non-JSON               | Cache is **not** updated; previous value still served|
 | CodexBar JSON fails `jq` validation           | Same — preserve last good cache                      |
 | Cache file missing and every refresh path fails | Fetcher exits non-zero; renderers print `AI ?`     |
-| Cache age > `2 × SHOWY_BAR_REFRESH_SECONDS`     | Zellij + tmux render countdowns as `?`; SketchyBar unchanged |
+| Cache age > `2 × SHOWY_BAR_REFRESH_SECONDS`     | All render surfaces show one trailing `⚠`, grey frozen quota data, and hide elapsed markers |
 
 ## Why bash and not Python/Go/Rust
 
@@ -110,6 +117,9 @@ filtered provider count without duplicating CodexBar or renderer internals.
 It honors `SHOWY_BAR_PROVIDERS` / `SHOWY_BAR_PROVIDERS_EXCLUDE` and emits:
 
 - `available`: whether a valid cache was read.
+- `stale`: whether the cache age exceeds `SHOWY_BAR_REFRESH_SECONDS * 2`.
+- `cacheAgeSeconds`: seconds since the usage cache mtime, or `null` when absent.
+- `staleAfterSeconds`: the numeric stale threshold.
 - `providers`: filtered provider ids in render order.
 - `providerCount`: `providers | length`.
 - `sketchybar.compactRecommended`: `providerCount >=

@@ -1,6 +1,6 @@
 # showy-bar
 
-Always-on AI coding-quota strips for **[SketchyBar](https://github.com/FelixKratz/SketchyBar)**, **[Zellij](https://github.com/zellij-org/zellij)**, and **[tmux](https://github.com/tmux/tmux)**,
+Always-on AI plan quota strips for **[SketchyBar](https://github.com/FelixKratz/SketchyBar)**, **[Zellij](https://github.com/zellij-org/zellij)**, and **[tmux](https://github.com/tmux/tmux)**,
 driven by [CodexBar](https://github.com/steipete/CodexBar).
 
 Beautiful, themeable, minimal.
@@ -210,6 +210,8 @@ Useful knobs:
 | `SHOWY_BAR_PALETTE_PRIMARY_*`       | Original ai-quota palette              | Canonical role-first good/warn/bad/unknown colors     |
 | `SHOWY_BAR_PALETTE_COUNTDOWN`       | `7b8496`                               | Normal Zellij and SketchyBar countdown label color    |
 | `SHOWY_BAR_PALETTE_COUNTDOWN_WARN`  | primary bad color                      | Urgent countdown label color                          |
+| `SHOWY_BAR_PALETTE_STALE`          | primary unknown color                  | Frozen-snapshot grey for caps, bars, sigil backgrounds, separators, and countdown text |
+| `SHOWY_BAR_STALE_GLYPH`            | `⚠`                                    | Trailing stale snapshot indicator glyph                 |
 | `SHOWY_BAR_PALETTE_ICON_TEXT`       | `f2f4f8`                               | Fallback provider icon text color                     |
 | `SHOWY_BAR_SKETCHYBAR_CLICK`        | `open -b com.steipete.codexbar`        | Default SketchyBar click action; degraded icons open provider status URLs |
 | `SHOWY_BAR_SKETCHYBAR_PILL_*`       | `14` / `28` / `0xcc24273a`             | SketchyBar bracket radius, height, and ARGB color     |
@@ -280,10 +282,12 @@ icon/row layout. Terminal previews show the deterministic
 - Terminal strips omit CodexBar's `tertiary` window. Zellij and tmux show
   primary over secondary in a single half-block strip. SketchyBar shows up to
   three stacked bars when the provider exposes a tertiary window.
-- **Stale-cache degradation is terminal-only.** When the cache is older than
-  `2 × SHOWY_BAR_REFRESH_SECONDS`, Zellij and tmux keep last-known quota colors
-  but render countdowns as `?` and hide elapsed markers. SketchyBar continues
-  to render at full strength from the cache.
+- **Stale cache is rendered as a frozen snapshot.** When the cache is older than
+  `2 × SHOWY_BAR_REFRESH_SECONDS`, every visual surface shows one trailing `⚠`,
+  greys caps/bars/sigil backgrounds/separators/countdowns with
+  `SHOWY_BAR_PALETTE_STALE`, keeps provider icons and sigil letters unchanged,
+  and hides elapsed markers. `showy-bar-state` exposes the same stale decision,
+  cache age, and threshold in JSON.
 - No Linux-side provider for browser-cookie providers — same constraint
   as CodexBar itself.
 
