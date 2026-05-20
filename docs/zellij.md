@@ -69,8 +69,9 @@ ZELLIJ_SESSION_NAME=test showy-bar-zellij-pipe
 Start one feeder for each Zellij session (usually from the terminal wrapper
 that launches the session). `ZELLIJ_SESSION_NAME` targets updates at that
 session when the feeder runs outside Zellij. It re-emits the strip every
-`SHOWY_BAR_ZELLIJ_PIPE_INTERVAL` seconds; it does not watch
-Zellij session metadata or subscribe to tab events.
+`SHOWY_BAR_ZELLIJ_PIPE_INTERVAL` seconds (default `10`); SketchyBar uses the
+same default cadence to avoid visible countdown drift between surfaces.
+The feeder does not watch Zellij session metadata or subscribe to tab events.
 
 New tab-local zjstatus instances start with empty pipe state until the next
 feeder tick. For immediate paint after creating a tab or plugin, send a

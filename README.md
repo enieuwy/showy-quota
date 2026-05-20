@@ -199,9 +199,10 @@ Useful knobs:
 
 | Variable                          | Default                                | Effect                                                |
 |-----------------------------------|----------------------------------------|-------------------------------------------------------|
-| `SHOWY_BAR_REFRESH_SECONDS`         | `120`                                  | Upper bound on how often `codexbar` itself is invoked |
+| `SHOWY_BAR_REFRESH_SECONDS`         | `120`                                  | Upper bound on slow CLI fallback refreshes |
 | `SHOWY_BAR_CODEXBAR_SERVE_URL`    | `http://127.0.0.1:8080`                | Localhost base URL for `codexbar serve`; set empty to skip the HTTP probe |
 | `SHOWY_BAR_CODEXBAR_SERVE_TIMEOUT_SECONDS` | `0.5`                         | HTTP timeout for the default `codexbar serve` fetch path |
+| `SHOWY_BAR_CODEXBAR_SERVE_REFRESH_SECONDS` | `10`                         | Faster cache refresh cadence when `codexbar serve` is available |
 | `SHOWY_BAR_PROVIDERS`               | empty (render CodexBar's enabled providers) | Ordered comma-list allow-list, e.g. `codex,claude`   |
 | `SHOWY_BAR_PROVIDERS_EXCLUDE`       | empty                                  | Comma-list exclude-list applied after the allow-list  |
 | `SHOWY_BAR_PROVIDER_ORDER`          | `codex,claude,opencode,gemini`         | Stable render order without filtering; missing providers are skipped |
@@ -217,6 +218,7 @@ Useful knobs:
 | `SHOWY_BAR_SKETCHYBAR_CLICK`        | `open -b com.steipete.codexbar`        | Default SketchyBar click action; degraded icons open provider status URLs |
 | `SHOWY_BAR_SKETCHYBAR_PILL_*`       | `14` / `28` / `0xcc24273a`             | SketchyBar bracket radius, height, and ARGB color     |
 | `SHOWY_BAR_SKETCHYBAR_PROVIDER_ICON_MODE` | `svg`                            | `svg` for CodexBar SVG icons, `font` for mapped app-font glyphs with SVG fallback |
+| `SHOWY_BAR_SKETCHYBAR_UPDATE_FREQ` | `10`                                   | SketchyBar repaint cadence; matches the default Zellij pipe cadence |
 | `SHOWY_BAR_CODEXBAR_RESOURCES`      | `/Applications/CodexBar.app/...`       | Where to find provider SVGs                           |
 | `SHOWY_BAR_SKETCHYBAR_COMPACT_PROVIDER_COUNT` | `5` | Provider-count breakpoint exposed by `showy-bar-state` for external layout managers |
 | `SHOWY_BAR_TERMINAL_BAR_MODE`     | `auto`                                 | Terminal renderer mode: `auto` keeps time-tier providers in `dual` and renders configured model-class providers as `mono3`; set `dual`, `sextant3`, or `mono3` to force one body mode for every provider |
@@ -265,8 +267,10 @@ Cache lives at `${XDG_CACHE_HOME:-~/.cache}/showy-bar/usage.json`.
 
 ## How it stays cheap
 
-- One `codexbar` invocation per `SHOWY_BAR_REFRESH_SECONDS` regardless of how
-  many bars are running.
+- With `codexbar serve` available, showy-bar probes the local `/usage` endpoint
+  every `SHOWY_BAR_CODEXBAR_SERVE_REFRESH_SECONDS`; otherwise it falls back to
+  one `codexbar usage` invocation per `SHOWY_BAR_REFRESH_SECONDS` regardless of
+  how many bars are running.
 - SketchyBar compares the desired provider set to its last declared state once
   per tick; add/remove and bracket rebuild only happen when that set changes.
 - SVG fallback icon PNGs are generated once per provider per cache directory.

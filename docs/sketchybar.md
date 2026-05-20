@@ -18,7 +18,8 @@ localhost `codexbar serve` probe or CLI fallback, after `SHOWY_BAR_PROVIDERS` /
 Plus:
 
 - `showy_bar.trigger`     — invisible item that runs the plugin every
-  `SHOWY_BAR_SKETCHYBAR_UPDATE_FREQ` seconds.
+  `SHOWY_BAR_SKETCHYBAR_UPDATE_FREQ` seconds (default `10`, matching the
+  default Zellij pipe interval).
 - `showy_bar_bracket`     — pill background grouping the provider items.
 
 Provider adds/removals reconcile against that filtered set on the next plugin

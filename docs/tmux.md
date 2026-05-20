@@ -88,8 +88,10 @@ set -g window-status-current-format ''
 
 tmux invokes the script on its own schedule (default 15 s). The script
 itself reads from the shared cache, so it is fast (≤ 50 ms typical).
-Tighten the cache TTL with `SHOWY_BAR_REFRESH_SECONDS` if you want the
-strip to track provider state more aggressively.
+With `codexbar serve` running, the shared cache refreshes from the local HTTP
+endpoint every `SHOWY_BAR_CODEXBAR_SERVE_REFRESH_SECONDS` by default. Tighten
+`SHOWY_BAR_REFRESH_SECONDS` only if you intentionally want the slower CLI
+fallback to run more often too.
 
 ## PATH gotchas
 

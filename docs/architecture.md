@@ -56,12 +56,17 @@ than `SHOWY_BAR_REFRESH_SECONDS * 2`. Zellij, tmux, SketchyBar, and
 indicator and grey frozen data, while the state surface reports the boolean and
 threshold.
 
-Refreshes try `${SHOWY_BAR_CODEXBAR_SERVE_URL%/}/usage` first with `curl`; the
+Refreshes prefer `${SHOWY_BAR_CODEXBAR_SERVE_URL%/}/usage` with `curl`; the
 default base URL is `http://127.0.0.1:8080`. Set
-`SHOWY_BAR_CODEXBAR_SERVE_URL=` to skip the HTTP probe. Connection failures,
-non-local URLs, missing `curl`, non-array HTTP payloads, or arrays with no
-renderable usage providers fall back to the CLI path. The same on-disk
-validation and last-known-good semantics still gate publication.
+`SHOWY_BAR_CODEXBAR_SERVE_URL=` to skip the HTTP probe. When an existing cache
+is still fresh under `SHOWY_BAR_REFRESH_SECONDS`, the fetcher may still refresh
+from `codexbar serve` every `SHOWY_BAR_CODEXBAR_SERVE_REFRESH_SECONDS` so
+renderers repaint shortly after the server's own response cache changes. Failed
+fast HTTP probes keep serving the existing cache; they do not invoke the slower
+CLI fallback until the normal refresh interval expires. Full refreshes still
+fall back to the CLI path on connection failures, non-local URLs, missing
+`curl`, non-array HTTP payloads, or arrays with no renderable usage providers.
+The same on-disk validation and last-known-good semantics gate publication.
 
 The tmux and Zellij detail panes source showy-bar config when present, then
 run `${SHOWY_BAR_CODEXBAR_BIN:-codexbar} usage` directly because they display

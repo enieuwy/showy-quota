@@ -347,21 +347,16 @@ run_codexbar() {
     run_codexbar_cli
 }
 
-refresh_cache() {
-    local out tmp stamp_tmp rc
+publish_cache_payload() {
+    local out="$1" tmp stamp_tmp
     if ! tmp=$(mktemp "${SHOWY_BAR_CACHE_DIR}/usage.XXXXXX"); then
         showy_bar_log "could not create temporary cache file"
         return 1
     fi
 
-
-    rc=0
-    out=$(run_codexbar) || rc=$?
-
-    # Validate first byte without piping (pipefail-safe).
     if [[ -z "${out}" || "${out:0:1}" != '[' ]]; then
         rm -f "${tmp}"
-        showy_bar_log "codexbar produced no usable output (rc=${rc})"
+        showy_bar_log "codexbar produced no usable output"
         return 1
     fi
 
@@ -389,6 +384,30 @@ refresh_cache() {
     return 1
 }
 
+refresh_cache_from_serve() {
+    local out
+    [[ -n "${SHOWY_BAR_CODEXBAR_SERVE_URL}" ]] || return 127
+    if out=$(run_codexbar_serve) && serve_payload_is_publishable "${out}"; then
+        publish_cache_payload "${out}"
+        return $?
+    fi
+    showy_bar_log "codexbar serve fetch failed or returned no renderable usage"
+    return 1
+}
+
+refresh_cache() {
+    local out rc
+
+    rc=0
+    out=$(run_codexbar) || rc=$?
+    if [[ -z "${out}" || "${out:0:1}" != '[' ]]; then
+        showy_bar_log "codexbar produced no usable output (rc=${rc})"
+        return 1
+    fi
+
+    publish_cache_payload "${out}"
+}
+
 cache_is_valid() {
     [[ -s "${SHOWY_BAR_USAGE_FILE}" ]] || return 1
     showy_bar_json_valid "${SHOWY_BAR_USAGE_FILE}"
@@ -402,6 +421,17 @@ cache_is_fresh() {
     (( age < SHOWY_BAR_REFRESH_SECONDS ))
 }
 
+serve_cache_is_fresh() {
+    [[ -n "${SHOWY_BAR_CODEXBAR_SERVE_URL}" ]] || return 1
+    cache_is_valid || return 1
+    local seconds="${SHOWY_BAR_CODEXBAR_SERVE_REFRESH_SECONDS}" age
+    [[ "${seconds}" =~ ^[0-9]+$ ]] || seconds=10
+    seconds=$((10#${seconds}))
+    (( seconds > 0 )) || return 1
+    age=$(showy_bar_age_seconds "${SHOWY_BAR_USAGE_FILE}")
+    (( age < seconds ))
+}
+
 retry_refresh_after_lock_wait() {
     lock_rc=0
     showy_bar_log "retrying refresh after lock wait"
@@ -413,8 +443,12 @@ retry_refresh_after_lock_wait() {
 
 lock_rc=0
 pre_refresh_token=$(cache_token)
-if (( force_refresh )) || ! cache_is_fresh; then
+if (( force_refresh )); then
     showy_bar_with_lock refresh_cache || lock_rc=$?
+elif ! cache_is_fresh; then
+    showy_bar_with_lock refresh_cache || lock_rc=$?
+elif [[ -n "${SHOWY_BAR_CODEXBAR_SERVE_URL}" ]] && ! serve_cache_is_fresh; then
+    showy_bar_with_lock refresh_cache_from_serve || lock_rc=$?
 fi
 
 # Lost the lock contest? Wait for the holder on cold/invalid cache. Ambiguous

@@ -878,6 +878,7 @@ log="${TMP}/sb-items.log"
 run_sketchybar_items codexbar-mixed.json "${cache}" "${log}"
 item_log="$(< "${log}")"
 assert_contains "bootstrap declares trigger item" "showy_bar.trigger drawing=off updates=on" "${item_log}"
+assert_contains "bootstrap defaults trigger cadence to zellij interval" "update_freq=10" "${item_log}"
 assert_contains "bootstrap synchronously adds provider items" "--add item showy_bar.claude.icon left" "${item_log}"
 assert_contains "bootstrap adds native primary slider" "--add slider showy_bar.claude.primary left 80" "${item_log}"
 assert_contains "bootstrap adds native marker overlay" "--add slider showy_bar.claude.secondary_marker left 80" "${item_log}"
@@ -1303,6 +1304,65 @@ if (( rc == 0 )) && printf '%s' "${out}" | jq -e 'type == "array" and any(.provi
     ok "fetcher reads codexbar serve usage endpoint"
 else
     fail "fetcher reads codexbar serve usage endpoint" "rc=${rc}; out=${out}"
+fi
+
+cache=$(mk_cache)
+cp "${FIXTURE_DIR}/codexbar-mixed.json" "${cache}/usage.json"
+rc=0
+out=$(
+    PATH="${stub_dir}:${PATH}" \
+    SHOWY_BAR_NO_CONFIG=1 \
+    SHOWY_BAR_CACHE_DIR="${cache}" \
+    SHOWY_BAR_CODEXBAR_BIN="${missing_bin}" \
+    SHOWY_BAR_CODEXBAR_SERVE_URL="${serve_url}" \
+    SHOWY_BAR_CODEXBAR_SERVE_REFRESH_SECONDS=0 \
+    SHOWY_BAR_TEST_SERVE_URL="${serve_url}" \
+    SHOWY_BAR_TEST_SERVE_FIXTURE="${FIXTURE_DIR}/codexbar-low.json" \
+    "${REPO_ROOT}/bin/showy-bar-fetch" 2>/dev/null
+) || rc=$?
+if (( rc == 0 )) && printf '%s' "${out}" | jq -e 'type == "array" and any(.provider == "claude") and all(.[]; .provider != "codex")' >/dev/null 2>&1; then
+    ok "fetcher refreshes fresh cache from codexbar serve cadence"
+else
+    fail "fetcher refreshes fresh cache from codexbar serve cadence" "rc=${rc}; out=${out}"
+fi
+
+cache=$(mk_cache)
+cp "${FIXTURE_DIR}/codexbar-mixed.json" "${cache}/usage.json"
+rc=0
+out=$(
+    PATH="${stub_dir}:${PATH}" \
+    SHOWY_BAR_NO_CONFIG=1 \
+    SHOWY_BAR_CACHE_DIR="${cache}" \
+    SHOWY_BAR_CODEXBAR_SERVE_URL="${serve_url}" \
+    SHOWY_BAR_CODEXBAR_SERVE_REFRESH_SECONDS=08 \
+    SHOWY_BAR_TEST_SERVE_URL="${serve_url}" \
+    SHOWY_BAR_TEST_SERVE_FIXTURE="${FIXTURE_DIR}/codexbar-low.json" \
+    "${REPO_ROOT}/bin/showy-bar-fetch" 2>/dev/null
+) || rc=$?
+if (( rc == 0 )) && printf '%s' "${out}" | jq -e 'type == "array" and any(.provider == "codex") and any(.provider == "gemini")' >/dev/null 2>&1; then
+    ok "fetcher treats leading-zero serve cadence as decimal"
+else
+    fail "fetcher treats leading-zero serve cadence as decimal" "rc=${rc}; out=${out}"
+fi
+
+cache=$(mk_cache)
+cp "${FIXTURE_DIR}/codexbar-mixed.json" "${cache}/usage.json"
+rc=0
+out=$(
+    PATH="${stub_dir}:${PATH}" \
+    SHOWY_BAR_NO_CONFIG=1 \
+    SHOWY_BAR_CACHE_DIR="${cache}" \
+    SHOWY_BAR_CODEXBAR_SERVE_URL="${serve_url}" \
+    SHOWY_BAR_CODEXBAR_SERVE_REFRESH_SECONDS=0 \
+    SHOWY_BAR_TEST_SERVE_URL="${serve_url}" \
+    SHOWY_BAR_TEST_SERVE_FIXTURE="${FIXTURE_DIR}/codexbar-non-array.json" \
+    SHOWY_BAR_TEST_FIXTURE="${FIXTURE_DIR}/codexbar-realistic.json" \
+    "${REPO_ROOT}/bin/showy-bar-fetch" 2>/dev/null
+) || rc=$?
+if (( rc == 0 )) && printf '%s' "${out}" | jq -e 'type == "array" and any(.provider == "codex") and any(.provider == "gemini")' >/dev/null 2>&1; then
+    ok "fetcher skips CLI fallback after failed fast serve probe"
+else
+    fail "fetcher skips CLI fallback after failed fast serve probe" "rc=${rc}; out=${out}"
 fi
 
 # 4c. A non-CodexBar service on the default port must not block CLI fallback.
