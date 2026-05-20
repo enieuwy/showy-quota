@@ -43,7 +43,7 @@ and falls back to spawning the CLI on refresh.
 ### Features
 - **Zero auth/config:** Relies entirely on CodexBar for credentials and parsing.
 - **Provider status (SketchyBar):** Icons automatically tint yellow (minor/maintenance) or red (major/critical) during an outage. Clicking a degraded icon opens the provider's official status page.
-- **Pacing & thresholds:** Renders proportional pacing markers and color-codes usage (good/warn/bad) based on configurable remaining-quota and time thresholds.
+- **Pacing & thresholds:** Renders proportional pacing markers where the surface supports them and color-codes usage (good/warn/bad) based on configurable remaining-quota and time thresholds.
 - **Themeable:** Ships with Catppuccin, Nord, Dracula, Tokyo Night, and others.
 - **Low overhead:** A single cached fetcher serves every running bar.
 
