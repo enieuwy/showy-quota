@@ -114,14 +114,20 @@ doctor: ## Check runtime prerequisites without touching the system.
 		printf 'showy-bar: bash 4+ required. macOS /bin/bash is 3.2; install Homebrew bash.\n' >&2; exit 1; }
 	@command -v jq >/dev/null || { \
 		printf 'showy-bar: jq is required (brew install jq / apt-get install jq).\n' >&2; exit 1; }
-	@command -v codexbar >/dev/null || { \
-		printf 'showy-bar: codexbar is required and must be on PATH.\n' >&2; \
-		printf '  macOS app:   brew install --cask steipete/tap/codexbar\n' >&2; \
-		printf '  CLI tarball: https://github.com/steipete/CodexBar/releases\n' >&2; exit 1; }
-	@printf 'doctor: bash %s, jq %s, codexbar %s — ok\n' \
+	@serve_url="$${SHOWY_BAR_CODEXBAR_SERVE_URL:-http://127.0.0.1:8080}"; \
+	if command -v codexbar >/dev/null; then \
+		source_desc="codexbar $$(command -v codexbar)"; \
+	elif command -v curl >/dev/null && curl --fail --silent --max-time "$${SHOWY_BAR_CODEXBAR_SERVE_TIMEOUT_SECONDS:-0.5}" "$${serve_url%/}/usage" >/dev/null; then \
+		source_desc="codexbar serve $${serve_url%/}/usage"; \
+	else \
+		printf 'showy-bar: CodexBar data source required.\n' >&2; \
+		printf '  preferred: codexbar serve at %s/usage (requires curl)\n' "$${serve_url%/}" >&2; \
+		printf '  fallback:  codexbar CLI on PATH\n' >&2; exit 1; \
+	fi; \
+	printf 'doctor: bash %s, jq %s, %s — ok\n' \
 		"$$(bash --version | head -n1 | awk '{print $$4}')" \
 		"$$(jq --version)" \
-		"$$(command -v codexbar)"
+		"$${source_desc}"
 
 diagnose: ## Print runtime state useful for bug reports.
 	@$(REPO)/bin/showy-bar --diagnose

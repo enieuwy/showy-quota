@@ -21,9 +21,6 @@ Beautiful, themeable, minimal.
 
 ---
 
-CodexBar handles every provider's auth, cookies, OAuth, parsing, and caching.
-This repo's only job is to render its JSON in three places:
-
 ```
 codexbar serve → http://127.0.0.1:8080/usage
        │
@@ -35,10 +32,6 @@ bin/showy-bar-fetch     ←  shared cache + flock + last-known-good
        ├──► bin/showy-bar-zellij-bar           (ANSI strip for zjstatus pipe)
        └──► bin/showy-bar-tmux-bar             (tmux #[…] markup for status-right)
 ```
-
-No provider auth code, no extra config beyond a single optional env file. By
-default, showy-bar probes `http://127.0.0.1:8080/usage` for `codexbar serve`
-and falls back to spawning the CLI on refresh.
 
 ### Features
 - **Zero auth/config:** Relies entirely on CodexBar for credentials and parsing.
@@ -65,70 +58,20 @@ and falls back to spawning the CLI on refresh.
 
    ```sh
    git clone https://github.com/enieuwy/showy-bar && cd showy-bar
-   make doctor                                        # verifies bash 4+, jq, codexbar
-   make install                                       # symlinks bin/* into ~/.local/bin
+   make doctor                    # bash 4+, jq, codexbar present
+   make install                   # symlinks bin/* into ~/.local/bin
    ```
 
-3. **Wire exactly one UI.** `make install` does not put anything on a bar.
-   Pick the one you use:
+   `make install` refuses to clobber existing files unless you run with
+   `FORCE=1`, and it does **not** wire any UI. Each bar integration is opt-in.
+
+3. **Wire a UI.** Pick the UI(s) you use:
 
    - **SketchyBar:** `make install-sketchybar`, then add
      `source "$ITEM_DIR/showy_bar.sh"` to your `sketchybarrc` and reload.
    - **tmux:** paste the snippet in [tmux wiring](#tmux-wiring) into `~/.tmux.conf`.
    - **Zellij:** install `zjstatus.wasm`, paste the layout fragment, start
      `showy-bar-zellij-pipe`. See [`docs/zellij.md`](docs/zellij.md).
-
-Stuck? `bin/showy-bar --diagnose` (or `make diagnose`) prints exactly the
-state a bug report needs.
-
-## Requirements
-
-- **macOS** for SketchyBar. Zellij/tmux bars also work on Linux when the
-  CodexBar CLI can fetch your chosen providers.
-- [`codexbar`](https://github.com/steipete/CodexBar) on the PATH and
-  configured.
-  - macOS app: `brew install --cask steipete/tap/codexbar`, then enable
-    providers in **CodexBar → Preferences → Providers**.
-  - CLI tarballs / Linux: install the CodexBar CLI from GitHub Releases or
-    `brew install steipete/tap/codexbar`, then configure `~/.codexbar/config.json`.
-    CodexBar's web-backed providers remain macOS-only; CLI/OAuth/API/local
-    providers work where CodexBar supports them.
-- `bash` 4+ (macOS users usually need Homebrew `bash`), `jq`, and a `date`
-  that understands either `-j -f` (BSD/macOS) or `-d` (GNU coreutils).
-- SketchyBar integration also needs `sketchybar` on the PATH. Font icon mode
-  needs `sketchybar-app-font`; SVG fallback icons need ImageMagick 7+
-  (`magick`). Native usage rows do not need `magick`.
-- The Zellij renderer wraps each provider chunk in Powerline-Extra end
-  caps (U+E0B6 / U+E0B4). Any Nerd Font ships these; with a non-Nerd
-  font, set `SHOWY_BAR_CAP_LEFT=` / `SHOWY_BAR_CAP_RIGHT=` to blank
-  them. Terminal sextant modes have additional font notes in `docs/zellij.md`
-  and `docs/tmux.md`.
-- Optional: `flock` for inter-process locking; falls back to an owner-scoped
-  `mkdir` lock when missing.
-- Optional: `curl` for the default `codexbar serve` probe; without it,
-  showy-bar falls back to the CLI path.
-
-In `SHOWY_BAR_SKETCHYBAR_PROVIDER_ICON_MODE=font`, mapped providers use
-`sketchybar-app-font` glyphs and the rest fall back to CodexBar's bundled SVGs
-at `/Applications/CodexBar.app/Contents/Resources/ProviderIcon-<id>.svg`. No
-icons are bundled in this repo.
-
-## Install
-
-See [Quickstart](#quickstart) for the 3-step path. Detail flags:
-
-```sh
-make doctor                    # bash 4+, jq, codexbar present
-make install                   # symlinks bin/* into ~/.local/bin
-make install-sketchybar        # optional; SketchyBar item + plugin only
-make install-all               # both
-make uninstall                 # remove every symlink this Makefile created
-```
-
-`make install` refuses to clobber existing files and refuses to retarget
-existing symlinks unless you explicitly run with `FORCE=1`. It does **not**
-wire any UI — each bar integration is opt-in so tmux/Zellij users do not get
-SketchyBar files, and vice versa.
 
 ### SketchyBar wiring
 
@@ -177,77 +120,79 @@ tmux source ~/.tmux.conf
 No `watch(1)` dependency — the popup uses a tiny shell loop so this works on a
 stock macOS install.
 
+### Terminal rendering modes
+
+Terminal strips default to an `auto` mode that picks a body layout per
+provider:
+
+- **`dual`** (default for time-tier providers like 5h/7d): a
+  primary-over-secondary half-block layout. The pacing marker tints one
+  cell's background with the `elapsed` color; body width is 12 cells.
+- **`mono3`** (default for `gemini`, `antigravity`): packs primary,
+  secondary, and tertiary into a single sextant cell per column with
+  top/middle/bottom rows. Uses a single provider-level foreground color
+  and inserts a light `│` pacing separator between cells (body width is
+  13 when the marker is interior).
+
+<p>
+  <img src="docs/images/mono3-terminal.png" alt="mono3 terminal rendering layout" width="420">
+</p>
+
+Customize terminal layout with `SHOWY_BAR_TERMINAL_BAR_MODE=dual|mono3|sextant3`.
+For `mono3` auto-mode selection and marker behavior, use
+`SHOWY_BAR_MONO3_PROVIDERS`, `SHOWY_BAR_MONO3_PROVIDERS_EXCLUDE`, and
+`SHOWY_BAR_MONO3_MARKER_SOURCE`.
+
+Stuck? `bin/showy-bar --diagnose` (or `make diagnose`) prints exactly the
+state a bug report needs.
+
+## Requirements
+
+- **macOS** for SketchyBar. Zellij/tmux bars also work on Linux when CodexBar
+  can fetch your chosen providers.
+- A CodexBar data source:
+  - preferred: `codexbar serve` reachable at `http://127.0.0.1:8080/usage`
+    (requires `curl`);
+  - fallback: `codexbar` CLI on PATH.
+  CodexBar's web-backed providers remain macOS-only; CLI/OAuth/API/local
+  providers work where CodexBar supports them.
+- `bash` 4+ (macOS users usually need Homebrew `bash`), `jq`, and a `date`
+  that understands either `-j -f` (BSD/macOS) or `-d` (GNU coreutils).
+- SketchyBar integration also needs `sketchybar` on the PATH. Font icon mode
+  needs `sketchybar-app-font`; SVG fallback icons need ImageMagick 7+
+  (`magick`). Native usage rows do not need `magick`.
+- The Zellij renderer wraps each provider chunk in Powerline-Extra end
+  caps (U+E0B6 / U+E0B4). Any Nerd Font ships these; with a non-Nerd
+  font, set `SHOWY_BAR_CAP_LEFT=` / `SHOWY_BAR_CAP_RIGHT=` to blank
+  them. Terminal sextant modes have additional font notes in `docs/zellij.md`
+  and `docs/tmux.md`.
+- Optional: `flock` for inter-process locking; falls back to an owner-scoped
+  `mkdir` lock when missing.
+
 ## Configuration
 
-Every script reads optional overrides from
-`~/.config/showy-bar/config.env` (see
-[`share/config.env.example`](share/config.env.example) for the full list
-of variables). All values have working defaults; the file is optional.
+Every script reads optional overrides from `~/.config/showy-bar/config.env`.
+The file is optional; create it only for values you want to override.
 
-Choose a named palette by editing `~/.config/showy-bar/config.env`:
+Most users only need these; the full environment surface lives in
+[`share/config.env.example`](share/config.env.example).
 
-```sh
-SHOWY_BAR_THEME=catppuccin-mocha-blue
-```
+| Variable | Default | Effect |
+|---|---|---|
+| `SHOWY_BAR_THEME` | unset (default palette) | Load a named built-in or user palette. |
+| `SHOWY_BAR_PROVIDERS` | empty | Ordered provider allow-list; empty renders CodexBar's enabled providers. |
+| `SHOWY_BAR_PROVIDERS_EXCLUDE` | empty | Provider deny-list applied after the allow-list. |
+| `SHOWY_BAR_PROVIDER_ORDER` | `codex,claude,opencode,gemini` | Stable render order without filtering. |
+| `SHOWY_BAR_REFRESH_SECONDS` | `120` | Slow CLI fallback refresh interval. |
+| `SHOWY_BAR_CODEXBAR_SERVE_URL` | `http://127.0.0.1:8080` | Local `codexbar serve` base URL; set empty to skip HTTP probing. |
+| `SHOWY_BAR_CODEXBAR_SERVE_REFRESH_SECONDS` | `10` | Refresh interval when `codexbar serve` is available. |
+| `SHOWY_BAR_TIME_WARN_MINUTES` | `30` | Urgent countdown threshold. |
+| `SHOWY_BAR_SKETCHYBAR_CLICK` | `open -b com.steipete.codexbar` | Default SketchyBar click action; degraded icons open provider status URLs. |
 
-Built-ins include Default, Carbonfox, Catppuccin variants, Dracula, Gruvbox
-Dark, Nord, and Tokyo Night.
-
-See [Theme gallery](#theme-gallery) further down for visual comparisons.
-
-Useful knobs:
-
-| Variable                          | Default                                | Effect                                                |
-|-----------------------------------|----------------------------------------|-------------------------------------------------------|
-| `SHOWY_BAR_REFRESH_SECONDS`         | `120`                                  | Upper bound on slow CLI fallback refreshes |
-| `SHOWY_BAR_CODEXBAR_SERVE_URL`    | `http://127.0.0.1:8080`                | Localhost base URL for `codexbar serve`; set empty to skip the HTTP probe |
-| `SHOWY_BAR_CODEXBAR_SERVE_TIMEOUT_SECONDS` | `0.5`                         | HTTP timeout for the default `codexbar serve` fetch path |
-| `SHOWY_BAR_CODEXBAR_SERVE_REFRESH_SECONDS` | `10`                         | Faster cache refresh cadence when `codexbar serve` is available |
-| `SHOWY_BAR_PROVIDERS`               | empty (render CodexBar's enabled providers) | Ordered comma-list allow-list, e.g. `codex,claude`   |
-| `SHOWY_BAR_PROVIDERS_EXCLUDE`       | empty                                  | Comma-list exclude-list applied after the allow-list  |
-| `SHOWY_BAR_PROVIDER_ORDER`          | `codex,claude,opencode,gemini`         | Stable render order without filtering; missing providers are skipped |
-| `SHOWY_BAR_INCLUDE_STATUS`          | `1`                                    | Include CodexBar status for outage-tinted logos and status-page icon clicks |
-| `SHOWY_BAR_TIME_WARN_MINUTES`       | `30`                                   | Threshold for red countdown labels                    |
-| `SHOWY_BAR_THEME`                   | empty                                  | Load `~/.config/showy-bar/themes/<name>.env` or the built-in `share/themes/<name>.env` palette |
-| `SHOWY_BAR_PALETTE_PRIMARY_*`       | Original ai-quota palette              | Canonical role-first good/warn/bad/unknown colors     |
-| `SHOWY_BAR_PALETTE_COUNTDOWN`       | `7b8496`                               | Normal Zellij and SketchyBar countdown label color    |
-| `SHOWY_BAR_PALETTE_COUNTDOWN_WARN`  | primary bad color                      | Urgent countdown label color                          |
-| `SHOWY_BAR_PALETTE_STALE`          | primary unknown color                  | Frozen-snapshot grey for caps, bars, sigil backgrounds, separators, and countdown text |
-| `SHOWY_BAR_STALE_GLYPH`            | `⚠`                                    | Trailing stale snapshot indicator glyph                 |
-| `SHOWY_BAR_PALETTE_ICON_TEXT`       | `f2f4f8`                               | Fallback provider icon text color                     |
-| `SHOWY_BAR_SKETCHYBAR_CLICK`        | `open -b com.steipete.codexbar`        | Default SketchyBar click action; degraded icons open provider status URLs |
-| `SHOWY_BAR_SKETCHYBAR_PILL_*`       | `14` / `28` / `0xcc24273a`             | SketchyBar bracket radius, height, and ARGB color     |
-| `SHOWY_BAR_SKETCHYBAR_PROVIDER_ICON_MODE` | `svg`                            | `svg` for CodexBar SVG icons, `font` for mapped app-font glyphs with SVG fallback |
-| `SHOWY_BAR_SKETCHYBAR_UPDATE_FREQ` | `10`                                   | SketchyBar repaint cadence; matches the default Zellij pipe cadence |
-| `SHOWY_BAR_CODEXBAR_RESOURCES`      | `/Applications/CodexBar.app/...`       | Where to find provider SVGs                           |
-| `SHOWY_BAR_SKETCHYBAR_COMPACT_PROVIDER_COUNT` | `5` | Provider-count breakpoint exposed by `showy-bar-state` for external layout managers |
-| `SHOWY_BAR_TERMINAL_BAR_MODE`     | `auto`                                 | Terminal renderer mode: `auto` keeps time-tier providers in `dual` and renders configured model-class providers as `mono3`; set `dual`, `sextant3`, or `mono3` to force one body mode for every provider |
-| `SHOWY_BAR_MONO3_PROVIDERS`       | `gemini,antigravity`                  | Comma-list of providers that use `mono3` in `auto` mode |
-| `SHOWY_BAR_MONO3_PROVIDERS_EXCLUDE` | empty                                | Comma-list of providers forced back to `dual` in `auto` mode |
-| `SHOWY_BAR_MONO3_COLOR_MODE`      | `lowest`                              | `mono3` foreground policy: `lowest` uses the lowest remaining visible row; `primary` uses primary severity |
-| `SHOWY_BAR_MONO3_MARKER_SOURCE`   | `primary`                             | Single `mono3` pacing separator source: `primary`, `secondary`, `tertiary`, `shared`, or `none` |
-
+Palette overrides use role-first keys such as `SHOWY_BAR_PALETTE_PRIMARY_*`.
 Secondary and tertiary row colors auto-derive from the primary palette at
-`0.55` by default. Override `SHOWY_BAR_PALETTE_SECONDARY_*`,
-`SHOWY_BAR_PALETTE_TERTIARY_*`, or the `*_SCALE` knobs when you want custom
-per-role colors.
-
-## Verification
-
-```sh
-make doctor                         # bash 4+, jq, codexbar present
-make test                           # smoke tests over JSON fixtures
-make diagnose                       # printable bug-report state (= `bin/showy-bar --diagnose`)
-bin/showy-bar-fetch | jq length     # 1+ if CodexBar has providers enabled
-bin/showy-bar-state                 # JSON state for layout managers
-bin/showy-bar --list                # available palette themes
-bin/showy-bar --preview default     # deterministic ANSI theme preview
-bin/showy-bar-zellij-bar            # ANSI strip
-bin/showy-bar-tmux-bar              # tmux markup
-```
-
-Cache lives at `${XDG_CACHE_HOME:-~/.cache}/showy-bar/usage.json`.
-`make clean` clears it.
+`0.55` unless overridden; see `share/config.env.example` for the full palette
+surface.
 
 ## Theme gallery
 
@@ -265,52 +210,23 @@ Cache lives at `${XDG_CACHE_HOME:-~/.cache}/showy-bar/usage.json`.
 | `nord` | <img src="docs/images/themes/nord-sketchybar.svg" alt="nord SketchyBar preview" width="420"> | <img src="docs/images/themes/nord-terminal.png" alt="nord terminal preview" width="420"> |
 | `tokyonight` | <img src="docs/images/themes/tokyonight-sketchybar.svg" alt="tokyonight SketchyBar preview" width="420"> | <img src="docs/images/themes/tokyonight-terminal.png" alt="tokyonight terminal preview" width="420"> |
 
+## Verification
+
+```sh
+make doctor      # check runtime prerequisites
+make test        # smoke tests over JSON fixtures
+make diagnose    # printable bug-report state
+```
+
+Cache lives at `${XDG_CACHE_HOME:-~/.cache}/showy-bar/usage.json`.
+`make clean` clears it.
+
 ## How it stays cheap
 
-- With `codexbar serve` available, showy-bar probes the local `/usage` endpoint
-  every `SHOWY_BAR_CODEXBAR_SERVE_REFRESH_SECONDS`; otherwise it falls back to
-  one `codexbar usage` invocation per `SHOWY_BAR_REFRESH_SECONDS` regardless of
-  how many bars are running.
-- SketchyBar compares the desired provider set to its last declared state once
-  per tick; add/remove and bracket rebuild only happen when that set changes.
-- SVG fallback icon PNGs are generated once per provider per cache directory.
-- Native SketchyBar rows and font icons avoid steady-state image generation.
-- Bars never blank on transient `codexbar` failure: the fetcher serves
-  the last-known-good cache and exits 0.
-
-## Limitations
-
-- `codexbar` runs from a GUI macOS app bundle; cookie-based providers
-  need Full Disk Access in System Settings → Privacy & Security to
-  decrypt browser cookies.
-- Terminal strips default to `auto`: time-tier providers such as 5h/7d stay in
-  the primary-over-secondary half-block `dual` body, while providers listed in
-  `SHOWY_BAR_MONO3_PROVIDERS` (Gemini/Antigravity by default) use `mono3`.
-  `mono3` encodes primary, secondary, and tertiary as top/middle/bottom sextant
-  rows with one provider-level foreground color and one light `│` pacing
-  separator. The separator is based on the primary row by default; set
-  `SHOWY_BAR_MONO3_MARKER_SOURCE=secondary`, `tertiary`, `shared`, or `none` to
-  change or suppress it. Use `SHOWY_BAR_MONO3_PROVIDERS` /
-  `SHOWY_BAR_MONO3_PROVIDERS_EXCLUDE` for per-provider auto-mode overrides. Set
-  `SHOWY_BAR_TERMINAL_BAR_MODE=dual`, `sextant3`, or `mono3` only when you want
-  to force one body mode for every provider; `sextant3` keeps the bottom-most-row
-  color policy and has no elapsed marker.
-- No Linux-side provider for browser-cookie providers — same constraint
-  as CodexBar itself.
-
-## Layout
-
-```
-bin/             showy-bar-fetch, showy-bar-state, showy-bar,
-                 showy-bar-{zellij,tmux}-bar, showy-bar-zellij-pipe
-lib/             common.sh, strip.sh
-sketchybar/      items/showy_bar.sh, plugins/showy_bar.sh
-zellij/          fragments
-tmux/            fragments
-share/           config.env.example
-test/            render_test.sh + JSON fixtures
-docs/            architecture.md
-```
+- One shared fetcher serves every running bar, preferring `codexbar serve` and
+  falling back to the CLI.
+- Bars never blank on transient `codexbar` failure: the fetcher serves the
+  last-known-good cache.
 
 ## License
 

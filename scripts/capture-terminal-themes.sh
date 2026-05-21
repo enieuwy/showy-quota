@@ -138,6 +138,40 @@ EOF
     chmod +x "${command_file}"
 }
 
+write_mono3_command_script() {
+    local command_file="$1"
+    cat > "${command_file}" <<EOF
+#!${BASH_BIN}
+set -euo pipefail
+export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:\${PATH:-}"
+cd "${REPO_ROOT}"
+printf '\\033[?25l\\033[2J\\033[H'
+SHOWY_BAR_THEME=default \\
+    SHOWY_BAR_NO_CONFIG=1 \\
+    SHOWY_BAR_FORCE_COLOR=1 \\
+    SHOWY_BAR_NOW_EPOCH=4070908800 \\
+    SHOWY_BAR_CAP_LEFT=\$'\\ue0b6' \\
+    SHOWY_BAR_CAP_RIGHT=\$'\\ue0b4' \\
+    SHOWY_BAR_TERMINAL_BAR_MODE=mono3 \\
+    "${REPO_ROOT}/bin/showy-bar-zellij-bar" --json - <<'JSON'
+[
+  {"provider":"gemini","usage":{
+    "primary":  {"usedPercent":92,"resetsAt":"2099-01-01T02:30:00Z","windowMinutes":300},
+    "secondary":{"usedPercent":33,"resetsAt":"2099-01-04T00:00:00Z","windowMinutes":10080},
+    "tertiary": {"usedPercent":25,"resetsAt":"2099-01-02T00:00:00Z","windowMinutes":2880}
+  }},
+  {"provider":"antigravity","usage":{
+    "primary":  {"usedPercent":70,"resetsAt":"2099-01-01T01:30:00Z","windowMinutes":300},
+    "secondary":{"usedPercent":55,"resetsAt":"2099-01-04T00:00:00Z","windowMinutes":10080},
+    "tertiary": {"usedPercent":40,"resetsAt":"2099-01-02T00:00:00Z","windowMinutes":2880}
+  }}
+]
+JSON
+sleep "${HOLD_SECONDS}"
+EOF
+    chmod +x "${command_file}"
+}
+
 write_ghostty_config() {
     local bg="$1" fg="$2" command_file="$3" config_file="$4"
     cat > "${config_file}" <<EOF
@@ -259,8 +293,51 @@ capture_theme() {
     active_config=""
 }
 
+capture_mono3() {
+    local command_file="${TMP_DIR}/mono3.sh"
+    local config_file="${TMP_DIR}/mono3.ghostty"
+    local screen_file="${TMP_DIR}/mono3-screen.png"
+    local raw_file="${TMP_DIR}/mono3-raw.png"
+    local out_file="${REPO_ROOT}/docs/images/mono3-terminal.png"
+    local mono3_w="${SHOWY_BAR_CAPTURE_MONO3_W:-1200}"
+    local bg fg bounds scale geometry
+
+    bg="$(palette_value default bg)"
+    fg="$(palette_value default icon_text)"
+    write_mono3_command_script "${command_file}"
+    write_ghostty_config "${bg}" "${fg}" "${command_file}" "${config_file}"
+    "${GHOSTTY_BIN}" +validate-config --config-file="${config_file}"
+
+    wait_capture_window_gone >/dev/null 2>&1 || true
+    active_config="${config_file}"
+    open -na "${GHOSTTY_APP}" --args --config-file="${config_file}"
+    sleep "${WARMUP_SECONDS}"
+
+    if ! bounds="$(window_bounds 900 80)"; then
+        printf 'showy-bar: Ghostty capture window did not appear for mono3\n' >&2
+        return 1
+    fi
+
+    scale="$(screen_scale)"
+    geometry="$(window_crop_geometry "${bounds}" "${scale}")"
+    screencapture -x "${screen_file}"
+    magick "${screen_file}" -crop "${geometry}" +repage "${raw_file}"
+    magick "${raw_file}" -crop "${mono3_w}x${OUTPUT_H}+${OUTPUT_X}+${OUTPUT_Y}" +repage -strip "${out_file}"
+    chmod 0644 "${out_file}"
+    printf 'captured %s\n' "${out_file}"
+
+    pkill -f "${active_config}" >/dev/null 2>&1 || true
+    wait_capture_window_gone >/dev/null 2>&1 || true
+    active_config=""
+}
+
 main() {
     local theme
+    if [[ "${1:-}" == "--mono3" ]]; then
+        capture_mono3
+        return 0
+    fi
+
     if (( $# > 0 )); then
         for theme in "$@"; do
             [[ -n "${theme}" ]] || continue
