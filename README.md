@@ -24,13 +24,15 @@ Beautiful, themeable, minimal.
 ```
 codexbar serve → http://127.0.0.1:8080/usage
        │
+       ├──► showy-quota-zellij.wasm              (standalone Zellij plugin)
+       │
        ▼
 bin/showy-quota-fetch     ←  shared cache + flock + last-known-good
        │  ~/.cache/showy-quota/usage.json
        ├──► bin/showy-quota-state                 (stable provider/layout state JSON)
        ├──► sketchybar/plugins/showy_quota.sh    (native SketchyBar rows + icons)
-       ├──► bin/showy-quota-zellij-bar           (ANSI strip for zjstatus pipe)
-       └──► bin/showy-quota-tmux-bar             (tmux #[…] markup for status-right)
+       ├──► bin/showy-quota-tmux-bar             (tmux #[…] markup for status-right)
+       └──► bin/showy-quota-zellij-bar           (advanced zjstatus pipe segment)
 ```
 
 ### Features
@@ -38,7 +40,7 @@ bin/showy-quota-fetch     ←  shared cache + flock + last-known-good
 - **Provider status (SketchyBar):** Icons automatically tint yellow (minor/maintenance) or red (major/critical) during an outage. Clicking a degraded icon opens the provider's official status page.
 - **Pacing & thresholds:** Renders proportional pacing markers where the surface supports them and color-codes usage (good/warn/bad) based on configurable remaining-quota and time thresholds.
 - **Themeable:** Ships with Catppuccin, Nord, Dracula, Tokyo Night, and others.
-- **Low overhead:** A single cached fetcher serves every running bar.
+- **Low overhead:** Host bars share one cached fetcher; Zellij can use a single WASM artifact.
 
 ## Quickstart
 
@@ -54,24 +56,27 @@ bin/showy-quota-fetch     ←  shared cache + flock + last-known-good
    **System Settings → Privacy & Security**. If `jq length` prints `0`, fix
    CodexBar before continuing — showy-quota has nothing to paint without it.
 
-2. **Install showy-quota.**
+2. **Install showy-quota shell scripts for SketchyBar/tmux, or the Zellij plugin.**
 
    ```sh
    git clone https://github.com/enieuwy/showy-quota && cd showy-quota
-   make doctor                    # bash 4+, jq, codexbar present
+   make doctor                    # bash 4+, jq, codexbar present for shell integrations
    make install                   # symlinks bin/* into ~/.local/bin
+   make install-plugin            # builds + installs showy-quota-zellij.wasm
    ```
 
-   `make install` refuses to clobber existing files unless you run with
-   `FORCE=1`, and it does **not** wire any UI. Each bar integration is opt-in.
+   For Zellij-only installs from a release, you can skip the clone and download
+   `showy-quota-zellij.wasm`; see [`docs/plugin.md`](docs/plugin.md).
+   `make install` and `make install-plugin` refuse to clobber existing files
+   unless you run with `FORCE=1`.
 
 3. **Wire a UI.** Pick the UI(s) you use:
 
    - **SketchyBar:** `make install-sketchybar`, then add
      `source "$ITEM_DIR/showy_quota.sh"` to your `sketchybarrc` and reload.
    - **tmux:** paste the snippet in [tmux wiring](#tmux-wiring) into `~/.tmux.conf`.
-   - **Zellij:** install `zjstatus.wasm`, paste the layout fragment, start
-     `showy-quota-zellij-pipe`. See [`docs/zellij.md`](docs/zellij.md).
+   - **Zellij:** install `showy-quota-zellij.wasm`, paste the layout fragment.
+     See [`docs/zellij.md`](docs/zellij.md) and [`docs/plugin.md`](docs/plugin.md).
 
 ### SketchyBar wiring
 
@@ -91,18 +96,17 @@ plugin tick without another reload.
 
 ### Zellij wiring
 
-Three pieces:
+Two pieces:
 
-1. **Widget pane** — paste `zellij/layout-pane.kdl.fragment` into your
-   default layout. It declares the visible `zjstatus` pipe widget only.
-   Install `zjstatus.wasm` first; see [`docs/zellij.md`](docs/zellij.md).
-2. **Pipe loop** — start `showy-quota-zellij-pipe` for each Zellij session
-   (for example, `ZELLIJ_SESSION_NAME=test showy-quota-zellij-pipe` from the
-   terminal wrapper that launches the session).
-3. **Detail keybind** — paste `zellij/detail-pane.kdl.fragment` into your
+1. **Plugin pane** — install `showy-quota-zellij.wasm` and paste
+   `zellij/layout-pane.kdl.fragment` into your default layout. It declares one
+   visible standalone plugin pane; no `zjstatus` or feeder loop is needed.
+2. **Detail keybind** — paste `zellij/detail-pane.kdl.fragment` into your
    keybinds block. Default is `Alt /`.
 
-Reload Zellij to pick up the new layout/keybind, then start the pipe loop.
+Reload Zellij to pick up the new layout/keybind. Advanced users who want
+showy-quota inside an existing multi-widget zjstatus row can keep using
+`showy-quota-zellij-pipe`; see [`docs/zellij.md`](docs/zellij.md).
 
 ### tmux wiring
 
@@ -151,13 +155,13 @@ state a bug report needs.
 - **macOS** for SketchyBar. Zellij/tmux bars also work on Linux when CodexBar
   can fetch your chosen providers.
 - A CodexBar data source:
-  - preferred: `codexbar serve` reachable at `http://127.0.0.1:8080/usage`
-    (requires `curl`);
-  - fallback: `codexbar` CLI on PATH.
+  - Zellij plugin: `codexbar serve` reachable at `http://127.0.0.1:8080/usage`;
+  - shell integrations: same serve URL preferred, with `codexbar` CLI fallback.
   CodexBar's web-backed providers remain macOS-only; CLI/OAuth/API/local
   providers work where CodexBar supports them.
-- `bash` 4+ (macOS users usually need Homebrew `bash`), `jq`, and a `date`
-  that understands either `-j -f` (BSD/macOS) or `-d` (GNU coreutils).
+- Shell integrations need `bash` 4+, `jq`, and a `date` that understands either
+  `-j -f` (BSD/macOS) or `-d` (GNU coreutils).
+  The standalone Zellij plugin does not need the shell scripts, `bash`, or `jq`.
 - SketchyBar integration also needs `sketchybar` on the PATH. Font icon mode
   needs `sketchybar-app-font`; SVG fallback icons need ImageMagick 7+
   (`magick`). Native usage rows do not need `magick`.
@@ -215,6 +219,7 @@ surface.
 ```sh
 make doctor      # check runtime prerequisites
 make test        # smoke tests over JSON fixtures
+make plugin      # build showy-quota-zellij.wasm
 make diagnose    # printable bug-report state
 ```
 
@@ -223,10 +228,10 @@ Cache lives at `${XDG_CACHE_HOME:-~/.cache}/showy-quota/usage.json`.
 
 ## How it stays cheap
 
-- One shared fetcher serves every running bar, preferring `codexbar serve` and
-  falling back to the CLI.
-- Bars never blank on transient `codexbar` failure: the fetcher serves the
-  last-known-good cache.
+- tmux, SketchyBar, and advanced zjstatus share one cached fetcher, preferring
+  `codexbar serve` and falling back to the CLI.
+- The standalone Zellij plugin fetches `codexbar serve` directly and keeps
+  in-memory last-known-good output per pane.
 
 ## License
 

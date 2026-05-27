@@ -6,13 +6,29 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- Standalone `showy-quota-zellij.wasm` plugin for Zellij. It fetches CodexBar
+  serve directly, renders the quota strip in-process, and removes the normal
+  Zellij dependency on `zjstatus`, feeder loops, and showy-quota shell scripts.
+- Rust renderer parity tests that compare plugin output against the existing
+  shell Zellij renderer over JSON fixtures.
+- `make plugin` / `make install-plugin` and a release workflow that attaches
+  the prebuilt Zellij WASM artifact to `v*` releases.
+
 ### Changed
+- Zellij docs now make the standalone plugin primary and move the zjstatus pipe
+  feeder to the advanced composition path.
 - Renamed project from `showy-bar` to `showy-quota`. All binaries, env vars,
   config paths, SketchyBar/zjstatus widget names, cache paths, and docs use
   `showy-quota` / `showy_quota` / `SHOWY_QUOTA` consistently. The Zellij
   pipe widget is now `pipe_showy_quota`, the SketchyBar item prefix is
   `showy_quota`, and the config directory is `~/.config/showy-quota/`. Git
   remote updated to `enieuwy/showy-quota`.
+
+### Removed
+- `showy-quota-zellij-kick` and `showy-quota-zellij-new-tab`; the standalone
+  plugin paints on load and timer events, so the recommended path no longer
+  needs manual repaint wrappers.
 
 ## [0.1.0] — 2026-05-17
 

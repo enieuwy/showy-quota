@@ -1,0 +1,10 @@
+[
+  {
+    "provider": "claude",
+    "usage": {
+      "primary": { "usedPercent": 25 },
+      "secondary": { "usedPercent": 50, "windowMinutes": 100, "resetsAt": "2099-01-01T01:40:00Z" },
+      "tertiary": { "usedPercent": 75 }
+    }
+  }
+]

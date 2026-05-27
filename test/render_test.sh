@@ -736,6 +736,13 @@ assert_contains "zellij --json stdin renders without fetch" "CL" "${out}"
 ansi_dim=$'\x1b[2m'
 assert_not_contains "zellij --json stdin skips stale dimming" "${ansi_dim}" "${out}"
 
+printf '\nrust zellij parity\n'
+if (cd "${REPO_ROOT}" && cargo test -p showy-quota-zellij-core --test shell_parity); then
+    ok "rust zellij renderer matches shell golden fixtures"
+else
+    fail "rust zellij renderer matches shell golden fixtures"
+fi
+
 # ── tmux renderer ────────────────────────────────────────────────────
 
 printf '\ntmux renderer\n'
@@ -1599,27 +1606,6 @@ out=$(
 assert_contains "zellij stale absolute reset shows unknown countdown" "?" "${out}"
 assert_not_contains "zellij stale absolute reset does not show now" "now" "${out}"
 
-printf '\nzellij pipe helpers\n'
-cache=$(mk_cache)
-cp "${FIXTURE_DIR}/codexbar-mixed.json" "${cache}/usage.json"
-zellij_log="${TMP}/zellij-kick.log"
-rc=0
-out=$(
-    PATH="${stub_dir}:${PATH}" \
-    SHOWY_QUOTA_NO_CONFIG=1 \
-    SHOWY_QUOTA_CACHE_DIR="${cache}" \
-    SHOWY_QUOTA_CODEXBAR_SERVE_URL='' \
-    SHOWY_QUOTA_ZELLIJ_PIPE_TIMEOUT_TENTHS=20 \
-    SHOWY_QUOTA_TEST_ZELLIJ_LOG="${zellij_log}" \
-    ZELLIJ_SESSION_NAME=test \
-    "${REPO_ROOT}/bin/showy-quota-zellij-kick" 2>/dev/null
-) || rc=$?
-if (( rc == 0 )); then
-    ok "zellij kick succeeds with session target"
-else
-    fail "zellij kick succeeds with session target" "rc=${rc}; out=${out}"
-fi
-assert_contains "zellij kick targets named session" "--session test pipe --name showy-quota -- zjstatus::pipe::pipe_showy_quota::" "$(< "${zellij_log}")"
 
 # 7. Concurrent fetch — only one codexbar invocation across simultaneous
 #    callers. We exercise both lock paths via SHOWY_QUOTA_FORCE_NO_FLOCK.

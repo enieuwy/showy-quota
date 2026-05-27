@@ -1,0 +1,13 @@
+[workspace]
+members = [
+    "crates/showy-quota-zellij-core",
+    "crates/showy-quota-zellij",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/enieuwy/showy-quota"
+rust-version = "1.80"
+version = "0.1.0"

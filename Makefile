@@ -10,14 +10,20 @@
 PREFIX        ?= $(HOME)/.local
 BIN_DIR       ?= $(PREFIX)/bin
 SKETCHYBAR    ?= $(HOME)/.config/sketchybar
+ZELLIJ_PLUGINS ?= $(HOME)/.config/zellij/plugins
 SBAR_ITEMS    ?= $(SKETCHYBAR)/items
 SBAR_PLUGINS  ?= $(SKETCHYBAR)/plugins
 FORCE         ?= 0
+CARGO         ?= $(shell if command -v rustup >/dev/null 2>&1; then printf 'rustup run stable cargo'; else printf 'cargo'; fi)
+RUSTC         ?= $(shell if command -v rustup >/dev/null 2>&1; then rustup which rustc; else printf 'rustc'; fi)
 
 REPO          := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
-BIN_NAMES     := showy-quota-fetch showy-quota-state showy-quota showy-quota-tmux-bar showy-quota-zellij-bar showy-quota-zellij-pipe showy-quota-zellij-kick showy-quota-zellij-new-tab
+BIN_NAMES     := showy-quota-fetch showy-quota-state showy-quota showy-quota-tmux-bar showy-quota-zellij-bar showy-quota-zellij-pipe
+PLUGIN_CRATE  := showy-quota-zellij
+PLUGIN_WASM   := $(REPO)/target/wasm32-wasip1/release/showy-quota-zellij.wasm
+PLUGIN_TARGET := $(ZELLIJ_PLUGINS)/showy-quota-zellij.wasm
 
-.PHONY: help doctor diagnose install install-bin install-sketchybar install-all uninstall test lint clean
+.PHONY: help doctor diagnose install install-bin install-sketchybar plugin install-plugin install-all uninstall test lint clean
 
 help: ## Show this help.
 	@awk 'BEGIN{FS=":.*##"}/^[a-zA-Z_-]+:.*##/{printf "  \033[36m%-20s\033[0m %s\n",$$1,$$2}' $(MAKEFILE_LIST)
@@ -25,9 +31,10 @@ help: ## Show this help.
 install: doctor install-bin ## Check prerequisites, then symlink shared scripts.
 	@printf '\nInstalled shared showy-quota scripts into $(BIN_DIR).\n'
 	@printf 'Nothing is wired to a bar yet. Run one of:\n'
-	@printf '  make install-sketchybar      # then `source "$$ITEM_DIR/showy_quota.sh"`\n'
+	@printf '  make install-sketchybar    # then `source "$$ITEM_DIR/showy_quota.sh"`\n'
+	@printf '  make install-plugin        # then paste zellij/layout-pane.kdl.fragment\n'
 	@printf '  cat tmux/status-line.tmux.fragment\n'
-	@printf '  cat zellij/layout-pane.kdl.fragment\n'
+	@printf '  cat zellij/layout-pane.kdl.fragment  # advanced zjstatus path also documented\n'
 
 install-bin:
 	@mkdir -p "$(BIN_DIR)"
@@ -77,8 +84,24 @@ install-sketchybar:
 		printf 'linked %s\n' "$$target"; \
 	done
 
+plugin: ## Build the standalone Zellij WASM plugin.
+	@if command -v rustup >/dev/null 2>&1; then rustup target add wasm32-wasip1 >/dev/null; fi
+	@RUSTC="$(RUSTC)" $(CARGO) build --release --target wasm32-wasip1 -p $(PLUGIN_CRATE)
+	@printf 'built %s\n' "$(PLUGIN_WASM)"
 
-install-all: install-bin install-sketchybar ## Install shared scripts and every optional integration.
+install-plugin: plugin ## Install the standalone Zellij WASM plugin.
+	@mkdir -p "$(ZELLIJ_PLUGINS)"
+	@if [ -e "$(PLUGIN_TARGET)" ] && ! cmp -s "$(PLUGIN_WASM)" "$(PLUGIN_TARGET)"; then \
+		if [ "$(FORCE)" != "1" ]; then \
+			printf 'refusing to clobber %s (set FORCE=1 to replace)\n' "$(PLUGIN_TARGET)" >&2; \
+			exit 1; \
+		fi; \
+	fi
+	@cp -f "$(PLUGIN_WASM)" "$(PLUGIN_TARGET)"
+	@printf 'installed %s\n' "$(PLUGIN_TARGET)"
+
+
+install-all: install-bin install-sketchybar install-plugin ## Install shared scripts and every optional integration.
 uninstall: ## Remove symlinks that this Makefile created.
 	@for name in $(BIN_NAMES); do \
 		src="$(REPO)/bin/$$name"; \
@@ -141,8 +164,6 @@ lint: ## Run shellcheck if available.
 			"$(REPO)/bin/showy-quota-tmux-bar" \
 			"$(REPO)/bin/showy-quota-zellij-bar" \
 			"$(REPO)/bin/showy-quota-zellij-pipe" \
-			"$(REPO)/bin/showy-quota-zellij-kick" \
-			"$(REPO)/bin/showy-quota-zellij-new-tab" \
 			"$(REPO)/lib/common.sh" \
 			"$(REPO)/lib/strip.sh" \
 			"$(REPO)/sketchybar/items/showy_quota.sh" \

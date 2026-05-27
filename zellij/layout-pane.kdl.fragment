@@ -1,18 +1,12 @@
-// showy-quota — Zellij layout snippet for the visible zjstatus pipe widget.
-// Add inside a layout or tab block. The pipe feeder runs externally, started
-// by the terminal wrapper, not as a Zellij pane.
+// showy-quota — standalone Zellij plugin pane.
+// Add inside default_tab_template (after `children`) or inside a tab block.
+// Requires showy-quota-zellij.wasm at the configured path. See docs/zellij.md.
 
-// Requires zjstatus.wasm installed at the configured path. See docs/zellij.md.
 pane size=1 borderless=true {
-    plugin location="file:~/.config/zellij/plugins/zjstatus.wasm" {
-        // Pipe widget is more stable than `command`; it does not crash
-        // under WASMI's single-threaded std::sync::Mutex initialization.
-        pipe_showy_quota_format "{output}"
-        pipe_showy_quota_rendermode "raw"
-
-        format_left "{pipe_showy_quota}"
-        format_center ""
-        format_right ""
-        format_space ""
+    plugin location="file:~/.config/zellij/plugins/showy-quota-zellij.wasm" {
+        // Defaults shown.
+        serve_url "http://127.0.0.1:8080"
+        interval_seconds 10
+        fallback_command "" // set to "codexbar" to enable CLI fallback
     }
 }

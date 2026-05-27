@@ -7,6 +7,9 @@
 /tmp-*.png
 /cache/
 
+
+# Rust build outputs
+/target/
 # editor / OS scratch
 .vscode/
 .idea/

@@ -1,0 +1,12 @@
+[package]
+name = "showy-quota-zellij"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+showy-quota-zellij-core = { path = "../showy-quota-zellij-core" }
+zellij-tile = "0.44.3"

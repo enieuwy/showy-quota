@@ -1,0 +1,10 @@
+[
+  {
+    "provider": "gemini",
+    "usage": {
+      "primary": { "usedPercent": 25, "windowMinutes": 100, "resetsAt": "2099-01-01T01:40:00Z" },
+      "secondary": { "usedPercent": 50, "windowMinutes": 200, "resetsAt": "2099-01-01T03:20:00Z" },
+      "tertiary": { "usedPercent": 75, "windowMinutes": 300, "resetsAt": "2099-01-01T05:00:00Z" }
+    }
+  }
+]

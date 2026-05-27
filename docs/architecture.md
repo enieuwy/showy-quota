@@ -1,155 +1,118 @@
 # Architecture
 
-`showy-quota` is intentionally tiny. There are three layers:
+`showy-quota` has two integration families:
 
-1. **Data plane.** A single shell script, `bin/showy-quota-fetch`, owns the
-   on-disk cache and is the only renderer path that talks to CodexBar. By
-   default it probes `codexbar serve` at localhost `/usage`, then falls back to
-   invoking `codexbar usage --format json` directly.
-2. **Renderers / state surfaces.** Independent scripts that read the cache and
-   emit format-specific output or stable integration state:
-   - `bin/showy-quota-state` → provider/layout state JSON for external coordinators
-   - `bin/showy-quota-zellij-bar` → ANSI strip
-   - `bin/showy-quota-tmux-bar` → tmux markup
-   - `sketchybar/plugins/showy_quota.sh` → SketchyBar item updates + PNGs
-3. **Presentation.** SketchyBar items, Zellij layout/keybind, tmux
-   status-right snippet, and optional external layout managers.
+1. **Shell integrations for host bars.** tmux, SketchyBar, and the advanced zjstatus path use the existing shell data plane and renderers.
+2. **Standalone Zellij plugin.** Zellij's recommended path is a Rust/WASM plugin that fetches CodexBar serve directly and renders the same terminal strip in-process without ANSI escapes.
 
-```
-                ┌─────────────────────────────────────────────┐
-                │ codexbar usage --format json │  or  │ codexbar serve /usage │
-                └──────────────────────────┬─────────────────────────────────┘
-                                           │ (slow CLI cold; cheap server hit)
-                                           ▼
-                ┌─────────────────────────────────────────────┐
-                │   bin/showy-quota-fetch (flock + atomic write)  │
-                │   ~/.cache/showy-quota/usage.json         │
-                └──────────────────────────┬──────────────────┘
-                                           │ (cheap; pure JSON read)
-                ┌──────────────┬───────────┴──────────┬──────────────────┐
-                ▼              ▼                      ▼                  ▼
-        showy-quota-state   sketchybar/plugins/   showy-quota-zellij-bar   showy-quota-tmux-bar
-         state JSON          showy_quota.sh          ANSI strip        tmux #[…] markup
-                               │                (zjstatus pipe)   (status-right)
-                               ▼
-                         sketchybar --set …
-                         provider icon PNGs in image cache
+```text
+Recommended Zellij path:
+
+codexbar serve /usage
+        │
+        ▼
+showy-quota-zellij.wasm
+  ├─ WebAccess request to localhost /usage
+  ├─ optional RunCommands fallback to `codexbar usage --format json --pretty`
+  ├─ in-memory last-known-good data
+  └─ plain terminal strip rendered directly in a one-line Zellij pane
+
+Shell integrations:
+
+codexbar serve /usage  or  codexbar usage --format json
+        │
+        ▼
+bin/showy-quota-fetch  ← shared cache + flock + atomic publish
+        │  ~/.cache/showy-quota/usage.json
+        ├──► bin/showy-quota-state                 (stable provider/layout state JSON)
+        ├──► sketchybar/plugins/showy_quota.sh    (native SketchyBar rows + icons)
+        ├──► bin/showy-quota-tmux-bar             (tmux #[…] markup)
+        └──► bin/showy-quota-zellij-bar           (advanced zjstatus ANSI segment)
 ```
 
-## Cache contract
+## Shell cache contract
+
+The shell data plane is still the reliability boundary for tmux, SketchyBar, and advanced zjstatus composition.
 
 - File: `${SHOWY_QUOTA_CACHE_DIR}/usage.json` (default: `${XDG_CACHE_HOME:-$HOME/.cache}/showy-quota/usage.json`)
 - Stamp file: `${SHOWY_QUOTA_CACHE_DIR}/usage.json.updated-at`
 - `flock` path: `${SHOWY_QUOTA_CACHE_DIR}/usage.lock`
 - owner-scoped `mkdir` fallback path: `${SHOWY_QUOTA_CACHE_DIR}/usage.lock.d`
-- Validation: `jq` must accept an array of provider objects. If a usage
-  window is present, its `usedPercent` must be numeric before publishing.
+- Validation: `jq` must accept an array of provider objects. If a usage window is present, its `usedPercent` must be numeric before publication.
 
-The fetcher prints the cache content to stdout regardless of whether it
-just refreshed or served stale bytes. Callers must not differentiate; if
-they want freshness data they read `--age`.
+The fetcher prints the cache content to stdout regardless of whether it just refreshed or served stale bytes. Callers must not differentiate; if they want freshness data they read `--age`.
 
-Freshness is a shared render concern, not a per-provider state. A cache is
-stale exactly when `showy_quota_age_seconds "${SHOWY_QUOTA_USAGE_FILE}"` is greater
-than `SHOWY_QUOTA_REFRESH_SECONDS * 2`. Zellij, tmux, SketchyBar, and
-`showy-quota-state` all consume that same rule: renderers show one trailing stale
-indicator and grey frozen data, while the state surface reports the boolean and
-threshold.
+Freshness is a shared render concern. A shell cache is stale when `showy_quota_age_seconds "${SHOWY_QUOTA_USAGE_FILE}"` is greater than `SHOWY_QUOTA_REFRESH_SECONDS * 2`. Shell renderers show one trailing stale indicator, grey frozen data, and hide elapsed markers; `showy-quota-state` reports the boolean and threshold.
 
-Refreshes prefer `${SHOWY_QUOTA_CODEXBAR_SERVE_URL%/}/usage` with `curl`; the
-default base URL is `http://127.0.0.1:8080`. Set
-`SHOWY_QUOTA_CODEXBAR_SERVE_URL=` to skip the HTTP probe. When an existing cache
-is still fresh under `SHOWY_QUOTA_REFRESH_SECONDS`, the fetcher may still refresh
-from `codexbar serve` every `SHOWY_QUOTA_CODEXBAR_SERVE_REFRESH_SECONDS` so
-renderers repaint shortly after the server's own response cache changes. Failed
-fast HTTP probes keep serving the existing cache; they do not invoke the slower
-CLI fallback until the normal refresh interval expires. Full refreshes still
-fall back to the CLI path on connection failures, non-local URLs, missing
-`curl`, non-array HTTP payloads, or arrays with no renderable usage providers.
-The same on-disk validation and last-known-good semantics gate publication.
+Refreshes prefer `${SHOWY_QUOTA_CODEXBAR_SERVE_URL%/}/usage` with `curl`; the default base URL is `http://127.0.0.1:8080`. Set `SHOWY_QUOTA_CODEXBAR_SERVE_URL=` to skip the HTTP probe. When an existing cache is still fresh under `SHOWY_QUOTA_REFRESH_SECONDS`, the fetcher may still refresh from `codexbar serve` every `SHOWY_QUOTA_CODEXBAR_SERVE_REFRESH_SECONDS` so bars repaint shortly after the server's own response cache changes. Failed fast HTTP probes keep serving the existing cache; they do not invoke the slower CLI fallback until the normal refresh interval expires.
 
-The tmux and Zellij detail panes source showy-quota config when present, then
-run `${SHOWY_QUOTA_CODEXBAR_BIN:-codexbar} usage` directly because they display
-CodexBar's text UI, not the compact cache-backed renderer output.
+The tmux and Zellij detail panes source showy-quota config when present, then run `${SHOWY_QUOTA_CODEXBAR_BIN:-codexbar} usage` directly because they display CodexBar's text UI, not the compact cache-backed renderer output.
 
-`SHOWY_QUOTA_TERMINAL_BAR_MODE` only affects the Zellij/tmux bar body. The
-default `auto` renderer selects per provider from configuration: providers in
-`SHOWY_QUOTA_MONO3_PROVIDERS` (default `gemini,antigravity`) render as `mono3`
-unless excluded by `SHOWY_QUOTA_MONO3_PROVIDERS_EXCLUDE`; every other provider
-uses `dual` primary/secondary half-block geometry. `mono3` reads the tertiary
-window, packs primary/secondary/tertiary into one U+1FBxx sextant row, and uses
-one provider-level foreground color (`SHOWY_QUOTA_MONO3_COLOR_MODE=lowest|primary`).
-Because the terminal body can draw only one pacing separator, mono3 bases it on
-`SHOWY_QUOTA_MONO3_MARKER_SOURCE` (`primary` by default; `secondary`, `tertiary`,
-`shared`, and `none` are supported). The `shared` source only draws when at
-least two rows have the same parseable reset epoch and `windowMinutes`.
-`SHOWY_QUOTA_MONO3_MARKER_STYLE` controls whether the separator `replace`s the cell
-(preserving bar width) or `insert`s (widening the bar). Forced
-`SHOWY_QUOTA_TERMINAL_BAR_MODE=sextant3` keeps the older bottom-most-row cell-color
-policy and does not draw elapsed markers; forced `dual` and `mono3` apply those
-bodies to every provider.
+## Standalone Zellij plugin contract
+
+The plugin does not read the host cache and does not shell out to showy-quota scripts. Its default path is:
+
+```text
+web_request("http://127.0.0.1:8080/usage") → parse → filter/order → render plain strip
+```
+
+It requests `WebAccess`. If `fallback_command "codexbar"` is configured, it also requests `RunCommands` and runs `codexbar usage --format json --pretty` when the serve request fails.
+
+The plugin keeps last-known-good JSON in memory for the pane/session. If refreshes fail after a success, it continues rendering the previous data and marks it stale after `2 × interval_seconds`. That preserves the user-visible last-known-good behavior without requiring `FullHdAccess` or a disk cache.
+
+The Rust renderer intentionally duplicates only the terminal strip logic. Golden tests compare its output to `bin/showy-quota-zellij-bar` over the fixture set so tmux/SketchyBar can stay shell-based without visual drift in Zellij.
+
+## Terminal rendering modes
+
+`SHOWY_QUOTA_TERMINAL_BAR_MODE` in shell, and `terminal_bar_mode` in plugin KDL, affect the Zellij/tmux bar body. The default `auto` renderer selects per provider from configuration: providers in `SHOWY_QUOTA_MONO3_PROVIDERS` / `mono3_providers` (default `gemini,antigravity`) render as `mono3` unless excluded; every other provider uses `dual` primary/secondary half-block geometry.
+
+`mono3` reads the tertiary window, packs primary/secondary/tertiary into one U+1FBxx sextant row, and uses one provider-level foreground color. Because the terminal body can draw only one pacing separator, mono3 bases it on `SHOWY_QUOTA_MONO3_MARKER_SOURCE` / `mono3_marker_source` (`primary` by default; `secondary`, `tertiary`, `shared`, and `none` are supported). Stale snapshots hide pacing separators.
+
+Forced `sextant3` keeps the older bottom-most-row cell-color policy and does not draw elapsed markers; forced `dual` and `mono3` apply those bodies to every provider.
 
 ## Failure semantics
 
-| Condition                                     | Outcome                                              |
-|-----------------------------------------------|------------------------------------------------------|
-| `codexbar` not on PATH and no serve URL       | First run errors; subsequent runs serve stale cache  |
-| `codexbar serve` unavailable or not renderable | Fetcher falls back to CLI, then existing stale cache |
-| CodexBar CLI returns non-JSON               | Cache is **not** updated; previous value still served|
-| CodexBar JSON fails `jq` validation           | Same — preserve last good cache                      |
-| Cache file missing and every refresh path fails | Fetcher exits non-zero; renderers print `AI ?`     |
-| Cache age > `2 × SHOWY_QUOTA_REFRESH_SECONDS`     | All render surfaces show one trailing `⚠`, grey frozen quota data, and hide elapsed markers |
+| Condition | Shell integrations | Standalone Zellij plugin |
+|---|---|---|
+| `codexbar serve` unavailable | Fetcher falls back to CLI, then existing stale cache | Shows first-failure message, or uses CLI fallback if configured |
+| CodexBar CLI returns non-JSON | Cache is not updated; previous value still served | Fallback output rejected; previous in-memory value remains |
+| CodexBar JSON fails validation | Same — preserve last good cache | Same — preserve last in-memory value |
+| No prior valid data | Renderers print `AI ?` or `AI idle` depending on path | Pane shows unavailable/invalid message or `AI idle` |
+| Data older than stale threshold | One trailing `⚠`, grey frozen quota data, no elapsed markers | Same visual stale behavior from in-memory age |
+| Zellij permission denied | Not applicable to shell/zjstatus feeder | Pane shows `showy-quota: permission denied` |
 
-## Why bash and not Python/Go/Rust
+## Why bash and Rust, not Python/Go
 
-The ai-quota predecessor was Python with a daemon, sidecar, and
-`--client-defaults` indirection. That stack made sense when ai-quota also
-had to *talk to providers*. CodexBar removed that need. Bash + `jq` +
-ImageMagick is enough to stitch JSON to bars and is the lowest possible
-install footprint.
+The old `ai-quota` predecessor was Python with a daemon, sidecar, and `--client-defaults` indirection. That stack made sense when it also had to talk to providers. CodexBar removed that need for host bars: bash + `jq` + ImageMagick remains the lowest-friction glue for tmux and SketchyBar.
+
+Zellij is different. A high-value Zellij integration must be a standalone WASM plugin so users can install one artifact and avoid `zjstatus`, feeder loops, and shell-script setup. Zellij officially supports Rust plugins, so the Zellij renderer is Rust. The project is not a full Rust port: SketchyBar and tmux stay on the shell path, with parity enforced by tests.
+
+Go is not used because the Zellij plugin API is Rust-first. TinyGo/community bindings would add WASI/API risk, and a Go CLI plus Rust plugin would split compiled logic across two languages.
 
 ## Provider id mapping
 
-CodexBar's JSON `provider` field is the canonical id and matches the
-filename of its bundled SVG (`ProviderIcon-<id>.svg`). The SketchyBar
-plugin uses these one-to-one — no remapping table.
+CodexBar's JSON `provider` field is the canonical id and matches the filename of its bundled SVG (`ProviderIcon-<id>.svg`). The SketchyBar plugin uses these one-to-one — no remapping table.
 
-The Zellij and tmux strips render a 2-letter sigil per provider via
-`showy_quota_provider_sigil` (`lib/strip.sh`). New CodexBar providers fall
-back to the first two letters of the id.
+The terminal strips render a 2-letter sigil per provider. New CodexBar providers fall back to the first two letters of the id.
 
-Provider render order is deterministic. `SHOWY_QUOTA_PROVIDERS`, when set, is
-both an allow-list and the render order. Otherwise `SHOWY_QUOTA_PROVIDER_ORDER`
-ranks providers without filtering them; missing providers are skipped, and
-unlisted providers render after the ranked providers sorted by id. The default
-rank is `codex,claude,opencode,gemini`.
+Provider render order is deterministic. `SHOWY_QUOTA_PROVIDERS` / plugin `providers`, when set, is both an allow-list and render order. Otherwise `SHOWY_QUOTA_PROVIDER_ORDER` / plugin `provider_order` ranks providers without filtering them; missing providers are skipped, and unlisted providers render after ranked providers sorted by id. The default rank is `codex,claude,opencode,gemini`.
 
 ## Adding a new SketchyBar provider
 
-CodexBar discovers providers; this repo discovers them via the cache
-content. So: enable the provider in CodexBar and wait for the next refresh
-cycle. Zellij and tmux will render the new provider automatically.
-SketchyBar declares/removes provider items on the next plugin tick after the
-filtered provider set changes; no reload is required after the initial install.
+CodexBar discovers providers; this repo discovers them via the cache content. Enable the provider in CodexBar and wait for the next refresh cycle. Zellij/tmux terminal strips render new providers automatically. SketchyBar declares/removes provider items on the next plugin tick after the filtered provider set changes; no reload is required after the initial install.
 
 ## External layout managers
 
-`bin/showy-quota-state` is the public bridge for configs that need CodexBar's
-filtered provider count without duplicating CodexBar or renderer internals.
-It honors `SHOWY_QUOTA_PROVIDERS` / `SHOWY_QUOTA_PROVIDERS_EXCLUDE` and emits:
+`bin/showy-quota-state` is the public bridge for configs that need CodexBar's filtered provider count without duplicating CodexBar or renderer internals. It honors `SHOWY_QUOTA_PROVIDERS` / `SHOWY_QUOTA_PROVIDERS_EXCLUDE` and emits:
 
 - `available`: whether a valid cache was read.
-- `stale`: whether the cache age exceeds `SHOWY_QUOTA_REFRESH_SECONDS * 2`.
-- `cacheAgeSeconds`: seconds since the usage cache mtime, or `null` when absent.
-- `staleAfterSeconds`: the numeric stale threshold.
+- `stale`: whether cache age exceeds `SHOWY_QUOTA_REFRESH_SECONDS * 2`.
+- `cacheAgeSeconds`: seconds since usage cache mtime, or `null` when absent.
+- `staleAfterSeconds`: numeric stale threshold.
 - `providers`: filtered provider ids in render order.
 - `providerCount`: `providers | length`.
-- `sketchybar.compactRecommended`: `providerCount >=
-  SHOWY_QUOTA_SKETCHYBAR_COMPACT_PROVIDER_COUNT`.
+- `sketchybar.compactRecommended`: `providerCount >= SHOWY_QUOTA_SKETCHYBAR_COMPACT_PROVIDER_COUNT`.
 
-Consumers should treat `available=false` as "leave the current layout alone";
-it means no last-known-good cache exists yet.
+Consumers should treat `available=false` as "leave the current layout alone"; it means no last-known-good cache exists yet.
 
-The SketchyBar plugin triggers `showy_quota_provider_change` when that filtered
-provider set changes, so configs can subscribe without polling if they want
-immediate layout reconciliation.
+The SketchyBar plugin triggers `showy_quota_provider_change` when that filtered provider set changes, so configs can subscribe without polling if they want immediate layout reconciliation.
