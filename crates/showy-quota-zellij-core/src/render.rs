@@ -2,7 +2,7 @@ use std::cmp::Ordering;
 
 use time::format_description::well_known::Rfc3339;
 use time::macros::format_description;
-use time::{OffsetDateTime, PrimitiveDateTime, Time};
+use time::{Duration, OffsetDateTime, PrimitiveDateTime, Time, UtcOffset};
 
 use crate::codexbar::{is_renderable, parse_usage_payload, ProviderRecord, UsageWindow};
 use crate::config::RenderConfig;
@@ -12,6 +12,7 @@ use crate::palette::{hex_to_rgb, Role};
 pub struct RenderOptions {
     pub color: bool,
     pub stale: bool,
+    pub degraded_cli: bool,
     pub now_epoch: i64,
 }
 
@@ -40,25 +41,22 @@ pub fn render_records(
         .collect();
     filter_and_sort(&mut records, config);
 
-    if records.is_empty() {
-        let mut out = String::new();
-        dim(&mut out, options.color);
-        out.push_str("AI idle");
-        reset(&mut out, options.color);
-        out.push('\n');
-        return out;
-    }
-
     let chunk_bg = &config.palette_bg;
     let stale_color = &config.palette_stale;
     let countdown_warn = &config.palette_countdown_warn;
     let mut out = String::new();
 
-    for (idx, record) in records.into_iter().enumerate() {
-        if idx > 0 {
-            out.push(' ');
+    if records.is_empty() {
+        dim(&mut out, options.color);
+        out.push_str("AI idle");
+        reset(&mut out, options.color);
+    } else {
+        for (idx, record) in records.into_iter().enumerate() {
+            if idx > 0 {
+                out.push(' ');
+            }
+            render_provider(&mut out, record, config, options, chunk_bg, stale_color);
         }
-        render_provider(&mut out, record, config, options, chunk_bg, stale_color);
     }
 
     if options.stale {
@@ -66,6 +64,17 @@ pub fn render_records(
         style_text(
             &mut out,
             &config.stale_glyph,
+            Some(countdown_warn),
+            Some(chunk_bg),
+            Weight::Bold,
+            options.color,
+        );
+    }
+    if options.degraded_cli {
+        out.push(' ');
+        style_text(
+            &mut out,
+            "⚠cli",
             Some(countdown_warn),
             Some(chunk_bg),
             Weight::Bold,
@@ -647,12 +656,27 @@ fn shared_window_marker_boundary(
         }
     }
     if count >= 2 {
-        elapsed_marker_boundary(
-            args.p_reset.or(args.s_reset).or(args.t_reset),
-            ref_window,
-            width,
-            now_epoch,
-        )
+        if let (Some(ref_epoch_val), Some(ref_window_val)) = (ref_epoch, ref_window) {
+            // Find which row established the shared window and use its reset string.
+            let matched_reset = [
+                (args.p_reset, args.p_window, ref_epoch_val, ref_window_val),
+                (args.s_reset, args.s_window, ref_epoch_val, ref_window_val),
+                (args.t_reset, args.t_window, ref_epoch_val, ref_window_val),
+            ]
+            .iter()
+            .filter_map(|&(reset, opt_window, re, rw)| {
+                let epoch = reset.and_then(|r| reset_epoch(r, now_epoch));
+                if epoch == Some(re) && opt_window == Some(rw) {
+                    reset
+                } else {
+                    None
+                }
+            })
+            .next();
+            elapsed_marker_boundary(matched_reset, Some(ref_window_val), width, now_epoch)
+        } else {
+            None
+        }
     } else {
         None
     }
@@ -809,8 +833,8 @@ fn reset_epoch(raw: &str, now_epoch: i64) -> Option<i64> {
     if raw.is_empty() || raw == "null" {
         return None;
     }
-    if let Ok(parsed) = OffsetDateTime::parse(raw, &Rfc3339) {
-        return Some(parsed.unix_timestamp());
+    if let Some(epoch) = parse_offset_datetime(raw) {
+        return Some(epoch);
     }
 
     let desc = raw
@@ -820,7 +844,58 @@ fn reset_epoch(raw: &str, now_epoch: i64) -> Option<i64> {
     parse_description_epoch(desc, now_epoch)
 }
 
+fn parse_offset_datetime(raw: &str) -> Option<i64> {
+    if let Ok(parsed) = OffsetDateTime::parse(raw, &Rfc3339) {
+        return Some(parsed.unix_timestamp());
+    }
+    let normalized = normalize_colonless_offset(raw)?;
+    OffsetDateTime::parse(&normalized, &Rfc3339)
+        .ok()
+        .map(|parsed| parsed.unix_timestamp())
+}
+
+fn normalize_colonless_offset(raw: &str) -> Option<String> {
+    let bytes = raw.as_bytes();
+    if bytes.len() < 5 {
+        return None;
+    }
+    let sign = bytes.len() - 5;
+    if !matches!(bytes[sign], b'+' | b'-') {
+        return None;
+    }
+    if !bytes[sign + 1..].iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    let mut normalized = String::with_capacity(raw.len() + 1);
+    normalized.push_str(&raw[..raw.len() - 2]);
+    normalized.push(':');
+    normalized.push_str(&raw[raw.len() - 2..]);
+    Some(normalized)
+}
+
+fn local_offset_at(datetime: OffsetDateTime) -> UtcOffset {
+    UtcOffset::local_offset_at(datetime)
+        .or_else(|_| UtcOffset::current_local_offset())
+        .unwrap_or(UtcOffset::UTC)
+}
+
+fn assume_local(local: PrimitiveDateTime, now_epoch: i64) -> Option<OffsetDateTime> {
+    let now = OffsetDateTime::from_unix_timestamp(now_epoch).ok()?;
+    let mut offset = local_offset_at(now);
+    for _ in 0..2 {
+        let candidate = local.assume_offset(offset);
+        let next = local_offset_at(candidate);
+        if next == offset {
+            return Some(candidate);
+        }
+        offset = next;
+    }
+    Some(local.assume_offset(offset))
+}
+
 fn parse_description_epoch(desc: &str, now_epoch: i64) -> Option<i64> {
+    let now = OffsetDateTime::from_unix_timestamp(now_epoch).ok()?;
+    let local_offset = local_offset_at(now);
     let short = format_description!(
         "[month repr:short] [day], [year] [hour repr:12]:[minute] [period case:upper]"
     );
@@ -830,16 +905,16 @@ fn parse_description_epoch(desc: &str, now_epoch: i64) -> Option<i64> {
     if let Ok(parsed) =
         PrimitiveDateTime::parse(desc, &short).or_else(|_| PrimitiveDateTime::parse(desc, &long))
     {
-        return Some(parsed.assume_utc().unix_timestamp());
+        return assume_local(parsed, now_epoch).map(|parsed| parsed.unix_timestamp());
     }
 
     let clock = parse_time_12h(desc)?;
-    let today = OffsetDateTime::from_unix_timestamp(now_epoch).ok()?.date();
-    let mut epoch = PrimitiveDateTime::new(today, clock)
-        .assume_utc()
-        .unix_timestamp();
+    let today = now.to_offset(local_offset).date();
+    let mut local = PrimitiveDateTime::new(today, clock);
+    let mut epoch = assume_local(local, now_epoch)?.unix_timestamp();
     if epoch < now_epoch {
-        epoch += 86_400;
+        local += Duration::days(1);
+        epoch = assume_local(local, now_epoch)?.unix_timestamp();
     }
     Some(epoch)
 }
@@ -922,6 +997,34 @@ fn dim(out: &mut String, color: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn render_idle(stale: bool, degraded_cli: bool) -> String {
+        render_zellij(
+            include_bytes!("../../../test/fixtures/codexbar-empty.json"),
+            &RenderConfig::default(),
+            RenderOptions {
+                color: false,
+                stale,
+                degraded_cli,
+                now_epoch: 4_070_908_800,
+            },
+        )
+        .expect("rendered idle fixture")
+    }
+
+    #[test]
+    fn idle_render_appends_degraded_marker() {
+        assert_eq!(render_idle(false, true), "AI idle ⚠cli\n");
+    }
+
+    #[test]
+    fn idle_render_appends_stale_marker() {
+        assert_eq!(render_idle(true, false), "AI idle ⚠\n");
+    }
+
+    #[test]
+    fn idle_render_appends_stale_and_degraded_markers() {
+        assert_eq!(render_idle(true, true), "AI idle ⚠ ⚠cli\n");
+    }
 
     #[test]
     fn countdown_format_matches_shell_contract() {
@@ -940,6 +1043,18 @@ mod tests {
     }
 
     #[test]
+    fn parses_colonless_iso8601_offset() {
+        assert_eq!(
+            reset_epoch("2099-01-01T01:40:00+0000", 0),
+            reset_epoch("2099-01-01T01:40:00+00:00", 0)
+        );
+        assert_eq!(
+            reset_epoch("2099-01-01T01:40:00.123-0730", 0),
+            reset_epoch("2099-01-01T01:40:00.123-07:30", 0)
+        );
+    }
+
+    #[test]
     fn no_color_render_contains_no_ansi_escapes() {
         let output = render_zellij(
             include_bytes!("../../../test/fixtures/codexbar-mixed.json"),
@@ -947,6 +1062,7 @@ mod tests {
             RenderOptions {
                 color: false,
                 stale: false,
+                degraded_cli: false,
                 now_epoch: 4_070_908_800,
             },
         )

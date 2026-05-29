@@ -3,27 +3,29 @@
 `showy-quota` has two integration families:
 
 1. **Shell integrations for host bars.** tmux, SketchyBar, and the advanced zjstatus path use the existing shell data plane and renderers.
-2. **Standalone Zellij plugin.** Zellij's recommended path is a Rust/WASM plugin that fetches CodexBar serve directly and renders the same terminal strip in-process without ANSI escapes.
+2. **Standalone Zellij plugin.** Zellij's recommended path is a Rust/WASM plugin that fetches CodexBar serve directly and renders the same ANSI-styled terminal strip in-process.
 
 ```text
 Recommended Zellij path:
 
-codexbar serve /usage
+codexbar serve /health + /usage
+        ▲
+        │ start if absent (Zellij background command pane)
         │
-        ▼
 showy-quota-zellij.wasm
-  ├─ WebAccess request to localhost /usage
-  ├─ optional RunCommands fallback to `codexbar usage --format json --pretty`
+  ├─ WebAccess request to localhost /health and /usage
+  ├─ OpenTerminalsOrPlugins startup of `codexbar serve`
+  ├─ RunCommands degraded fallback to `codexbar usage --format json --pretty`
   ├─ in-memory last-known-good data
-  └─ plain terminal strip rendered directly in a one-line Zellij pane
+  └─ ANSI-styled terminal strip rendered directly in a one-line Zellij pane
 
 Shell integrations:
 
-codexbar serve /usage  or  codexbar usage --format json
+codexbar serve /health + /usage  or  codexbar usage --format json
+        ▲
+        │ start if absent (managed pidfile)
         │
-        ▼
-bin/showy-quota-fetch  ← shared cache + flock + atomic publish
-        │  ~/.cache/showy-quota/usage.json
+bin/showy-quota-fetch  ← shared cache + source marker + flock + atomic publish
         ├──► bin/showy-quota-state                 (stable provider/layout state JSON)
         ├──► sketchybar/plugins/showy_quota.sh    (native SketchyBar rows + icons)
         ├──► bin/showy-quota-tmux-bar             (tmux #[…] markup)
@@ -36,6 +38,7 @@ The shell data plane is still the reliability boundary for tmux, SketchyBar, and
 
 - File: `${SHOWY_QUOTA_CACHE_DIR}/usage.json` (default: `${XDG_CACHE_HOME:-$HOME/.cache}/showy-quota/usage.json`)
 - Stamp file: `${SHOWY_QUOTA_CACHE_DIR}/usage.json.updated-at`
+- Source file: `${SHOWY_QUOTA_CACHE_DIR}/source` (`serve`, `cli`, or absent/unknown); CLI source is visibly degraded as `⚠cli`.
 - `flock` path: `${SHOWY_QUOTA_CACHE_DIR}/usage.lock`
 - owner-scoped `mkdir` fallback path: `${SHOWY_QUOTA_CACHE_DIR}/usage.lock.d`
 - Validation: `jq` must accept an array of provider objects. If a usage window is present, its `usedPercent` must be numeric before publication.
@@ -44,7 +47,7 @@ The fetcher prints the cache content to stdout regardless of whether it just ref
 
 Freshness is a shared render concern. A shell cache is stale when `showy_quota_age_seconds "${SHOWY_QUOTA_USAGE_FILE}"` is greater than `SHOWY_QUOTA_REFRESH_SECONDS * 2`. Shell renderers show one trailing stale indicator, grey frozen data, and hide elapsed markers; `showy-quota-state` reports the boolean and threshold.
 
-Refreshes prefer `${SHOWY_QUOTA_CODEXBAR_SERVE_URL%/}/usage` with `curl`; the default base URL is `http://127.0.0.1:8080`. Set `SHOWY_QUOTA_CODEXBAR_SERVE_URL=` to skip the HTTP probe. When an existing cache is still fresh under `SHOWY_QUOTA_REFRESH_SECONDS`, the fetcher may still refresh from `codexbar serve` every `SHOWY_QUOTA_CODEXBAR_SERVE_REFRESH_SECONDS` so bars repaint shortly after the server's own response cache changes. Failed fast HTTP probes keep serving the existing cache; they do not invoke the slower CLI fallback until the normal refresh interval expires.
+Refreshes prefer `${SHOWY_QUOTA_CODEXBAR_SERVE_URL%/}/usage` with `curl`; the default base URL is `http://127.0.0.1:8080`. Before falling back to CLI, `showy-quota-fetch` probes `/health` and, with `SHOWY_QUOTA_MANAGE_SERVE=1` (default), starts `codexbar serve` on the port implied by `SHOWY_QUOTA_CODEXBAR_SERVE_URL` (default `8080`) in the background with a pidfile. `SHOWY_QUOTA_CODEXBAR_SERVE_PORT` is now a compatibility override; when both are set and disagree, the fetcher logs a warning and prefers the URL port. Set `SHOWY_QUOTA_MANAGE_SERVE=0` to disable managed startup, or `SHOWY_QUOTA_CODEXBAR_SERVE_URL=` to skip HTTP entirely. When an existing cache is still fresh under `SHOWY_QUOTA_REFRESH_SECONDS`, the fetcher may still refresh from `codexbar serve` every `SHOWY_QUOTA_CODEXBAR_SERVE_REFRESH_SECONDS` so bars repaint shortly after the server's own response cache changes. Failed fast HTTP probes keep serving the existing cache; they do not invoke the slower CLI fallback until the normal refresh interval expires.
 
 The tmux and Zellij detail panes source showy-quota config when present, then run `${SHOWY_QUOTA_CODEXBAR_BIN:-codexbar} usage` directly because they display CodexBar's text UI, not the compact cache-backed renderer output.
 
@@ -53,12 +56,12 @@ The tmux and Zellij detail panes source showy-quota config when present, then ru
 The plugin does not read the host cache and does not shell out to showy-quota scripts. Its default path is:
 
 ```text
-web_request("http://127.0.0.1:8080/usage") → parse → filter/order → render plain strip
+web_request("/health") → start `codexbar serve` if needed → web_request("/usage") → parse → filter/order → render ANSI strip
 ```
 
-It requests `WebAccess`. If `fallback_command "codexbar"` is configured, it also requests `RunCommands` and runs `codexbar usage --format json --pretty` when the serve request fails.
+It requests `WebAccess`, `OpenTerminalsOrPlugins`, and `RunCommands` up front. If serve cannot be reached, the managed serve command uses the port from `serve_url` unless `serve_port` is set explicitly. CLI fallback runs `codexbar usage --format json --pretty`, renders data with a trailing `⚠cli` marker, and continues probing serve so it can switch back automatically.
 
-The plugin keeps last-known-good JSON in memory for the pane/session. If refreshes fail after a success, it continues rendering the previous data and marks it stale after `2 × interval_seconds`. That preserves the user-visible last-known-good behavior without requiring `FullHdAccess` or a disk cache.
+The plugin keeps last-known-good JSON in memory for the pane/session. If refreshes fail after a success, it continues rendering the previous data and marks it stale at `2 × interval_seconds`. That preserves the user-visible last-known-good behavior without requiring `FullHdAccess` or a disk cache.
 
 The Rust renderer intentionally duplicates only the terminal strip logic. Golden tests compare its output to `bin/showy-quota-zellij-bar` over the fixture set so tmux/SketchyBar can stay shell-based without visual drift in Zellij.
 
@@ -74,7 +77,7 @@ Forced `sextant3` keeps the older bottom-most-row cell-color policy and does not
 
 | Condition | Shell integrations | Standalone Zellij plugin |
 |---|---|---|
-| `codexbar serve` unavailable | Fetcher falls back to CLI, then existing stale cache | Shows first-failure message, or uses CLI fallback if configured |
+| `codexbar serve` unavailable | Fetcher starts serve, then falls back to visibly degraded CLI (`⚠cli`) if startup/probe fails | Plugin starts serve via background command pane, then uses visibly degraded CLI (`⚠cli`) if needed |
 | CodexBar CLI returns non-JSON | Cache is not updated; previous value still served | Fallback output rejected; previous in-memory value remains |
 | CodexBar JSON fails validation | Same — preserve last good cache | Same — preserve last in-memory value |
 | No prior valid data | Renderers print `AI ?` or `AI idle` depending on path | Pane shows unavailable/invalid message or `AI idle` |

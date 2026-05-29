@@ -1,8 +1,8 @@
 # Zellij integration
 
-The recommended Zellij integration is the standalone `showy-quota-zellij.wasm` plugin. It owns one borderless status pane, fetches CodexBar usage through `codexbar serve`, renders the terminal strip in-process without ANSI escapes, and repaints on load plus a one-shot timer.
+The recommended Zellij integration is the standalone `showy-quota-zellij.wasm` plugin. It owns one borderless status pane, starts/probes `codexbar serve`, renders the terminal strip in-process with ANSI styling, and repaints on load plus a one-shot timer.
 
-It does not use `zjstatus`, does not need a feeder loop, and does not require the showy-quota shell scripts to be installed.
+It does not use `zjstatus`, does not need a feeder loop, does not require the showy-quota shell scripts to be installed, and does not require users to start `codexbar serve` by hand.
 
 ## Quick install
 
@@ -29,43 +29,52 @@ layout {
         pane size=1 borderless=true {
             plugin location="file:~/.config/zellij/plugins/showy-quota-zellij.wasm" {
                 serve_url "http://127.0.0.1:8080"
+                manage_serve true
+                serve_command "codexbar"
                 interval_seconds 10
-                fallback_command ""
+                cli_fallback "degraded"
+                cli_command "codexbar"
+                cli_interval_seconds 120
             }
         }
     }
 }
 ```
 
-Start `codexbar serve` before launching Zellij. The plugin requests `http://127.0.0.1:8080/usage` by default.
+The plugin probes `http://127.0.0.1:8080/health` and `/usage` by default. If `/health` is unavailable, it asks Zellij to start `codexbar serve` in a hidden background command pane on the `serve_url` port. If serve still cannot be reached, the default CLI fallback renders data from `codexbar usage --format json --pretty` with a trailing `⚠cli` marker.
 
 ## Permissions
 
-Default permission:
+Default permissions:
 
 ```text
 WebAccess
-```
-
-If `fallback_command "codexbar"` is set, the plugin also requests:
-
-```text
+OpenTerminalsOrPlugins
 RunCommands
 ```
 
-Zellij can show permission prompts in a floating pane that is hidden by default. Pre-grant permissions to avoid a blank first launch. Zellij versions differ on whether local file plugins are keyed by absolute path or `file:` URL, so include both forms when editing `permissions.kdl` by hand.
+`WebAccess` is for localhost `/health` and `/usage`, `OpenTerminalsOrPlugins` is for the managed serve background command pane, and `RunCommands` is for degraded CLI fallback.
+
+Zellij can show permission prompts in a floating pane that is hidden by default. Pre-grant permissions to avoid a blank first launch. Zellij versions differ on whether local file plugins are keyed by absolute path, expanded `file:` URL, or the literal `file:~` URL from the layout, so include all forms when editing `permissions.kdl` by hand.
 
 macOS:
 
 ```kdl
 // ~/Library/Caches/org.Zellij-Contributors.Zellij/permissions.kdl
+"file:~/.config/zellij/plugins/showy-quota-zellij.wasm" {
+    WebAccess
+    OpenTerminalsOrPlugins
+    RunCommands
+}
 "/Users/you/.config/zellij/plugins/showy-quota-zellij.wasm" {
     WebAccess
-    // RunCommands only if fallback_command is enabled
+    OpenTerminalsOrPlugins
+    RunCommands
 }
 "file:/Users/you/.config/zellij/plugins/showy-quota-zellij.wasm" {
     WebAccess
-    // RunCommands only if fallback_command is enabled
+    OpenTerminalsOrPlugins
+    RunCommands
 }
 ```
 
@@ -73,13 +82,20 @@ Linux:
 
 ```kdl
 // ${XDG_CACHE_HOME:-~/.cache}/zellij/permissions.kdl
+"file:~/.config/zellij/plugins/showy-quota-zellij.wasm" {
+    WebAccess
+    OpenTerminalsOrPlugins
+    RunCommands
+}
 "/home/you/.config/zellij/plugins/showy-quota-zellij.wasm" {
     WebAccess
-    // RunCommands only if fallback_command is enabled
+    OpenTerminalsOrPlugins
+    RunCommands
 }
 "file:/home/you/.config/zellij/plugins/showy-quota-zellij.wasm" {
     WebAccess
-    // RunCommands only if fallback_command is enabled
+    OpenTerminalsOrPlugins
+    RunCommands
 }
 ```
 
@@ -87,7 +103,7 @@ If you do not pre-grant, reveal floating panes once, focus the pending permissio
 
 ## Output shape
 
-The plugin renders the same terminal strip geometry as `bin/showy-quota-zellij-bar`, without ANSI color escapes:
+The plugin renders the same styled terminal strip geometry as `bin/showy-quota-zellij-bar`:
 
 ```text
 <SIGIL>▕<12-cell bar body>▏<countdown>
@@ -96,14 +112,15 @@ The plugin renders the same terminal strip geometry as `bin/showy-quota-zellij-b
 | Segment | Meaning |
 |---|---|
 | **SIGIL** | 2-letter provider abbreviation (`CL`, `CX`, `GE`, …). |
-| **bar** | In default `auto` mode, time-tier providers render as `dual` half-block geometry (`▀`) for primary/5h over secondary/7d quota. Providers listed in `mono3_providers` (`gemini,antigravity` by default) render as `mono3`: primary, secondary, and tertiary are packed into top/middle/bottom sextant rows, plus one provider-level `│` pacing separator. Color roles still configure shell/zjstatus output; the standalone plugin uses the same thresholds and geometry but emits no color escapes. |
+| **bar** | In default `auto` mode, time-tier providers render as `dual` half-block geometry (`▀`) for primary/5h over secondary/7d quota. Providers listed in `mono3_providers` (`gemini,antigravity` by default) render as `mono3`: primary, secondary, and tertiary are packed into top/middle/bottom sextant rows, plus one provider-level `│` pacing separator. Color roles configure the standalone plugin, shell renderer, and advanced zjstatus output. |
 | **countdown** | Compact like `12m`, `4h`, `4:31`, `2d`, `5w`, or `?` if the provider does not expose a primary reset time. |
 
-Stale snapshots keep the last-known-good data, hide elapsed markers, and append the stale glyph (`⚠` by default). The shell and advanced zjstatus renderers additionally grey data-bearing colors; the standalone plugin intentionally emits plain text because Zellij plugin panes render escape bytes literally.
+Stale snapshots keep the last-known-good data, hide elapsed markers, grey data-bearing colors, and append the stale glyph (`⚠` by default). CLI fallback appends `⚠cli`; stale and degraded can appear together.
 
 ```text
-fresh: CL▕▀▀▀▀▀▀▀▀▀▀▀▀▏12m
-stale: CL▕▀▀▀▀▀▀▀▀▀▀▀▀▏12m ⚠
+fresh:    CL▕▀▀▀▀▀▀▀▀▀▀▀▀▏12m
+stale:    CL▕▀▀▀▀▀▀▀▀▀▀▀▀▏12m ⚠
+fallback: CL▕▀▀▀▀▀▀▀▀▀▀▀▀▏12m ⚠cli
 ```
 
 ## Plugin configuration
@@ -115,8 +132,12 @@ Common options:
 ```kdl
 plugin location="file:~/.config/zellij/plugins/showy-quota-zellij.wasm" {
     serve_url "http://127.0.0.1:8080"
+    manage_serve true
+    serve_command "codexbar"
     interval_seconds 10
-    fallback_command ""        // set to "codexbar" to enable CLI fallback
+    cli_fallback "degraded"
+    cli_command "codexbar"
+    cli_interval_seconds 120
     providers ""               // comma-separated allow-list and order
     providers_exclude ""       // comma-separated deny-list
     provider_order "codex,claude,opencode,gemini"

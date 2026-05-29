@@ -66,8 +66,21 @@ else
 fi
 
 cache_age="null"
+cache_source="unknown"
 if [[ -f "${SHOWY_QUOTA_USAGE_FILE}" ]]; then
     cache_age=$(showy_quota_age_seconds "${SHOWY_QUOTA_USAGE_FILE}")
+fi
+if [[ -r "${SHOWY_QUOTA_SOURCE_FILE}" ]]; then
+    IFS= read -r cache_source < "${SHOWY_QUOTA_SOURCE_FILE}" || cache_source="unknown"
+fi
+case "${cache_source}" in
+    serve|cli) ;;
+    *) cache_source="unknown" ;;
+esac
+if [[ "${cache_source}" == "cli" ]]; then
+    degraded_flag=true
+else
+    degraded_flag=false
 fi
 stale_after=$(showy_quota_stale_after_seconds)
 if [[ "${cache_age}" != "null" ]] && (( cache_age > stale_after )); then
@@ -88,13 +101,19 @@ case "${mode}" in
             --argjson providers "${providers_json}" \
             --argjson available "${available}" \
             --argjson stale "${stale_flag}" \
+            --argjson degraded "${degraded_flag}" \
             --arg cache_age "${cache_age}" \
             --arg stale_after "${stale_after}" \
+            --arg cache_source "${cache_source}" \
             --arg compact_threshold "${threshold}" \
             '($compact_threshold | tonumber) as $compact_threshold_num
             | {
                 available: $available,
                 stale: $stale,
+                cache: {
+                    source: $cache_source,
+                    degraded: $degraded
+                },
                 cacheAgeSeconds: (if $cache_age == "null" then null else ($cache_age | tonumber) end),
                 staleAfterSeconds: ($stale_after | tonumber),
                 providers: $providers,

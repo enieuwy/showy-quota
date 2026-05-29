@@ -126,6 +126,21 @@ declare_stale_item() {
                    click_script="${CLICK}" >/dev/null 2>&1 || true
 }
 
+declare_degraded_item() {
+    sketchybar --remove showy_quota.degraded >/dev/null 2>&1 || true
+    sketchybar --add item showy_quota.degraded left \
+               --set showy_quota.degraded \
+                   drawing=off \
+                   label="${SHOWY_QUOTA_DEGRADED_CLI_GLYPH}" \
+                   label.color="${COUNTDOWN_WARN_ARGB}" \
+                   icon.drawing=off \
+                   background.color=0x00000000 \
+                   background.height=0 \
+                   padding_left=2 \
+                   padding_right=4 \
+                   click_script="${CLICK}" >/dev/null 2>&1 || true
+}
+
 declare_provider_items() {
     local pid="$1"
     remove_provider_items "${pid}"
@@ -241,10 +256,9 @@ declared_items_present() {
         [[ -n "${pid}" ]] || continue
         provider_items_declared "${pid}" || return 1
     done <<< "${providers}"
-    [[ -z "${providers}" ]] || {
-        sketchybar_item_exists showy_quota.stale \
-            && sketchybar_item_exists showy_quota_bracket
-    }
+    sketchybar_item_exists showy_quota.stale || return 1
+    sketchybar_item_exists showy_quota.degraded || return 1
+    [[ -z "${providers}" ]] || sketchybar_item_exists showy_quota_bracket
 }
 
 
@@ -253,6 +267,8 @@ recreate_bracket() {
     local bracket_items=()
     local has_provider=0
     sketchybar --remove showy_quota_bracket >/dev/null 2>&1 || true
+    declare_stale_item
+    declare_degraded_item
 
     while IFS= read -r pid; do
         [[ -n "${pid}" ]] || continue
@@ -270,13 +286,10 @@ recreate_bracket() {
     done <<< "${providers}"
 
     if (( ! has_provider )); then
-        sketchybar --remove showy_quota.stale >/dev/null 2>&1 || true
         return 0
     fi
 
-    bracket_items+=("showy_quota.stale")
-
-    declare_stale_item
+    bracket_items+=("showy_quota.stale" "showy_quota.degraded")
     sketchybar --add bracket showy_quota_bracket "${bracket_items[@]}" \
                --set showy_quota_bracket \
                    background.color="${SHOWY_QUOTA_SKETCHYBAR_PILL_COLOR}" \
@@ -311,6 +324,7 @@ clear_declared_items() {
     done <<< "${declared}"
     sketchybar --remove showy_quota_bracket >/dev/null 2>&1 || true
     sketchybar --remove showy_quota.stale >/dev/null 2>&1 || true
+    sketchybar --remove showy_quota.degraded >/dev/null 2>&1 || true
     write_state_providers "" || showy_quota_log "failed to clear sketchybar provider state"
 }
 
@@ -554,6 +568,10 @@ if showy_quota_cache_stale_for "${SHOWY_QUOTA_USAGE_FILE}"; then
 else
     stale=0
 fi
+degraded_cli=0
+if [[ "${SHOWY_QUOTA_DEGRADED_CLI:-}" == "1" ]] || { [[ -z "${SHOWY_QUOTA_DEGRADED_CLI:-}" ]] && showy_quota_cache_degraded_cli; }; then
+    degraded_cli=1
+fi
 
 elapsed_marker_x() {
     local reset_at="$1" window_minutes="$2"
@@ -592,7 +610,7 @@ done <<< "${desired_providers}"
 if [[ "${SHOWY_QUOTA_SKETCHYBAR_FORCE_REDECLARE:-0}" == "1" ]]; then
     force_redeclare=1
     declared_item_providers=""
-elif [[ -n "${expected_live_providers}" ]] && ! declared_items_present "${expected_live_providers}"; then
+elif ! declared_items_present "${expected_live_providers}"; then
     force_redeclare=1
     declared_item_providers=""
     showy_quota_log "sketchybar items missing; forcing redeclare"
@@ -753,4 +771,9 @@ if (( stale )); then
     sketchybar --set showy_quota.stale drawing=on label="${SHOWY_QUOTA_STALE_GLYPH}" label.color="${COUNTDOWN_WARN_ARGB}" icon.drawing=off background.color=0x00000000 background.height=0 padding_left=4 padding_right=2 click_script="${CLICK}" >/dev/null 2>&1 || true
 else
     sketchybar --set showy_quota.stale drawing=off >/dev/null 2>&1 || true
+fi
+if (( degraded_cli )); then
+    sketchybar --set showy_quota.degraded drawing=on label="${SHOWY_QUOTA_DEGRADED_CLI_GLYPH}" label.color="${COUNTDOWN_WARN_ARGB}" icon.drawing=off background.color=0x00000000 background.height=0 padding_left=2 padding_right=4 click_script="${CLICK}" >/dev/null 2>&1 || true
+else
+    sketchybar --set showy_quota.degraded drawing=off >/dev/null 2>&1 || true
 fi

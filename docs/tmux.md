@@ -38,11 +38,14 @@ When the cache is older than `2 × SHOWY_QUOTA_REFRESH_SECONDS`, tmux gets one
 trailing `SHOWY_QUOTA_STALE_GLYPH` (default `⚠`) after the last provider. The
 cap glyphs, sigil background, separator, bar fill cells, and countdown
 foreground use `SHOWY_QUOTA_PALETTE_STALE`; sigil letters and the strip
-background stay unchanged, and elapsed markers are hidden.
+background stay unchanged, and elapsed markers are hidden. When the shared cache
+came from CLI fallback instead of `codexbar serve`, tmux appends `⚠cli` in the
+warning color.
 
 ```text
-fresh: #[…]CL▕▀▀▀▀▀▀▀▀▀▀▀▀▏12m
-stale: #[…]CL▕▀▀▀▀▀▀▀▀▀▀▀▀▏12m #[…]⚠   # data-bearing colors greyed
+fresh:    #[…]CL▕▀▀▀▀▀▀▀▀▀▀▀▀▏12m
+stale:    #[…]CL▕▀▀▀▀▀▀▀▀▀▀▀▀▏12m #[…]⚠     # data-bearing colors greyed
+fallback: #[…]CL▕▀▀▀▀▀▀▀▀▀▀▀▀▏12m #[…]⚠cli
 ```
 
 ## Font requirements
@@ -121,10 +124,11 @@ set -g window-status-current-format ''
 
 tmux invokes the script on its own schedule (default 15 s). The script
 itself reads from the shared cache, so it is fast (≤ 50 ms typical).
-With `codexbar serve` running, the shared cache refreshes from the local HTTP
-endpoint every `SHOWY_QUOTA_CODEXBAR_SERVE_REFRESH_SECONDS` by default. Tighten
-`SHOWY_QUOTA_REFRESH_SECONDS` only if you intentionally want the slower CLI
-fallback to run more often too.
+With `codexbar serve` reachable, the shared cache refreshes from the local HTTP
+endpoint every `SHOWY_QUOTA_CODEXBAR_SERVE_REFRESH_SECONDS` by default. If serve
+is missing, `showy-quota-fetch` starts it when `SHOWY_QUOTA_MANAGE_SERVE=1`
+(default). Tighten `SHOWY_QUOTA_REFRESH_SECONDS` only if you intentionally want
+the slower CLI fallback to run more often too.
 
 ## PATH gotchas
 

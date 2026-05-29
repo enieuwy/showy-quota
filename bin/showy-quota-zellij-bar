@@ -243,16 +243,29 @@ fi
 filtered=$(printf '%s' "${data}" | showy_quota_filter_renderable)
 count=$(printf '%s' "${filtered}" | jq 'length')
 
-if (( count == 0 )); then
-    dim; printf 'AI idle'; reset; printf '\n'
-    exit 0
-fi
-
 # Stale = cache is older than 2x the refresh interval; render quota state
 # as last-known data with a single trailing frozen-snapshot marker.
 stale=0
 if [[ -z "${json_input}" ]] && showy_quota_cache_stale_for "${SHOWY_QUOTA_USAGE_FILE}"; then
     stale=1
+fi
+degraded_cli=0
+if [[ "${SHOWY_QUOTA_DEGRADED_CLI:-}" == "1" ]] || { [[ -z "${SHOWY_QUOTA_DEGRADED_CLI:-}" && -z "${json_input}" ]] && showy_quota_cache_degraded_cli; }; then
+    degraded_cli=1
+fi
+
+if (( count == 0 )); then
+    dim; printf 'AI idle'; reset
+    if (( stale )); then
+        printf ' '
+        style_text "${SHOWY_QUOTA_STALE_GLYPH}" "$(showy_quota_palette countdown_warn)" "$(showy_quota_palette bg)" bold
+    fi
+    if (( degraded_cli )); then
+        printf ' '
+        style_text "${SHOWY_QUOTA_DEGRADED_CLI_GLYPH}" "$(showy_quota_palette countdown_warn)" "$(showy_quota_palette bg)" bold
+    fi
+    printf '\n'
+    exit 0
 fi
 
 # ── per-provider render ─────────────────────────────────────────────
@@ -379,6 +392,10 @@ done <<< "${rows}"
 if (( stale )); then
     printf ' '
     style_text "${SHOWY_QUOTA_STALE_GLYPH}" "${countdown_warn}" "${chunk_bg}" bold
+fi
+if (( degraded_cli )); then
+    printf ' '
+    style_text "${SHOWY_QUOTA_DEGRADED_CLI_GLYPH}" "${countdown_warn}" "${chunk_bg}" bold
 fi
 
 # Strip CR; emit single newline so zjstatus pipe widget sees a clean record.

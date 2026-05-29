@@ -15,7 +15,7 @@
 #   --json      Default. Print the cached JSON.
 #   --age       Print cache age in seconds and exit.
 #   --path      Print the cache file path and exit.
-#
+#   --stop-serve Stop the managed codexbar serve process and exit.
 # This script is intentionally narrow: every renderer (zellij, tmux,
 # sketchybar) reads from the same cache file so we never fan out N parallel
 # `codexbar` invocations.
@@ -37,12 +37,14 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${SCRIPT_PATH}")" && pwd -P)"
 
 mode="json"
 force_refresh=0
+stop_serve=0
 while (($#)); do
     case "$1" in
         --refresh) force_refresh=1 ;;
         --json)    mode="json" ;;
         --age)     mode="age" ;;
         --path)    mode="path" ;;
+        --stop-serve) stop_serve=1 ;;
         -h|--help)
             sed -n '2,18p' "$0"
             exit 0
@@ -54,6 +56,19 @@ done
 
 mkdir -p "${SHOWY_QUOTA_CACHE_DIR}"
 chmod 700 "${SHOWY_QUOTA_CACHE_DIR}" 2>/dev/null || true
+SHOWY_QUOTA_MANAGED_SERVE_RESTART_ATTEMPTED=0
+
+stop_managed_serve() {
+    local pid="" start_epoch="" _basename=""
+    if ! managed_serve_valid_pidfile pid start_epoch _basename; then
+        rm -f -- "${SHOWY_QUOTA_CODEXBAR_SERVE_PID_FILE}"
+        return 0
+    fi
+    kill "${pid}" 2>/dev/null || true
+    rm -f -- "${SHOWY_QUOTA_CODEXBAR_SERVE_PID_FILE}"
+    showy_quota_log "stopped managed codexbar serve pid ${pid}"
+    return 0
+}
 
 if [[ "${mode}" == "path" ]]; then
     printf '%s\n' "${SHOWY_QUOTA_USAGE_FILE}"
@@ -279,23 +294,281 @@ showy_quota_wait_for_cache() {
 
 # ── core refresh ──────────────────────────────────────────────────────
 
-run_codexbar_serve() {
+serve_base_url() {
+    [[ -n "${SHOWY_QUOTA_CODEXBAR_SERVE_URL}" ]] || return 1
+    local base="${SHOWY_QUOTA_CODEXBAR_SERVE_URL%/}"
+    if ! [[ "${base}" =~ ^http://(127[.]0[.]0[.]1|localhost|\[::1\])(:[0-9]+)?$ ]]; then
+        showy_quota_log "ignoring non-local codexbar serve URL: ${SHOWY_QUOTA_CODEXBAR_SERVE_URL}"
+        return 1
+    fi
+    printf '%s\n' "${base}"
+}
+
+serve_timeout() {
+    local timeout="${SHOWY_QUOTA_CODEXBAR_SERVE_TIMEOUT_SECONDS}"
+    [[ "${timeout}" =~ ^[0-9]+([.][0-9]+)?$ ]] || timeout=0.5
+    printf '%s\n' "${timeout}"
+}
+
+positive_integer_or_default() {
+    local value="$1" default="$2"
+    if [[ "${value}" =~ ^[0-9]+$ ]]; then
+        value=$((10#${value}))
+    else
+        value="${default}"
+    fi
+    (( value > 0 )) || value="${default}"
+    printf '%s\n' "${value}"
+}
+
+codexbar_cli_timeout_seconds() {
+    positive_integer_or_default "${SHOWY_QUOTA_CODEXBAR_CLI_TIMEOUT_SECONDS:-20}" 20
+}
+
+serve_failure_restart_threshold() {
+    positive_integer_or_default "${SHOWY_QUOTA_CODEXBAR_SERVE_FAILURES_BEFORE_RESTART:-3}" 3
+}
+
+serve_port_from_base_url() {
+    local base="" url_port="8080" configured_port="${SHOWY_QUOTA_CODEXBAR_SERVE_PORT:-}"
+    base=$(serve_base_url) || return 1
+    if [[ "${base}" =~ :([0-9]+)$ ]]; then
+        url_port="${BASH_REMATCH[1]}"
+    fi
+    if [[ -n "${configured_port}" ]]; then
+        if [[ "${configured_port}" =~ ^[0-9]+$ ]]; then
+            if [[ "${configured_port}" != "${url_port}" ]]; then
+                showy_quota_log "SHOWY_QUOTA_CODEXBAR_SERVE_PORT=${configured_port} ignored; using port ${url_port} from SHOWY_QUOTA_CODEXBAR_SERVE_URL"
+            fi
+        else
+            showy_quota_log "ignoring invalid SHOWY_QUOTA_CODEXBAR_SERVE_PORT: ${configured_port}"
+        fi
+    fi
+    printf '%s\n' "${url_port}"
+}
+
+serve_health_ok() {
+    showy_quota_have curl || return 2
+    local base
+    base=$(serve_base_url) || return 1
+    curl --fail --silent --max-time "$(serve_timeout)" "${base}/health" >/dev/null 2>&1
+}
+
+wait_for_serve_health() {
+    local max_tenths="${SHOWY_QUOTA_CODEXBAR_SERVE_START_WAIT_TENTHS:-30}"
+    [[ "${max_tenths}" =~ ^[0-9]+$ ]] || max_tenths=30
+    max_tenths=$((10#${max_tenths}))
+    (( max_tenths > 0 )) || max_tenths=30
+    local i
+    for (( i=0; i<max_tenths; i++ )); do
+        serve_health_ok && return 0
+        sleep 0.1
+    done
+    return 1
+}
+
+managed_serve_expected_basename() {
+    printf '%s\n' "${SHOWY_QUOTA_CODEXBAR_BIN##*/}"
+}
+
+showy_quota_pid_start_epoch() {
+    local pid="$1" lstart="" epoch=""
+    lstart=$(ps -p "${pid}" -o lstart= 2>/dev/null) || return 1
+    lstart="${lstart#"${lstart%%[![:space:]]*}"}"
+    epoch=$(showy_quota_parse_local_epoch "%a %b %e %T %Y" "${lstart}" 2>/dev/null) \
+        || epoch=$(showy_quota_parse_local_epoch "%a %e %b %T %Y" "${lstart}" 2>/dev/null) \
+        || return 1
+    printf '%s\n' "${epoch}"
+}
+
+showy_quota_pid_command_matches_managed_serve() {
+    local pid="$1" expected_basename="$2" expected_port="$3" command="" token="" previous=""
+    local saw_bin=0 saw_serve=0 saw_port=0
+    command=$(ps -p "${pid}" -o command= 2>/dev/null) || return 1
+    command="${command#"${command%%[![:space:]]*}"}"
+    for token in ${command}; do
+        if [[ "${token##*/}" == "${expected_basename}" ]]; then
+            saw_bin=1
+        elif (( saw_bin )) && [[ "${token}" == "serve" ]]; then
+            saw_serve=1
+        fi
+
+        if [[ "${previous}" == "--port" && "${token}" == "${expected_port}" ]] \
+            || [[ "${token}" == "--port=${expected_port}" ]]
+        then
+            saw_port=1
+        fi
+        previous="${token}"
+    done
+    (( saw_bin && saw_serve && saw_port ))
+}
+
+managed_serve_pidfile_record() {
+    local -n out_pid="$1" out_start_epoch="$2" out_basename="$3"
+    out_pid=""
+    out_start_epoch=""
+    out_basename=""
+    [[ -r "${SHOWY_QUOTA_CODEXBAR_SERVE_PID_FILE}" ]] || return 1
+
+    local raw=""
+    IFS= read -r raw < "${SHOWY_QUOTA_CODEXBAR_SERVE_PID_FILE}" || raw=""
+    if [[ "${raw}" =~ ^([0-9]+):([0-9]+):([^:[:space:]]+)$ ]]; then
+        out_pid="${BASH_REMATCH[1]}"
+        out_start_epoch="${BASH_REMATCH[2]}"
+        out_basename="${BASH_REMATCH[3]}"
+        return 0
+    fi
+    if [[ "${raw}" =~ ^[0-9]+$ ]]; then
+        showy_quota_log "discarding legacy managed serve pidfile"
+    elif [[ -n "${raw}" ]]; then
+        showy_quota_log "discarding malformed managed serve pidfile"
+    fi
+    rm -f -- "${SHOWY_QUOTA_CODEXBAR_SERVE_PID_FILE}"
+    return 1
+}
+
+managed_serve_pid_matches_record() {
+    local pid="$1" recorded_start_epoch="$2" recorded_basename="$3"
+    [[ "${recorded_basename}" == "$(managed_serve_expected_basename)" ]] || return 1
+    kill -0 "${pid}" 2>/dev/null || return 1
+
+    local actual_start_epoch="" expected_port="" delta=0
+    actual_start_epoch=$(showy_quota_pid_start_epoch "${pid}" 2>/dev/null) || return 1
+    expected_port=$(serve_port_from_base_url) || return 1
+    showy_quota_pid_command_matches_managed_serve "${pid}" "${recorded_basename}" "${expected_port}" || return 1
+
+    delta=$(( actual_start_epoch > recorded_start_epoch
+        ? actual_start_epoch - recorded_start_epoch
+        : recorded_start_epoch - actual_start_epoch ))
+    (( delta <= 2 ))
+}
+
+managed_serve_valid_pidfile() {
+    local pid_ref="$1" start_ref="$2" basename_ref="$3"
+    local -n out_pid="${pid_ref}" out_start_epoch="${start_ref}" out_basename="${basename_ref}"
+    if ! managed_serve_pidfile_record "${pid_ref}" "${start_ref}" "${basename_ref}"; then
+        return 1
+    fi
+    if managed_serve_pid_matches_record "${out_pid}" "${out_start_epoch}" "${out_basename}"; then
+        return 0
+    fi
+    showy_quota_log "discarding stale managed serve pidfile for pid ${out_pid:-unknown}"
+    rm -f -- "${SHOWY_QUOTA_CODEXBAR_SERVE_PID_FILE}"
+    out_pid=""
+    out_start_epoch=""
+    out_basename=""
+    return 1
+}
+
+managed_serve_pid_alive() {
+    local pid="" start_epoch="" _basename=""
+    managed_serve_valid_pidfile pid start_epoch _basename
+}
+
+managed_serve_pid_start_epoch_for_record() {
+    local pid="$1" start_epoch="" i
+    for (( i=0; i<10; i++ )); do
+        start_epoch=$(showy_quota_pid_start_epoch "${pid}" 2>/dev/null) && {
+            printf '%s\n' "${start_epoch}"
+            return 0
+        }
+        sleep 0.1
+    done
+    showy_quota_now_epoch
+}
+
+terminate_managed_serve_pid() {
+    local pid="$1" recorded_start_epoch="$2" recorded_basename="$3" i
+    managed_serve_pid_matches_record "${pid}" "${recorded_start_epoch}" "${recorded_basename}" || return 1
+    kill "${pid}" 2>/dev/null || true
+    for (( i=0; i<10; i++ )); do
+        kill -0 "${pid}" 2>/dev/null || return 0
+        if ! managed_serve_pid_matches_record "${pid}" "${recorded_start_epoch}" "${recorded_basename}"; then
+            showy_quota_log "not escalating managed serve termination; pid ${pid} no longer matches pidfile record"
+            return 1
+        fi
+        sleep 0.1
+    done
+    managed_serve_pid_matches_record "${pid}" "${recorded_start_epoch}" "${recorded_basename}" || return 1
+    kill -9 "${pid}" 2>/dev/null || true
+    return 0
+}
+
+start_managed_serve() {
+    local bin="${SHOWY_QUOTA_CODEXBAR_BIN}"
+    showy_quota_have "${bin}" || return 1
+
+    local port="" refresh_interval="${SHOWY_QUOTA_CODEXBAR_SERVE_REFRESH_INTERVAL_SECONDS:-60}"
+    port=$(serve_port_from_base_url) || return 1
+    [[ "${refresh_interval}" =~ ^[0-9]+$ ]] || refresh_interval=60
+
+    if showy_quota_have setsid; then
+        setsid "${bin}" serve --port "${port}" --refresh-interval "${refresh_interval}" >/dev/null 2>&1 &
+    else
+        nohup "${bin}" serve --port "${port}" --refresh-interval "${refresh_interval}" >/dev/null 2>&1 &
+    fi
+    local pid=$! start_epoch=""
+    start_epoch=$(managed_serve_pid_start_epoch_for_record "${pid}")
+    printf '%s:%s:%s\n' "${pid}" "${start_epoch}" "$(managed_serve_expected_basename)" > "${SHOWY_QUOTA_CODEXBAR_SERVE_PID_FILE}"
+    chmod 600 "${SHOWY_QUOTA_CODEXBAR_SERVE_PID_FILE}" 2>/dev/null || true
+    disown "${pid}" 2>/dev/null || true
+    showy_quota_log "started managed codexbar serve pid ${pid} on port ${port}"
+}
+
+restart_managed_serve_once() {
+    if (( SHOWY_QUOTA_MANAGED_SERVE_RESTART_ATTEMPTED )); then
+        return 1
+    fi
+    SHOWY_QUOTA_MANAGED_SERVE_RESTART_ATTEMPTED=1
+
+    local pid="" start_epoch="" _basename=""
+    if managed_serve_valid_pidfile pid start_epoch _basename; then
+        showy_quota_log "restarting unhealthy managed codexbar serve pid ${pid}"
+        terminate_managed_serve_pid "${pid}" "${start_epoch}" "${_basename}" || true
+    fi
+    rm -f -- "${SHOWY_QUOTA_CODEXBAR_SERVE_PID_FILE}"
+    start_managed_serve
+}
+
+ensure_serve_running() {
     [[ -n "${SHOWY_QUOTA_CODEXBAR_SERVE_URL}" ]] || return 127
+    showy_quota_have curl || return 127
+    serve_health_ok && return 0
+    [[ "${SHOWY_QUOTA_MANAGE_SERVE:-1}" == "1" ]] || return 1
+    if managed_serve_pid_alive; then
+        if wait_for_serve_health; then
+            return 0
+        fi
+        restart_managed_serve_once || return 1
+        wait_for_serve_health
+        return $?
+    fi
+    rm -f -- "${SHOWY_QUOTA_CODEXBAR_SERVE_PID_FILE}"
+    start_managed_serve || return 1
+    if wait_for_serve_health; then
+        return 0
+    fi
+    if managed_serve_pid_alive; then
+        restart_managed_serve_once || return 1
+        wait_for_serve_health
+        return $?
+    fi
+    return 1
+}
+if (( stop_serve )); then
+    stop_managed_serve
+    exit 0
+fi
+
+run_codexbar_serve() {
+    local base
+    base=$(serve_base_url) || return 127
     showy_quota_have curl || {
         showy_quota_log "curl not found for codexbar serve URL"
         return 127
     }
 
-    local base timeout
-    base="${SHOWY_QUOTA_CODEXBAR_SERVE_URL%/}"
-    if ! [[ "${base}" =~ ^http://(127[.]0[.]0[.]1|localhost|\[::1\])(:[0-9]+)?$ ]]; then
-        showy_quota_log "ignoring non-local codexbar serve URL: ${SHOWY_QUOTA_CODEXBAR_SERVE_URL}"
-        return 127
-    fi
-
-    timeout="${SHOWY_QUOTA_CODEXBAR_SERVE_TIMEOUT_SECONDS}"
-    [[ "${timeout}" =~ ^[0-9]+([.][0-9]+)?$ ]] || timeout=0.5
-    curl --fail --silent --show-error --max-time "${timeout}" "${base}/usage" 2>/dev/null
+    curl --fail --silent --show-error --max-time "$(serve_timeout)" "${base}/usage" 2>/dev/null
 }
 
 serve_payload_is_publishable() {
@@ -321,6 +594,36 @@ serve_payload_is_publishable() {
     ' >/dev/null 2>&1 <<< "$1"
 }
 
+run_codexbar_serve_with_recovery() {
+    local out attempt threshold max_attempts=1
+    threshold=$(serve_failure_restart_threshold)
+    if [[ "${SHOWY_QUOTA_MANAGE_SERVE:-1}" == "1" ]] && managed_serve_pid_alive; then
+        max_attempts="${threshold}"
+    fi
+
+    for (( attempt=1; attempt<=max_attempts; attempt++ )); do
+        if out=$(run_codexbar_serve) && serve_payload_is_publishable "${out}"; then
+            printf '%s' "${out}"
+            return 0
+        fi
+    done
+
+    if [[ "${SHOWY_QUOTA_MANAGE_SERVE:-1}" == "1" ]] \
+        && managed_serve_pid_alive \
+        && serve_health_ok
+    then
+        showy_quota_log "codexbar serve /usage failed ${max_attempts} time(s) while /health was OK; restarting managed serve"
+        if restart_managed_serve_once && wait_for_serve_health; then
+            if out=$(run_codexbar_serve) && serve_payload_is_publishable "${out}"; then
+                printf '%s' "${out}"
+                return 0
+            fi
+        fi
+    fi
+
+    return 1
+}
+
 run_codexbar_cli() {
     if ! command -v "${SHOWY_QUOTA_CODEXBAR_BIN}" >/dev/null 2>&1; then
         showy_quota_log "codexbar binary not found: ${SHOWY_QUOTA_CODEXBAR_BIN}"
@@ -331,24 +634,39 @@ run_codexbar_cli() {
     if [[ "${SHOWY_QUOTA_INCLUDE_STATUS}" == "1" ]]; then
         args+=(--status)
     fi
-    "${SHOWY_QUOTA_CODEXBAR_BIN}" "${args[@]}" 2>/dev/null
+
+    local timeout_seconds
+    timeout_seconds=$(codexbar_cli_timeout_seconds)
+    if showy_quota_have timeout; then
+        timeout "${timeout_seconds}" "${SHOWY_QUOTA_CODEXBAR_BIN}" "${args[@]}" 2>/dev/null
+    else
+        showy_quota_log "timeout not found; codexbar CLI fallback is unbounded"
+        "${SHOWY_QUOTA_CODEXBAR_BIN}" "${args[@]}" 2>/dev/null
+    fi
 }
 
 run_codexbar() {
     local out
     if [[ -n "${SHOWY_QUOTA_CODEXBAR_SERVE_URL}" ]]; then
-        if out=$(run_codexbar_serve) && serve_payload_is_publishable "${out}"; then
+        ensure_serve_running || true
+        if out=$(run_codexbar_serve_with_recovery); then
+            printf '%s\n' "serve" > "${SHOWY_QUOTA_REFRESH_SOURCE_FILE}"
             printf '%s' "${out}"
             return 0
         fi
         showy_quota_log "codexbar serve fetch failed or returned no renderable usage; falling back to CLI"
     fi
 
-    run_codexbar_cli
+    if out=$(run_codexbar_cli); then
+        printf '%s\n' "cli" > "${SHOWY_QUOTA_REFRESH_SOURCE_FILE}"
+        printf '%s' "${out}"
+        return 0
+    fi
+    return 1
 }
 
 publish_cache_payload() {
-    local out="$1" tmp stamp_tmp
+    local out="$1" source="${2:-unknown}" tmp stamp_tmp source_tmp
     if ! tmp=$(mktemp "${SHOWY_QUOTA_CACHE_DIR}/usage.XXXXXX"); then
         showy_quota_log "could not create temporary cache file"
         return 1
@@ -367,15 +685,26 @@ publish_cache_payload() {
             showy_quota_log "could not create temporary stamp file"
             return 1
         fi
-        printf '%s.%s.%s\n' "$(date +%s)" "$$" "${RANDOM}" > "${stamp_tmp}" || {
+        if ! source_tmp=$(mktemp "${SHOWY_QUOTA_CACHE_DIR}/source.XXXXXX"); then
             rm -f "${tmp}" "${stamp_tmp}"
+            showy_quota_log "could not create temporary source file"
+            return 1
+        fi
+        printf '%s.%s.%s\n' "$(date +%s)" "$$" "${RANDOM}" > "${stamp_tmp}" || {
+            rm -f "${tmp}" "${stamp_tmp}" "${source_tmp}"
             showy_quota_log "could not write temporary stamp file"
+            return 1
+        }
+        printf '%s\n' "${source}" > "${source_tmp}" || {
+            rm -f "${tmp}" "${stamp_tmp}" "${source_tmp}"
+            showy_quota_log "could not write temporary source file"
             return 1
         }
         mv "${tmp}" "${SHOWY_QUOTA_USAGE_FILE}"
         mv "${stamp_tmp}" "${SHOWY_QUOTA_USAGE_STAMP}"
-        chmod 600 "${SHOWY_QUOTA_USAGE_FILE}" "${SHOWY_QUOTA_USAGE_STAMP}" 2>/dev/null || true
-        showy_quota_log "cache refreshed (${#out} bytes)"
+        mv "${source_tmp}" "${SHOWY_QUOTA_SOURCE_FILE}"
+        chmod 600 "${SHOWY_QUOTA_USAGE_FILE}" "${SHOWY_QUOTA_USAGE_STAMP}" "${SHOWY_QUOTA_SOURCE_FILE}" 2>/dev/null || true
+        showy_quota_log "cache refreshed from ${source} (${#out} bytes)"
         return 0
     fi
 
@@ -387,8 +716,9 @@ publish_cache_payload() {
 refresh_cache_from_serve() {
     local out
     [[ -n "${SHOWY_QUOTA_CODEXBAR_SERVE_URL}" ]] || return 127
-    if out=$(run_codexbar_serve) && serve_payload_is_publishable "${out}"; then
-        publish_cache_payload "${out}"
+    ensure_serve_running || true
+    if out=$(run_codexbar_serve_with_recovery); then
+        publish_cache_payload "${out}" "serve"
         return $?
     fi
     showy_quota_log "codexbar serve fetch failed or returned no renderable usage"
@@ -396,16 +726,23 @@ refresh_cache_from_serve() {
 }
 
 refresh_cache() {
-    local out rc
+    local out rc source
 
     rc=0
+    SHOWY_QUOTA_REFRESH_SOURCE_FILE="${SHOWY_QUOTA_CACHE_DIR}/refresh-source.$$"
+    rm -f -- "${SHOWY_QUOTA_REFRESH_SOURCE_FILE}"
     out=$(run_codexbar) || rc=$?
+    source="unknown"
+    if [[ -r "${SHOWY_QUOTA_REFRESH_SOURCE_FILE}" ]]; then
+        IFS= read -r source < "${SHOWY_QUOTA_REFRESH_SOURCE_FILE}" || source="unknown"
+    fi
+    rm -f -- "${SHOWY_QUOTA_REFRESH_SOURCE_FILE}"
     if [[ -z "${out}" || "${out:0:1}" != '[' ]]; then
         showy_quota_log "codexbar produced no usable output (rc=${rc})"
         return 1
     fi
 
-    publish_cache_payload "${out}"
+    publish_cache_payload "${out}" "${source}"
 }
 
 cache_is_valid() {

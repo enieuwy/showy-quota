@@ -2,9 +2,9 @@
 
 ## What gets added
 
-Per provider in the filtered render set (CodexBar usage JSON from the default
-localhost `codexbar serve` probe or CLI fallback, after `SHOWY_QUOTA_PROVIDERS` /
-`SHOWY_QUOTA_PROVIDERS_EXCLUDE` are applied):
+Per provider in the filtered render set (CodexBar usage JSON from managed
+localhost `codexbar serve` or visibly degraded CLI fallback, after
+`SHOWY_QUOTA_PROVIDERS` / `SHOWY_QUOTA_PROVIDERS_EXCLUDE` are applied):
 
 - `showy_quota.<provider>.icon` — provider icon (`sketchybar-app-font` when
   mapped, CodexBar SVG/PNG fallback otherwise)
@@ -21,6 +21,7 @@ Plus:
   `SHOWY_QUOTA_SKETCHYBAR_UPDATE_FREQ` seconds (default `10`, matching the
   default Zellij pipe interval).
 - `showy_quota_bracket`     — pill background grouping the provider items.
+- `showy_quota.degraded`  — trailing `⚠cli` marker when the cache came from CLI fallback.
 
 Provider adds/removals reconcile against that filtered set on the next plugin
 tick; no `sketchybar --reload` is required after the initial install.
@@ -40,6 +41,7 @@ reports CodexBar state:
 ```json
 {
   "available": true,
+  "cache": { "source": "serve", "degraded": false },
   "providers": ["codex", "claude"],
   "providerCount": 2,
   "sketchybar": {
@@ -124,7 +126,7 @@ dimmed ai-quota look unless you override `SHOWY_QUOTA_PALETTE_SECONDARY_*` or
 Use `showy-quota` to browse named palettes and persist `SHOWY_QUOTA_THEME`
 without hand-editing the config file.
 
-## Stale snapshot
+## Stale and degraded snapshots
 
 When `${SHOWY_QUOTA_USAGE_FILE}` is older than
 `2 × SHOWY_QUOTA_REFRESH_SECONDS`, the plugin turns on the trailing
@@ -133,6 +135,10 @@ When `${SHOWY_QUOTA_USAGE_FILE}` is older than
 Provider sliders and countdown labels switch to `SHOWY_QUOTA_PALETTE_STALE`;
 provider icons keep their normal status tint, and elapsed marker overlays are
 hidden so stale reset timing is not presented as live.
+
+When the shared cache was refreshed from CLI fallback instead of
+`codexbar serve`, `showy_quota.degraded` renders `⚠cli` in the same warning
+color. Serve recovery clears the marker on the next successful fetch.
 
 ## Cache
 

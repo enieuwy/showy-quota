@@ -10,6 +10,7 @@ struct Case<'a> {
     color: bool,
     now_epoch: i64,
     stale: bool,
+    degraded_cli: bool,
     configure: fn(&mut RenderConfig),
 }
 
@@ -22,6 +23,7 @@ fn rust_renderer_matches_shell_zellij_renderer() {
             color: true,
             now_epoch: 4_070_908_800,
             stale: false,
+            degraded_cli: false,
             configure: |_| {},
         },
         Case {
@@ -30,6 +32,7 @@ fn rust_renderer_matches_shell_zellij_renderer() {
             color: false,
             now_epoch: 4_070_908_800,
             stale: false,
+            degraded_cli: false,
             configure: |config| {
                 config.terminal_bar_mode = "sextant3".into();
                 config.zellij_bar_width = 8;
@@ -41,6 +44,7 @@ fn rust_renderer_matches_shell_zellij_renderer() {
             color: false,
             now_epoch: 4_070_912_400,
             stale: false,
+            degraded_cli: false,
             configure: |config| {
                 config.zellij_bar_width = 8;
             },
@@ -51,6 +55,7 @@ fn rust_renderer_matches_shell_zellij_renderer() {
             color: false,
             now_epoch: 4_070_912_400,
             stale: false,
+            degraded_cli: false,
             configure: |config| {
                 config.zellij_bar_width = 8;
                 config.mono3_marker_style = "insert".into();
@@ -62,6 +67,7 @@ fn rust_renderer_matches_shell_zellij_renderer() {
             color: false,
             now_epoch: 4_070_908_800,
             stale: false,
+            degraded_cli: false,
             configure: |config| {
                 config.providers = vec!["claude".into()];
             },
@@ -72,6 +78,7 @@ fn rust_renderer_matches_shell_zellij_renderer() {
             color: false,
             now_epoch: 4_070_908_800,
             stale: false,
+            degraded_cli: false,
             configure: |_| {},
         },
         Case {
@@ -80,6 +87,7 @@ fn rust_renderer_matches_shell_zellij_renderer() {
             color: false,
             now_epoch: 4_070_908_800,
             stale: false,
+            degraded_cli: false,
             configure: |_| {},
         },
         Case {
@@ -88,6 +96,7 @@ fn rust_renderer_matches_shell_zellij_renderer() {
             color: true,
             now_epoch: 4_070_928_480,
             stale: true,
+            degraded_cli: false,
             configure: |_| {},
         },
         Case {
@@ -96,9 +105,28 @@ fn rust_renderer_matches_shell_zellij_renderer() {
             color: true,
             now_epoch: 4_070_912_400,
             stale: true,
+            degraded_cli: false,
             configure: |config| {
                 config.zellij_bar_width = 8;
             },
+        },
+        Case {
+            name: "degraded mixed no color",
+            fixture: "codexbar-mixed.json",
+            color: false,
+            now_epoch: 4_070_908_800,
+            stale: false,
+            degraded_cli: true,
+            configure: |_| {},
+        },
+        Case {
+            name: "stale and degraded mixed no color",
+            fixture: "codexbar-mixed.json",
+            color: false,
+            now_epoch: 4_070_928_480,
+            stale: true,
+            degraded_cli: true,
+            configure: |_| {},
         },
     ];
 
@@ -114,6 +142,7 @@ fn rust_renderer_matches_shell_zellij_renderer() {
             RenderOptions {
                 color: case.color,
                 stale: case.stale,
+                degraded_cli: case.degraded_cli,
                 now_epoch: case.now_epoch,
             },
         )
@@ -177,7 +206,16 @@ fn shell_render_stale(root: &Path, fixture: &Path, case: Case<'_>) -> String {
 
 fn base_shell_command(root: &Path, case: Case<'_>) -> Command {
     let mut cmd = Command::new(root.join("bin/showy-quota-zellij-bar"));
+    for (key, _) in std::env::vars() {
+        if key.starts_with("SHOWY_QUOTA_") {
+            cmd.env_remove(key);
+        }
+    }
     cmd.env("SHOWY_QUOTA_NO_CONFIG", "1")
+        .env(
+            "SHOWY_QUOTA_DEGRADED_CLI",
+            if case.degraded_cli { "1" } else { "0" },
+        )
         .env("SHOWY_QUOTA_NOW_EPOCH", case.now_epoch.to_string());
     if case.color {
         cmd.env("SHOWY_QUOTA_FORCE_COLOR", "1")

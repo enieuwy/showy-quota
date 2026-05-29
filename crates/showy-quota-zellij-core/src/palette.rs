@@ -103,7 +103,7 @@ fn scale_hex(hex: &str, factor: &str) -> String {
     )
 }
 
-fn parse_factor(raw: &str) -> Option<(u32, u32)> {
+fn parse_factor(raw: &str) -> Option<(u64, u64)> {
     let raw = raw.trim();
     if raw.is_empty() {
         return None;
@@ -114,7 +114,7 @@ fn parse_factor(raw: &str) -> Option<(u32, u32)> {
         }
         let int = if int.is_empty() { "0" } else { int };
         let num = format!("{}{}", int, frac).parse().ok()?;
-        let den = 10_u32.checked_pow(frac.len() as u32)?;
+        let den = 10_u64.checked_pow(frac.len() as u32)?;
         Some((num, den))
     } else if raw.bytes().all(|b| b.is_ascii_digit()) {
         Some((raw.parse().ok()?, 1))
@@ -123,9 +123,9 @@ fn parse_factor(raw: &str) -> Option<(u32, u32)> {
     }
 }
 
-fn scale_component(value: u8, factor_num: u32, factor_den: u32) -> u8 {
+fn scale_component(value: u8, factor_num: u64, factor_den: u64) -> u8 {
     let den = factor_den.max(1);
-    ((value as u32 * factor_num) / den).min(255) as u8
+    ((value as u64 * factor_num) / den).min(255) as u8
 }
 
 #[cfg(test)]

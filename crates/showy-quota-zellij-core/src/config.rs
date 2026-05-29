@@ -206,12 +206,17 @@ impl RenderConfig {
             "SHOWY_QUOTA_PALETTE_COUNTDOWN",
             &mut self.palette_countdown,
         );
-        assign_string(
-            &get,
-            "SHOWY_QUOTA_PALETTE_COUNTDOWN_WARN",
-            &mut self.palette_countdown_warn,
-        );
-        assign_string(&get, "SHOWY_QUOTA_PALETTE_STALE", &mut self.palette_stale);
+        if let Some(value) = get("SHOWY_QUOTA_PALETTE_COUNTDOWN_WARN") {
+            self.palette_countdown_warn = value;
+        } else {
+            self.palette_countdown_warn
+                .clone_from(&self.palette_primary_bad);
+        }
+        if let Some(value) = get("SHOWY_QUOTA_PALETTE_STALE") {
+            self.palette_stale = value;
+        } else {
+            self.palette_stale.clone_from(&self.palette_primary_unknown);
+        }
         assign_string(
             &get,
             "SHOWY_QUOTA_PALETTE_ELAPSED",
@@ -361,4 +366,35 @@ pub fn csv(raw: &str) -> Vec<String> {
         .filter(|part| !part.is_empty())
         .map(str::to_string)
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn warning_and_stale_palettes_follow_primary_defaults() {
+        let mut kdl = BTreeMap::new();
+        kdl.insert("palette_primary_bad".into(), "111111".into());
+        kdl.insert("palette_primary_unknown".into(), "222222".into());
+
+        let config = RenderConfig::from_kdl_config(&kdl);
+
+        assert_eq!(config.palette_countdown_warn, "111111");
+        assert_eq!(config.palette_stale, "222222");
+    }
+
+    #[test]
+    fn warning_and_stale_palette_overrides_win() {
+        let mut kdl = BTreeMap::new();
+        kdl.insert("palette_primary_bad".into(), "111111".into());
+        kdl.insert("palette_primary_unknown".into(), "222222".into());
+        kdl.insert("palette_countdown_warn".into(), "333333".into());
+        kdl.insert("palette_stale".into(), "444444".into());
+
+        let config = RenderConfig::from_kdl_config(&kdl);
+
+        assert_eq!(config.palette_countdown_warn, "333333");
+        assert_eq!(config.palette_stale, "444444");
+    }
 }

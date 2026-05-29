@@ -15,6 +15,8 @@ FIXTURE_DIR="${REPO_ROOT}/test/fixtures"
 
 TMP=$(mktemp -d -t showy-quota-test.XXXXXX)
 trap 'rm -rf "${TMP}"' EXIT
+export SHOWY_QUOTA_MANAGE_SERVE=0
+export SHOWY_QUOTA_CODEXBAR_SERVE_URL=
 
 # ── stub codexbar that validates fetcher argv and prints the fixture ──
 
@@ -78,6 +80,10 @@ while [ "$#" -gt 0 ]; do
     esac
     shift
 done
+if [ "${url}" = "${SHOWY_QUOTA_TEST_SERVE_URL%/}/health" ]; then
+    printf '{}'
+    exit 0
+fi
 [ "${url}" = "${SHOWY_QUOTA_TEST_SERVE_URL%/}/usage" ] || exit 91
 cat "${SHOWY_QUOTA_TEST_SERVE_FIXTURE}"
 EOF
@@ -173,6 +179,34 @@ fixture_path() {
         printf '%s' "${FIXTURE_DIR}/${fixture}"
     fi
 }
+pid_start_epoch() {
+    python3 - "$1" <<'PY'
+import datetime
+import subprocess
+import sys
+
+pid = sys.argv[1]
+out = subprocess.check_output(["ps", "-p", pid, "-o", "lstart="], text=True).strip()
+for fmt in ("%a %b %d %H:%M:%S %Y", "%a %b %e %H:%M:%S %Y"):
+    try:
+        print(int(datetime.datetime.strptime(out, fmt).timestamp()))
+        raise SystemExit(0)
+    except ValueError:
+        pass
+raise SystemExit(1)
+PY
+}
+
+unused_tcp_port() {
+    python3 <<'PY'
+import contextlib
+import socket
+
+with contextlib.closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as sock:
+    sock.bind(("127.0.0.1", 0))
+    print(sock.getsockname()[1])
+PY
+}
 
 run_renderer() {
     local renderer="$1" fixture="$2"
@@ -186,6 +220,7 @@ run_renderer() {
             SHOWY_QUOTA_NO_CONFIG=1 \
             SHOWY_QUOTA_CACHE_DIR="${cache}" \
             SHOWY_QUOTA_TEST_FIXTURE="${fixture_file}" \
+            SHOWY_QUOTA_DEGRADED_CLI=0 \
             SHOWY_QUOTA_FORCE_COLOR=1 \
             "$@" \
             "${REPO_ROOT}/bin/${renderer}" 2>&1
@@ -237,6 +272,7 @@ run_sketchybar_items() {
         SHOWY_QUOTA_TEST_FIXTURE="${fixture_file}" \
         SHOWY_QUOTA_TEST_LOG="${log}" \
         SHOWY_QUOTA_TEST_STATE_DIR="${cache}/sb-state" \
+        SHOWY_QUOTA_DEGRADED_CLI=0 \
         "$@" \
         "${REPO_ROOT}/sketchybar/items/showy_quota.sh"
 }
@@ -253,6 +289,7 @@ run_sketchybar_plugin() {
         SHOWY_QUOTA_SKETCHYBAR_IMAGE_CACHE="${cache}/sb" \
         SHOWY_QUOTA_TEST_FIXTURE="${fixture_file}" \
         SHOWY_QUOTA_TEST_LOG="${log}" \
+        SHOWY_QUOTA_DEGRADED_CLI=0 \
         "$@" \
         SHOWY_QUOTA_TEST_STATE_DIR="${cache}/sb-state" \
         "${REPO_ROOT}/sketchybar/plugins/showy_quota.sh"
@@ -289,6 +326,7 @@ run_sketchybar_plugin_without_magick() {
         SHOWY_QUOTA_SKETCHYBAR_IMAGE_CACHE="${cache}/sb" \
         SHOWY_QUOTA_TEST_FIXTURE="${fixture_file}" \
         SHOWY_QUOTA_TEST_LOG="${log}" \
+        SHOWY_QUOTA_DEGRADED_CLI=0 \
         "$@" \
         SHOWY_QUOTA_TEST_STATE_DIR="${cache}/sb-state" \
         "${REPO_ROOT}/sketchybar/plugins/showy_quota.sh"
@@ -322,6 +360,7 @@ seed_sketchybar_live_items() {
     if (($# > 0)); then
         : > "${cache}/sb-state/showy_quota_bracket"
         : > "${cache}/sb-state/showy_quota.stale"
+        : > "${cache}/sb-state/showy_quota.degraded"
     fi
 }
 
@@ -672,6 +711,9 @@ assert_contains "zellij uses ai-quota powerline left cap" "" "${out}"
 assert_contains "zellij uses ai-quota half-block cells" "▀" "${out}"
 assert_not_contains "zellij no longer emits old block bar" "████" "${out}"
 
+out=$(run_renderer showy-quota-zellij-bar codexbar-mixed.json SHOWY_QUOTA_DEGRADED_CLI=1 NO_COLOR=1 SHOWY_QUOTA_FORCE_COLOR=0)
+assert_contains "zellij degraded CLI marker is visible" "⚠cli" "${out}"
+
 out=$(run_renderer showy-quota-zellij-bar "${sextant_fixture}" SHOWY_QUOTA_ZELLIJ_BAR_WIDTH=8 NO_COLOR=1 SHOWY_QUOTA_FORCE_COLOR=0)
 assert_contains "zellij default terminal mode keeps half-block cells" "▀" "${out}"
 assert_not_contains "zellij default terminal mode is not sextant3" "🬎" "${out}"
@@ -719,6 +761,26 @@ assert_contains "empty fixture renders 'AI idle'"      "AI idle" "${out}"
 out=$(run_renderer showy-quota-zellij-bar codexbar-error-only.json)
 assert_contains "all-error fixture renders 'AI idle'"  "AI idle" "${out}"
 
+out=$(run_renderer showy-quota-zellij-bar codexbar-empty.json SHOWY_QUOTA_DEGRADED_CLI=1 NO_COLOR=1 SHOWY_QUOTA_FORCE_COLOR=0)
+assert_contains "empty degraded fixture renders trailing CLI marker" "AI idle ⚠cli" "${out}"
+
+idle_cache=$(mk_cache)
+cp "${FIXTURE_DIR}/codexbar-empty.json" "${idle_cache}/usage.json"
+printf '%s\n' "cli" > "${idle_cache}/source"
+touch -t 198801010000 "${idle_cache}/usage.json"
+out=$(
+    env \
+        PATH="${stub_dir}:${PATH}" \
+        SHOWY_QUOTA_NO_CONFIG=1 \
+        SHOWY_QUOTA_CACHE_DIR="${idle_cache}" \
+        SHOWY_QUOTA_CODEXBAR_BIN="${TMP}/no-such-codexbar-zellij-idle" \
+        SHOWY_QUOTA_CODEXBAR_SERVE_URL='' \
+        SHOWY_QUOTA_FORCE_COLOR=0 \
+        NO_COLOR=1 \
+        "${REPO_ROOT}/bin/showy-quota-zellij-bar"
+)
+assert_contains "stale degraded idle cache renders both markers" "AI idle ⚠ ⚠cli" "${out}"
+
 out=$(run_renderer showy-quota-zellij-bar codexbar-low.json)
 # Bad-palette ee5396 = decimal RGB 238;83;150 inside the truecolor escape.
 assert_contains "low-remaining fixture uses BAD palette" "238;83;150" "${out}"
@@ -735,6 +797,18 @@ out=$(
 assert_contains "zellij --json stdin renders without fetch" "CL" "${out}"
 ansi_dim=$'\x1b[2m'
 assert_not_contains "zellij --json stdin skips stale dimming" "${ansi_dim}" "${out}"
+
+printf '%s\n' "cli" > "${json_cache}/source"
+out=$(
+    env \
+        SHOWY_QUOTA_NO_CONFIG=1 \
+        SHOWY_QUOTA_CACHE_DIR="${json_cache}" \
+        SHOWY_QUOTA_FETCH_BIN="${TMP}/missing-fetch" \
+        SHOWY_QUOTA_FORCE_COLOR=0 \
+        NO_COLOR=1 \
+        "${REPO_ROOT}/bin/showy-quota-zellij-bar" --json "$(fixture_path codexbar-mixed.json)"
+)
+assert_not_contains "zellij --json file ignores live cache degraded marker" "⚠cli" "${out}"
 
 printf '\nrust zellij parity\n'
 if (cd "${REPO_ROOT}" && cargo test -p showy-quota-zellij-core --test shell_parity); then
@@ -755,6 +829,10 @@ assert_contains "tmux uses zellij powerline left cap"  "" "${out}"
 assert_contains "tmux uses half-block primary/secondary cells" "▀" "${out}"
 assert_contains "tmux uses derived secondary background color" "bg=#14683a" "${out}"
 assert_not_contains "tmux no longer emits weekly hint glyph" "]w" "${out}"
+
+out=$(run_renderer showy-quota-tmux-bar codexbar-mixed.json SHOWY_QUOTA_DEGRADED_CLI=1)
+visible=$(strip_tmux_markup "${out}")
+assert_contains "tmux degraded CLI marker is visible" "⚠cli" "${visible}"
 
 out=$(run_renderer showy-quota-tmux-bar "${sextant_fixture}" SHOWY_QUOTA_TERMINAL_BAR_MODE=sextant3 SHOWY_QUOTA_TMUX_BAR_WIDTH=8)
 visible=$(strip_tmux_markup "${out}")
@@ -845,6 +923,8 @@ assert_equals "state marks cache available" "true" "$(printf '%s' "${out}" | jq 
 assert_equals "state provider count honors renderable filter" "3" "$(printf '%s' "${out}" | jq -r '.providerCount')"
 assert_equals "state provider order matches render order" "codex,claude,gemini" "$(printf '%s' "${out}" | jq -r '.providers | join(",")')"
 assert_equals "state compact recommendation defaults below threshold" "false" "$(printf '%s' "${out}" | jq -r '.sketchybar.compactRecommended')"
+assert_equals "state exposes degraded CLI source" "cli" "$(printf '%s' "${out}" | jq -r '.cache.source')"
+assert_equals "state exposes degraded flag" "true" "$(printf '%s' "${out}" | jq -r '.cache.degraded')"
 
 state_usage_cache=$(mk_cache)
 state_usage_file="${state_usage_cache}/usage-explicit.json"
@@ -897,7 +977,8 @@ assert_contains "bootstrap adds native primary slider" "--add slider showy_quota
 assert_contains "bootstrap adds native marker overlay" "--add slider showy_quota.claude.secondary_marker left 80" "${item_log}"
 assert_contains "bootstrap recreates bracket immediately" "--add bracket showy_quota_bracket" "${item_log}"
 assert_contains "bootstrap declares stale indicator" "--add item showy_quota.stale left" "${item_log}"
-assert_contains "bootstrap places stale item rightmost in bracket" "showy_quota.gemini.label showy_quota.stale --set showy_quota_bracket" "${item_log}"
+assert_contains "bootstrap declares degraded indicator" "--add item showy_quota.degraded left" "${item_log}"
+assert_contains "bootstrap places indicators rightmost in bracket" "showy_quota.gemini.label showy_quota.stale showy_quota.degraded --set showy_quota_bracket" "${item_log}"
 assert_contains "bootstrap preserves icon width" "width=22" "${item_log}"
 assert_contains "bootstrap preserves native bar slot width" "showy_quota.claude.slot icon.drawing=off" "${item_log}"
 assert_contains "bootstrap preserves native bar width" "width=84" "${item_log}"
@@ -965,6 +1046,7 @@ else
 fi
 plugin_log="$(< "${log}")"
 assert_contains "plugin keeps stale indicator off on fresh cache" "--set showy_quota.stale drawing=off" "${plugin_log}"
+assert_contains "plugin keeps degraded indicator off on fresh cache" "--set showy_quota.degraded drawing=off" "${plugin_log}"
 assert_contains "plugin updates native primary row percentage" "--set showy_quota.claude.primary drawing=on slider.percentage=83" "${plugin_log}"
 assert_contains "plugin updates native secondary row percentage" "--set showy_quota.claude.secondary drawing=on slider.percentage=81" "${plugin_log}"
 assert_contains "plugin hides missing tertiary row" "--set showy_quota.claude.tertiary drawing=off" "${plugin_log}"
@@ -986,12 +1068,29 @@ else
 fi
 
 cache=$(mk_cache)
+log="${TMP}/sb-degraded.log"
+run_sketchybar_plugin codexbar-mixed.json "${cache}" "${log}" SHOWY_QUOTA_DEGRADED_CLI=1
+plugin_log="$(< "${log}")"
+assert_contains "plugin shows degraded CLI indicator" "--set showy_quota.degraded drawing=on label=⚠cli label.color=0xffee5396" "${plugin_log}"
+cache=$(mk_cache)
+log="${TMP}/sb-degraded-empty.log"
+run_sketchybar_plugin codexbar-empty.json "${cache}" "${log}" SHOWY_QUOTA_DEGRADED_CLI=1
+plugin_log="$(< "${log}")"
+assert_contains "plugin shows degraded CLI indicator when provider set is empty" "--set showy_quota.degraded drawing=on label=⚠cli label.color=0xffee5396" "${plugin_log}"
+if [[ -e "${cache}/sb-state/showy_quota.degraded" ]]; then
+    ok "plugin keeps degraded indicator item when provider set is empty"
+else
+    fail "plugin keeps degraded indicator item when provider set is empty"
+fi
+
+cache=$(mk_cache)
 cp "${FIXTURE_DIR}/codexbar-mixed.json" "${cache}/usage.json"
 touch -t 198801010000 "${cache}/usage.json"
 log="${TMP}/sb-stale.log"
 run_sketchybar_plugin codexbar-mixed.json "${cache}" "${log}" SHOWY_QUOTA_CODEXBAR_BIN="${TMP}/no-such-codexbar-plugin" SHOWY_QUOTA_CODEXBAR_SERVE_URL=''
 plugin_log="$(< "${log}")"
 assert_contains "plugin shows stale indicator" "--set showy_quota.stale drawing=on label=⚠ label.color=0xffee5396" "${plugin_log}"
+assert_contains "plugin keeps degraded indicator off on stale cache" "--set showy_quota.degraded drawing=off" "${plugin_log}"
 assert_contains "plugin greys stale provider primary" "--set showy_quota.claude.primary drawing=on slider.percentage=83 slider.highlight_color=0xff6c7086" "${plugin_log}"
 assert_contains "plugin greys stale provider label" "label.color=0xff6c7086" "${plugin_log}"
 assert_contains "plugin hides stale marker" "--set showy_quota.claude.secondary_marker drawing=off" "${plugin_log}"
@@ -1107,7 +1206,7 @@ else
     fail "plugin re-adds declared providers ahead of new providers in sort order" \
         "codex line=${add_codex_before_gemini} gemini line=${add_gemini_label}"
 fi
-assert_contains "plugin rebuilds bracket with added native provider" "showy_quota.gemini.icon showy_quota.gemini.primary showy_quota.gemini.secondary showy_quota.gemini.tertiary showy_quota.gemini.secondary_marker showy_quota.gemini.tertiary_marker showy_quota.gemini.slot showy_quota.gemini.label showy_quota.stale --set showy_quota_bracket" "${plugin_log}"
+assert_contains "plugin rebuilds bracket with added native provider" "showy_quota.gemini.icon showy_quota.gemini.primary showy_quota.gemini.secondary showy_quota.gemini.tertiary showy_quota.gemini.secondary_marker showy_quota.gemini.tertiary_marker showy_quota.gemini.slot showy_quota.gemini.label showy_quota.stale showy_quota.degraded --set showy_quota_bracket" "${plugin_log}"
 assert_contains "plugin triggers provider-change event" "--trigger showy_quota_provider_change SHOWY_QUOTA_PROVIDER_COUNT=3 SHOWY_QUOTA_PROVIDERS=codex,claude,gemini" "${plugin_log}"
 
 cache=$(mk_cache)
@@ -1318,6 +1417,279 @@ if (( rc == 0 )) && printf '%s' "${out}" | jq -e 'type == "array" and any(.provi
 else
     fail "fetcher reads codexbar serve usage endpoint" "rc=${rc}; out=${out}"
 fi
+assert_equals "fetcher records serve cache source" "serve" "$(< "${cache}/source")"
+
+managed_bin_dir="${TMP}/managed-bin"
+mkdir -p "${managed_bin_dir}"
+cat > "${managed_bin_dir}/codexbar" <<'EOF'
+#!/usr/bin/env bash
+set -eu
+if [[ -n "${SHOWY_QUOTA_TEST_MANAGED_ARGS_FILE:-}" ]]; then
+    printf '%s\n' "$*" >> "${SHOWY_QUOTA_TEST_MANAGED_ARGS_FILE}"
+fi
+if [[ "${1:-}" == "serve" ]]; then
+    shift
+    port=""
+    while (($#)); do
+        case "$1" in
+            --port)
+                shift
+                port="${1:-}"
+                ;;
+            --refresh-interval)
+                shift
+                ;;
+        esac
+        shift
+    done
+    [[ -n "${port}" ]] || exit 91
+
+    count=1
+    if [[ -n "${SHOWY_QUOTA_TEST_MANAGED_COUNT_FILE:-}" ]]; then
+        count=0
+        if [[ -r "${SHOWY_QUOTA_TEST_MANAGED_COUNT_FILE}" ]]; then
+            IFS= read -r count < "${SHOWY_QUOTA_TEST_MANAGED_COUNT_FILE}" || count=0
+        fi
+        count=$((count + 1))
+        printf '%s\n' "${count}" > "${SHOWY_QUOTA_TEST_MANAGED_COUNT_FILE}"
+    fi
+
+    if [[ "${SHOWY_QUOTA_TEST_MANAGED_MODE:-healthy}" == "restart-once" && "${count}" -eq 1 ]]; then
+        while true; do
+            sleep 1
+        done
+    fi
+
+    if [[ "${SHOWY_QUOTA_TEST_MANAGED_MODE:-healthy}" == "health-ok-usage-bad-once" && "${count}" -eq 1 ]]; then
+        python3 - "${port}" <<'PY' &
+import http.server
+import sys
+
+port = int(sys.argv[1])
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/health":
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"{}")
+            return
+        if self.path == "/usage":
+            body = b"[]"
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        self.send_response(404)
+        self.end_headers()
+
+    def log_message(self, _format, *args):
+        return
+
+http.server.ThreadingHTTPServer.allow_reuse_address = True
+http.server.ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()
+PY
+        child=$!
+        trap 'kill "${child}" 2>/dev/null || true' EXIT TERM INT
+        wait "${child}"
+        exit $?
+    fi
+
+    python3 - "${port}" "${SHOWY_QUOTA_TEST_SERVE_FIXTURE}" <<'PY' &
+import http.server
+import sys
+
+port = int(sys.argv[1])
+fixture = sys.argv[2]
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/health":
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"{}")
+            return
+        if self.path == "/usage":
+            with open(fixture, "rb") as fh:
+                body = fh.read()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        self.send_response(404)
+        self.end_headers()
+
+    def log_message(self, _format, *args):
+        return
+
+http.server.ThreadingHTTPServer.allow_reuse_address = True
+http.server.ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()
+PY
+    child=$!
+    trap 'kill "${child}" 2>/dev/null || true' EXIT TERM INT
+    wait "${child}"
+    exit $?
+fi
+if [[ "${1:-}" == "usage" ]]; then
+    cat "${SHOWY_QUOTA_TEST_FIXTURE}"
+    exit 0
+fi
+exit 90
+EOF
+chmod +x "${managed_bin_dir}/codexbar"
+
+cache=$(mk_cache)
+managed_port=$(unused_tcp_port)
+managed_url="http://127.0.0.1:${managed_port}"
+rc=0
+out=$(
+    PATH="${managed_bin_dir}:${PATH}" \
+    SHOWY_QUOTA_NO_CONFIG=1 \
+    SHOWY_QUOTA_MANAGE_SERVE=1 \
+    SHOWY_QUOTA_CACHE_DIR="${cache}" \
+    SHOWY_QUOTA_CODEXBAR_SERVE_URL="${managed_url}" \
+    SHOWY_QUOTA_CODEXBAR_SERVE_START_WAIT_TENTHS=019 \
+    SHOWY_QUOTA_TEST_SERVE_FIXTURE="${FIXTURE_DIR}/codexbar-realistic.json" \
+    SHOWY_QUOTA_TEST_FIXTURE="${FIXTURE_DIR}/codexbar-low.json" \
+    "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
+) || rc=$?
+SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_CACHE_DIR="${cache}" SHOWY_QUOTA_CODEXBAR_BIN="${managed_bin_dir}/codexbar" SHOWY_QUOTA_CODEXBAR_SERVE_URL="${managed_url}" "${REPO_ROOT}/bin/showy-quota-fetch" --stop-serve >/dev/null 2>/dev/null || true
+if (( rc == 0 )) && printf '%s' "${out}" | jq -e 'type == "array" and any(.provider == "codex")' >/dev/null 2>&1 && [[ "$(< "${cache}/source")" == "serve" ]]; then
+    ok "fetcher auto-starts managed codexbar serve before CLI fallback"
+else
+    fail "fetcher auto-starts managed codexbar serve before CLI fallback" "rc=${rc}; out=${out}"
+fi
+
+cache=$(mk_cache)
+managed_port=$(unused_tcp_port)
+managed_url="http://127.0.0.1:${managed_port}"
+managed_args_log="${TMP}/managed-args.log"
+rm -f "${managed_args_log}"
+rc=0
+out=$(
+    PATH="${managed_bin_dir}:${PATH}" \
+    SHOWY_QUOTA_NO_CONFIG=1 \
+    SHOWY_QUOTA_MANAGE_SERVE=1 \
+    SHOWY_QUOTA_CACHE_DIR="${cache}" \
+    SHOWY_QUOTA_CODEXBAR_SERVE_URL="${managed_url}" \
+    SHOWY_QUOTA_CODEXBAR_SERVE_START_WAIT_TENTHS=50 \
+    SHOWY_QUOTA_TEST_MANAGED_ARGS_FILE="${managed_args_log}" \
+    SHOWY_QUOTA_TEST_SERVE_FIXTURE="${FIXTURE_DIR}/codexbar-realistic.json" \
+    SHOWY_QUOTA_TEST_FIXTURE="${FIXTURE_DIR}/codexbar-low.json" \
+    "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
+) || rc=$?
+SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_CACHE_DIR="${cache}" SHOWY_QUOTA_CODEXBAR_BIN="${managed_bin_dir}/codexbar" SHOWY_QUOTA_CODEXBAR_SERVE_URL="${managed_url}" "${REPO_ROOT}/bin/showy-quota-fetch" --stop-serve >/dev/null 2>/dev/null || true
+if (( rc == 0 )) && printf '%s' "${out}" | jq -e 'type == "array" and any(.provider == "codex")' >/dev/null 2>&1; then
+    assert_contains "fetcher derives managed serve port from serve URL" "--port ${managed_port}" "$(< "${managed_args_log}")"
+else
+    fail "fetcher derives managed serve port from serve URL" "rc=${rc}; out=${out}"
+fi
+
+cache=$(mk_cache)
+managed_port=$(unused_tcp_port)
+managed_url="http://127.0.0.1:${managed_port}"
+managed_count_file="${TMP}/managed-count.log"
+rm -f "${managed_count_file}"
+rc=0
+out=$(
+    PATH="${managed_bin_dir}:${PATH}" \
+    SHOWY_QUOTA_NO_CONFIG=1 \
+    SHOWY_QUOTA_MANAGE_SERVE=1 \
+    SHOWY_QUOTA_CACHE_DIR="${cache}" \
+    SHOWY_QUOTA_CODEXBAR_SERVE_URL="${managed_url}" \
+    SHOWY_QUOTA_CODEXBAR_SERVE_START_WAIT_TENTHS=20 \
+    SHOWY_QUOTA_TEST_MANAGED_MODE=restart-once \
+    SHOWY_QUOTA_TEST_MANAGED_COUNT_FILE="${managed_count_file}" \
+    SHOWY_QUOTA_TEST_SERVE_FIXTURE="${FIXTURE_DIR}/codexbar-realistic.json" \
+    SHOWY_QUOTA_TEST_FIXTURE="${FIXTURE_DIR}/codexbar-low.json" \
+    "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
+) || rc=$?
+SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_CACHE_DIR="${cache}" SHOWY_QUOTA_CODEXBAR_BIN="${managed_bin_dir}/codexbar" SHOWY_QUOTA_CODEXBAR_SERVE_URL="${managed_url}" "${REPO_ROOT}/bin/showy-quota-fetch" --stop-serve >/dev/null 2>/dev/null || true
+if (( rc == 0 )) && [[ "$(< "${managed_count_file}")" == "2" ]] && printf '%s' "${out}" | jq -e 'type == "array" and any(.provider == "codex")' >/dev/null 2>&1; then
+    ok "fetcher restarts unhealthy managed serve once"
+else
+    count_value="missing"
+    [[ -r "${managed_count_file}" ]] && count_value=$(< "${managed_count_file}")
+    fail "fetcher restarts unhealthy managed serve once" "rc=${rc}; out=${out}; count=${count_value}"
+fi
+
+cache=$(mk_cache)
+managed_port=$(unused_tcp_port)
+managed_url="http://127.0.0.1:${managed_port}"
+managed_count_file="${TMP}/managed-usage-bad-count.log"
+rm -f "${managed_count_file}"
+rc=0
+out=$(
+    PATH="${managed_bin_dir}:${PATH}" \
+    SHOWY_QUOTA_NO_CONFIG=1 \
+    SHOWY_QUOTA_MANAGE_SERVE=1 \
+    SHOWY_QUOTA_CACHE_DIR="${cache}" \
+    SHOWY_QUOTA_CODEXBAR_SERVE_URL="${managed_url}" \
+    SHOWY_QUOTA_CODEXBAR_SERVE_START_WAIT_TENTHS=50 \
+    SHOWY_QUOTA_CODEXBAR_SERVE_FAILURES_BEFORE_RESTART=1 \
+    SHOWY_QUOTA_TEST_MANAGED_MODE=health-ok-usage-bad-once \
+    SHOWY_QUOTA_TEST_MANAGED_COUNT_FILE="${managed_count_file}" \
+    SHOWY_QUOTA_TEST_SERVE_FIXTURE="${FIXTURE_DIR}/codexbar-realistic.json" \
+    SHOWY_QUOTA_TEST_FIXTURE="${FIXTURE_DIR}/codexbar-low.json" \
+    "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
+) || rc=$?
+SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_CACHE_DIR="${cache}" SHOWY_QUOTA_CODEXBAR_BIN="${managed_bin_dir}/codexbar" SHOWY_QUOTA_CODEXBAR_SERVE_URL="${managed_url}" "${REPO_ROOT}/bin/showy-quota-fetch" --stop-serve >/dev/null 2>/dev/null || true
+if (( rc == 0 )) && [[ "$(< "${managed_count_file}")" == "2" ]] && printf '%s' "${out}" | jq -e 'type == "array" and any(.provider == "codex")' >/dev/null 2>&1 && [[ "$(< "${cache}/source")" == "serve" ]]; then
+    ok "fetcher restarts managed serve when health is OK but usage is not publishable"
+else
+    count_value="missing"
+    [[ -r "${managed_count_file}" ]] && count_value=$(< "${managed_count_file}")
+    fail "fetcher restarts managed serve when health is OK but usage is not publishable" "rc=${rc}; out=${out}; count=${count_value}"
+fi
+
+
+cache=$(mk_cache)
+sleep 30 &
+unrelated_pid=$!
+unrelated_start=$(pid_start_epoch "${unrelated_pid}") || unrelated_start=0
+printf '%s:%s:%s\n' "${unrelated_pid}" "${unrelated_start}" "sleep" > "${cache}/codexbar-serve.pid"
+SHOWY_QUOTA_NO_CONFIG=1 \
+    SHOWY_QUOTA_CACHE_DIR="${cache}" \
+    SHOWY_QUOTA_CODEXBAR_BIN="${managed_bin_dir}/codexbar" \
+    "${REPO_ROOT}/bin/showy-quota-fetch" --stop-serve >/dev/null 2>/dev/null || true
+if kill -0 "${unrelated_pid}" 2>/dev/null; then
+    ok "fetcher stop-serve ignores unrelated pidfile process"
+else
+    fail "fetcher stop-serve ignores unrelated pidfile process"
+fi
+if [[ ! -e "${cache}/codexbar-serve.pid" ]]; then
+    ok "fetcher stop-serve removes stale pidfile"
+else
+    fail "fetcher stop-serve removes stale pidfile" "$(< "${cache}/codexbar-serve.pid")"
+fi
+kill "${unrelated_pid}" 2>/dev/null || true
+wait "${unrelated_pid}" 2>/dev/null || true
+
+cache=$(mk_cache)
+bash -c 'exec -a codexbar sleep 30' &
+unrelated_codexbar_pid=$!
+unrelated_codexbar_start=$(pid_start_epoch "${unrelated_codexbar_pid}") || unrelated_codexbar_start=0
+printf '%s:%s:%s\n' "${unrelated_codexbar_pid}" "${unrelated_codexbar_start}" "codexbar" > "${cache}/codexbar-serve.pid"
+SHOWY_QUOTA_NO_CONFIG=1 \
+    SHOWY_QUOTA_CACHE_DIR="${cache}" \
+    SHOWY_QUOTA_CODEXBAR_BIN="${managed_bin_dir}/codexbar" \
+    "${REPO_ROOT}/bin/showy-quota-fetch" --stop-serve >/dev/null 2>/dev/null || true
+if kill -0 "${unrelated_codexbar_pid}" 2>/dev/null; then
+    ok "fetcher stop-serve ignores non-serve codexbar pidfile process"
+else
+    fail "fetcher stop-serve ignores non-serve codexbar pidfile process"
+fi
+if [[ ! -e "${cache}/codexbar-serve.pid" ]]; then
+    ok "fetcher stop-serve removes non-serve codexbar pidfile"
+else
+    fail "fetcher stop-serve removes non-serve codexbar pidfile" "$(< "${cache}/codexbar-serve.pid")"
+fi
+kill "${unrelated_codexbar_pid}" 2>/dev/null || true
+wait "${unrelated_codexbar_pid}" 2>/dev/null || true
 
 cache=$(mk_cache)
 cp "${FIXTURE_DIR}/codexbar-mixed.json" "${cache}/usage.json"
@@ -1396,6 +1768,7 @@ if (( rc == 0 )) && printf '%s' "${out}" | jq -e 'type == "array" and any(.provi
 else
     fail "fetcher falls back when serve returns non-array JSON" "rc=${rc}; out=${out}"
 fi
+assert_equals "fetcher records CLI degraded cache source" "cli" "$(< "${cache}/source")"
 
 cache=$(mk_cache)
 rc=0
@@ -1468,6 +1841,64 @@ if (( rc == 0 )) && printf '%s' "${out}" | jq -e 'type == "array"' >/dev/null 2>
     ok "fetcher serves stale cache when codexbar disappears"
 else
     fail "fetcher serves stale cache when codexbar disappears" "rc=${rc}"
+fi
+
+
+timeout_cli_dir="${TMP}/timeout-cli"
+mkdir -p "${timeout_cli_dir}"
+cat > "${timeout_cli_dir}/codexbar" <<'EOF'
+#!/usr/bin/env bash
+set -eu
+printf 'x' >> "${SHOWY_QUOTA_TEST_COUNTER}"
+sleep 5
+cat "${SHOWY_QUOTA_TEST_FIXTURE}"
+EOF
+chmod +x "${timeout_cli_dir}/codexbar"
+cat > "${timeout_cli_dir}/timeout" <<'EOF'
+#!/usr/bin/env bash
+set -eu
+seconds="$1"
+shift
+printf '%s\n' "${seconds}" > "${SHOWY_QUOTA_TEST_TIMEOUT_ARGS_FILE}"
+"$@" &
+pid=$!
+sleep 0.1
+if kill -0 "${pid}" 2>/dev/null; then
+    kill "${pid}" 2>/dev/null || true
+    wait "${pid}" 2>/dev/null || true
+    exit 124
+fi
+wait "${pid}"
+EOF
+chmod +x "${timeout_cli_dir}/timeout"
+
+cache=$(mk_cache)
+cp "${FIXTURE_DIR}/codexbar-low.json" "${cache}/usage.json"
+touch -t 198801010000 "${cache}/usage.json"
+expected_stale=$(< "${cache}/usage.json")
+timeout_counter="${cache}/timeout-cli-call-count"
+timeout_args="${cache}/timeout-cli-seconds"
+: > "${timeout_counter}"
+rc=0
+out=$(
+    PATH="${timeout_cli_dir}:${PATH}" \
+    SHOWY_QUOTA_NO_CONFIG=1 \
+    SHOWY_QUOTA_CACHE_DIR="${cache}" \
+    SHOWY_QUOTA_CODEXBAR_BIN="${timeout_cli_dir}/codexbar" \
+    SHOWY_QUOTA_CODEXBAR_SERVE_URL='' \
+    SHOWY_QUOTA_REFRESH_SECONDS=0 \
+    SHOWY_QUOTA_CODEXBAR_CLI_TIMEOUT_SECONDS=1 \
+    SHOWY_QUOTA_TEST_COUNTER="${timeout_counter}" \
+    SHOWY_QUOTA_TEST_TIMEOUT_ARGS_FILE="${timeout_args}" \
+    SHOWY_QUOTA_TEST_FIXTURE="${FIXTURE_DIR}/codexbar-realistic.json" \
+    "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
+) || rc=$?
+if (( rc == 0 )) && [[ "${out}" == "${expected_stale}" ]]; then
+    ok "fetcher bounds hanging CLI fallback and emits stale cache"
+else
+    timeout_value="missing"
+    [[ -r "${timeout_args}" ]] && timeout_value=$(< "${timeout_args}")
+    fail "fetcher bounds hanging CLI fallback and emits stale cache" "rc=${rc}; out=${out}; timeout=${timeout_value}"
 fi
 
 # 6. Stale-cache rendering marks one frozen-snapshot indicator and greys data.

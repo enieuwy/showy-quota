@@ -52,6 +52,9 @@ jobs:
       - name: make test
         run: make test
 
+      - name: cargo test
+        run: cargo test --workspace
+
       - name: make plugin
         run: make plugin
 

@@ -53,8 +53,14 @@ showy_quota_load_config
 : "${SHOWY_QUOTA_CACHE_DIR:=${XDG_CACHE_HOME:-${HOME}/.cache}/showy-quota}"
 : "${SHOWY_QUOTA_CODEXBAR_BIN:=codexbar}"
 : "${SHOWY_QUOTA_CODEXBAR_SERVE_URL=http://127.0.0.1:8080}"
+: "${SHOWY_QUOTA_CODEXBAR_SERVE_PORT:=}"
+: "${SHOWY_QUOTA_CODEXBAR_SERVE_REFRESH_INTERVAL_SECONDS:=60}"
+: "${SHOWY_QUOTA_CODEXBAR_SERVE_START_WAIT_TENTHS:=30}"
+: "${SHOWY_QUOTA_MANAGE_SERVE:=1}"
 : "${SHOWY_QUOTA_CODEXBAR_SERVE_TIMEOUT_SECONDS:=0.5}"
 : "${SHOWY_QUOTA_CODEXBAR_SERVE_REFRESH_SECONDS:=10}"
+: "${SHOWY_QUOTA_CODEXBAR_CLI_TIMEOUT_SECONDS:=20}"
+: "${SHOWY_QUOTA_CODEXBAR_SERVE_FAILURES_BEFORE_RESTART:=3}"
 : "${SHOWY_QUOTA_PROVIDERS:=}"
 : "${SHOWY_QUOTA_PROVIDERS_EXCLUDE:=}"
 : "${SHOWY_QUOTA_PROVIDER_ORDER:=codex,claude,opencode,gemini}"
@@ -75,6 +81,7 @@ showy_quota_load_config
 : "${SHOWY_QUOTA_PALETTE_STALE:=${SHOWY_QUOTA_PALETTE_PRIMARY_UNKNOWN}}"
 : "${SHOWY_QUOTA_PALETTE_ELAPSED:=be95ff}"
 : "${SHOWY_QUOTA_STALE_GLYPH:=⚠}"
+: "${SHOWY_QUOTA_DEGRADED_CLI_GLYPH:=⚠cli}"
 
 : "${SHOWY_QUOTA_GOOD_MIN_REMAINING:=40}"
 : "${SHOWY_QUOTA_WARN_MIN_REMAINING:=15}"
@@ -111,9 +118,10 @@ showy_quota_load_config
 : "${SHOWY_QUOTA_MONO3_MARKER_STYLE:=replace}"
 : "${SHOWY_QUOTA_ZELLIJ_BIN:=zellij}"
 : "${SHOWY_QUOTA_ZELLIJ_PLUGIN:=}"
-
 : "${SHOWY_QUOTA_USAGE_FILE:=${SHOWY_QUOTA_CACHE_DIR}/usage.json}"
 : "${SHOWY_QUOTA_USAGE_STAMP:=${SHOWY_QUOTA_CACHE_DIR}/usage.json.updated-at}"
+: "${SHOWY_QUOTA_SOURCE_FILE:=${SHOWY_QUOTA_CACHE_DIR}/source}"
+: "${SHOWY_QUOTA_CODEXBAR_SERVE_PID_FILE:=${SHOWY_QUOTA_CACHE_DIR}/codexbar-serve.pid}"
 : "${SHOWY_QUOTA_USAGE_LOCK:=${SHOWY_QUOTA_CACHE_DIR}/usage.lock}"
 
 declare -gA SHOWY_QUOTA_ROLE_PALETTE_CACHE=()
@@ -150,6 +158,21 @@ showy_quota_age_seconds() {
     elif mtime=$(stat -c %Y "${path}" 2>/dev/null); then :
     else mtime="${now}"; fi
     printf '%s\n' $((now - mtime))
+}
+
+showy_quota_cache_source() {
+    local source="unknown"
+    if [[ -r "${SHOWY_QUOTA_SOURCE_FILE}" ]]; then
+        IFS= read -r source < "${SHOWY_QUOTA_SOURCE_FILE}" || source="unknown"
+    fi
+    case "${source}" in
+        serve|cli) printf '%s\n' "${source}" ;;
+        *)         printf 'unknown\n' ;;
+    esac
+}
+
+showy_quota_cache_degraded_cli() {
+    [[ "$(showy_quota_cache_source)" == "cli" ]]
 }
 
 showy_quota_stale_after_seconds() { printf '%s\n' $((SHOWY_QUOTA_REFRESH_SECONDS * 2)); }
