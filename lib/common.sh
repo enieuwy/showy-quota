@@ -61,9 +61,14 @@ showy_quota_load_config
 : "${SHOWY_QUOTA_CODEXBAR_SERVE_REFRESH_SECONDS:=10}"
 : "${SHOWY_QUOTA_CODEXBAR_CLI_TIMEOUT_SECONDS:=20}"
 : "${SHOWY_QUOTA_CODEXBAR_SERVE_FAILURES_BEFORE_RESTART:=3}"
+: "${SHOWY_QUOTA_CODEXBAR_SERVE_FAILURE_BACKOFF_SECONDS:=60}"
+: "${SHOWY_QUOTA_CODEXBAR_CLI_FAILURE_BACKOFF_SECONDS:=${SHOWY_QUOTA_REFRESH_SECONDS}}"
+: "${SHOWY_QUOTA_CODEXBAR_CONFIG_PROVIDERS_TIMEOUT_SECONDS:=5}"
+: "${SHOWY_QUOTA_CODEXBAR_CONFIG_PROVIDERS_BACKOFF_SECONDS:=60}"
+: "${SHOWY_QUOTA_PROVIDER_FAILURE_BACKOFF_SECONDS:=${SHOWY_QUOTA_REFRESH_SECONDS}}"
 : "${SHOWY_QUOTA_PROVIDERS:=}"
 : "${SHOWY_QUOTA_PROVIDERS_EXCLUDE:=}"
-: "${SHOWY_QUOTA_PROVIDER_ORDER:=codex,claude,opencode,gemini}"
+: "${SHOWY_QUOTA_PROVIDER_ORDER:=codex,claude,copilot,opencode,gemini}"
 : "${SHOWY_QUOTA_INCLUDE_STATUS:=1}"
 
 : "${SHOWY_QUOTA_PALETTE_PRIMARY_GOOD:=25be6a}"
@@ -123,6 +128,10 @@ showy_quota_load_config
 : "${SHOWY_QUOTA_SOURCE_FILE:=${SHOWY_QUOTA_CACHE_DIR}/source}"
 : "${SHOWY_QUOTA_CODEXBAR_SERVE_PID_FILE:=${SHOWY_QUOTA_CACHE_DIR}/codexbar-serve.pid}"
 : "${SHOWY_QUOTA_USAGE_LOCK:=${SHOWY_QUOTA_CACHE_DIR}/usage.lock}"
+: "${SHOWY_QUOTA_CODEXBAR_SERVE_FAILURE_STAMP:=${SHOWY_QUOTA_CACHE_DIR}/serve-failed-at}"
+: "${SHOWY_QUOTA_CODEXBAR_CLI_FAILURE_STAMP:=${SHOWY_QUOTA_CACHE_DIR}/cli-failed-at}"
+: "${SHOWY_QUOTA_CODEXBAR_CONFIG_PROVIDERS_FAILURE_STAMP:=${SHOWY_QUOTA_CACHE_DIR}/config-providers-failed-at}"
+: "${SHOWY_QUOTA_PROVIDER_FAILURE_DIR:=${SHOWY_QUOTA_CACHE_DIR}/provider-failures}"
 
 declare -gA SHOWY_QUOTA_ROLE_PALETTE_CACHE=()
 
@@ -173,6 +182,28 @@ showy_quota_cache_source() {
 
 showy_quota_cache_degraded_cli() {
     [[ "$(showy_quota_cache_source)" == "cli" ]]
+}
+
+# Emit provider ids (one per line, deduplicated, original order preserved) from
+# a CodexBar usage payload. Validates each id with the same regex as the JSON
+# schema check so unsafe ids never leak into argv.
+showy_quota_provider_ids_from_payload() {
+    local file="$1"
+    [[ -s "${file}" ]] || return 1
+    showy_quota_have jq || return 1
+    jq -r '
+        if type == "array" then
+            reduce .[] as $r (
+                [];
+                if ($r.provider? | type == "string")
+                   and ($r.provider | test("^[A-Za-z0-9_.-]+$"))
+                   and (index($r.provider) == null)
+                then . + [$r.provider]
+                else .
+                end
+            ) | .[]
+        else empty end
+    ' "${file}" 2>/dev/null
 }
 
 showy_quota_stale_after_seconds() { printf '%s\n' $((SHOWY_QUOTA_REFRESH_SECONDS * 2)); }

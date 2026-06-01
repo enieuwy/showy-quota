@@ -14,6 +14,7 @@
 .vscode/
 .idea/
 .agents/
+AGENTS.md
 
 # oracle reviews and other transient AI artifacts
 docs/reviews/

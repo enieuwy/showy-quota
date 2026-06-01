@@ -1,6 +1,12 @@
 // showy-quota — standalone Zellij plugin pane.
 // Add inside default_tab_template (after `children`) or inside a tab block.
 // Requires showy-quota-zellij.wasm at the configured path. See docs/zellij.md.
+//
+// The plugin is self-contained: it probes CodexBar serve, may auto-start a
+// managed `codexbar serve`, and falls back to per-provider `codexbar usage`
+// CLI calls discovered through `codexbar config providers`. It must not be
+// routed through `showy-quota-fetch`; that helper exists for the shell
+// renderers (tmux, sketchybar).
 
 pane size=1 borderless=true {
     plugin location="file:~/.config/zellij/plugins/showy-quota-zellij.wasm" {
@@ -12,5 +18,7 @@ pane size=1 borderless=true {
         cli_fallback "degraded"
         cli_command "codexbar"
         cli_interval_seconds 120
+        // provider_failure_backoff_seconds 120
+        // provider_discovery_backoff_seconds 60
     }
 }

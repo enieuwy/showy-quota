@@ -15,8 +15,9 @@ codexbar serve /health + /usage
 showy-quota-zellij.wasm
   ├─ WebAccess request to localhost /health and /usage
   ├─ OpenTerminalsOrPlugins startup of `codexbar serve`
-  ├─ RunCommands degraded fallback to `codexbar usage --format json --pretty`
-  ├─ in-memory last-known-good data
+  ├─ RunCommands provider discovery via `codexbar config providers --format json`
+  ├─ RunCommands per-provider degraded fallback to `codexbar usage --provider <id> --format json --pretty`
+  ├─ in-memory last-known-good data, kept per provider so one failure does not blow away the others
   └─ ANSI-styled terminal strip rendered directly in a one-line Zellij pane
 
 Shell integrations:
@@ -59,7 +60,7 @@ The plugin does not read the host cache and does not shell out to showy-quota sc
 web_request("/health") → start `codexbar serve` if needed → web_request("/usage") → parse → filter/order → render ANSI strip
 ```
 
-It requests `WebAccess`, `OpenTerminalsOrPlugins`, and `RunCommands` up front. If serve cannot be reached, the managed serve command uses the port from `serve_url` unless `serve_port` is set explicitly. CLI fallback runs `codexbar usage --format json --pretty`, renders data with a trailing `⚠cli` marker, and continues probing serve so it can switch back automatically.
+It requests `WebAccess`, `OpenTerminalsOrPlugins`, and `RunCommands` up front. If serve cannot be reached, the managed serve command uses the port from `serve_url` unless `serve_port` is set explicitly. CLI fallback is provider-aware: the plugin first runs `codexbar config providers --format json --pretty` once per discovery window, then issues one `codexbar usage --provider <id> --format json --pretty [--status]` per enabled provider. Successful per-provider records are merged into the in-memory payload incrementally, and one provider's failure or hang only stamps that provider's backoff — every other provider continues to render its last-known-good slice marked with `⚠cli`. Serve health probing continues so the plugin can switch back automatically.
 
 The plugin keeps last-known-good JSON in memory for the pane/session. If refreshes fail after a success, it continues rendering the previous data and marks it stale at `2 × interval_seconds`. That preserves the user-visible last-known-good behavior without requiring `FullHdAccess` or a disk cache.
 
@@ -77,8 +78,8 @@ Forced `sextant3` keeps the older bottom-most-row cell-color policy and does not
 
 | Condition | Shell integrations | Standalone Zellij plugin |
 |---|---|---|
-| `codexbar serve` unavailable | Fetcher starts serve, then falls back to visibly degraded CLI (`⚠cli`) if startup/probe fails | Plugin starts serve via background command pane, then uses visibly degraded CLI (`⚠cli`) if needed |
-| CodexBar CLI returns non-JSON | Cache is not updated; previous value still served | Fallback output rejected; previous in-memory value remains |
+| `codexbar serve` unavailable | Fetcher starts serve, then falls back to provider-aware CLI (`⚠cli`) if startup/probe fails | Plugin starts serve via background command pane, then falls back to provider-discovery + per-provider `codexbar usage --provider <id>` calls (`⚠cli`) if needed |
+| CodexBar CLI returns non-JSON | Provider call recorded as failed; cache otherwise untouched | Per-provider result rejected; the provider's previous in-memory slice (if any) remains |
 | CodexBar JSON fails validation | Same — preserve last good cache | Same — preserve last in-memory value |
 | No prior valid data | Renderers print `AI ?` or `AI idle` depending on path | Pane shows unavailable/invalid message or `AI idle` |
 | Data older than stale threshold | One trailing `⚠`, grey frozen quota data, no elapsed markers | Same visual stale behavior from in-memory age |
@@ -98,7 +99,7 @@ CodexBar's JSON `provider` field is the canonical id and matches the filename of
 
 The terminal strips render a 2-letter sigil per provider. New CodexBar providers fall back to the first two letters of the id.
 
-Provider render order is deterministic. `SHOWY_QUOTA_PROVIDERS` / plugin `providers`, when set, is both an allow-list and render order. Otherwise `SHOWY_QUOTA_PROVIDER_ORDER` / plugin `provider_order` ranks providers without filtering them; missing providers are skipped, and unlisted providers render after ranked providers sorted by id. The default rank is `codex,claude,opencode,gemini`.
+Provider render order is deterministic. `SHOWY_QUOTA_PROVIDERS` / plugin `providers`, when set, is both an allow-list and render order. Otherwise `SHOWY_QUOTA_PROVIDER_ORDER` / plugin `provider_order` ranks providers without filtering them; missing providers are skipped, and unlisted providers render after ranked providers sorted by id. The default rank is `codex,claude,copilot,opencode,gemini`.
 
 ## Adding a new SketchyBar provider
 

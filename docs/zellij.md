@@ -41,7 +41,7 @@ layout {
 }
 ```
 
-The plugin probes `http://127.0.0.1:8080/health` and `/usage` by default. If `/health` is unavailable, it asks Zellij to start `codexbar serve` in a hidden background command pane on the `serve_url` port. If serve still cannot be reached, the default CLI fallback renders data from `codexbar usage --format json --pretty` with a trailing `⚠cli` marker.
+The plugin probes `http://127.0.0.1:8080/health` and `/usage` by default. If `/health` is unavailable, it asks Zellij to start `codexbar serve` in a hidden background command pane on the `serve_url` port. If serve still cannot be reached, the plugin runs `codexbar config providers --format json --pretty` to discover enabled providers, then issues one `codexbar usage --provider <id> --format json --pretty [--status]` per enabled provider. Successful records merge into the in-memory payload; failing or hanging providers stamp a per-provider backoff and keep their previous slice. The merged output is marked with `⚠cli` until serve recovers. The plugin is intentionally self-contained — do not point `cli_command` at `showy-quota-fetch`.
 
 ## Permissions
 
@@ -53,7 +53,7 @@ OpenTerminalsOrPlugins
 RunCommands
 ```
 
-`WebAccess` is for localhost `/health` and `/usage`, `OpenTerminalsOrPlugins` is for the managed serve background command pane, and `RunCommands` is for degraded CLI fallback.
+`WebAccess` is for localhost `/health` and `/usage`, `OpenTerminalsOrPlugins` is for the managed serve background command pane, and `RunCommands` is used twice in the degraded path: once for `codexbar config providers --format json --pretty` discovery and once per enabled provider for `codexbar usage --provider <id> --format json --pretty`.
 
 Zellij can show permission prompts in a floating pane that is hidden by default. Pre-grant permissions to avoid a blank first launch. Zellij versions differ on whether local file plugins are keyed by absolute path, expanded `file:` URL, or the literal `file:~` URL from the layout, so include all forms when editing `permissions.kdl` by hand.
 
@@ -138,9 +138,11 @@ plugin location="file:~/.config/zellij/plugins/showy-quota-zellij.wasm" {
     cli_fallback "degraded"
     cli_command "codexbar"
     cli_interval_seconds 120
+    // provider_failure_backoff_seconds 120
+    // provider_discovery_backoff_seconds 60
     providers ""               // comma-separated allow-list and order
     providers_exclude ""       // comma-separated deny-list
-    provider_order "codex,claude,opencode,gemini"
+    provider_order "codex,claude,copilot,opencode,gemini"
     bar_width 12
     terminal_bar_mode "auto"   // auto, dual, mono3, sextant3
     mono3_providers "gemini,antigravity"

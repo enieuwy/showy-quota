@@ -39,6 +39,71 @@ CACHE_DIR="${SHOWY_QUOTA_SKETCHYBAR_IMAGE_CACHE}"
 mkdir -p "${CACHE_DIR}" || exit 0
 STATE_FILE="${CACHE_DIR}/providers.txt"
 CLICK="${SHOWY_QUOTA_SKETCHYBAR_CLICK}"
+RENDER_LOCK_DIR="${CACHE_DIR}/render.lock"
+RENDER_LOCK_OWNER="${RENDER_LOCK_DIR}/owner.pid"
+
+render_lock_age_seconds() {
+    local now mtime
+    now=$(showy_quota_now_epoch)
+    if mtime=$(stat -f %m "${RENDER_LOCK_DIR}" 2>/dev/null) \
+        || mtime=$(stat -c %Y "${RENDER_LOCK_DIR}" 2>/dev/null); then
+        printf '%s\n' $((now - mtime))
+        return 0
+    fi
+    return 1
+}
+
+release_render_lock() {
+    local owner_pid=""
+    if [[ -r "${RENDER_LOCK_OWNER}" ]]; then
+        IFS= read -r owner_pid < "${RENDER_LOCK_OWNER}" || owner_pid=""
+    fi
+    if [[ "${owner_pid}" == "$$" ]]; then
+        rm -f -- "${RENDER_LOCK_OWNER}"
+        rmdir -- "${RENDER_LOCK_DIR}" 2>/dev/null || true
+    fi
+}
+
+acquire_render_lock() {
+    if mkdir -- "${RENDER_LOCK_DIR}" 2>/dev/null; then
+        printf '%s\n' "$$" > "${RENDER_LOCK_OWNER}" || {
+            rmdir -- "${RENDER_LOCK_DIR}" 2>/dev/null || true
+            return 1
+        }
+        trap release_render_lock EXIT
+        return 0
+    fi
+
+    local owner_pid="" lock_age="" max_ownerless_age=30
+    if [[ -r "${RENDER_LOCK_OWNER}" ]]; then
+        IFS= read -r owner_pid < "${RENDER_LOCK_OWNER}" || owner_pid=""
+        if [[ "${owner_pid}" =~ ^[0-9]+$ ]] && kill -0 "${owner_pid}" 2>/dev/null; then
+            showy_quota_log "sketchybar render already in flight (pid ${owner_pid}); skipping"
+            return 1
+        fi
+        rm -f -- "${RENDER_LOCK_OWNER}"
+        if rmdir -- "${RENDER_LOCK_DIR}" 2>/dev/null; then
+            acquire_render_lock
+            return $?
+        fi
+        return 1
+    fi
+
+    if lock_age=$(render_lock_age_seconds) && (( lock_age >= max_ownerless_age )); then
+        rmdir -- "${RENDER_LOCK_DIR}" 2>/dev/null || true
+        acquire_render_lock
+        return $?
+    fi
+
+    showy_quota_log "sketchybar render lock is ownerless; skipping"
+    return 1
+}
+
+start_background_refresh() {
+    ( "${FETCH}" >/dev/null 2>&1 ) &
+    disown "$!" 2>/dev/null || true
+}
+
 
 read_state_providers() {
     [[ -f "${STATE_FILE}" ]] || return 0
@@ -416,7 +481,6 @@ provider_font_icon() {
         antigravity) printf ':antigravity:' ;;
         claude)      printf ':claude:' ;;
         codex)       printf ':codex:' ;;
-        copilot)     printf ':copilot:' ;;
         cursor)      printf ':cursor:' ;;
         deepseek)    printf ':deepseek:' ;;
         gemini)      printf ':gemini:' ;;
@@ -562,7 +626,12 @@ label_for_minutes() {
 
 # ── main ─────────────────────────────────────────────────────────────
 
-data=$("${FETCH}" 2>/dev/null || printf '[]')
+acquire_render_lock || exit 0
+if data=$("${FETCH}" --cache-only 2>/dev/null); then
+    start_background_refresh
+else
+    data=$("${FETCH}" 2>/dev/null || printf '[]')
+fi
 if showy_quota_cache_stale_for "${SHOWY_QUOTA_USAGE_FILE}"; then
     stale=1
 else

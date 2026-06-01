@@ -13,6 +13,7 @@
 # Flags:
 #   --refresh   Force a refresh regardless of cache age.
 #   --json      Default. Print the cached JSON.
+#   --cache-only Print existing valid cache without refreshing.
 #   --age       Print cache age in seconds and exit.
 #   --path      Print the cache file path and exit.
 #   --stop-serve Stop the managed codexbar serve process and exit.
@@ -42,11 +43,12 @@ while (($#)); do
     case "$1" in
         --refresh) force_refresh=1 ;;
         --json)    mode="json" ;;
+        --cache-only) mode="cache-only" ;;
         --age)     mode="age" ;;
         --path)    mode="path" ;;
         --stop-serve) stop_serve=1 ;;
         -h|--help)
-            sed -n '2,18p' "$0"
+            sed -n '2,19p' "$0"
             exit 0
             ;;
         *) showy_quota_die "unknown argument: $1" ;;
@@ -264,6 +266,14 @@ cache_token() {
         || printf 'file:unknown\n'
 }
 
+if [[ "${mode}" == "cache-only" ]]; then
+    if [[ -s "${SHOWY_QUOTA_USAGE_FILE}" ]] && showy_quota_json_valid "${SHOWY_QUOTA_USAGE_FILE}"; then
+        cat "${SHOWY_QUOTA_USAGE_FILE}"
+        exit 0
+    fi
+    exit 1
+fi
+
 # Block up to N tenths of a second for the cache file to appear or refresh.
 # Used by callers that lost the lock; protects against the cold-start case
 # where there is no cache yet. With require_fresh=1, a changed token is not
@@ -328,6 +338,483 @@ codexbar_cli_timeout_seconds() {
 serve_failure_restart_threshold() {
     positive_integer_or_default "${SHOWY_QUOTA_CODEXBAR_SERVE_FAILURES_BEFORE_RESTART:-3}" 3
 }
+
+serve_failure_backoff_seconds() {
+    positive_integer_or_default "${SHOWY_QUOTA_CODEXBAR_SERVE_FAILURE_BACKOFF_SECONDS:-60}" 60
+}
+
+serve_failure_backoff_active() {
+    local seconds failed_at now age
+    (( force_refresh == 0 )) || return 1
+    seconds=$(serve_failure_backoff_seconds)
+    (( seconds > 0 )) || return 1
+    [[ -r "${SHOWY_QUOTA_CODEXBAR_SERVE_FAILURE_STAMP}" ]] || return 1
+    IFS= read -r failed_at < "${SHOWY_QUOTA_CODEXBAR_SERVE_FAILURE_STAMP}" || return 1
+    [[ "${failed_at}" =~ ^[0-9]+$ ]] || { rm -f -- "${SHOWY_QUOTA_CODEXBAR_SERVE_FAILURE_STAMP}"; return 1; }
+    now=$(showy_quota_now_epoch)
+    age=$((now - failed_at))
+    if (( age >= 0 && age < seconds )); then
+        showy_quota_log "skipping codexbar serve probe during failure backoff (${age}/${seconds}s)"
+        return 0
+    fi
+    rm -f -- "${SHOWY_QUOTA_CODEXBAR_SERVE_FAILURE_STAMP}"
+    return 1
+}
+
+record_serve_failure() {
+    printf '%s\n' "$(showy_quota_now_epoch)" > "${SHOWY_QUOTA_CODEXBAR_SERVE_FAILURE_STAMP}" 2>/dev/null || true
+}
+
+clear_serve_failure() {
+    rm -f -- "${SHOWY_QUOTA_CODEXBAR_SERVE_FAILURE_STAMP}" 2>/dev/null || true
+}
+
+cli_failure_backoff_seconds() {
+    positive_integer_or_default "${SHOWY_QUOTA_CODEXBAR_CLI_FAILURE_BACKOFF_SECONDS:-${SHOWY_QUOTA_REFRESH_SECONDS:-120}}" 120
+}
+
+cli_failure_backoff_active() {
+    local seconds failed_at now age
+    (( force_refresh == 0 )) || return 1
+    seconds=$(cli_failure_backoff_seconds)
+    (( seconds > 0 )) || return 1
+    [[ -r "${SHOWY_QUOTA_CODEXBAR_CLI_FAILURE_STAMP}" ]] || return 1
+    IFS= read -r failed_at < "${SHOWY_QUOTA_CODEXBAR_CLI_FAILURE_STAMP}" || return 1
+    [[ "${failed_at}" =~ ^[0-9]+$ ]] || { rm -f -- "${SHOWY_QUOTA_CODEXBAR_CLI_FAILURE_STAMP}"; return 1; }
+    now=$(showy_quota_now_epoch)
+    age=$((now - failed_at))
+    if (( age >= 0 && age < seconds )); then
+        showy_quota_log "skipping codexbar CLI fallback during failure backoff (${age}/${seconds}s)"
+        return 0
+    fi
+    rm -f -- "${SHOWY_QUOTA_CODEXBAR_CLI_FAILURE_STAMP}"
+    return 1
+}
+
+record_cli_failure() {
+    printf '%s\n' "$(showy_quota_now_epoch)" > "${SHOWY_QUOTA_CODEXBAR_CLI_FAILURE_STAMP}" 2>/dev/null || true
+}
+
+clear_cli_failure() {
+    rm -f -- "${SHOWY_QUOTA_CODEXBAR_CLI_FAILURE_STAMP}" 2>/dev/null || true
+}
+
+# ── provider discovery & per-provider fallback ─────────────────────────
+
+codexbar_config_providers_timeout_seconds() {
+    positive_integer_or_default "${SHOWY_QUOTA_CODEXBAR_CONFIG_PROVIDERS_TIMEOUT_SECONDS:-5}" 5
+}
+
+config_providers_backoff_seconds() {
+    positive_integer_or_default "${SHOWY_QUOTA_CODEXBAR_CONFIG_PROVIDERS_BACKOFF_SECONDS:-60}" 60
+}
+
+config_providers_backoff_active() {
+    local seconds failed_at now age
+    (( force_refresh == 0 )) || return 1
+    seconds=$(config_providers_backoff_seconds)
+    (( seconds > 0 )) || return 1
+    [[ -r "${SHOWY_QUOTA_CODEXBAR_CONFIG_PROVIDERS_FAILURE_STAMP}" ]] || return 1
+    IFS= read -r failed_at < "${SHOWY_QUOTA_CODEXBAR_CONFIG_PROVIDERS_FAILURE_STAMP}" || return 1
+    [[ "${failed_at}" =~ ^[0-9]+$ ]] || { rm -f -- "${SHOWY_QUOTA_CODEXBAR_CONFIG_PROVIDERS_FAILURE_STAMP}"; return 1; }
+    now=$(showy_quota_now_epoch)
+    age=$((now - failed_at))
+    if (( age >= 0 && age < seconds )); then
+        return 0
+    fi
+    rm -f -- "${SHOWY_QUOTA_CODEXBAR_CONFIG_PROVIDERS_FAILURE_STAMP}"
+    return 1
+}
+
+record_config_providers_failure() {
+    printf '%s\n' "$(showy_quota_now_epoch)" > "${SHOWY_QUOTA_CODEXBAR_CONFIG_PROVIDERS_FAILURE_STAMP}" 2>/dev/null || true
+}
+
+clear_config_providers_failure() {
+    rm -f -- "${SHOWY_QUOTA_CODEXBAR_CONFIG_PROVIDERS_FAILURE_STAMP}" 2>/dev/null || true
+}
+
+provider_failure_backoff_seconds() {
+    positive_integer_or_default "${SHOWY_QUOTA_PROVIDER_FAILURE_BACKOFF_SECONDS:-${SHOWY_QUOTA_REFRESH_SECONDS:-120}}" 120
+}
+
+provider_failure_stamp_path() {
+    local provider="$1"
+    printf '%s/%s' "${SHOWY_QUOTA_PROVIDER_FAILURE_DIR}" "${provider}"
+}
+
+provider_failure_backoff_active() {
+    local provider="$1" stamp seconds failed_at now age
+    (( force_refresh == 0 )) || return 1
+    seconds=$(provider_failure_backoff_seconds)
+    (( seconds > 0 )) || return 1
+    stamp=$(provider_failure_stamp_path "${provider}")
+    [[ -r "${stamp}" ]] || return 1
+    IFS= read -r failed_at < "${stamp}" || return 1
+    [[ "${failed_at}" =~ ^[0-9]+$ ]] || { rm -f -- "${stamp}"; return 1; }
+    now=$(showy_quota_now_epoch)
+    age=$((now - failed_at))
+    if (( age >= 0 && age < seconds )); then
+        showy_quota_log "skipping codexbar CLI fallback for ${provider} during failure backoff (${age}/${seconds}s)"
+        return 0
+    fi
+    rm -f -- "${stamp}"
+    return 1
+}
+
+record_provider_failure() {
+    local provider="$1" stamp
+    mkdir -p "${SHOWY_QUOTA_PROVIDER_FAILURE_DIR}" 2>/dev/null || true
+    stamp=$(provider_failure_stamp_path "${provider}")
+    printf '%s\n' "$(showy_quota_now_epoch)" > "${stamp}" 2>/dev/null || true
+}
+
+clear_provider_failure() {
+    local provider="$1"
+    rm -f -- "$(provider_failure_stamp_path "${provider}")" 2>/dev/null || true
+}
+
+valid_provider_id() {
+    local id="$1"
+    [[ "${id}" =~ ^[A-Za-z0-9_.-]+$ ]]
+}
+
+# Run `codexbar config providers --format json [--pretty]` with a hard timeout
+# and emit enabled provider ids (one per line) on stdout. Empty stdout +
+# non-zero rc on failure. Honors a short failure backoff so a hanging
+# CodexBar config call does not re-arm every refresh tick.
+discover_providers() {
+    if ! command -v "${SHOWY_QUOTA_CODEXBAR_BIN}" >/dev/null 2>&1; then
+        return 127
+    fi
+    if config_providers_backoff_active; then
+        return 1
+    fi
+    local timeout_seconds raw type_check ids rc=0 enabled_count=0 valid_count=0 id_line
+    timeout_seconds=$(codexbar_config_providers_timeout_seconds)
+    raw=$(run_with_hard_timeout "${timeout_seconds}" "${SHOWY_QUOTA_CODEXBAR_BIN}" config providers --format json --pretty) || rc=$?
+    if (( rc != 0 )) || [[ -z "${raw}" ]]; then
+        record_config_providers_failure
+        return 1
+    fi
+    showy_quota_have jq || { record_config_providers_failure; return 1; }
+    type_check=$(jq -r 'if type == "array" then "ok" else "no" end' <<< "${raw}" 2>/dev/null) || type_check="no"
+    if [[ "${type_check}" != "ok" ]]; then
+        record_config_providers_failure
+        return 1
+    fi
+    # Two-pass: count enabled provider records independently from provider
+    # strings, then keep only ids that pass `valid_provider_id`. Empty, null,
+    # or missing ids in enabled records are invalid inventory, not canonical
+    # empty inventory.
+    enabled_count=$(jq -r '
+        [.[] | select(type == "object") | select(.enabled == true)] | length
+    ' <<< "${raw}" 2>/dev/null) || enabled_count=0
+    [[ "${enabled_count}" =~ ^[0-9]+$ ]] || enabled_count=0
+    ids=$(jq -r '
+        .[]
+        | select(type == "object")
+        | select(.enabled == true)
+        | .provider
+        | select(type == "string")
+        | select(test("^[A-Za-z0-9_.-]+$"))
+    ' <<< "${raw}" 2>/dev/null) || ids=""
+    if [[ -n "${ids}" ]]; then
+        while IFS= read -r id_line; do
+            [[ -n "${id_line}" ]] && valid_count=$((valid_count + 1))
+        done <<< "${ids}"
+    fi
+    if (( enabled_count != valid_count )); then
+        showy_quota_log "codexbar config providers returned only invalid provider ids"
+        record_config_providers_failure
+        return 1
+    fi
+    clear_config_providers_failure
+    [[ -n "${ids}" ]] && printf '%s\n' "${ids}"
+    return 0
+}
+
+# Newline-separated provider ids, deduplicated in first-seen order, after
+# applying SHOWY_QUOTA_PROVIDERS allow-list, SHOWY_QUOTA_PROVIDERS_EXCLUDE,
+# and SHOWY_QUOTA_PROVIDER_ORDER. Allow-list and exclude membership both treat
+# their CSV values as a set; order is preserved deterministically.
+apply_provider_filters() {
+    local input="$1"
+    local allow_csv="${SHOWY_QUOTA_PROVIDERS:-}"
+    local exclude_csv="${SHOWY_QUOTA_PROVIDERS_EXCLUDE:-}"
+    local order_csv="${SHOWY_QUOTA_PROVIDER_ORDER:-}"
+    local -a allow=() exclude=() order=() raw=() filtered=() ordered=() seen=()
+    local id token in_list raw_id
+
+    IFS=$'\n' read -r -d '' -a raw < <(printf '%s\0' "${input}") || true
+
+    if [[ -n "${allow_csv}" ]]; then
+        IFS=',' read -r -a allow <<< "${allow_csv}"
+    fi
+    if [[ -n "${exclude_csv}" ]]; then
+        IFS=',' read -r -a exclude <<< "${exclude_csv}"
+    fi
+    if [[ -n "${order_csv}" ]]; then
+        IFS=',' read -r -a order <<< "${order_csv}"
+    fi
+
+    for id in "${raw[@]}"; do
+        id="${id#"${id%%[![:space:]]*}"}"
+        id="${id%"${id##*[![:space:]]}"}"
+        [[ -n "${id}" ]] || continue
+        valid_provider_id "${id}" || continue
+
+        if (( ${#allow[@]} > 0 )); then
+            in_list=0
+            for token in "${allow[@]}"; do
+                token="${token#"${token%%[![:space:]]*}"}"
+                token="${token%"${token##*[![:space:]]}"}"
+                [[ "${token}" == "${id}" ]] && { in_list=1; break; }
+            done
+            (( in_list )) || continue
+        fi
+
+        in_list=0
+        for token in "${exclude[@]}"; do
+            token="${token#"${token%%[![:space:]]*}"}"
+            token="${token%"${token##*[![:space:]]}"}"
+            [[ "${token}" == "${id}" ]] && { in_list=1; break; }
+        done
+        (( in_list )) && continue
+
+        in_list=0
+        for token in "${filtered[@]}"; do
+            [[ "${token}" == "${id}" ]] && { in_list=1; break; }
+        done
+        (( in_list )) || filtered+=("${id}")
+    done
+
+    if (( ${#allow[@]} > 0 )); then
+        # SHOWY_QUOTA_PROVIDERS is an ordered allow-list. When present, it
+        # defines fallback query order; provider_order remains display-only
+        # for the broader renderer path.
+        for token in "${allow[@]}"; do
+            token="${token#"${token%%[![:space:]]*}"}"
+            token="${token%"${token##*[![:space:]]}"}"
+            [[ -n "${token}" ]] || continue
+            for id in "${filtered[@]}"; do
+                if [[ "${id}" == "${token}" ]]; then
+                    in_list=0
+                    for raw_id in "${ordered[@]}"; do
+                        [[ "${raw_id}" == "${id}" ]] && { in_list=1; break; }
+                    done
+                    (( in_list )) || ordered+=("${id}")
+                    break
+                fi
+            done
+        done
+    else
+        # First emit providers in SHOWY_QUOTA_PROVIDER_ORDER, then any
+        # remaining in their original (filtered) order.
+        for token in "${order[@]}"; do
+            token="${token#"${token%%[![:space:]]*}"}"
+            token="${token%"${token##*[![:space:]]}"}"
+            [[ -n "${token}" ]] || continue
+            for id in "${filtered[@]}"; do
+                if [[ "${id}" == "${token}" ]]; then
+                    in_list=0
+                    for raw_id in "${ordered[@]}"; do
+                        [[ "${raw_id}" == "${id}" ]] && { in_list=1; break; }
+                    done
+                    (( in_list )) || ordered+=("${id}")
+                    break
+                fi
+            done
+        done
+        for id in "${filtered[@]}"; do
+            in_list=0
+            for raw_id in "${ordered[@]}"; do
+                [[ "${raw_id}" == "${id}" ]] && { in_list=1; break; }
+            done
+            (( in_list )) || ordered+=("${id}")
+        done
+    fi
+
+    (( ${#ordered[@]} > 0 )) || return 1
+    printf '%s\n' "${ordered[@]}"
+}
+
+# Discover the provider list to drive per-provider CLI fallback. Order of
+# preference: live CodexBar `config providers` → ids in the existing valid
+# cache → explicit SHOWY_QUOTA_PROVIDERS allow-list. Returns 1 with no output
+# when none of those yield a usable list. Returns 2 with empty output when a
+# canonical empty inventory (CodexBar reports zero enabled providers) was
+# observed — callers should publish an empty `[]` payload rather than treating
+# this as a refresh failure.
+provider_inventory_for_fallback() {
+    local discovery_rc=0 discovery_raw="" raw="" ordered=""
+    discovery_raw=$(discover_providers) || discovery_rc=$?
+    if (( discovery_rc == 0 )); then
+        ordered=""
+        if [[ -n "${discovery_raw}" ]]; then
+            ordered=$(apply_provider_filters "${discovery_raw}") || ordered=""
+        fi
+        if [[ -n "${ordered}" ]]; then
+            showy_quota_log "provider inventory from codexbar-config: $(tr '\n' ' ' <<< "${ordered}")"
+            printf '%s' "${ordered}"
+            return 0
+        fi
+        showy_quota_log "codexbar reports no enabled providers; publishing empty cache"
+        return 2
+    fi
+
+    if [[ -s "${SHOWY_QUOTA_USAGE_FILE}" ]] \
+        && showy_quota_json_valid "${SHOWY_QUOTA_USAGE_FILE}" \
+        && raw=$(showy_quota_provider_ids_from_payload "${SHOWY_QUOTA_USAGE_FILE}") \
+        && [[ -n "${raw}" ]]; then
+        ordered=$(apply_provider_filters "${raw}") || ordered=""
+        if [[ -n "${ordered}" ]]; then
+            showy_quota_log "provider inventory from cache: $(tr '\n' ' ' <<< "${ordered}")"
+            printf '%s' "${ordered}"
+            return 0
+        fi
+        showy_quota_log "provider inventory from cache filtered to empty list"
+    fi
+
+    if [[ -n "${SHOWY_QUOTA_PROVIDERS:-}" ]]; then
+        raw=$(printf '%s' "${SHOWY_QUOTA_PROVIDERS}" | tr ',' '\n')
+        ordered=$(apply_provider_filters "${raw}") || ordered=""
+        if [[ -n "${ordered}" ]]; then
+            showy_quota_log "provider inventory from allow-list: $(tr '\n' ' ' <<< "${ordered}")"
+            printf '%s' "${ordered}"
+            return 0
+        fi
+        showy_quota_log "provider inventory from allow-list filtered to empty list"
+    fi
+
+    showy_quota_log "no provider inventory: codexbar config failed, cache empty, SHOWY_QUOTA_PROVIDERS unset"
+    return 1
+}
+
+# Validate a per-provider usage payload: it must be a JSON array, every record
+# must be an object whose `.provider` matches the requested id, and any
+# embedded `.usage` object must have well-typed windows. We deliberately
+# accept error-only records (the renderer surfaces them as idle/errored) and
+# accept an empty array (CodexBar has no data for this provider right now);
+# only a malformed shape or mismatched provider id fails the predicate.
+provider_payload_is_publishable() {
+    local provider="$1" payload="$2"
+    [[ -n "${payload}" ]] || return 1
+    jq --arg p "${provider}" -e '
+        type == "array"
+        and all(.[]?;
+            type == "object"
+            and (.provider | type == "string")
+            and (.provider == $p)
+            and (
+                (.usage // null) == null
+                or (
+                    (.usage | type) == "object"
+                    and all([.usage.primary, .usage.secondary, .usage.tertiary][];
+                        . == null
+                        or (type == "object" and (.usedPercent | type) == "number")
+                    )
+                )
+            )
+        )
+    ' >/dev/null 2>&1 <<< "${payload}"
+}
+
+# Run `codexbar usage --provider <id> --format json --pretty [--status]`
+# bounded by a hard process-group timeout. Emits the payload on stdout when it
+# validates as a single-provider record; returns 1 otherwise.
+run_codexbar_cli_provider() {
+    local provider="$1"
+    local timeout_seconds out rc=0
+    valid_provider_id "${provider}" || return 1
+    if ! command -v "${SHOWY_QUOTA_CODEXBAR_BIN}" >/dev/null 2>&1; then
+        showy_quota_log "codexbar binary not found: ${SHOWY_QUOTA_CODEXBAR_BIN}"
+        return 127
+    fi
+    local args=(usage --provider "${provider}" --format json --pretty)
+    if [[ "${SHOWY_QUOTA_INCLUDE_STATUS}" == "1" ]]; then
+        args+=(--status)
+    fi
+    timeout_seconds=$(codexbar_cli_timeout_seconds)
+    out=$(run_with_hard_timeout "${timeout_seconds}" "${SHOWY_QUOTA_CODEXBAR_BIN}" "${args[@]}") || rc=$?
+    if (( rc != 0 )); then
+        showy_quota_log "codexbar usage --provider ${provider} failed (rc=${rc})"
+        return 1
+    fi
+    if ! provider_payload_is_publishable "${provider}" "${out}"; then
+        showy_quota_log "codexbar usage --provider ${provider} returned no renderable record"
+        return 1
+    fi
+    printf '%s' "${out}"
+    return 0
+}
+
+# Per-provider CLI fallback: discover providers, run one CLI invocation per
+# provider with isolation, and merge successful records into one publishable
+# array. Returns 0 with merged JSON on stdout when at least one provider
+# succeeds (or the canonical inventory is empty, in which case `[]` is emitted
+# so renderers can show an idle state instead of stale/blank output), and
+# records per-provider backoff for failures so a single misbehaving provider
+# does not poison every tick.
+run_codexbar_cli_per_provider() {
+    local providers=""
+    local rc=0
+    providers=$(provider_inventory_for_fallback) || rc=$?
+    if (( rc == 2 )); then
+        printf '[]'
+        return 0
+    fi
+    if (( rc != 0 )); then
+        return 1
+    fi
+    [[ -n "${providers}" ]] || return 1
+
+    local -a accumulated=()
+    local provider provider_rc
+    local out=""
+    while IFS= read -r provider; do
+        [[ -n "${provider}" ]] || continue
+        if provider_failure_backoff_active "${provider}"; then
+            continue
+        fi
+        provider_rc=0
+        out=$(run_codexbar_cli_provider "${provider}") || provider_rc=$?
+        if (( provider_rc == 127 )); then
+            return 1
+        fi
+        if (( provider_rc != 0 )); then
+            record_provider_failure "${provider}"
+            continue
+        fi
+        clear_provider_failure "${provider}"
+        accumulated+=("${out}")
+    done <<< "${providers}"
+
+    (( ${#accumulated[@]} > 0 )) || return 1
+
+    # Merge per-provider arrays into one publishable array. Validation in
+    # `publish_cache_payload` runs again before we publish, so a degenerate
+    # merge fails closed without overwriting the existing cache.
+    local merged
+    merged=$(printf '%s' "${accumulated[0]}")
+    local i
+    for (( i = 1; i < ${#accumulated[@]}; i++ )); do
+        merged=$(jq -s '
+            map(select(type == "array")) | add // []
+            | reduce .[] as $r ([];
+                if ($r.provider | type == "string")
+                   and (any(.[]; .provider == $r.provider) | not)
+                then . + [$r]
+                else . end
+              )
+        ' <<< "${merged}"$'\n'"${accumulated[$i]}" 2>/dev/null) || return 1
+    done
+
+    [[ -n "${merged}" && "${merged:0:1}" == '[' ]] || return 1
+    printf '%s' "${merged}"
+}
+
+
 
 serve_port_from_base_url() {
     local base="" url_port="8080" configured_port="${SHOWY_QUOTA_CODEXBAR_SERVE_PORT:-}"
@@ -600,9 +1087,12 @@ run_codexbar_serve_with_recovery() {
     if [[ "${SHOWY_QUOTA_MANAGE_SERVE:-1}" == "1" ]] && managed_serve_pid_alive; then
         max_attempts="${threshold}"
     fi
+    serve_failure_backoff_active && return 1
+
 
     for (( attempt=1; attempt<=max_attempts; attempt++ )); do
         if out=$(run_codexbar_serve) && serve_payload_is_publishable "${out}"; then
+            clear_serve_failure
             printf '%s' "${out}"
             return 0
         fi
@@ -615,53 +1105,94 @@ run_codexbar_serve_with_recovery() {
         showy_quota_log "codexbar serve /usage failed ${max_attempts} time(s) while /health was OK; restarting managed serve"
         if restart_managed_serve_once && wait_for_serve_health; then
             if out=$(run_codexbar_serve) && serve_payload_is_publishable "${out}"; then
+                clear_serve_failure
                 printf '%s' "${out}"
                 return 0
             fi
         fi
     fi
 
+    record_serve_failure
     return 1
 }
 
-run_codexbar_cli() {
-    if ! command -v "${SHOWY_QUOTA_CODEXBAR_BIN}" >/dev/null 2>&1; then
-        showy_quota_log "codexbar binary not found: ${SHOWY_QUOTA_CODEXBAR_BIN}"
-        return 127
+run_with_hard_timeout() {
+    local timeout_seconds="$1"
+    shift
+
+    if showy_quota_have python3; then
+        python3 - "${timeout_seconds}" "$@" <<'PY'
+import os
+import signal
+import subprocess
+import sys
+
+timeout = float(sys.argv[1])
+argv = sys.argv[2:]
+
+try:
+    proc = subprocess.Popen(
+        argv,
+        stdout=sys.stdout.buffer,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+except OSError:
+    sys.exit(127)
+
+try:
+    sys.exit(proc.wait(timeout=timeout))
+except subprocess.TimeoutExpired:
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    try:
+        proc.wait(timeout=1)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        proc.wait()
+    sys.exit(124)
+PY
+        return $?
     fi
 
-    local args=(usage --format json --pretty)
-    if [[ "${SHOWY_QUOTA_INCLUDE_STATUS}" == "1" ]]; then
-        args+=(--status)
-    fi
-
-    local timeout_seconds
-    timeout_seconds=$(codexbar_cli_timeout_seconds)
     if showy_quota_have timeout; then
-        timeout "${timeout_seconds}" "${SHOWY_QUOTA_CODEXBAR_BIN}" "${args[@]}" 2>/dev/null
-    else
-        showy_quota_log "timeout not found; codexbar CLI fallback is unbounded"
-        "${SHOWY_QUOTA_CODEXBAR_BIN}" "${args[@]}" 2>/dev/null
+        timeout "${timeout_seconds}" "$@" 2>/dev/null
+        return $?
     fi
+
+    showy_quota_log "python3/timeout not found; refusing unbounded command"
+    return 127
 }
 
 run_codexbar() {
     local out
     if [[ -n "${SHOWY_QUOTA_CODEXBAR_SERVE_URL}" ]]; then
-        ensure_serve_running || true
-        if out=$(run_codexbar_serve_with_recovery); then
-            printf '%s\n' "serve" > "${SHOWY_QUOTA_REFRESH_SOURCE_FILE}"
-            printf '%s' "${out}"
-            return 0
+        if ! serve_failure_backoff_active; then
+            ensure_serve_running || true
+            if out=$(run_codexbar_serve_with_recovery); then
+                printf '%s\n' "serve" > "${SHOWY_QUOTA_REFRESH_SOURCE_FILE}"
+                printf '%s' "${out}"
+                return 0
+            fi
         fi
         showy_quota_log "codexbar serve fetch failed or returned no renderable usage; falling back to CLI"
     fi
 
-    if out=$(run_codexbar_cli); then
+    if cli_failure_backoff_active; then
+        return 1
+    fi
+
+    if out=$(run_codexbar_cli_per_provider); then
         printf '%s\n' "cli" > "${SHOWY_QUOTA_REFRESH_SOURCE_FILE}"
         printf '%s' "${out}"
         return 0
     fi
+    record_cli_failure
     return 1
 }
 
@@ -716,6 +1247,7 @@ publish_cache_payload() {
 refresh_cache_from_serve() {
     local out
     [[ -n "${SHOWY_QUOTA_CODEXBAR_SERVE_URL}" ]] || return 127
+    serve_failure_backoff_active && return 1
     ensure_serve_running || true
     if out=$(run_codexbar_serve_with_recovery); then
         publish_cache_payload "${out}" "serve"
@@ -738,11 +1270,17 @@ refresh_cache() {
     fi
     rm -f -- "${SHOWY_QUOTA_REFRESH_SOURCE_FILE}"
     if [[ -z "${out}" || "${out:0:1}" != '[' ]]; then
+        [[ "${source}" == "cli" ]] && record_cli_failure
         showy_quota_log "codexbar produced no usable output (rc=${rc})"
         return 1
     fi
 
-    publish_cache_payload "${out}" "${source}"
+    if publish_cache_payload "${out}" "${source}"; then
+        [[ "${source}" == "cli" ]] && clear_cli_failure
+        return 0
+    fi
+    [[ "${source}" == "cli" ]] && record_cli_failure
+    return 1
 }
 
 cache_is_valid() {

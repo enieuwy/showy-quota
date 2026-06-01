@@ -24,11 +24,38 @@ stub_dir="${TMP}/bin"
 mkdir -p "${stub_dir}"
 cat > "${stub_dir}/codexbar" <<'EOF'
 #!/bin/sh
+# Provider inventory request: derive enabled-true entries from the fixture.
+if [ "${1:-}" = "config" ] && [ "${2:-}" = "providers" ]; then
+    [ -n "${SHOWY_QUOTA_TEST_FIXTURE:-}" ] || exit 1
+    shift 2
+    saw_format=0
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --format) shift; [ "${1:-}" = "json" ] || exit 11; saw_format=1 ;;
+            --json|--json-only) saw_format=1 ;;
+            --pretty) ;;
+            *) exit 12 ;;
+        esac
+        shift
+    done
+    [ "${saw_format}" = "1" ] || exit 13
+    jq '
+        if type == "array" then
+            [ .[] | {provider: .provider, enabled: true} ]
+        else
+            error("fixture is not an array")
+        end
+    ' < "${SHOWY_QUOTA_TEST_FIXTURE}" || exit 14
+    exit 0
+fi
+
+# Per-provider usage: filter the fixture to the requested provider id.
 [ -n "${SHOWY_QUOTA_TEST_FIXTURE:-}" ] || exit 1
 [ "${1:-}" = "usage" ] || exit 90
 shift
 saw_format=0
 saw_pretty=0
+saw_provider=""
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --format)
@@ -37,7 +64,8 @@ while [ "$#" -gt 0 ]; do
             saw_format=1
             ;;
         --provider)
-            exit 92
+            shift
+            saw_provider="${1:-}"
             ;;
         --pretty)
             saw_pretty=1
@@ -51,7 +79,12 @@ while [ "$#" -gt 0 ]; do
     shift
 done
 [ "${saw_format}" = "1" ] && [ "${saw_pretty}" = "1" ] || exit 94
-cat "${SHOWY_QUOTA_TEST_FIXTURE}"
+# The fetcher must always isolate provider calls; reject any aggregate call.
+[ -n "${saw_provider}" ] || exit 95
+jq --arg p "${saw_provider}" '
+    if type == "array" then [ .[] | select(.provider == $p) ]
+    else error("fixture is not an array") end
+' < "${SHOWY_QUOTA_TEST_FIXTURE}"
 EOF
 chmod +x "${stub_dir}/codexbar"
 
@@ -302,7 +335,7 @@ run_sketchybar_plugin_without_magick() {
     fixture_file=$(fixture_path "${fixture}")
     no_magick_path="${TMP}/no-magick-bin"
     mkdir -p "${no_magick_path}"
-    for tool in bash jq readlink dirname mkdir mktemp mv rm rmdir date stat sed tr cat; do
+    for tool in bash jq readlink dirname mkdir mktemp mv rm rmdir date stat sed tr cat python3; do
         if [[ "${tool}" == "bash" && -x /opt/homebrew/bin/bash ]]; then
             tool_path=/opt/homebrew/bin/bash
         else
@@ -380,7 +413,7 @@ process_state() {
 wait_for_state_prefix() {
     local pid="$1" prefix="$2"
     local state
-    for _ in 1 2 3 4 5 6 7 8 9 10; do
+    for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
         state=$(process_state "${pid}" || true)
         [[ "${state}" == "${prefix}"* ]] && return 0
         sleep 0.1
@@ -1117,6 +1150,16 @@ assert_contains "plugin maps gemini provider to app font icon" "showy_quota.gemi
 assert_contains "plugin widens font icon item to make a real native bar gap" "showy_quota.claude.icon drawing=on icon.drawing=on icon=:claude: icon.font=sketchybar-app-font:Regular:14.0 icon.color=0xfff2f4f8 icon.align=center icon.width=22 icon.padding_left=0 icon.padding_right=0 label.drawing=off background.image.drawing=off background.color=0x00000000 background.height=0 padding_left=5 padding_right=0 width=24" "${plugin_log}"
 assert_not_contains "font icon mode avoids provider PNG cache paths" "icon-v2-" "${plugin_log}"
 
+copilot_fixture="${TMP}/codexbar-copilot.json"
+printf '%s\n' '[{"provider":"copilot","usage":{"primary":{"usedPercent":0},"secondary":{"usedPercent":0}}}]' > "${copilot_fixture}"
+cache=$(mk_cache)
+log="${TMP}/sb-copilot-font-no-magick.log"
+run_sketchybar_plugin_without_magick "${copilot_fixture}" "${cache}" "${log}" SHOWY_QUOTA_SKETCHYBAR_PROVIDER_ICON_MODE=font
+copilot_font_log="$(< "${log}")"
+assert_not_contains "font icon mode does not use sketchybar-app-font copilot glyph" "showy_quota.copilot.icon drawing=on icon.drawing=on icon=:copilot:" "${copilot_font_log}"
+assert_contains "copilot has no pointer-like font fallback without magick" "--set showy_quota.copilot.icon drawing=off click_script=open -b com.steipete.codexbar" "${copilot_font_log}"
+
+
 cache=$(mk_cache)
 log="${TMP}/sb-font-status-no-magick.log"
 run_sketchybar_plugin_without_magick codexbar-status-major.json "${cache}" "${log}" SHOWY_QUOTA_SKETCHYBAR_PROVIDER_ICON_MODE=font
@@ -1165,6 +1208,16 @@ if command -v magick >/dev/null 2>&1; then
     font_fallback_log="$(< "${log}")"
     assert_contains "font icon mode falls back to SVG for unmapped opencode" "showy_quota.opencode.icon drawing=on icon.drawing=off label.drawing=off background.image=${cache}/sb/icon-v2-opencode.png" "${font_fallback_log}"
     assert_not_contains "font icon mode avoids generic code glyph for opencode" "showy_quota.opencode.icon drawing=on icon.drawing=on icon=:code:" "${font_fallback_log}"
+
+    copilot_resource_dir="${TMP}/copilot-resources"
+    mkdir -p "${copilot_resource_dir}"
+    printf '%s\n' '<svg width="100" height="100" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M50 10C72 10 90 28 90 50C90 72 72 90 50 90C28 90 10 72 10 50C10 28 28 10 50 10Z" fill="#ffffff"/></svg>' > "${copilot_resource_dir}/ProviderIcon-copilot.svg"
+    cache=$(mk_cache)
+    log="${TMP}/sb-copilot-svg-fallback.log"
+    run_sketchybar_plugin "${copilot_fixture}" "${cache}" "${log}" SHOWY_QUOTA_CODEXBAR_RESOURCES="${copilot_resource_dir}" SHOWY_QUOTA_SKETCHYBAR_PROVIDER_ICON_MODE=font
+    copilot_svg_log="$(< "${log}")"
+    assert_contains "font icon mode falls back to CodexBar SVG for copilot" "showy_quota.copilot.icon drawing=on icon.drawing=off label.drawing=off background.image=${cache}/sb/icon-v2-copilot.png" "${copilot_svg_log}"
+    assert_not_contains "font icon mode avoids pointer-like copilot app-font glyph" "showy_quota.copilot.icon drawing=on icon.drawing=on icon=:copilot:" "${copilot_svg_log}"
 else
     ok "plugin skips ImageMagick icon tests when magick is unavailable"
 fi
@@ -1344,6 +1397,32 @@ if (( rc != 0 )) && [[ -z "${out}" ]]; then
 else
     fail "fetcher rejects invalid fresh cache" "rc=${rc}; out=${out}"
 fi
+
+cache=$(mk_cache)
+cp "${FIXTURE_DIR}/codexbar-realistic.json" "${cache}/usage.json"
+cache_only_marker="${cache}/refresh-attempted"
+cache_only_bin="${cache}/codexbar-refresh-attempt"
+cat > "${cache_only_bin}" <<EOF
+#!/usr/bin/env bash
+printf x > '${cache_only_marker}'
+exit 99
+EOF
+chmod +x "${cache_only_bin}"
+rc=0
+out=$(
+    SHOWY_QUOTA_NO_CONFIG=1 \
+    SHOWY_QUOTA_CACHE_DIR="${cache}" \
+    SHOWY_QUOTA_REFRESH_SECONDS=0 \
+    SHOWY_QUOTA_CODEXBAR_BIN="${cache_only_bin}" \
+    SHOWY_QUOTA_CODEXBAR_SERVE_URL='' \
+    "${REPO_ROOT}/bin/showy-quota-fetch" --cache-only 2>/dev/null
+) || rc=$?
+if (( rc == 0 )) && printf '%s' "${out}" | jq -e 'type == "array" and any(.provider == "codex")' >/dev/null 2>&1 && [[ ! -e "${cache}/source" ]] && [[ ! -e "${cache_only_marker}" ]]; then
+    ok "fetcher cache-only emits valid cache without refreshing"
+else
+    fail "fetcher cache-only emits valid cache without refreshing" "rc=${rc}; out=${out}"
+fi
+
 
 bad_provider="${TMP}/bad-provider.json"
 printf '%s\n' '[{"provider":"bad/id","usage":{"primary":{"usedPercent":12}}}]' > "${bad_provider}"
@@ -1750,6 +1829,61 @@ else
     fail "fetcher skips CLI fallback after failed fast serve probe" "rc=${rc}; out=${out}"
 fi
 
+cache=$(mk_cache)
+cp "${FIXTURE_DIR}/codexbar-mixed.json" "${cache}/usage.json"
+rc=0
+out=$(
+    PATH="${stub_dir}:${PATH}" \
+    SHOWY_QUOTA_NO_CONFIG=1 \
+    SHOWY_QUOTA_CACHE_DIR="${cache}" \
+    SHOWY_QUOTA_CODEXBAR_BIN="${missing_bin}" \
+    SHOWY_QUOTA_CODEXBAR_SERVE_URL="${serve_url}" \
+    SHOWY_QUOTA_CODEXBAR_SERVE_REFRESH_SECONDS=0 \
+    SHOWY_QUOTA_TEST_SERVE_URL="${serve_url}" \
+    SHOWY_QUOTA_TEST_SERVE_FIXTURE="${FIXTURE_DIR}/codexbar-non-array.json" \
+    "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
+) || rc=$?
+if (( rc == 0 )) && [[ -r "${cache}/serve-failed-at" ]] && printf '%s' "${out}" | jq -e 'type == "array" and any(.provider == "codex") and any(.provider == "gemini")' >/dev/null 2>&1; then
+    ok "fetcher records failed fast serve probe backoff"
+else
+    fail "fetcher records failed fast serve probe backoff" "rc=${rc}; out=${out}"
+fi
+rc=0
+out=$(
+    PATH="${stub_dir}:${PATH}" \
+    SHOWY_QUOTA_NO_CONFIG=1 \
+    SHOWY_QUOTA_CACHE_DIR="${cache}" \
+    SHOWY_QUOTA_CODEXBAR_BIN="${missing_bin}" \
+    SHOWY_QUOTA_CODEXBAR_SERVE_URL="${serve_url}" \
+    SHOWY_QUOTA_CODEXBAR_SERVE_REFRESH_SECONDS=0 \
+    SHOWY_QUOTA_TEST_SERVE_URL="${serve_url}" \
+    SHOWY_QUOTA_TEST_SERVE_FIXTURE="${FIXTURE_DIR}/codexbar-low.json" \
+    "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
+) || rc=$?
+if (( rc == 0 )) && printf '%s' "${out}" | jq -e 'type == "array" and any(.provider == "codex") and any(.provider == "gemini") and any(.provider == "cursor")' >/dev/null 2>&1; then
+    ok "fetcher backs off repeated fast serve probes"
+else
+    fail "fetcher backs off repeated fast serve probes" "rc=${rc}; out=${out}"
+fi
+rc=0
+out=$(
+    PATH="${stub_dir}:${PATH}" \
+    SHOWY_QUOTA_NO_CONFIG=1 \
+    SHOWY_QUOTA_CACHE_DIR="${cache}" \
+    SHOWY_QUOTA_CODEXBAR_BIN="${missing_bin}" \
+    SHOWY_QUOTA_CODEXBAR_SERVE_URL="${serve_url}" \
+    SHOWY_QUOTA_CODEXBAR_SERVE_REFRESH_SECONDS=0 \
+    SHOWY_QUOTA_TEST_SERVE_URL="${serve_url}" \
+    SHOWY_QUOTA_TEST_SERVE_FIXTURE="${FIXTURE_DIR}/codexbar-low.json" \
+    "${REPO_ROOT}/bin/showy-quota-fetch" --refresh 2>/dev/null
+) || rc=$?
+if (( rc == 0 )) && printf '%s' "${out}" | jq -e 'type == "array" and length == 1 and .[0].provider == "claude"' >/dev/null 2>&1; then
+    ok "fetcher forced refresh bypasses serve backoff"
+else
+    fail "fetcher forced refresh bypasses serve backoff" "rc=${rc}; out=${out}"
+fi
+
+
 # 4c. A non-CodexBar service on the default port must not block CLI fallback.
 cache=$(mk_cache)
 rc=0
@@ -1893,12 +2027,456 @@ out=$(
     SHOWY_QUOTA_TEST_FIXTURE="${FIXTURE_DIR}/codexbar-realistic.json" \
     "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
 ) || rc=$?
-if (( rc == 0 )) && [[ "${out}" == "${expected_stale}" ]]; then
+if (( rc == 0 )) && [[ "${out}" == "${expected_stale}" ]] && [[ -s "${timeout_counter}" ]] && [[ -r "${cache}/cli-failed-at" ]]; then
     ok "fetcher bounds hanging CLI fallback and emits stale cache"
 else
     timeout_value="missing"
     [[ -r "${timeout_args}" ]] && timeout_value=$(< "${timeout_args}")
     fail "fetcher bounds hanging CLI fallback and emits stale cache" "rc=${rc}; out=${out}; timeout=${timeout_value}"
+fi
+calls_before=$(< "${timeout_counter}")
+rc=0
+out=$(
+    PATH="${timeout_cli_dir}:${PATH}" \
+    SHOWY_QUOTA_NO_CONFIG=1 \
+    SHOWY_QUOTA_CACHE_DIR="${cache}" \
+    SHOWY_QUOTA_CODEXBAR_BIN="${timeout_cli_dir}/codexbar" \
+    SHOWY_QUOTA_CODEXBAR_SERVE_URL='' \
+    SHOWY_QUOTA_REFRESH_SECONDS=0 \
+    SHOWY_QUOTA_CODEXBAR_CLI_TIMEOUT_SECONDS=1 \
+    SHOWY_QUOTA_TEST_COUNTER="${timeout_counter}" \
+    SHOWY_QUOTA_TEST_TIMEOUT_ARGS_FILE="${timeout_args}" \
+    SHOWY_QUOTA_TEST_FIXTURE="${FIXTURE_DIR}/codexbar-realistic.json" \
+    "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
+) || rc=$?
+calls_after=$(< "${timeout_counter}")
+if (( rc == 0 )) && [[ "${out}" == "${expected_stale}" ]] && [[ "${calls_after}" == "${calls_before}" ]]; then
+    ok "fetcher backs off repeated hanging CLI fallback"
+else
+    fail "fetcher backs off repeated hanging CLI fallback" "rc=${rc}; before=${#calls_before}; after=${#calls_after}; out=${out}"
+fi
+
+malformed_cli_dir="${TMP}/malformed-cli"
+mkdir -p "${malformed_cli_dir}"
+cat > "${malformed_cli_dir}/codexbar" <<'EOF'
+#!/usr/bin/env bash
+set -eu
+printf 'x' >> "${SHOWY_QUOTA_TEST_COUNTER}"
+cat "${SHOWY_QUOTA_TEST_FIXTURE}"
+EOF
+chmod +x "${malformed_cli_dir}/codexbar"
+cache=$(mk_cache)
+cp "${FIXTURE_DIR}/codexbar-low.json" "${cache}/usage.json"
+touch -t 198801010000 "${cache}/usage.json"
+expected_stale=$(< "${cache}/usage.json")
+malformed_counter="${cache}/malformed-cli-call-count"
+: > "${malformed_counter}"
+rc=0
+out=$(
+    PATH="${malformed_cli_dir}:${PATH}" \
+    SHOWY_QUOTA_NO_CONFIG=1 \
+    SHOWY_QUOTA_CACHE_DIR="${cache}" \
+    SHOWY_QUOTA_CODEXBAR_BIN="${malformed_cli_dir}/codexbar" \
+    SHOWY_QUOTA_CODEXBAR_SERVE_URL='' \
+    SHOWY_QUOTA_REFRESH_SECONDS=0 \
+    SHOWY_QUOTA_TEST_COUNTER="${malformed_counter}" \
+    SHOWY_QUOTA_TEST_FIXTURE="${FIXTURE_DIR}/codexbar-non-array.json" \
+    "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
+) || rc=$?
+malformed_calls_before=$(< "${malformed_counter}")
+if (( rc == 0 )) && [[ "${out}" == "${expected_stale}" ]] && [[ -s "${malformed_counter}" ]] && [[ -r "${cache}/cli-failed-at" ]]; then
+    ok "fetcher records CLI backoff for unusable zero-exit output"
+else
+    fail "fetcher records CLI backoff for unusable zero-exit output" "rc=${rc}; calls=${#malformed_calls_before}; out=${out}"
+fi
+rc=0
+out=$(
+    PATH="${malformed_cli_dir}:${PATH}" \
+    SHOWY_QUOTA_NO_CONFIG=1 \
+    SHOWY_QUOTA_CACHE_DIR="${cache}" \
+    SHOWY_QUOTA_CODEXBAR_BIN="${malformed_cli_dir}/codexbar" \
+    SHOWY_QUOTA_CODEXBAR_SERVE_URL='' \
+    SHOWY_QUOTA_REFRESH_SECONDS=0 \
+    SHOWY_QUOTA_TEST_COUNTER="${malformed_counter}" \
+    SHOWY_QUOTA_TEST_FIXTURE="${FIXTURE_DIR}/codexbar-realistic.json" \
+    "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
+) || rc=$?
+malformed_calls_after=$(< "${malformed_counter}")
+if (( rc == 0 )) && [[ "${out}" == "${expected_stale}" ]] && [[ "${malformed_calls_after}" == "${malformed_calls_before}" ]]; then
+    ok "fetcher backs off repeated unusable zero-exit CLI output"
+else
+    fail "fetcher backs off repeated unusable zero-exit CLI output" "rc=${rc}; before=${#malformed_calls_before}; after=${#malformed_calls_after}; out=${out}"
+fi
+
+
+# 5b. Provider-aware fallback: discovery, isolation, and last-known-good
+#     preservation when every provider call fails.
+printf '\nprovider-aware fallback\n'
+
+# Provider discovery: only enabled providers are queried.
+provider_aware_dir="${TMP}/provider-aware"
+mkdir -p "${provider_aware_dir}"
+cat > "${provider_aware_dir}/codexbar" <<EOF
+#!/bin/sh
+# Provider inventory: instant, separately counted.
+counter="\${SHOWY_QUOTA_TEST_COUNTER:-}"
+config_counter="\${SHOWY_QUOTA_TEST_CONFIG_COUNTER:-}"
+if [ "\${1:-}" = "config" ] && [ "\${2:-}" = "providers" ]; then
+    [ -n "\${config_counter}" ] && printf 'x' >> "\${config_counter}"
+    disabled="\${SHOWY_QUOTA_TEST_DISABLE_PROVIDER:-}"
+    jq --arg disabled "\${disabled}" \
+        '[.[] | {provider, enabled: (.provider != \$disabled)}]' \
+        < "\${SHOWY_QUOTA_TEST_PROVIDERS_FIXTURE:-${FIXTURE_DIR}/codexbar-mixed.json}"
+    exit 0
+fi
+# Per-provider usage: counted once per invocation. Optional per-provider hang
+# (sleep) and per-provider failure (non-zero exit).
+[ -n "\${counter}" ] && printf 'x' >> "\${counter}"
+provider=""
+while [ "\$#" -gt 0 ]; do
+    case "\$1" in
+        --provider) shift; provider="\${1:-}" ;;
+    esac
+    shift
+done
+if [ -n "\${provider}" ] && [ "\${provider}" = "\${SHOWY_QUOTA_TEST_HANG_PROVIDER:-}" ]; then
+    sleep 5
+    exit 1
+fi
+if [ -n "\${provider}" ] && [ "\${provider}" = "\${SHOWY_QUOTA_TEST_FAIL_PROVIDER:-}" ]; then
+    exit 7
+fi
+jq --arg p "\${provider}" '[.[] | select(.provider == \$p)]' \
+    < "\${SHOWY_QUOTA_TEST_FIXTURE:-${FIXTURE_DIR}/codexbar-mixed.json}"
+EOF
+chmod +x "${provider_aware_dir}/codexbar"
+
+# Discovery: per-provider invocations restricted to enabled providers from
+# `codexbar config providers`. With "cursor" disabled, the fetcher must not
+# attempt a per-provider call for it.
+cache=$(mk_cache)
+usage_counter="${cache}/per-provider-call-count"
+: > "${usage_counter}"
+config_counter="${cache}/config-providers-call-count"
+: > "${config_counter}"
+rc=0
+out=$(
+    SHOWY_QUOTA_NO_CONFIG=1 \
+    SHOWY_QUOTA_CACHE_DIR="${cache}" \
+    SHOWY_QUOTA_CODEXBAR_BIN="${provider_aware_dir}/codexbar" \
+    SHOWY_QUOTA_CODEXBAR_SERVE_URL='' \
+    SHOWY_QUOTA_TEST_COUNTER="${usage_counter}" \
+    SHOWY_QUOTA_TEST_CONFIG_COUNTER="${config_counter}" \
+    SHOWY_QUOTA_TEST_DISABLE_PROVIDER=cursor \
+    SHOWY_QUOTA_TEST_FIXTURE="${FIXTURE_DIR}/codexbar-mixed.json" \
+    "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
+) || rc=$?
+config_calls=$(wc -c < "${config_counter}" | tr -d ' ')
+usage_calls=$(wc -c < "${usage_counter}" | tr -d ' ')
+if (( rc == 0 )) \
+    && printf '%s' "${out}" | jq -e 'type == "array" and any(.provider == "claude") and any(.provider == "codex") and any(.provider == "gemini") and (all(.[]; .provider != "cursor"))' >/dev/null 2>&1 \
+    && (( config_calls == 1 )) \
+    && (( usage_calls == 3 )); then
+    ok "fetcher per-provider CLI fallback honors codexbar config discovery"
+else
+    fail "fetcher per-provider CLI fallback honors codexbar config discovery" "rc=${rc}; config=${config_calls}; usage=${usage_calls}; out=${out:0:80}"
+fi
+
+# SHOWY_QUOTA_PROVIDERS is an ordered allow-list for fallback queries. It
+# should take precedence over the display-only provider order when set.
+cache=$(mk_cache)
+rc=0
+out=$(
+    SHOWY_QUOTA_NO_CONFIG=1 \
+    SHOWY_QUOTA_CACHE_DIR="${cache}" \
+    SHOWY_QUOTA_CODEXBAR_BIN="${provider_aware_dir}/codexbar" \
+    SHOWY_QUOTA_CODEXBAR_SERVE_URL='' \
+    SHOWY_QUOTA_PROVIDER_ORDER='codex,claude,gemini' \
+    SHOWY_QUOTA_PROVIDERS='gemini,claude' \
+    SHOWY_QUOTA_TEST_FIXTURE="${FIXTURE_DIR}/codexbar-mixed.json" \
+    "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
+) || rc=$?
+if (( rc == 0 )) \
+    && [[ "$(printf '%s' "${out}" | jq -r '[.[].provider] | join(",")')" == "gemini,claude" ]]; then
+    ok "fetcher honors SHOWY_QUOTA_PROVIDERS order during fallback"
+else
+    fail "fetcher honors SHOWY_QUOTA_PROVIDERS order during fallback" "rc=${rc}; out=${out:0:120}"
+fi
+
+# Provider isolation: one hanging provider must not prevent the others from
+# publishing. We bound the hang with the per-CLI hard timeout; the surviving
+# providers still merge into a publishable payload.
+cache=$(mk_cache)
+usage_counter="${cache}/isolation-call-count"
+: > "${usage_counter}"
+rc=0
+out=$(
+    SHOWY_QUOTA_NO_CONFIG=1 \
+    SHOWY_QUOTA_CACHE_DIR="${cache}" \
+    SHOWY_QUOTA_CODEXBAR_BIN="${provider_aware_dir}/codexbar" \
+    SHOWY_QUOTA_CODEXBAR_SERVE_URL='' \
+    SHOWY_QUOTA_CODEXBAR_CLI_TIMEOUT_SECONDS=1 \
+    SHOWY_QUOTA_TEST_COUNTER="${usage_counter}" \
+    SHOWY_QUOTA_TEST_HANG_PROVIDER=codex \
+    SHOWY_QUOTA_TEST_FIXTURE="${FIXTURE_DIR}/codexbar-mixed.json" \
+    "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
+) || rc=$?
+if (( rc == 0 )) \
+    && printf '%s' "${out}" | jq -e 'type == "array" and any(.provider == "claude") and any(.provider == "gemini") and (all(.[]; .provider != "codex"))' >/dev/null 2>&1 \
+    && [[ -r "${cache}/provider-failures/codex" ]]; then
+    ok "fetcher isolates one hanging provider from surviving providers"
+else
+    fail "fetcher isolates one hanging provider from surviving providers" "rc=${rc}; out=${out:0:120}"
+fi
+
+# Provider-level backoff: once a provider has a fresh failure stamp, a
+# subsequent refresh skips it without bumping the per-provider counter. We
+# pin the backoff seconds explicitly so this is independent of REFRESH_SECONDS.
+: > "${usage_counter}"
+rc=0
+out=$(
+    SHOWY_QUOTA_NO_CONFIG=1 \
+    SHOWY_QUOTA_CACHE_DIR="${cache}" \
+    SHOWY_QUOTA_CODEXBAR_BIN="${provider_aware_dir}/codexbar" \
+    SHOWY_QUOTA_CODEXBAR_SERVE_URL='' \
+    SHOWY_QUOTA_CODEXBAR_CLI_TIMEOUT_SECONDS=1 \
+    SHOWY_QUOTA_REFRESH_SECONDS=0 \
+    SHOWY_QUOTA_PROVIDER_FAILURE_BACKOFF_SECONDS=3600 \
+    SHOWY_QUOTA_TEST_COUNTER="${usage_counter}" \
+    SHOWY_QUOTA_TEST_FIXTURE="${FIXTURE_DIR}/codexbar-mixed.json" \
+    "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
+) || rc=$?
+# Expect 3 calls: claude, gemini, cursor; codex is in backoff and skipped.
+backoff_calls=$(wc -c < "${usage_counter}" | tr -d ' ')
+if (( rc == 0 )) \
+    && printf '%s' "${out}" | jq -e 'type == "array" and any(.provider == "claude") and any(.provider == "gemini") and (all(.[]; .provider != "codex"))' >/dev/null 2>&1 \
+    && (( backoff_calls == 3 )); then
+    ok "fetcher honors per-provider backoff on subsequent refresh"
+else
+    fail "fetcher honors per-provider backoff on subsequent refresh" "rc=${rc}; calls=${backoff_calls}; out=${out:0:160}"
+fi
+
+# No successful providers + existing cache → preserve last-known-good rather
+# than publishing an empty array. Every per-provider call returns an
+# unparseable error, but the previous valid cache must still be emitted.
+cache=$(mk_cache)
+cp "${FIXTURE_DIR}/codexbar-mixed.json" "${cache}/usage.json"
+expected_cache=$(< "${cache}/usage.json")
+touch -t 198801010000 "${cache}/usage.json"
+usage_counter="${cache}/all-fail-call-count"
+: > "${usage_counter}"
+failing_dir="${TMP}/all-fail"
+mkdir -p "${failing_dir}"
+cat > "${failing_dir}/codexbar" <<EOF
+#!/bin/sh
+counter="\${SHOWY_QUOTA_TEST_COUNTER:-}"
+if [ "\${1:-}" = "config" ] && [ "\${2:-}" = "providers" ]; then
+    cat "\${SHOWY_QUOTA_TEST_FIXTURE:-${FIXTURE_DIR}/codexbar-mixed.json}" \
+        | jq '[.[] | {provider, enabled: true}]'
+    exit 0
+fi
+[ -n "\${counter}" ] && printf 'x' >> "\${counter}"
+# Every per-provider call exits non-zero so no provider succeeds.
+exit 7
+EOF
+chmod +x "${failing_dir}/codexbar"
+rc=0
+out=$(
+    SHOWY_QUOTA_NO_CONFIG=1 \
+    SHOWY_QUOTA_CACHE_DIR="${cache}" \
+    SHOWY_QUOTA_CODEXBAR_BIN="${failing_dir}/codexbar" \
+    SHOWY_QUOTA_CODEXBAR_SERVE_URL='' \
+    SHOWY_QUOTA_REFRESH_SECONDS=0 \
+    SHOWY_QUOTA_TEST_COUNTER="${usage_counter}" \
+    SHOWY_QUOTA_TEST_FIXTURE="${FIXTURE_DIR}/codexbar-mixed.json" \
+    "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
+) || rc=$?
+if (( rc == 0 )) \
+    && [[ "${out}" == "${expected_cache}" ]] \
+    && [[ -r "${cache}/cli-failed-at" ]]; then
+    ok "fetcher preserves stale cache when every provider fallback fails"
+else
+    fail "fetcher preserves stale cache when every provider fallback fails" "rc=${rc}; cache_unchanged=$([[ \"${out}\" == \"${expected_cache}\" ]] && echo yes || echo no)"
+fi
+
+# Config discovery failure + stale cache with no allow-list overlap should
+# fall through to the explicit allow-list rather than giving up on refresh.
+config_fail_dir="${TMP}/config-fail"
+mkdir -p "${config_fail_dir}"
+cat > "${config_fail_dir}/codexbar" <<EOF
+#!/bin/sh
+if [ "\${1:-}" = "config" ] && [ "\${2:-}" = "providers" ]; then
+    exit 7
+fi
+provider=""
+while [ "\$#" -gt 0 ]; do
+    case "\$1" in
+        --provider) shift; provider="\${1:-}" ;;
+    esac
+    shift
+done
+jq --arg p "\${provider}" '[.[] | select(.provider == \$p)]' \
+    < "\${SHOWY_QUOTA_TEST_FIXTURE:-${FIXTURE_DIR}/codexbar-mixed.json}"
+EOF
+chmod +x "${config_fail_dir}/codexbar"
+cache=$(mk_cache)
+jq '[.[] | select(.provider == "codex")]' "${FIXTURE_DIR}/codexbar-mixed.json" > "${cache}/usage.json"
+touch -t 198801010000 "${cache}/usage.json"
+rc=0
+out=$(
+    SHOWY_QUOTA_NO_CONFIG=1 \
+    SHOWY_QUOTA_CACHE_DIR="${cache}" \
+    SHOWY_QUOTA_CODEXBAR_BIN="${config_fail_dir}/codexbar" \
+    SHOWY_QUOTA_CODEXBAR_SERVE_URL='' \
+    SHOWY_QUOTA_REFRESH_SECONDS=0 \
+    SHOWY_QUOTA_PROVIDERS='gemini' \
+    SHOWY_QUOTA_TEST_FIXTURE="${FIXTURE_DIR}/codexbar-mixed.json" \
+    "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
+) || rc=$?
+if (( rc == 0 )) \
+    && [[ "$(printf '%s' "${out}" | jq -r '[.[].provider] | join(",")')" == "gemini" ]]; then
+    ok "fetcher falls through to allow-list when cache filters empty"
+else
+    fail "fetcher falls through to allow-list when cache filters empty" "rc=${rc}; out=${out:0:120}"
+fi
+
+# Canonical empty inventory: when `codexbar config providers` reports no
+# enabled providers, the fetcher must publish `[]` so renderers can show idle
+# instead of stale/blank output.
+empty_inv_dir="${TMP}/empty-inv"
+mkdir -p "${empty_inv_dir}"
+cat > "${empty_inv_dir}/codexbar" <<'EOF'
+#!/bin/sh
+if [ "${1:-}" = "config" ] && [ "${2:-}" = "providers" ]; then
+    printf '[]'
+    exit 0
+fi
+# Should never be called when the inventory is empty.
+exit 42
+EOF
+chmod +x "${empty_inv_dir}/codexbar"
+cache=$(mk_cache)
+rc=0
+out=$(
+    SHOWY_QUOTA_NO_CONFIG=1 \
+    SHOWY_QUOTA_CACHE_DIR="${cache}" \
+    SHOWY_QUOTA_CODEXBAR_BIN="${empty_inv_dir}/codexbar" \
+    SHOWY_QUOTA_CODEXBAR_SERVE_URL='' \
+    "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
+) || rc=$?
+if (( rc == 0 )) && [[ "${out}" == "[]" ]] && [[ "$(< "${cache}/source")" == "cli" ]]; then
+    ok "fetcher publishes empty cache when codexbar reports no enabled providers"
+else
+    fail "fetcher publishes empty cache when codexbar reports no enabled providers" "rc=${rc}; out=${out}"
+fi
+
+# All-invalid inventory: a discovery response containing only unsafe provider
+# ids must be treated as a discovery failure, never silently published as
+# canonical empty (would mask CodexBar misconfiguration).
+bad_inv_dir="${TMP}/bad-inv"
+mkdir -p "${bad_inv_dir}"
+cat > "${bad_inv_dir}/codexbar" <<'EOF'
+#!/bin/sh
+if [ "${1:-}" = "config" ] && [ "${2:-}" = "providers" ]; then
+    printf '%s' '[{"provider":"bad/id","enabled":true}]'
+    exit 0
+fi
+exit 99
+EOF
+chmod +x "${bad_inv_dir}/codexbar"
+cache=$(mk_cache)
+rc=0
+out=$(
+    SHOWY_QUOTA_NO_CONFIG=1 \
+    SHOWY_QUOTA_CACHE_DIR="${cache}" \
+    SHOWY_QUOTA_CODEXBAR_BIN="${bad_inv_dir}/codexbar" \
+    SHOWY_QUOTA_CODEXBAR_SERVE_URL='' \
+    "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
+) || rc=$?
+if (( rc != 0 )) && [[ -z "${out}" ]] && ! [[ -f "${cache}/usage.json" ]] \
+    && [[ -r "${cache}/config-providers-failed-at" ]]; then
+    ok "fetcher treats all-invalid provider inventory as discovery failure"
+else
+    fail "fetcher treats all-invalid provider inventory as discovery failure" "rc=${rc}; out=${out}"
+fi
+
+# Empty/null/missing provider ids in enabled records are invalid inventory,
+# not canonical empty inventory.
+bad_empty_inv_dir="${TMP}/bad-empty-inv"
+mkdir -p "${bad_empty_inv_dir}"
+cat > "${bad_empty_inv_dir}/codexbar" <<'EOF'
+#!/bin/sh
+if [ "${1:-}" = "config" ] && [ "${2:-}" = "providers" ]; then
+    printf '%s' "${SHOWY_QUOTA_TEST_PROVIDERS_PAYLOAD}"
+    exit 0
+fi
+exit 99
+EOF
+chmod +x "${bad_empty_inv_dir}/codexbar"
+for bad_payload in \
+    '[{"provider":"","enabled":true}]' \
+    '[{"provider":null,"enabled":true}]' \
+    '[{"enabled":true}]'
+do
+    cache=$(mk_cache)
+    rc=0
+    out=$(
+        SHOWY_QUOTA_NO_CONFIG=1 \
+        SHOWY_QUOTA_CACHE_DIR="${cache}" \
+        SHOWY_QUOTA_CODEXBAR_BIN="${bad_empty_inv_dir}/codexbar" \
+        SHOWY_QUOTA_CODEXBAR_SERVE_URL='' \
+        SHOWY_QUOTA_TEST_PROVIDERS_PAYLOAD="${bad_payload}" \
+        "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
+    ) || rc=$?
+    if (( rc != 0 )) && [[ -z "${out}" ]] && ! [[ -f "${cache}/usage.json" ]] \
+        && [[ -r "${cache}/config-providers-failed-at" ]]; then
+        ok "fetcher treats enabled provider payload ${bad_payload} as invalid inventory"
+    else
+        fail "fetcher treats enabled provider payload ${bad_payload} as invalid inventory" "rc=${rc}; out=${out}"
+    fi
+done
+
+# SHOWY_QUOTA_PROVIDERS_EXCLUDE drops providers from the discovered inventory
+# before any per-provider CLI call.
+
+cache=$(mk_cache)
+rc=0
+out=$(
+    SHOWY_QUOTA_NO_CONFIG=1 \
+    SHOWY_QUOTA_CACHE_DIR="${cache}" \
+    SHOWY_QUOTA_CODEXBAR_BIN="${bad_empty_inv_dir}/codexbar" \
+    SHOWY_QUOTA_CODEXBAR_SERVE_URL='' \
+    SHOWY_QUOTA_TEST_PROVIDERS_PAYLOAD='[{"provider":"codex","enabled":true},{"enabled":true}]' \
+    "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
+) || rc=$?
+if (( rc != 0 )) && [[ -z "${out}" ]] && ! [[ -f "${cache}/usage.json" ]] \
+    && [[ -r "${cache}/config-providers-failed-at" ]]; then
+    ok "fetcher treats mixed valid and malformed enabled providers as invalid inventory"
+else
+    fail "fetcher treats mixed valid and malformed enabled providers as invalid inventory" "rc=${rc}; out=${out}"
+fi
+
+cache=$(mk_cache)
+usage_counter="${cache}/exclude-call-count"
+: > "${usage_counter}"
+rc=0
+out=$(
+    SHOWY_QUOTA_NO_CONFIG=1 \
+    SHOWY_QUOTA_CACHE_DIR="${cache}" \
+    SHOWY_QUOTA_CODEXBAR_BIN="${provider_aware_dir}/codexbar" \
+    SHOWY_QUOTA_CODEXBAR_SERVE_URL='' \
+    SHOWY_QUOTA_PROVIDERS_EXCLUDE='codex,cursor' \
+    SHOWY_QUOTA_TEST_COUNTER="${usage_counter}" \
+    SHOWY_QUOTA_TEST_FIXTURE="${FIXTURE_DIR}/codexbar-mixed.json" \
+    "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
+) || rc=$?
+excl_calls=$(wc -c < "${usage_counter}" | tr -d ' ')
+if (( rc == 0 )) \
+    && printf '%s' "${out}" | jq -e 'type == "array" and any(.provider == "claude") and any(.provider == "gemini") and (all(.[]; .provider != "codex" and .provider != "cursor"))' >/dev/null 2>&1 \
+    && (( excl_calls == 2 )); then
+    ok "fetcher exclude list prunes providers before per-provider CLI calls"
+else
+    fail "fetcher exclude list prunes providers before per-provider CLI calls" "rc=${rc}; calls=${excl_calls}; out=${out:0:120}"
 fi
 
 # 6. Stale-cache rendering marks one frozen-snapshot indicator and greys data.
@@ -2046,9 +2624,27 @@ slow_dir="${TMP}/slow"
 mkdir -p "${slow_dir}"
 cat > "${slow_dir}/codexbar" <<EOF
 #!/bin/sh
+# Provider inventory: instant response derived from the fixture, no counter.
+fixture="\${SHOWY_QUOTA_TEST_FIXTURE:-${FIXTURE_DIR}/codexbar-mixed.json}"
+if [ "\${1:-}" = "config" ] && [ "\${2:-}" = "providers" ]; then
+    jq '[.[] | {provider, enabled: true}]' < "\${fixture}"
+    exit 0
+fi
+# Per-provider usage call: count the invocation, then sleep before returning.
 [ -n "\${SHOWY_QUOTA_TEST_COUNTER:-}" ] && printf 'x' >> "\${SHOWY_QUOTA_TEST_COUNTER}"
 sleep 1
-cat "\${SHOWY_QUOTA_TEST_FIXTURE:-${FIXTURE_DIR}/codexbar-mixed.json}"
+provider=""
+while [ "\$#" -gt 0 ]; do
+    case "\$1" in
+        --provider) shift; provider="\${1:-}" ;;
+    esac
+    shift
+done
+if [ -n "\${provider}" ]; then
+    jq --arg p "\${provider}" '[.[] | select(.provider == \$p)]' < "\${fixture}"
+else
+    cat "\${fixture}"
+fi
 EOF
 chmod +x "${slow_dir}/codexbar"
 
@@ -2072,6 +2668,7 @@ for path_label in flock mkdir; do
             SHOWY_QUOTA_CODEXBAR_BIN="${slow_dir}/codexbar" \
             SHOWY_QUOTA_FORCE_NO_FLOCK="${force_no_flock}" \
             SHOWY_QUOTA_TEST_COUNTER="${counter}" \
+            SHOWY_QUOTA_PROVIDERS=claude \
             "${REPO_ROOT}/bin/showy-quota-fetch" > "${out_file}" 2>/dev/null
         ) &
         pids+=("$!")
@@ -2244,6 +2841,7 @@ out=$(
     SHOWY_QUOTA_LOCK_WAIT_TENTHS=10 \
     SHOWY_QUOTA_TEST_COUNTER="${counter}" \
     SHOWY_QUOTA_TEST_FIXTURE="${FIXTURE_DIR}/codexbar-realistic.json" \
+    SHOWY_QUOTA_PROVIDERS=codex \
     "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
 ) || rc=$?
 if (( rc == 0 )) && grep -F -q 'futureUnknownTopLevelField' <<< "${out}"; then
@@ -2274,6 +2872,7 @@ for idx in 1 2 3 4; do
         SHOWY_QUOTA_LOCK_WAIT_TENTHS=300 \
         SHOWY_QUOTA_TEST_COUNTER="${counter}" \
         SHOWY_QUOTA_TEST_FIXTURE="${FIXTURE_DIR}/codexbar-realistic.json" \
+        SHOWY_QUOTA_PROVIDERS=codex \
         "${REPO_ROOT}/bin/showy-quota-fetch" --refresh > "${out_file}" 2> "${err_file}"
     ) &
     pids+=("$!")
@@ -2329,6 +2928,7 @@ out=$(
     SHOWY_QUOTA_LOCK_WAIT_TENTHS=10 \
     SHOWY_QUOTA_TEST_COUNTER="${counter}" \
     SHOWY_QUOTA_TEST_FIXTURE="${FIXTURE_DIR}/codexbar-realistic.json" \
+    SHOWY_QUOTA_PROVIDERS=codex \
     "${REPO_ROOT}/bin/showy-quota-fetch" --refresh 2>/dev/null
 ) || rc=$?
 if (( rc == 0 )) && grep -F -q 'futureUnknownTopLevelField' <<< "${out}"; then

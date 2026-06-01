@@ -214,7 +214,7 @@ Most users only need these; the full environment surface lives in
 | `SHOWY_QUOTA_THEME` | unset (default palette) | Load a named built-in or user palette. |
 | `SHOWY_QUOTA_PROVIDERS` | empty | Ordered provider allow-list; empty renders CodexBar's enabled providers. |
 | `SHOWY_QUOTA_PROVIDERS_EXCLUDE` | empty | Provider deny-list applied after the allow-list. |
-| `SHOWY_QUOTA_PROVIDER_ORDER` | `codex,claude,opencode,gemini` | Stable render order without filtering. |
+| `SHOWY_QUOTA_PROVIDER_ORDER` | `codex,claude,copilot,opencode,gemini` | Stable render order without filtering. |
 | `SHOWY_QUOTA_REFRESH_SECONDS` | `120` | Slow CLI fallback refresh interval. |
 | `SHOWY_QUOTA_MANAGE_SERVE` | `1` | Start `codexbar serve` automatically before CLI fallback; set `0` to disable. |
 | `SHOWY_QUOTA_CODEXBAR_SERVE_URL` | `http://127.0.0.1:8080` | Local `codexbar serve` base URL; set empty to skip HTTP probing. |

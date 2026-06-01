@@ -51,7 +51,7 @@ impl Default for RenderConfig {
         Self {
             providers: Vec::new(),
             providers_exclude: Vec::new(),
-            provider_order: csv("codex,claude,opencode,gemini"),
+            provider_order: csv("codex,claude,copilot,opencode,gemini"),
             include_status: true,
             palette_primary_good: "25be6a".into(),
             palette_primary_warn: "f0af00".into(),

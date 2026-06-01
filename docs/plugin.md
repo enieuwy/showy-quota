@@ -17,8 +17,12 @@ http://127.0.0.1:8080/health
 http://127.0.0.1:8080/usage
 ```
 
-If serve cannot be started or reached, the default CLI fallback runs
-`codexbar usage --format json --pretty` and marks the strip with `⚠cli`.
+If serve cannot be started or reached, the plugin discovers enabled providers
+through `codexbar config providers --format json --pretty` and falls back to
+one `codexbar usage --provider <id> --format json --pretty [--status]` call per
+enabled provider. Each provider has its own in-flight flag, last-known-good
+slice, and failure backoff, so one hung or failing provider never blocks the
+rest. The merged result is marked with `⚠cli`.
 
 ## Install prebuilt WASM
 
@@ -64,6 +68,8 @@ pane size=1 borderless=true {
         cli_fallback "degraded"
         cli_command "codexbar"
         cli_interval_seconds 120
+        // provider_failure_backoff_seconds 120
+        // provider_discovery_backoff_seconds 60
     }
 }
 ```
@@ -85,7 +91,9 @@ RunCommands
 
 `WebAccess` is for localhost `/health` and `/usage`, `OpenTerminalsOrPlugins`
 is for the managed `codexbar serve` background command pane, and `RunCommands`
-is for the visible degraded CLI fallback.
+is used twice in the fallback path: once for provider discovery
+(`codexbar config providers --format json --pretty`) and once per enabled
+provider for `codexbar usage --provider <id> --format json --pretty`.
 
 Zellij can show plugin permission prompts in a hidden floating pane. To avoid a blank pane on first launch, pre-grant permissions. Zellij versions differ on whether file plugins are stored by absolute path, expanded `file:` URL, or the literal `file:~` URL from the layout, so include all forms when editing the file by hand.
 
@@ -147,11 +155,13 @@ Common options:
 |`serve_port`|URL port|Port passed to `codexbar serve --port`; defaults to the port in `serve_url` so custom localhost ports stay aligned.|
 |`interval_seconds`|`10`|Serve refresh cadence; timers are one-shot and re-armed after each tick.|
 |`cli_fallback`|`degraded`|`degraded` or `off`. Degraded fallback appends `⚠cli`.|
-|`cli_command`|`codexbar`|Command used for `usage --format json --pretty` fallback.|
+|`cli_command`|`codexbar`|Command used for provider discovery (`codexbar config providers …`) and per-provider fallback (`codexbar usage --provider <id> …`). Do not point this at `showy-quota-fetch`; the plugin is intentionally self-contained.|
 |`cli_interval_seconds`|`120`|Slow cadence while fallback is active; the plugin still probes serve every tick and switches back when it recovers.|
-|`providers`|empty|Comma-separated allow-list and render order.|
-|`providers_exclude`|empty|Comma-separated deny-list.|
-|`provider_order`|`codex,claude,opencode,gemini`|Render order when `providers` is empty.|
+|`provider_failure_backoff_seconds`|`cli_interval_seconds`|How long to skip a provider after one of its CLI calls fails.|
+|`provider_discovery_backoff_seconds`|`60`|How long to skip provider discovery after failure, and how long a successful CodexBar provider inventory is reused before refresh.|
+|`providers`|empty|Comma-separated allow-list and render order. When set, it also constrains the per-provider fallback work list.|
+|`providers_exclude`|empty|Comma-separated deny-list. Excluded providers are dropped from the per-provider fallback work list before any CLI call.|
+|`provider_order`|`codex,claude,copilot,opencode,gemini`|Render order when `providers` is empty. Display order only — not a provider inventory.|
 |`bar_width`|`12`|Cells in each provider bar body. Minimum is 8.|
 |`terminal_bar_mode`|`auto`|`auto`, `dual`, `mono3`, or `sextant3`.|
 |`mono3_providers`|`gemini,antigravity`|Providers that use `mono3` in `auto` mode.|
@@ -180,11 +190,12 @@ The shell integrations still use `config.env`; the plugin uses KDL so the WASM a
 |Condition|Pane behavior|
 |---|---|
 |Permission denied|Shows `showy-quota: permission denied`.|
-|CodexBar serve unavailable before first success|Starts `codexbar serve`; if startup fails, uses CLI fallback or shows `showy-quota: CodexBar serve unavailable` when fallback is off.|
-|CLI fallback active|Renders fetched quota data with trailing `⚠cli`; continues probing serve and removes the marker after recovery.|
+|CodexBar serve unavailable before first success|Starts `codexbar serve`; if startup fails, runs `codexbar config providers` discovery followed by per-provider `codexbar usage --provider <id>` calls. Shows `showy-quota: CodexBar serve unavailable` only when `cli_fallback "off"` is set.|
+|CLI fallback active|Merges successful per-provider records into the in-memory payload, marks output with `⚠cli`, and continues probing serve so it can switch back automatically.|
+|Single provider hangs or errors|That provider's slot keeps its previous record; the per-provider backoff prevents repeated retries within the configured window. Other providers continue to render normally.|
 |Serve fails after a success|Keeps rendering last-known-good output; turns stale at `2 × interval_seconds`; falls back only after repeated failures.|
-|Serve returns invalid JSON|Keeps last-known-good output; before first success tries the degraded CLI fallback.|
-|No renderable providers and no prior data|Renders `AI idle`.|
+|Serve returns invalid JSON|Keeps last-known-good output; before first success tries the per-provider degraded fallback.|
+|No renderable providers and no prior data|Renders `AI idle`. CodexBar reporting zero enabled providers is the same canonical empty state, not an error.|
 
 ## Advanced zjstatus path
 
