@@ -543,7 +543,7 @@ apply_provider_filters() {
     local allow_csv="${SHOWY_QUOTA_PROVIDERS:-}"
     local exclude_csv="${SHOWY_QUOTA_PROVIDERS_EXCLUDE:-}"
     local order_csv="${SHOWY_QUOTA_PROVIDER_ORDER:-}"
-    local -a allow=() exclude=() order=() raw=() filtered=() ordered=() seen=()
+    local -a allow=() exclude=() order=() raw=() filtered=() ordered=()
     local id token in_list raw_id
 
     IFS=$'\n' read -r -d '' -a raw < <(printf '%s\0' "${input}") || true
@@ -647,16 +647,16 @@ apply_provider_filters() {
 # observed — callers should publish an empty `[]` payload rather than treating
 # this as a refresh failure.
 provider_inventory_for_fallback() {
-    local discovery_rc=0 discovery_raw="" raw="" ordered=""
+    local discovery_rc=0 discovery_raw="" ids="" selection=""
     discovery_raw=$(discover_providers) || discovery_rc=$?
     if (( discovery_rc == 0 )); then
-        ordered=""
+        selection=""
         if [[ -n "${discovery_raw}" ]]; then
-            ordered=$(apply_provider_filters "${discovery_raw}") || ordered=""
+            selection=$(apply_provider_filters "${discovery_raw}") || selection=""
         fi
-        if [[ -n "${ordered}" ]]; then
-            showy_quota_log "provider inventory from codexbar-config: $(tr '\n' ' ' <<< "${ordered}")"
-            printf '%s' "${ordered}"
+        if [[ -n "${selection}" ]]; then
+            showy_quota_log "provider inventory from codexbar-config: $(tr '\n' ' ' <<< "${selection}")"
+            printf '%s' "${selection}"
             return 0
         fi
         showy_quota_log "codexbar reports no enabled providers; publishing empty cache"
@@ -665,23 +665,23 @@ provider_inventory_for_fallback() {
 
     if [[ -s "${SHOWY_QUOTA_USAGE_FILE}" ]] \
         && showy_quota_json_valid "${SHOWY_QUOTA_USAGE_FILE}" \
-        && raw=$(showy_quota_provider_ids_from_payload "${SHOWY_QUOTA_USAGE_FILE}") \
-        && [[ -n "${raw}" ]]; then
-        ordered=$(apply_provider_filters "${raw}") || ordered=""
-        if [[ -n "${ordered}" ]]; then
-            showy_quota_log "provider inventory from cache: $(tr '\n' ' ' <<< "${ordered}")"
-            printf '%s' "${ordered}"
+        && ids=$(showy_quota_provider_ids_from_payload "${SHOWY_QUOTA_USAGE_FILE}") \
+        && [[ -n "${ids}" ]]; then
+        selection=$(apply_provider_filters "${ids}") || selection=""
+        if [[ -n "${selection}" ]]; then
+            showy_quota_log "provider inventory from cache: $(tr '\n' ' ' <<< "${selection}")"
+            printf '%s' "${selection}"
             return 0
         fi
         showy_quota_log "provider inventory from cache filtered to empty list"
     fi
 
     if [[ -n "${SHOWY_QUOTA_PROVIDERS:-}" ]]; then
-        raw=$(printf '%s' "${SHOWY_QUOTA_PROVIDERS}" | tr ',' '\n')
-        ordered=$(apply_provider_filters "${raw}") || ordered=""
-        if [[ -n "${ordered}" ]]; then
-            showy_quota_log "provider inventory from allow-list: $(tr '\n' ' ' <<< "${ordered}")"
-            printf '%s' "${ordered}"
+        ids=$(printf '%s' "${SHOWY_QUOTA_PROVIDERS}" | tr ',' '\n')
+        selection=$(apply_provider_filters "${ids}") || selection=""
+        if [[ -n "${selection}" ]]; then
+            showy_quota_log "provider inventory from allow-list: $(tr '\n' ' ' <<< "${selection}")"
+            printf '%s' "${selection}"
             return 0
         fi
         showy_quota_log "provider inventory from allow-list filtered to empty list"

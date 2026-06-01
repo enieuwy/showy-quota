@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-06-01
+
 ### Added
 - Standalone `showy-quota-zellij.wasm` plugin for Zellij. It fetches CodexBar
   serve directly, renders the quota strip in-process, and removes the normal
@@ -16,6 +18,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   shell Zellij renderer over JSON fixtures.
 - `make plugin` / `make install-plugin` and a release workflow that attaches
   the prebuilt Zellij WASM artifact to `v*` releases.
+- Provider-aware per-provider fallback in both `bin/showy-quota-fetch` and the
+  self-contained Zellij plugin, so individual provider refresh failures no
+  longer collapse the whole quota strip.
 
 ### Changed
 - Zellij docs now make the standalone plugin primary and move the zjstatus pipe
@@ -26,6 +31,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   pipe widget is now `pipe_showy_quota`, the SketchyBar item prefix is
   `showy_quota`, and the config directory is `~/.config/showy-quota/`. Git
   remote updated to `enieuwy/showy-quota`.
+- Provider discovery now uses CodexBar `config providers` as the canonical
+  inventory for fallback while preserving `SHOWY_QUOTA_PROVIDERS`,
+  `SHOWY_QUOTA_PROVIDERS_EXCLUDE`, and `SHOWY_QUOTA_PROVIDER_ORDER` filters.
+- Fallback refreshes now use per-provider backoff and preserve stale cache
+  entries when a provider is temporarily unavailable.
+
+### Fixed
+- Canonical empty provider inventories now publish an empty usage payload
+  instead of being treated as refresh failures.
 
 ### Removed
 - `showy-quota-zellij-kick` and `showy-quota-zellij-new-tab`; the standalone
@@ -74,3 +88,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Security
 - `bin/showy-quota-fetch`: cache dir and files now persist as `0700`/`0600`
   instead of the user's default umask. CodexBar usage JSON stays user-only.
+
+[Unreleased]: https://github.com/enieuwy/showy-quota/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/enieuwy/showy-quota/releases/tag/v0.2.0

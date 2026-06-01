@@ -20,6 +20,17 @@ jobs:
         run: |
           cargo build --release --target wasm32-wasip1 -p showy-quota-zellij
           cp target/wasm32-wasip1/release/showy-quota-zellij.wasm showy-quota-zellij.wasm
+      - name: Write artifact checksum
+        run: sha256sum showy-quota-zellij.wasm > showy-quota-zellij.wasm.sha256
+      - name: Extract release notes
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          awk -v version="${VERSION}" '
+            $0 ~ "^## \\[" version "\\]" { capture = 1; next }
+            capture && /^## \[/ { exit }
+            capture { print }
+          ' CHANGELOG.md > release-notes.md
+          test -s release-notes.md
       - name: Check plugin exports
         run: |
           python3 - <<'PY'
@@ -65,4 +76,9 @@ jobs:
       - name: Attach plugin artifact
         uses: softprops/action-gh-release@v2
         with:
-          files: showy-quota-zellij.wasm
+          body_path: release-notes.md
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            showy-quota-zellij.wasm
+            showy-quota-zellij.wasm.sha256
