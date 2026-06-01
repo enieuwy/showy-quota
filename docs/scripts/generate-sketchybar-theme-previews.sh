@@ -1,11 +1,12 @@
 #!/bin/bash
+# shellcheck disable=SC2016
 # Generate README SketchyBar theme previews from real plugin-rendered icons
 # and SVG-native rows that mirror the SketchyBar slider layout.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
-REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd -P)"
+REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd -P)"
 OUT_DIR="${SHOWY_QUOTA_SKETCH_PREVIEW_OUT_DIR:-${REPO_ROOT}/docs/images/themes}"
 BASH_BIN="${SHOWY_QUOTA_SKETCH_PREVIEW_BASH_BIN:-/opt/homebrew/bin/bash}"
 CODEXBAR_RESOURCES="${SHOWY_QUOTA_CODEXBAR_RESOURCES:-/Applications/CodexBar.app/Contents/Resources}"

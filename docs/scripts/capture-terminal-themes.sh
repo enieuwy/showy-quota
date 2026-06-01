@@ -1,4 +1,5 @@
 #!/bin/bash
+# shellcheck disable=SC2016
 # Capture real Ghostty previews for the README theme gallery.
 #
 # The previews use a decorationless Ghostty window so the output starts at the
@@ -9,7 +10,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
-REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd -P)"
+REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd -P)"
 
 GHOSTTY_APP="${SHOWY_QUOTA_CAPTURE_GHOSTTY_APP:-/Applications/Ghostty.app}"
 GHOSTTY_BIN="${SHOWY_QUOTA_CAPTURE_GHOSTTY_BIN:-${GHOSTTY_APP}/Contents/MacOS/ghostty}"
