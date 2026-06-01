@@ -6,6 +6,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- Moved host-specific SketchyBar, tmux, and Zellij fragments under
+  `adapters/` to keep the repository root focused on shared code and metadata.
+
 ## [0.2.0] — 2026-06-01
 
 ### Added

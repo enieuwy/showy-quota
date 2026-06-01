@@ -28,7 +28,7 @@
         done
         local dir
         dir=$(cd -- "$(dirname -- "${self}")" && pwd -P)
-        cd -- "${dir}/../.." && pwd -P
+        cd -- "${dir}/../../.." && pwd -P
     }
     REPO_ROOT="$(resolve_repo_root)"
 
@@ -50,7 +50,7 @@
         declare -gx "${cb_var}"
     done < <(compgen -A variable SHOWY_QUOTA_)
 
-    PLUGIN_PATH="${REPO_ROOT}/sketchybar/plugins/showy_quota.sh"
+    PLUGIN_PATH="${REPO_ROOT}/adapters/sketchybar/plugins/showy_quota.sh"
     [[ -x "${PLUGIN_PATH}" ]] || PLUGIN_PATH="${PLUGIN_DIR:-}/showy_quota.sh"
     [[ -n "${PLUGIN_PATH}" && -r "${PLUGIN_PATH}" ]] || exit 0
 

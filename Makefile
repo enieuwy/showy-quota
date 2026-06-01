@@ -38,9 +38,9 @@ install: doctor install-bin ## Check prerequisites, then symlink shared scripts.
 	@printf '\nInstalled shared showy-quota scripts into $(BIN_DIR).\n'
 	@printf 'Nothing is wired to a bar yet. Run one of:\n'
 	@printf '  make install-sketchybar    # then `source "$$ITEM_DIR/showy_quota.sh"`\n'
-	@printf '  make install-plugin        # then paste zellij/layout-pane.kdl.fragment\n'
-	@printf '  cat tmux/status-line.tmux.fragment\n'
-	@printf '  cat zellij/layout-pane.kdl.fragment  # advanced zjstatus path also documented\n'
+	@printf '  make install-plugin        # then paste adapters/zellij/layout-pane.kdl.fragment\n'
+	@printf '  cat adapters/tmux/status-line.tmux.fragment\n'
+	@printf '  cat adapters/zellij/layout-pane.kdl.fragment  # advanced zjstatus path also documented\n'
 
 install-bin:
 	@mkdir -p "$(BIN_DIR)"
@@ -69,20 +69,23 @@ install-bin:
 install-sketchybar:
 	@mkdir -p "$(SBAR_ITEMS)" "$(SBAR_PLUGINS)"
 	@for pair in \
-		"$(REPO)/sketchybar/items/showy_quota.sh:$(SBAR_ITEMS)/showy_quota.sh" \
-		"$(REPO)/sketchybar/plugins/showy_quota.sh:$(SBAR_PLUGINS)/showy_quota.sh"; do \
-		src=$${pair%%:*}; target=$${pair##*:}; \
+		"$(REPO)/adapters/sketchybar/items/showy_quota.sh:$(REPO)/sketchybar/items/showy_quota.sh:$(SBAR_ITEMS)/showy_quota.sh" \
+		"$(REPO)/adapters/sketchybar/plugins/showy_quota.sh:$(REPO)/sketchybar/plugins/showy_quota.sh:$(SBAR_PLUGINS)/showy_quota.sh"; do \
+		src=$${pair%%:*}; rest=$${pair#*:}; legacy_src=$${rest%%:*}; target=$${rest#*:}; \
 		if [ -L "$$target" ]; then \
 			cur=$$(readlink "$$target"); \
 			if [ "$$cur" = "$$src" ]; then \
 				printf 'noop  %s -> %s (already current)\n' "$$target" "$$src"; \
 				continue; \
 			fi; \
-			if [ "$(FORCE)" != "1" ]; then \
+			if [ "$$cur" = "$$legacy_src" ]; then \
+				printf 'retarget legacy %s\n  was: %s\n  now: %s\n' "$$target" "$$cur" "$$src"; \
+			elif [ "$(FORCE)" != "1" ]; then \
 				printf 'refusing to retarget %s\n  was: %s\n  now: %s\n  set FORCE=1 to adopt this symlink\n' "$$target" "$$cur" "$$src" >&2; \
 				exit 1; \
+			else \
+				printf 'retarget %s\n  was: %s\n  now: %s\n' "$$target" "$$cur" "$$src" >&2; \
 			fi; \
-			printf 'retarget %s\n  was: %s\n  now: %s\n' "$$target" "$$cur" "$$src" >&2; \
 		elif [ -e "$$target" ]; then \
 			printf 'refusing to clobber %s\n' "$$target" >&2; exit 1; \
 		fi; \
@@ -122,12 +125,12 @@ uninstall: ## Remove symlinks that this Makefile created.
 		fi; \
 	done
 	@for pair in \
-		"$(REPO)/sketchybar/items/showy_quota.sh:$(SBAR_ITEMS)/showy_quota.sh" \
-		"$(REPO)/sketchybar/plugins/showy_quota.sh:$(SBAR_PLUGINS)/showy_quota.sh"; do \
-		src=$${pair%%:*}; target=$${pair##*:}; \
+		"$(REPO)/adapters/sketchybar/items/showy_quota.sh:$(REPO)/sketchybar/items/showy_quota.sh:$(SBAR_ITEMS)/showy_quota.sh" \
+		"$(REPO)/adapters/sketchybar/plugins/showy_quota.sh:$(REPO)/sketchybar/plugins/showy_quota.sh:$(SBAR_PLUGINS)/showy_quota.sh"; do \
+		src=$${pair%%:*}; rest=$${pair#*:}; legacy_src=$${rest%%:*}; target=$${rest#*:}; \
 		if [ -L "$$target" ]; then \
 			cur=$$(readlink "$$target"); \
-			if [ "$$cur" = "$$src" ]; then \
+			if [ "$$cur" = "$$src" ] || [ "$$cur" = "$$legacy_src" ]; then \
 				rm -f "$$target"; printf 'removed %s\n' "$$target"; \
 			else \
 				printf 'skip %s (points to %s)\n' "$$target" "$$cur" >&2; \
@@ -173,8 +176,8 @@ lint: ## Run shellcheck if available.
 			"$(REPO)/showy-quota.tmux" \
 			"$(REPO)/lib/common.sh" \
 			"$(REPO)/lib/strip.sh" \
-			"$(REPO)/sketchybar/items/showy_quota.sh" \
-			"$(REPO)/sketchybar/plugins/showy_quota.sh" \
+			"$(REPO)/adapters/sketchybar/items/showy_quota.sh" \
+			"$(REPO)/adapters/sketchybar/plugins/showy_quota.sh" \
 			"$(REPO)/test/render_test.sh"; \
 	else \
 		printf 'shellcheck not installed; skipping\n'; \

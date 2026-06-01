@@ -20,7 +20,7 @@ make plugin
 make install-plugin
 ```
 
-Then paste `zellij/layout-pane.kdl.fragment` into your layout, usually inside `default_tab_template` after `children`:
+Then paste `adapters/zellij/layout-pane.kdl.fragment` into your layout, usually inside `default_tab_template` after `children`:
 
 ```kdl
 layout {
@@ -161,7 +161,7 @@ The `dual` body uses Unicode Block Elements (`▀`, `▕`, `▏`). The `mono3` a
 
 ## Detail pane
 
-The keybind (`zellij/detail-pane.kdl.fragment`) is unchanged. It opens a floating pane that sources `${XDG_CONFIG_HOME:-$HOME/.config}/showy-quota/config.env` when present, then runs CodexBar's text UI:
+The keybind (`adapters/zellij/detail-pane.kdl.fragment`) is unchanged. It opens a floating pane that sources `${XDG_CONFIG_HOME:-$HOME/.config}/showy-quota/config.env` when present, then runs CodexBar's text UI:
 
 ```sh
 while :; do clear; "${SHOWY_QUOTA_CODEXBAR_BIN:-codexbar}" usage; sleep 30; done

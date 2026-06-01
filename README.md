@@ -32,7 +32,7 @@ codexbar serve → http://127.0.0.1:8080/health + /usage
 bin/showy-quota-fetch     ←  shared cache + source marker + flock + last-known-good
        │  ~/.cache/showy-quota/usage.json + source
        ├──► bin/showy-quota-state                 (stable provider/layout state JSON)
-       ├──► sketchybar/plugins/showy_quota.sh    (native SketchyBar rows + icons)
+       ├──► adapters/sketchybar/plugins/showy_quota.sh    (native SketchyBar rows + icons)
        ├──► bin/showy-quota-tmux-bar             (tmux #[…] markup for status-right)
        └──► bin/showy-quota-zellij-bar           (advanced zjstatus pipe segment)
 ```
@@ -110,9 +110,10 @@ plugin tick without another reload.
 Two pieces:
 
 1. **Plugin pane** — install `showy-quota-zellij.wasm` and paste
-   `zellij/layout-pane.kdl.fragment` into your default layout. It declares one
-   visible standalone plugin pane; no `zjstatus` or feeder loop is needed.
-2. **Detail keybind** — paste `zellij/detail-pane.kdl.fragment` into your
+   `adapters/zellij/layout-pane.kdl.fragment` into your default layout. It
+   declares one visible standalone plugin pane; no `zjstatus` or feeder loop is
+   needed.
+2. **Detail keybind** — paste `adapters/zellij/detail-pane.kdl.fragment` into your
    keybinds block. Default is `Alt /`.
 
 Reload Zellij to pick up the new layout/keybind. Advanced users who want

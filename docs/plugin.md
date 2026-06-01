@@ -35,7 +35,7 @@ curl -L \
   https://github.com/enieuwy/showy-quota/releases/latest/download/showy-quota-zellij.wasm
 ```
 
-Then paste `zellij/layout-pane.kdl.fragment` into your layout, usually inside `default_tab_template` after `children`.
+Then paste `adapters/zellij/layout-pane.kdl.fragment` into your layout, usually inside `default_tab_template` after `children`.
 
 ## Build from source
 

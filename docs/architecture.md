@@ -28,7 +28,7 @@ codexbar serve /health + /usage  or  codexbar usage --format json
         │
 bin/showy-quota-fetch  ← shared cache + source marker + flock + atomic publish
         ├──► bin/showy-quota-state                 (stable provider/layout state JSON)
-        ├──► sketchybar/plugins/showy_quota.sh    (native SketchyBar rows + icons)
+        ├──► adapters/sketchybar/plugins/showy_quota.sh    (native SketchyBar rows + icons)
         ├──► bin/showy-quota-tmux-bar             (tmux #[…] markup)
         └──► bin/showy-quota-zellij-bar           (advanced zjstatus ANSI segment)
 ```

@@ -25,7 +25,7 @@ resolve_repo_root() {
     done
     local dir
     dir=$(cd -- "$(dirname -- "${self}")" && pwd -P)
-    cd -- "${dir}/../.." && pwd -P
+    cd -- "${dir}/../../.." && pwd -P
 }
 REPO_ROOT="$(resolve_repo_root)"
 

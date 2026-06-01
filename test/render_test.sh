@@ -307,7 +307,7 @@ run_sketchybar_items() {
         SHOWY_QUOTA_TEST_STATE_DIR="${cache}/sb-state" \
         SHOWY_QUOTA_DEGRADED_CLI=0 \
         "$@" \
-        "${REPO_ROOT}/sketchybar/items/showy_quota.sh"
+        "${REPO_ROOT}/adapters/sketchybar/items/showy_quota.sh"
 }
 
 run_sketchybar_plugin() {
@@ -325,7 +325,7 @@ run_sketchybar_plugin() {
         SHOWY_QUOTA_DEGRADED_CLI=0 \
         "$@" \
         SHOWY_QUOTA_TEST_STATE_DIR="${cache}/sb-state" \
-        "${REPO_ROOT}/sketchybar/plugins/showy_quota.sh"
+        "${REPO_ROOT}/adapters/sketchybar/plugins/showy_quota.sh"
 }
 
 run_sketchybar_plugin_without_magick() {
@@ -362,7 +362,7 @@ run_sketchybar_plugin_without_magick() {
         SHOWY_QUOTA_DEGRADED_CLI=0 \
         "$@" \
         SHOWY_QUOTA_TEST_STATE_DIR="${cache}/sb-state" \
-        "${REPO_ROOT}/sketchybar/plugins/showy_quota.sh"
+        "${REPO_ROOT}/adapters/sketchybar/plugins/showy_quota.sh"
 }
 
 seed_sketchybar_state() {
@@ -1051,7 +1051,7 @@ log="${TMP}/sb-items-click.log"
     export SHOWY_QUOTA_TEST_FIXTURE="${FIXTURE_DIR}/codexbar-mixed.json"
     export SHOWY_QUOTA_TEST_LOG="${log}"
     SHOWY_QUOTA_SKETCHYBAR_CLICK='custom-click'
-    . "${REPO_ROOT}/sketchybar/items/showy_quota.sh"
+    . "${REPO_ROOT}/adapters/sketchybar/items/showy_quota.sh"
 )
 item_log="$(< "${log}")"
 assert_contains "bootstrap exports non-exported click override" "click_script=custom-click" "${item_log}"

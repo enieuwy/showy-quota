@@ -191,7 +191,7 @@ render_theme() {
         SHOWY_QUOTA_SKETCHYBAR_IMAGE_CACHE="${cache_dir}" \
         SHOWY_QUOTA_CODEXBAR_RESOURCES="${CODEXBAR_RESOURCES}" \
         PATH="${stub_dir}:${PATH}" \
-        "${BASH_BIN}" "${REPO_ROOT}/sketchybar/plugins/showy_quota.sh"
+        "${BASH_BIN}" "${REPO_ROOT}/adapters/sketchybar/plugins/showy_quota.sh"
 
     strip_png_metadata "${cache_dir}/icon-v2-claude.png"
     strip_png_metadata "${cache_dir}/icon-v2-codex.png"
