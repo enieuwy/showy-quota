@@ -68,7 +68,7 @@ jobs:
       - name: cargo audit
         if: runner.os == 'Linux'
         run: |
-          cargo install cargo-audit --version 0.22.1 --locked
+          cargo install cargo-audit --locked
           # RUSTSEC-2026-0009 (time <0.3.47) is a stack-exhaustion DoS reachable
           # only via RFC 2822 parsing of malicious input. This workspace parses
           # only RFC 3339 / ISO-8601 and custom format descriptions from local
