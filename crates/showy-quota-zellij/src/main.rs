@@ -837,9 +837,9 @@ impl State {
         let eligible_set: std::collections::BTreeSet<&str> =
             eligible.iter().map(String::as_str).collect();
         let needs_seed = eligible.iter().any(|provider| {
-            self.provider_states.get(provider).map_or(true, |state| {
-                state.last_record.is_none() && !state.last_result_empty
-            })
+            self.provider_states
+                .get(provider)
+                .is_none_or(|state| state.last_record.is_none() && !state.last_result_empty)
         });
         if needs_seed {
             // Seed any unqueried eligible providers from the existing payload so a

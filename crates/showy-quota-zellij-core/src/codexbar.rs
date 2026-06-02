@@ -88,7 +88,7 @@ pub fn valid_provider_id(provider: &str) -> bool {
 
 fn valid_provider_record(record: &ProviderRecord) -> bool {
     valid_provider_id(&record.provider)
-        && record.usage.as_ref().map_or(true, |usage| {
+        && record.usage.as_ref().is_none_or(|usage| {
             valid_window(usage.primary.as_ref())
                 && valid_window(usage.secondary.as_ref())
                 && valid_window(usage.tertiary.as_ref())
@@ -96,7 +96,7 @@ fn valid_provider_record(record: &ProviderRecord) -> bool {
 }
 
 fn valid_window(window: Option<&UsageWindow>) -> bool {
-    window.map_or(true, |window| window.used_percent.is_some())
+    window.is_none_or(|window| window.used_percent.is_some())
 }
 
 fn pct(value: Option<f64>) -> i32 {
