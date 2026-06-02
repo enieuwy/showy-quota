@@ -6,9 +6,53 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.2.1] — 2026-06-02
+
+### Added
+- `bin/showy-quota --diagnose --json` emits stable machine-readable diagnostics
+  (paths, tool availability, config/cache state, env knobs, and a CodexBar
+  probe) alongside the existing human-readable output.
+- Configurable degraded CLI glyph via the `degraded_cli_glyph` plugin/KDL key
+  and `SHOWY_QUOTA_DEGRADED_CLI_GLYPH`.
+- `reset_description_timezone_offset` (KDL) /
+  `SHOWY_QUOTA_RESET_DESCRIPTION_TIMEZONE_OFFSET` to make local-time
+  `resetDescription` countdowns deterministic under WASM, where the host
+  timezone cannot be inferred. ISO `resetsAt` timestamps remain preferred.
+- Corrupt cache quarantine: an invalid `usage.json` is moved aside as
+  `usage.json.corrupt.<epoch>.<pid>` with bounded retention
+  (`SHOWY_QUOTA_CORRUPT_CACHE_RETENTION`, default `3`) instead of being
+  silently rechecked.
+- CI now runs `cargo clippy --workspace --all-targets -- -D warnings` and a
+  Linux `cargo audit` dependency advisory scan, plus `cargo fmt --check`.
+
 ### Changed
 - Moved host-specific SketchyBar, tmux, and Zellij fragments under
   `adapters/` to keep the repository root focused on shared code and metadata.
+- Shell renderers no longer block on lock contention when a valid cache already
+  exists: non-forced callers emit the current snapshot immediately while the
+  lock holder refreshes. Forced refreshes still wait and retry.
+- `make doctor` distinguishes `codexbar` CLI vs serve-only data sources and
+  reports optional-tool availability without failing valid setups.
+- The TPM `showy-quota.tmux` wrapper now preflights `tmux` and verifies the
+  renderer is executable before wiring a `#(...)` status command.
+- Palette helpers (shell and Rust) accept a leading `#` and normalize hex to
+  lowercase.
+- Smaller Zellij WASM artifact via a release profile (`lto`,
+  `opt-level = "z"`, `codegen-units = 1`, `panic = "abort"`, stripped
+  debuginfo).
+- SketchyBar icon cache now keys on palette inputs and cleans up temporary
+  icon files.
+
+### Fixed
+- The Zellij plugin no longer requests a repaint when an event leaves the
+  rendered strip unchanged, while still repainting on real output changes and
+  synchronous timer-driven state transitions.
+- `bin/showy-quota-fetch` closes stdin for spawned CodexBar subprocesses so a
+  hung command cannot block on terminal input.
+- `crates/showy-quota-zellij-core` reset-description day rollover uses checked
+  date arithmetic instead of a panicking add.
+- `make install*` targets mark source scripts executable; `make uninstall`
+  removes the copied plugin only when it matches the current artifact.
 
 ## [0.2.0] — 2026-06-01
 
@@ -93,5 +137,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `bin/showy-quota-fetch`: cache dir and files now persist as `0700`/`0600`
   instead of the user's default umask. CodexBar usage JSON stays user-only.
 
-[Unreleased]: https://github.com/enieuwy/showy-quota/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/enieuwy/showy-quota/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/enieuwy/showy-quota/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/enieuwy/showy-quota/releases/tag/v0.2.0

@@ -26,7 +26,7 @@ THEME_NAME_RE='^[A-Za-z0-9._-]+$'
 
 usage() {
     printf '%s\n' \
-        'Usage: showy-quota [--set <name>|--unset|--current|--list|--preview <name>|--diagnose]' \
+        'Usage: showy-quota [--set <name>|--unset|--current|--list|--preview <name>|--diagnose [--json]]' \
         '' \
         'With no flags, opens an interactive theme selector when fzf and a TTY are available.' \
         'Without fzf or a TTY, prints a deterministic theme list and exact set/unset commands.' \
@@ -37,7 +37,7 @@ usage() {
         '  --current         Print the persisted theme name, or (none)' \
         '  --list            Print available theme names, one per line' \
         '  --preview <name>  Print one ANSI preview strip for a theme' \
-        '  --diagnose        Print runtime state useful for bug reports' \
+        '  --diagnose        Print runtime state useful for bug reports (--json for machines)' \
         '  -h, --help        Show this help'
 }
 
@@ -312,6 +312,185 @@ print_tool_path() {
     fi
 }
 
+json_string() {
+    jq -Rn --arg value "$1" '$value'
+}
+
+json_number_or_null() {
+    local value="$1"
+    if [[ "${value}" =~ ^[0-9]+$ ]]; then
+        printf '%s' "${value}"
+    else
+        printf 'null'
+    fi
+}
+
+diagnose_env_vars() {
+    printf '%s\n' \
+        SHOWY_QUOTA_REFRESH_SECONDS \
+        SHOWY_QUOTA_LOCK_WAIT_TENTHS \
+        SHOWY_QUOTA_CACHE_DIR \
+        SHOWY_QUOTA_CODEXBAR_BIN \
+        SHOWY_QUOTA_CODEXBAR_SERVE_URL \
+        SHOWY_QUOTA_CODEXBAR_SERVE_TIMEOUT_SECONDS \
+        SHOWY_QUOTA_CODEXBAR_SERVE_REFRESH_SECONDS \
+        SHOWY_QUOTA_PROVIDERS \
+        SHOWY_QUOTA_PROVIDERS_EXCLUDE \
+        SHOWY_QUOTA_PROVIDER_ORDER \
+        SHOWY_QUOTA_INCLUDE_STATUS \
+        SHOWY_QUOTA_THEME \
+        SHOWY_QUOTA_TIME_WARN_MINUTES \
+        SHOWY_QUOTA_DEBUG \
+        SHOWY_QUOTA_FORCE_COLOR \
+        SHOWY_QUOTA_NO_CONFIG \
+        SHOWY_QUOTA_SKETCHYBAR_PROVIDER_ICON_MODE \
+        SHOWY_QUOTA_SKETCHYBAR_UPDATE_FREQ \
+        SHOWY_QUOTA_ZELLIJ_WIDGET \
+        SHOWY_QUOTA_ZELLIJ_PIPE_INTERVAL \
+        SHOWY_QUOTA_ZELLIJ_BIN
+}
+
+diagnose_env_json() {
+    local first=1 var value
+    printf '{'
+    while IFS= read -r var; do
+        [[ -n "${!var:-}" ]] || continue
+        value=$(json_string "${!var}")
+        (( first )) || printf ','
+        first=0
+        printf '"%s":%s' "${var}" "${value}"
+    done < <(diagnose_env_vars)
+    printf '}'
+}
+
+diagnose_tools_json() {
+    local first=1 name path
+    printf '{'
+    for name in "$@"; do
+        (( first )) || printf ','
+        first=0
+        if path=$(command -v "${name}" 2>/dev/null); then
+            printf '"%s":{"available":true,"path":%s}' "${name}" "$(json_string "${path}")"
+        else
+            printf '"%s":{"available":false,"path":null}' "${name}"
+        fi
+    done
+    printf '}'
+}
+
+diagnose_json() {
+    command -v jq >/dev/null 2>&1 || die 'jq is required for --diagnose --json'
+
+    local fetch_bin state_bin cache_path cache_age cache_size_json state_json config_status config_readable
+    local env_json required_tools_json optional_tools_json cb cb_path cb_available cb_cache_count_json
+    fetch_bin="${SCRIPT_DIR}/showy-quota-fetch"
+    state_bin="${SCRIPT_DIR}/showy-quota-state"
+
+    cache_path=""
+    cache_age=""
+    cache_size_json=null
+    if [[ -x "${fetch_bin}" ]]; then
+        cache_path="$("${fetch_bin}" --path 2>/dev/null || true)"
+        cache_age="$("${fetch_bin}" --age 2>/dev/null || true)"
+        if [[ -n "${cache_path}" && -f "${cache_path}" ]]; then
+            cache_size_json=$(json_number_or_null "$(wc -c < "${cache_path}" 2>/dev/null | tr -d ' ' || true)")
+        fi
+    fi
+
+    if [[ -x "${state_bin}" ]]; then
+        state_json="$("${state_bin}" 2>/dev/null || printf 'null')"
+        if ! jq -e 'type == "object"' >/dev/null 2>&1 <<< "${state_json}"; then
+            state_json=null
+        fi
+    else
+        state_json=null
+    fi
+
+    if [[ -r "${CONFIG_FILE}" ]]; then
+        config_status=readable
+        config_readable=true
+    elif [[ -e "${CONFIG_FILE}" ]]; then
+        config_status=unreadable
+        config_readable=false
+    else
+        config_status=absent
+        config_readable=null
+    fi
+
+    cb="${SHOWY_QUOTA_CODEXBAR_BIN:-codexbar}"
+    cb_available=false
+    cb_path=""
+    if cb_path=$(command -v "${cb}" 2>/dev/null); then
+        cb_available=true
+    fi
+    cb_cache_count_json=null
+    if [[ -n "${cache_path}" && -f "${cache_path}" ]]; then
+        cb_cache_count_json=$(jq 'if type == "array" then length else null end' "${cache_path}" 2>/dev/null || printf 'null')
+    fi
+
+    env_json=$(diagnose_env_json)
+    required_tools_json=$(diagnose_tools_json bash jq codexbar)
+    optional_tools_json=$(diagnose_tools_json curl flock sketchybar magick zellij tmux fzf)
+
+    jq -n \
+        --arg showyQuota "${SCRIPT_PATH}" \
+        --arg repoRoot "${REPO_ROOT}" \
+        --arg bashVersion "${BASH_VERSION:-unknown}" \
+        --arg uname "$(uname -srm 2>/dev/null || printf 'unknown')" \
+        --arg configFile "${CONFIG_FILE}" \
+        --arg configStatus "${config_status}" \
+        --argjson configReadable "${config_readable}" \
+        --arg theme "$(current_theme_value 2>/dev/null || true)" \
+        --arg fetchBin "${fetch_bin}" \
+        --arg cachePath "${cache_path}" \
+        --arg cacheAge "${cache_age}" \
+        --argjson cacheSize "${cache_size_json}" \
+        --argjson state "${state_json}" \
+        --argjson envKnobs "${env_json}" \
+        --argjson requiredTools "${required_tools_json}" \
+        --argjson optionalTools "${optional_tools_json}" \
+        --arg codexbarCommand "${cb}" \
+        --arg codexbarPath "${cb_path}" \
+        --argjson codexbarAvailable "${cb_available}" \
+        --argjson cachedProviderCount "${cb_cache_count_json}" \
+        '{
+            paths: {
+                showyQuota: $showyQuota,
+                repoRoot: $repoRoot,
+                fetch: $fetchBin,
+                cache: (if $cachePath == "" then null else $cachePath end),
+                config: $configFile
+            },
+            runtime: {
+                bash: $bashVersion,
+                uname: $uname
+            },
+            tools: {
+                required: $requiredTools,
+                optional: $optionalTools
+            },
+            config: {
+                path: $configFile,
+                status: $configStatus,
+                readable: $configReadable,
+                theme: (if $theme == "" then null else $theme end)
+            },
+            cache: {
+                path: (if $cachePath == "" then null else $cachePath end),
+                ageSeconds: (if ($cacheAge | test("^[0-9]+$")) then ($cacheAge | tonumber) else null end),
+                sizeBytes: $cacheSize
+            },
+            state: $state,
+            env: $envKnobs,
+            codexbarProbe: {
+                command: $codexbarCommand,
+                available: $codexbarAvailable,
+                path: (if $codexbarPath == "" then null else $codexbarPath end),
+                cachedProviderCount: $cachedProviderCount
+            }
+        }'
+}
+
 diagnose() {
     local fetch_bin state_bin cache_path cache_age
     fetch_bin="${SCRIPT_DIR}/showy-quota-fetch"
@@ -370,33 +549,11 @@ diagnose() {
 
     printf '\n# Env knobs (set values only)\n'
     local var
-    for var in \
-        SHOWY_QUOTA_REFRESH_SECONDS \
-        SHOWY_QUOTA_LOCK_WAIT_TENTHS \
-        SHOWY_QUOTA_CACHE_DIR \
-        SHOWY_QUOTA_CODEXBAR_BIN \
-        SHOWY_QUOTA_CODEXBAR_SERVE_URL \
-        SHOWY_QUOTA_CODEXBAR_SERVE_TIMEOUT_SECONDS \
-        SHOWY_QUOTA_CODEXBAR_SERVE_REFRESH_SECONDS \
-        SHOWY_QUOTA_PROVIDERS \
-        SHOWY_QUOTA_PROVIDERS_EXCLUDE \
-        SHOWY_QUOTA_PROVIDER_ORDER \
-        SHOWY_QUOTA_INCLUDE_STATUS \
-        SHOWY_QUOTA_THEME \
-        SHOWY_QUOTA_TIME_WARN_MINUTES \
-        SHOWY_QUOTA_DEBUG \
-        SHOWY_QUOTA_FORCE_COLOR \
-        SHOWY_QUOTA_NO_CONFIG \
-        SHOWY_QUOTA_SKETCHYBAR_PROVIDER_ICON_MODE \
-        SHOWY_QUOTA_SKETCHYBAR_UPDATE_FREQ \
-        SHOWY_QUOTA_ZELLIJ_WIDGET \
-        SHOWY_QUOTA_ZELLIJ_PIPE_INTERVAL \
-        SHOWY_QUOTA_ZELLIJ_BIN
-    do
+    while IFS= read -r var; do
         if [[ -n "${!var:-}" ]]; then
             printf '  %s=%s\n' "${var}" "${!var}"
         fi
-    done
+    done < <(diagnose_env_vars)
 
     printf '\n# CodexBar probe\n'
     local cb="${SHOWY_QUOTA_CODEXBAR_BIN:-codexbar}"
@@ -443,8 +600,13 @@ main() {
             preview_theme "$2"
             ;;
         --diagnose)
-            (($# == 1)) || usage_error '--diagnose does not accept arguments'
-            diagnose
+            if (($# == 2)); then
+                [[ "$2" == "--json" ]] || usage_error '--diagnose only accepts --json'
+                diagnose_json
+            else
+                (($# == 1)) || usage_error '--diagnose only accepts --json'
+                diagnose
+            fi
             ;;
         -h|--help)
             (($# == 1)) || usage_error '--help does not accept arguments'

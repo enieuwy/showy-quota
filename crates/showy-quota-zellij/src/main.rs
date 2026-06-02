@@ -1,3 +1,5 @@
+#![cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+
 use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -283,6 +285,7 @@ impl ZellijPlugin for State {
     fn update(&mut self, event: Event) -> bool {
         match event {
             Event::PermissionRequestResult(PermissionStatus::Granted) => {
+                let previous_output = self.last_output.clone();
                 self.permissions_granted = true;
                 self.health_in_flight = false;
                 self.usage_in_flight = false;
@@ -290,7 +293,7 @@ impl ZellijPlugin for State {
                 self.clear_all_provider_in_flight();
                 self.schedule_timer();
                 self.tick();
-                true
+                self.last_output != previous_output
             }
             Event::PermissionRequestResult(PermissionStatus::Denied) => {
                 self.permissions_granted = false;
@@ -302,13 +305,15 @@ impl ZellijPlugin for State {
                 true
             }
             Event::Timer(_) => {
+                let previous_output = self.last_output.clone();
                 self.schedule_timer();
-                let changed = self.refresh_output();
+                self.refresh_output();
                 self.tick();
-                changed || self.last_payload.is_none()
+                self.last_output != previous_output
             }
             Event::Visible(true) => true,
             Event::WebRequestResult(status, _headers, body, context) => {
+                let previous_output = self.last_output.clone();
                 match context.get("kind").map(String::as_str) {
                     Some(HEALTH_KIND) => {
                         self.health_in_flight = false;
@@ -317,7 +322,7 @@ impl ZellijPlugin for State {
                         } else {
                             self.handle_serve_unavailable();
                         }
-                        true
+                        self.last_output != previous_output
                     }
                     Some(USAGE_KIND) => {
                         self.usage_in_flight = false;
@@ -326,7 +331,7 @@ impl ZellijPlugin for State {
                         } else {
                             self.handle_usage_failure();
                         }
-                        true
+                        self.last_output != previous_output
                     }
                     _ => false,
                 }
@@ -334,8 +339,9 @@ impl ZellijPlugin for State {
             Event::RunCommandResult(exit, stdout, _stderr, context) => {
                 match context.get("kind").map(String::as_str) {
                     Some(FALLBACK_DISCOVER_KIND) => {
+                        let previous_output = self.last_output.clone();
                         self.handle_discovery_result(exit, stdout);
-                        true
+                        self.last_output != previous_output
                     }
                     Some(FALLBACK_PROVIDER_KIND) => {
                         let provider = context
@@ -751,11 +757,11 @@ impl State {
                 if attempt != Some(active_attempt) {
                     // Late result from an expired command; ignore it so a
                     // previously wedged provider cannot overwrite newer state.
-                    return true;
+                    return false;
                 }
             } else if attempt.is_some() && state.last_failure_seconds.is_some() && !state.in_flight
             {
-                return true;
+                return false;
             }
         }
         if let Some(state) = self.provider_states.get_mut(provider) {
@@ -768,17 +774,17 @@ impl State {
         let now = now_seconds();
         if exit != Some(0) {
             self.record_provider_failure(provider, now);
-            self.refresh_output();
-            self.render_cli_failure_if_all_terminal();
-            return true;
+            let mut changed = self.refresh_output();
+            changed |= self.render_cli_failure_if_all_terminal();
+            return changed;
         }
         let record = match extract_provider_record(&stdout, provider) {
             Ok(record) => record,
             Err(()) => {
                 self.record_provider_failure(provider, now);
-                self.refresh_output();
-                self.render_cli_failure_if_all_terminal();
-                return true;
+                let mut changed = self.refresh_output();
+                changed |= self.render_cli_failure_if_all_terminal();
+                return changed;
             }
         };
         let entry = self
@@ -790,8 +796,7 @@ impl State {
         entry.last_failure_seconds = None;
         entry.in_flight = false;
         entry.active_attempt_token = None;
-        self.publish_synthesized_cli_payload(now);
-        true
+        self.publish_synthesized_cli_payload(now)
     }
 
     fn record_provider_failure(&mut self, provider: &str, now: f64) {
@@ -812,11 +817,13 @@ impl State {
         }
     }
 
-    fn publish_empty_cli_payload(&mut self) {
+    fn publish_empty_cli_payload(&mut self) -> bool {
+        let previous_output = self.last_output.clone();
         let payload = b"[]".to_vec();
         if self.accept_payload(payload, Source::Cli) {
             self.last_cli_fetch_seconds = Some(now_seconds());
         }
+        self.last_output != previous_output
     }
 
     /// Re-serialize the current `provider_states.last_record` map (plus any
@@ -825,28 +832,35 @@ impl State {
     /// CLI-source refresh. Preserves last-known-good data: a single provider
     /// success after a serve outage updates that provider's slice without
     /// blowing away the rest.
-    fn publish_synthesized_cli_payload(&mut self, now: f64) {
+    fn publish_synthesized_cli_payload(&mut self, now: f64) -> bool {
         let eligible = self.eligible_provider_inventory();
         let eligible_set: std::collections::BTreeSet<&str> =
             eligible.iter().map(String::as_str).collect();
-        // Seed any unqueried eligible providers from the existing payload so a
-        // single per-provider success does not blow away the rest of the bar.
-        // Providers outside the current inventory are intentionally ignored:
-        // discovery is canonical, so disabled providers must not reappear.
-        if let Some(payload) = self.last_payload.as_deref() {
-            if let Ok(records) = parse_usage_payload(payload) {
-                if let Ok(value) = serde_json::from_slice::<serde_json::Value>(payload) {
-                    if let Some(array) = value.as_array() {
-                        for (record, value) in records.iter().zip(array.iter()) {
-                            if !eligible_set.contains(record.provider.as_str()) {
-                                continue;
-                            }
-                            let entry = self
-                                .provider_states
-                                .entry(record.provider.clone())
-                                .or_default();
-                            if entry.last_record.is_none() && !entry.last_result_empty {
-                                entry.last_record = Some(value.clone());
+        let needs_seed = eligible.iter().any(|provider| {
+            self.provider_states.get(provider).map_or(true, |state| {
+                state.last_record.is_none() && !state.last_result_empty
+            })
+        });
+        if needs_seed {
+            // Seed any unqueried eligible providers from the existing payload so a
+            // single per-provider success does not blow away the rest of the bar.
+            // Providers outside the current inventory are intentionally ignored:
+            // discovery is canonical, so disabled providers must not reappear.
+            if let Some(payload) = self.last_payload.as_deref() {
+                if let Ok(records) = parse_usage_payload(payload) {
+                    if let Ok(value) = serde_json::from_slice::<serde_json::Value>(payload) {
+                        if let Some(array) = value.as_array() {
+                            for (record, value) in records.iter().zip(array.iter()) {
+                                if !eligible_set.contains(record.provider.as_str()) {
+                                    continue;
+                                }
+                                let entry = self
+                                    .provider_states
+                                    .entry(record.provider.clone())
+                                    .or_default();
+                                if entry.last_record.is_none() && !entry.last_result_empty {
+                                    entry.last_record = Some(value.clone());
+                                }
                             }
                         }
                     }
@@ -867,11 +881,13 @@ impl State {
         }
         let bytes = match serde_json::to_vec(&serde_json::Value::Array(array)) {
             Ok(bytes) => bytes,
-            Err(_) => return,
+            Err(_) => return false,
         };
+        let previous_output = self.last_output.clone();
         if self.accept_payload(bytes, Source::Cli) {
             self.last_cli_fetch_seconds = Some(now);
         }
+        self.last_output != previous_output
     }
 
     fn expire_stale_provider_flights(&mut self, now: f64) {
@@ -906,19 +922,25 @@ impl State {
             })
     }
 
-    fn render_cli_failure_if_all_terminal(&mut self) {
+    fn render_cli_failure_if_all_terminal(&mut self) -> bool {
         if self.last_payload.is_some() {
-            return;
+            return false;
         }
         let providers = self.eligible_provider_inventory();
         if self.all_provider_attempts_terminal(&providers) {
-            self.render_cli_failure();
+            return self.render_cli_failure();
         }
+        false
     }
 
-    fn render_cli_failure(&mut self) {
+    fn render_cli_failure(&mut self) -> bool {
         self.set_source(Source::Unavailable);
-        self.last_output = " showy-quota: CodexBar CLI unavailable ".into();
+        let output = " showy-quota: CodexBar CLI unavailable ";
+        if self.last_output == output {
+            return false;
+        }
+        self.last_output = output.into();
+        true
     }
 
     fn prune_last_payload_to_current_inventory(&mut self) {
@@ -954,15 +976,13 @@ impl State {
 
     fn accept_payload(&mut self, payload: Vec<u8>, source: Source) -> bool {
         let Ok(records) = parse_usage_payload(&payload) else {
-            self.render_failure();
-            return false;
+            return self.render_failure();
         };
         if !payload_has_renderable_provider(&records)
             && self.last_payload.is_some()
             && !(source == Source::Cli && records.is_empty())
         {
-            self.render_failure();
-            return false;
+            return self.render_failure();
         }
         // When serve returns a fresh aggregate, refresh per-provider state so
         // a future degraded transition has a baseline of every record CodexBar
@@ -996,12 +1016,16 @@ impl State {
         }
     }
 
-    fn render_failure(&mut self) {
+    fn render_failure(&mut self) -> bool {
         if self.last_payload.is_some() {
-            self.refresh_output();
-        } else {
-            self.last_output = " showy-quota: CodexBar serve unavailable ".into();
+            return self.refresh_output();
         }
+        let output = " showy-quota: CodexBar serve unavailable ";
+        if self.last_output == output {
+            return false;
+        }
+        self.last_output = output.into();
+        true
     }
 
     fn refresh_output(&mut self) -> bool {
@@ -1150,8 +1174,16 @@ fn now_seconds() -> f64 {
         .unwrap_or(0.0)
 }
 
+#[cfg(target_arch = "wasm32")]
+register_plugin!(State);
+
+#[cfg(not(target_arch = "wasm32"))]
+fn main() {}
+
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::field_reassign_with_default)]
+
     use super::*;
 
     fn event_context(kind: &str) -> BTreeMap<String, String> {
@@ -1260,7 +1292,7 @@ mod tests {
         assert!(state.refresh_output());
         assert!(state.last_output.contains("⚠cli"));
 
-        assert!(state.update(Event::WebRequestResult(
+        assert!(!state.update(Event::WebRequestResult(
             200,
             BTreeMap::new(),
             Vec::new(),
@@ -1269,7 +1301,7 @@ mod tests {
         assert_eq!(state.source, Source::Cli);
 
         state.usage_in_flight = true;
-        assert!(state.update(Event::WebRequestResult(
+        assert!(!state.update(Event::WebRequestResult(
             503,
             BTreeMap::new(),
             Vec::new(),
@@ -1279,6 +1311,56 @@ mod tests {
         assert!(state.last_output.contains("⚠cli"));
     }
 
+    #[test]
+    fn unchanged_timer_tick_does_not_request_render() {
+        let mut state = State {
+            permissions_granted: true,
+            source: Source::Serve,
+            last_payload: Some(mixed_payload()),
+            ..State::default()
+        };
+        assert!(state.refresh_output());
+
+        assert!(!state.update(Event::Timer(0.0)));
+    }
+
+    #[test]
+    fn unchanged_usage_success_still_resets_failure_counter() {
+        let mut state = State {
+            permissions_granted: true,
+            source: Source::Serve,
+            last_payload: Some(mixed_payload()),
+            consecutive_serve_failures: SERVE_FAILURES_BEFORE_CLI - 1,
+            ..State::default()
+        };
+        assert!(state.refresh_output());
+        let output = state.last_output.clone();
+
+        assert!(!state.update(Event::WebRequestResult(
+            200,
+            BTreeMap::new(),
+            mixed_payload(),
+            event_context(USAGE_KIND),
+        )));
+
+        assert_eq!(state.consecutive_serve_failures, 0);
+        assert_eq!(state.source, Source::Serve);
+        assert_eq!(state.last_output, output);
+    }
+
+    #[test]
+    fn timer_reports_synchronous_failure_render() {
+        let mut state = State {
+            permissions_granted: true,
+            serve_url: String::new(),
+            cli_fallback: CliFallback::Off,
+            ..State::default()
+        };
+
+        assert!(state.update(Event::Timer(0.0)));
+        assert_eq!(state.source, Source::Unavailable);
+        assert!(state.last_output.contains("serve unavailable"));
+    }
     #[test]
     fn late_per_provider_result_is_ignored_after_serve_recovery() {
         let mut state = State {
@@ -1503,7 +1585,7 @@ mod tests {
             provider_fallback_context("codex"),
         )));
         // claude's CLI call fails → its slot must keep the seeded record.
-        assert!(state.update(Event::RunCommandResult(
+        assert!(!state.update(Event::RunCommandResult(
             Some(7),
             Vec::new(),
             Vec::new(),
@@ -1730,7 +1812,7 @@ mod tests {
         assert!(entry.last_failure_seconds.is_some());
         assert!(entry.active_attempt_token.is_none());
 
-        assert!(state.update(Event::RunCommandResult(
+        assert!(!state.update(Event::RunCommandResult(
             Some(0),
             provider_record(&mixed_payload(), "codex"),
             Vec::new(),
@@ -1764,9 +1846,3 @@ mod tests {
         assert!(matches!(extract_provider_record(b"[]", "codex"), Ok(None)));
     }
 }
-
-#[cfg(target_arch = "wasm32")]
-register_plugin!(State);
-
-#[cfg(not(target_arch = "wasm32"))]
-fn main() {}

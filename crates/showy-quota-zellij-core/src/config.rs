@@ -30,7 +30,9 @@ pub struct RenderConfig {
     pub palette_stale: String,
     pub palette_elapsed: String,
     pub stale_glyph: String,
+    pub degraded_cli_glyph: String,
 
+    pub reset_description_timezone_offset_minutes: Option<i16>,
     pub good_min_remaining: i32,
     pub warn_min_remaining: i32,
     pub time_warn_minutes: i64,
@@ -76,6 +78,8 @@ impl Default for RenderConfig {
             palette_stale: "6c7086".into(),
             palette_elapsed: "be95ff".into(),
             stale_glyph: "⚠".into(),
+            degraded_cli_glyph: "⚠cli".into(),
+            reset_description_timezone_offset_minutes: None,
             good_min_remaining: 40,
             warn_min_remaining: 15,
             time_warn_minutes: 30,
@@ -223,6 +227,16 @@ impl RenderConfig {
             &mut self.palette_elapsed,
         );
         assign_string(&get, "SHOWY_QUOTA_STALE_GLYPH", &mut self.stale_glyph);
+        assign_string(
+            &get,
+            "SHOWY_QUOTA_DEGRADED_CLI_GLYPH",
+            &mut self.degraded_cli_glyph,
+        );
+        self.reset_description_timezone_offset_minutes = get_timezone_offset_minutes(
+            &get,
+            "SHOWY_QUOTA_RESET_DESCRIPTION_TIMEZONE_OFFSET",
+            self.reset_description_timezone_offset_minutes,
+        );
 
         self.good_min_remaining = get_i32(
             &get,
@@ -295,6 +309,8 @@ fn kdl_aliases(env_name: &str) -> &'static [&'static str] {
         "SHOWY_QUOTA_PROVIDERS" => &["providers"],
         "SHOWY_QUOTA_PROVIDERS_EXCLUDE" => &["providers_exclude"],
         "SHOWY_QUOTA_PROVIDER_ORDER" => &["provider_order"],
+        "SHOWY_QUOTA_DEGRADED_CLI_GLYPH" => &["degraded_cli_glyph"],
+        "SHOWY_QUOTA_RESET_DESCRIPTION_TIMEZONE_OFFSET" => &["reset_description_timezone_offset"],
         _ => &[],
     }
 }
@@ -351,6 +367,38 @@ where
         .unwrap_or(default)
 }
 
+fn get_timezone_offset_minutes<F>(get: &F, name: &str, default: Option<i16>) -> Option<i16>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    get(name).map_or(default, |value| parse_timezone_offset_minutes(&value))
+}
+
+fn parse_timezone_offset_minutes(value: &str) -> Option<i16> {
+    let value = value.trim();
+    if value.eq_ignore_ascii_case("utc") || value == "Z" || value == "+00:00" || value == "-00:00" {
+        return Some(0);
+    }
+    let bytes = value.as_bytes();
+    if bytes.len() != 6 || !matches!(bytes[0], b'+' | b'-') || bytes[3] != b':' {
+        return None;
+    }
+    if !bytes[1..3].iter().all(u8::is_ascii_digit) || !bytes[4..6].iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    let hours: i16 = value[1..3].parse().ok()?;
+    let minutes: i16 = value[4..6].parse().ok()?;
+    if hours > 23 || minutes > 59 {
+        return None;
+    }
+    let total = hours.checked_mul(60)?.checked_add(minutes)?;
+    if bytes[0] == b'-' {
+        total.checked_neg()
+    } else {
+        Some(total)
+    }
+}
+
 fn get_usize<F>(get: &F, name: &str, default: usize) -> usize
 where
     F: Fn(&str) -> Option<String>,
@@ -396,5 +444,38 @@ mod tests {
 
         assert_eq!(config.palette_countdown_warn, "333333");
         assert_eq!(config.palette_stale, "444444");
+    }
+
+    #[test]
+    fn degraded_cli_glyph_can_be_configured_from_kdl() {
+        let mut kdl = BTreeMap::new();
+        kdl.insert("degraded_cli_glyph".into(), "CLI".into());
+
+        let config = RenderConfig::from_kdl_config(&kdl);
+
+        assert_eq!(config.degraded_cli_glyph, "CLI");
+    }
+
+    #[test]
+    fn reset_description_timezone_offset_parses_from_kdl() {
+        let mut kdl = BTreeMap::new();
+        kdl.insert("reset_description_timezone_offset".into(), "-07:30".into());
+
+        let config = RenderConfig::from_kdl_config(&kdl);
+
+        assert_eq!(config.reset_description_timezone_offset_minutes, Some(-450));
+    }
+
+    #[test]
+    fn invalid_reset_description_timezone_offset_is_ignored() {
+        let mut kdl = BTreeMap::new();
+        kdl.insert(
+            "reset_description_timezone_offset".into(),
+            "America/Los_Angeles".into(),
+        );
+
+        let config = RenderConfig::from_kdl_config(&kdl);
+
+        assert_eq!(config.reset_description_timezone_offset_minutes, None);
     }
 }

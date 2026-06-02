@@ -83,6 +83,7 @@ impl RenderConfig {
 }
 
 pub fn hex_to_rgb(hex: &str) -> (u8, u8, u8) {
+    let hex = hex.strip_prefix('#').unwrap_or(hex);
     if hex.len() != 6 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
         return (0, 0, 0);
     }
@@ -137,5 +138,11 @@ mod tests {
         assert_eq!(scale_hex("25be6a", "0.55"), "14683a");
         assert_eq!(scale_hex("f0af00", "0.55"), "846000");
         assert_eq!(scale_hex("ee5396", "0.55"), "822d52");
+    }
+
+    #[test]
+    fn palette_helpers_accept_leading_hash() {
+        assert_eq!(hex_to_rgb("#25be6a"), (0x25, 0xbe, 0x6a));
+        assert_eq!(scale_hex("#25be6a", "0.55"), "14683a");
     }
 }

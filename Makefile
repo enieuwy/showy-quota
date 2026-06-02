@@ -46,6 +46,7 @@ install-bin:
 	@mkdir -p "$(BIN_DIR)"
 	@for name in $(BIN_NAMES); do \
 		src="$(REPO)/bin/$$name"; \
+		chmod +x "$$src"; \
 		target="$(BIN_DIR)/$$name"; \
 		if [ -L "$$target" ]; then \
 			cur=$$(readlink "$$target"); \
@@ -72,6 +73,7 @@ install-sketchybar:
 		"$(REPO)/adapters/sketchybar/items/showy_quota.sh:$(REPO)/sketchybar/items/showy_quota.sh:$(SBAR_ITEMS)/showy_quota.sh" \
 		"$(REPO)/adapters/sketchybar/plugins/showy_quota.sh:$(REPO)/sketchybar/plugins/showy_quota.sh:$(SBAR_PLUGINS)/showy_quota.sh"; do \
 		src=$${pair%%:*}; rest=$${pair#*:}; legacy_src=$${rest%%:*}; target=$${rest#*:}; \
+		chmod +x "$$src"; \
 		if [ -L "$$target" ]; then \
 			cur=$$(readlink "$$target"); \
 			if [ "$$cur" = "$$src" ]; then \
@@ -137,6 +139,13 @@ uninstall: ## Remove symlinks that this Makefile created.
 			fi; \
 		fi; \
 	done
+	@if [ -f "$(PLUGIN_TARGET)" ]; then \
+		if [ -f "$(PLUGIN_WASM)" ] && cmp -s "$(PLUGIN_WASM)" "$(PLUGIN_TARGET)"; then \
+			rm -f "$(PLUGIN_TARGET)"; printf 'removed %s\n' "$(PLUGIN_TARGET)"; \
+		else \
+			printf 'skip %s (does not match current build artifact)\n' "$(PLUGIN_TARGET)" >&2; \
+		fi; \
+	fi
 
 test: ## Run the smoke-test suite against fixtures (no live codexbar).
 	@$(REPO)/test/render_test.sh
@@ -147,19 +156,28 @@ doctor: ## Check runtime prerequisites without touching the system.
 	@command -v jq >/dev/null || { \
 		printf 'showy-quota: jq is required (brew install jq / apt-get install jq).\n' >&2; exit 1; }
 	@serve_url="$${SHOWY_QUOTA_CODEXBAR_SERVE_URL:-http://127.0.0.1:8080}"; \
+	source_desc=""; \
 	if command -v codexbar >/dev/null; then \
-		source_desc="codexbar $$(command -v codexbar)"; \
+		source_desc="codexbar CLI $$(command -v codexbar)"; \
 	elif command -v curl >/dev/null && curl --fail --silent --max-time "$${SHOWY_QUOTA_CODEXBAR_SERVE_TIMEOUT_SECONDS:-0.5}" "$${serve_url%/}/usage" >/dev/null; then \
-		source_desc="codexbar serve $${serve_url%/}/usage"; \
+		source_desc="codexbar serve-only $${serve_url%/}/usage"; \
 	else \
 		printf 'showy-quota: CodexBar data source required.\n' >&2; \
-		printf '  preferred: codexbar serve at %s/usage (requires curl)\n' "$${serve_url%/}" >&2; \
-		printf '  fallback:  codexbar CLI on PATH\n' >&2; exit 1; \
+		printf '  preferred: codexbar CLI on PATH\n' >&2; \
+		printf '  serve-only: set SHOWY_QUOTA_CODEXBAR_SERVE_URL to a working /usage endpoint (requires curl)\n' >&2; \
+		exit 1; \
 	fi; \
 	printf 'doctor: bash %s, jq %s, %s — ok\n' \
-		"$$(bash --version | head -n1 | awk '{print $$4}')" \
+		"$$(bash -c 'printf "%s" "$${BASH_VERSION:-unknown}"')" \
 		"$$(jq --version)" \
-		"$${source_desc}"
+		"$${source_desc}"; \
+	for tool in curl flock shellcheck magick tmux zellij sketchybar; do \
+		if command -v "$$tool" >/dev/null 2>&1; then \
+			printf 'doctor: optional %-10s found: %s\n' "$$tool" "$$(command -v "$$tool")"; \
+		else \
+			printf 'doctor: optional %-10s missing (only needed for related integration/features)\n' "$$tool"; \
+		fi; \
+	done
 
 diagnose: ## Print runtime state useful for bug reports.
 	@$(REPO)/bin/showy-quota --diagnose

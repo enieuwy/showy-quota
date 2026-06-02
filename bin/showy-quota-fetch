@@ -266,6 +266,38 @@ cache_token() {
         || printf 'file:unknown\n'
 }
 
+quarantine_invalid_cache_if_present() {
+    [[ -f "${SHOWY_QUOTA_USAGE_FILE}" && -s "${SHOWY_QUOTA_USAGE_FILE}" ]] || return 0
+    showy_quota_json_valid "${SHOWY_QUOTA_USAGE_FILE}" && return 0
+
+    local stamp quarantine_path
+    stamp="$(showy_quota_now_epoch)"
+    quarantine_path="${SHOWY_QUOTA_USAGE_FILE}.corrupt.${stamp}.$$"
+    if mv -- "${SHOWY_QUOTA_USAGE_FILE}" "${quarantine_path}"; then
+        showy_quota_log "quarantined invalid cache at ${quarantine_path}"
+    elif [[ ! -e "${SHOWY_QUOTA_USAGE_FILE}" ]]; then
+        showy_quota_log "invalid cache was already quarantined by another fetcher"
+        return 0
+    else
+        showy_quota_log "invalid cache present but quarantine failed: ${SHOWY_QUOTA_USAGE_FILE}"
+        return 1
+    fi
+
+    local -a corrupt_files=("${SHOWY_QUOTA_USAGE_FILE}".corrupt.*)
+    [[ -e "${corrupt_files[0]}" ]] || return 0
+    local keep=3 count remove_count i
+    keep="${SHOWY_QUOTA_CORRUPT_CACHE_RETENTION:-3}"
+    [[ "${keep}" =~ ^[0-9]+$ ]] || keep=3
+    count="${#corrupt_files[@]}"
+    (( count > keep )) || return 0
+    remove_count=$((count - keep))
+    for (( i=0; i<remove_count; i++ )); do
+        rm -f -- "${corrupt_files[$i]}"
+    done
+}
+
+
+
 if [[ "${mode}" == "cache-only" ]]; then
     if [[ -s "${SHOWY_QUOTA_USAGE_FILE}" ]] && showy_quota_json_valid "${SHOWY_QUOTA_USAGE_FILE}"; then
         cat "${SHOWY_QUOTA_USAGE_FILE}"
@@ -1047,6 +1079,8 @@ if (( stop_serve )); then
     exit 0
 fi
 
+quarantine_invalid_cache_if_present
+
 run_codexbar_serve() {
     local base
     base=$(serve_base_url) || return 127
@@ -1135,6 +1169,7 @@ try:
         argv,
         stdout=sys.stdout.buffer,
         stderr=subprocess.DEVNULL,
+        stdin=subprocess.DEVNULL,
         start_new_session=True,
     )
 except OSError:
@@ -1326,11 +1361,12 @@ elif [[ -n "${SHOWY_QUOTA_CODEXBAR_SERVE_URL}" ]] && ! serve_cache_is_fresh; the
     showy_quota_with_lock refresh_cache_from_serve || lock_rc=$?
 fi
 
-# Lost the lock contest? Wait for the holder on cold/invalid cache. Ambiguous
-# mkdir owners cannot publish a cache, so wait the normal horizon, retry
-# recovery, then fall back to an existing valid cache only if retry fails.
+# Lost the lock contest? Forced callers wait for the holder and retry once
+# before falling back to the existing cache. Normal cache-first callers may
+# keep rendering an existing valid snapshot immediately; only cold/invalid
+# cache paths wait for the holder or retry recovery.
 if (( lock_rc == 2 || lock_rc == 3 )); then
-    if (( force_refresh || lock_rc == 3 )); then
+    if (( force_refresh )); then
         if ! showy_quota_wait_for_cache "${SHOWY_QUOTA_LOCK_WAIT_TENTHS}" "${pre_refresh_token}" "${force_refresh}"; then
             retry_refresh_after_lock_wait
             if cache_is_valid; then

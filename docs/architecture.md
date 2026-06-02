@@ -43,8 +43,12 @@ The shell data plane is still the reliability boundary for tmux, SketchyBar, and
 - `flock` path: `${SHOWY_QUOTA_CACHE_DIR}/usage.lock`
 - owner-scoped `mkdir` fallback path: `${SHOWY_QUOTA_CACHE_DIR}/usage.lock.d`
 - Validation: `jq` must accept an array of provider objects. If a usage window is present, its `usedPercent` must be numeric before publication.
+- Corrupt cache quarantine: if the existing usage cache fails validation before
+  a fetcher-owned refresh path runs, it is moved to
+  `usage.json.corrupt.<epoch>.<pid>` and old quarantine files are pruned
+  (`SHOWY_QUOTA_CORRUPT_CACHE_RETENTION`, default `3`).
 
-The fetcher prints the cache content to stdout regardless of whether it just refreshed or served stale bytes. Callers must not differentiate; if they want freshness data they read `--age`.
+The fetcher prints the cache content to stdout regardless of whether it just refreshed or served stale bytes. Callers must not differentiate; if they want freshness data they read `--age`. During non-forced lock contention, a caller with an existing valid cache may emit that snapshot immediately while the lock holder refreshes. Forced refresh callers wait for the holder and retry recovery first, but still fall back to an existing valid cache if no refreshed cache is published; this preserves the fetcher's last-known-good output contract.
 
 Freshness is a shared render concern. A shell cache is stale when `showy_quota_age_seconds "${SHOWY_QUOTA_USAGE_FILE}"` is greater than `SHOWY_QUOTA_REFRESH_SECONDS * 2`. Shell renderers show one trailing stale indicator, grey frozen data, and hide elapsed markers; `showy-quota-state` reports the boolean and threshold.
 

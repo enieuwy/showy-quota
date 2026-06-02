@@ -173,7 +173,8 @@ For `mono3` auto-mode selection and marker behavior, use
 `SHOWY_QUOTA_MONO3_MARKER_SOURCE`.
 
 Stuck? `bin/showy-quota --diagnose` (or `make diagnose`) prints exactly the
-state a bug report needs.
+state a bug report needs; `bin/showy-quota --diagnose --json` emits the same
+diagnostic surface as stable machine-readable JSON.
 
 ## Requirements
 
@@ -201,6 +202,9 @@ state a bug report needs.
   have additional font notes in `docs/zellij.md` and `docs/tmux.md`.
 - Optional: `flock` for inter-process locking; falls back to an owner-scoped
   `mkdir` lock when missing.
+- Development/install commands are written for GNU-compatible `make`; on
+  systems with a non-GNU default make, use `gmake` or invoke the scripts
+  directly.
 
 ## Configuration
 
@@ -251,11 +255,13 @@ surface.
 make doctor      # check runtime prerequisites
 make test        # smoke tests over JSON fixtures
 make plugin      # build showy-quota-zellij.wasm
-make diagnose    # printable bug-report state
+make diagnose    # printable bug-report state (`bin/showy-quota --diagnose --json` for JSON)
 ```
 
 Cache lives at `${XDG_CACHE_HOME:-~/.cache}/showy-quota/usage.json`.
-`make clean` clears it.
+If that file is corrupt, the fetcher moves it aside as
+`usage.json.corrupt.<epoch>.<pid>` and keeps only the newest few quarantine
+files for diagnostics. `make clean` clears cache artifacts.
 
 ## How it stays cheap
 

@@ -136,10 +136,10 @@ pub fn parse_provider_config_payload(payload: &[u8]) -> Result<Vec<String>, Prov
             continue;
         }
         any_enabled = true;
-        if valid_provider_id(&record.provider) {
-            if !enabled_valid.iter().any(|id| id == &record.provider) {
-                enabled_valid.push(record.provider);
-            }
+        if valid_provider_id(&record.provider)
+            && !enabled_valid.iter().any(|id| id == &record.provider)
+        {
+            enabled_valid.push(record.provider);
         }
     }
     if any_enabled && enabled_valid.is_empty() {

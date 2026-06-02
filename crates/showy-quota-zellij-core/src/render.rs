@@ -74,7 +74,7 @@ pub fn render_records(
         out.push(' ');
         style_text(
             &mut out,
-            "⚠cli",
+            &config.degraded_cli_glyph,
             Some(countdown_warn),
             Some(chunk_bg),
             Weight::Bold,
@@ -144,10 +144,22 @@ fn render_provider(
     let t_remaining = if t_used >= 0 { 100 - t_used } else { 0 };
 
     let p_reset = primary.reset_value();
-    let minutes = p_reset.and_then(|reset| minutes_until(reset, options.now_epoch));
+    let minutes = p_reset.and_then(|reset| {
+        minutes_until(
+            reset,
+            options.now_epoch,
+            config.reset_description_timezone_offset_minutes,
+        )
+    });
     let minutes = if options.stale && minutes == Some(0) {
         p_reset
-            .and_then(|reset| reset_epoch(reset, options.now_epoch))
+            .and_then(|reset| {
+                reset_epoch(
+                    reset,
+                    options.now_epoch,
+                    config.reset_description_timezone_offset_minutes,
+                )
+            })
             .filter(|epoch| *epoch > options.now_epoch)
             .map(|_| 0)
     } else {
@@ -155,12 +167,13 @@ fn render_provider(
     };
     let countdown = primary_label(minutes, p_remaining, p_reset);
 
-    let mut time_color = config.palette_countdown.clone();
-    if options.stale {
-        time_color = config.palette_stale.clone();
+    let time_color = if options.stale {
+        config.palette_stale.as_str()
     } else if minutes.is_some_and(|m| m < config.time_warn_minutes) {
-        time_color = config.palette_countdown_warn.clone();
-    }
+        config.palette_countdown_warn.as_str()
+    } else {
+        config.palette_countdown.as_str()
+    };
 
     let surface_color = &config.palette_surface;
     let mut primary_color = config.role_color(Role::Primary, p_remaining);
@@ -293,7 +306,7 @@ fn render_provider(
     style_text(
         out,
         &countdown,
-        Some(&time_color),
+        Some(time_color),
         Some(surface_color),
         Weight::Bold,
         options.color,
@@ -328,7 +341,13 @@ fn dual_metric_bar(
     let elapsed_color = &config.palette_elapsed;
     let p_fill = filled_cells(args.p_remaining, width);
     let s_fill = filled_cells(args.s_remaining, width);
-    let marker = elapsed_marker_cell(args.s_reset, args.s_window, width, options.now_epoch);
+    let marker = elapsed_marker_cell(
+        args.s_reset,
+        args.s_window,
+        width,
+        options.now_epoch,
+        config.reset_description_timezone_offset_minutes,
+    );
 
     for i in 0..width {
         let top_color = if i < p_fill {
@@ -553,12 +572,13 @@ fn elapsed_marker_cell(
     window_minutes: Option<i64>,
     width: usize,
     now_epoch: i64,
+    reset_description_offset_minutes: Option<i16>,
 ) -> Option<usize> {
     let window_minutes = window_minutes?;
     if window_minutes <= 0 || width == 0 {
         return None;
     }
-    let reset_epoch = reset_epoch(reset_at?, now_epoch)?;
+    let reset_epoch = reset_epoch(reset_at?, now_epoch, reset_description_offset_minutes)?;
     let duration = window_minutes.checked_mul(60)?;
     let start_epoch = reset_epoch.checked_sub(duration)?;
     let elapsed = (now_epoch - start_epoch).clamp(0, duration);
@@ -574,12 +594,13 @@ fn elapsed_marker_boundary(
     window_minutes: Option<i64>,
     width: usize,
     now_epoch: i64,
+    reset_description_offset_minutes: Option<i16>,
 ) -> Option<usize> {
     let window_minutes = window_minutes?;
     if window_minutes <= 0 || width == 0 {
         return None;
     }
-    let reset_epoch = reset_epoch(reset_at?, now_epoch)?;
+    let reset_epoch = reset_epoch(reset_at?, now_epoch, reset_description_offset_minutes)?;
     let duration = window_minutes.checked_mul(60)?;
     let start_epoch = reset_epoch.checked_sub(duration)?;
     let elapsed = (now_epoch - start_epoch).clamp(0, duration);
@@ -594,18 +615,40 @@ fn mono3_marker_boundary(
     now_epoch: i64,
 ) -> Option<usize> {
     match config.mono3_marker_source.as_str() {
-        "primary" | "" => {
-            row_marker_boundary(args.p_used, args.p_reset, args.p_window, width, now_epoch)
-        }
-        "secondary" => {
-            row_marker_boundary(args.s_used, args.s_reset, args.s_window, width, now_epoch)
-        }
-        "tertiary" => {
-            row_marker_boundary(args.t_used, args.t_reset, args.t_window, width, now_epoch)
-        }
-        "shared" => shared_window_marker_boundary(args, width, now_epoch),
+        "primary" | "" => row_marker_boundary(
+            args.p_used,
+            args.p_reset,
+            args.p_window,
+            width,
+            now_epoch,
+            config.reset_description_timezone_offset_minutes,
+        ),
+        "secondary" => row_marker_boundary(
+            args.s_used,
+            args.s_reset,
+            args.s_window,
+            width,
+            now_epoch,
+            config.reset_description_timezone_offset_minutes,
+        ),
+        "tertiary" => row_marker_boundary(
+            args.t_used,
+            args.t_reset,
+            args.t_window,
+            width,
+            now_epoch,
+            config.reset_description_timezone_offset_minutes,
+        ),
+        "shared" => shared_window_marker_boundary(args, width, now_epoch, config),
         "none" => None,
-        _ => row_marker_boundary(args.p_used, args.p_reset, args.p_window, width, now_epoch),
+        _ => row_marker_boundary(
+            args.p_used,
+            args.p_reset,
+            args.p_window,
+            width,
+            now_epoch,
+            config.reset_description_timezone_offset_minutes,
+        ),
     }
 }
 
@@ -615,17 +658,25 @@ fn row_marker_boundary(
     window: Option<i64>,
     width: usize,
     now_epoch: i64,
+    reset_description_offset_minutes: Option<i16>,
 ) -> Option<usize> {
     if used < 0 {
         return None;
     }
-    elapsed_marker_boundary(reset, window, width, now_epoch)
+    elapsed_marker_boundary(
+        reset,
+        window,
+        width,
+        now_epoch,
+        reset_description_offset_minutes,
+    )
 }
 
 fn shared_window_marker_boundary(
     args: &MonoArgs<'_>,
     width: usize,
     now_epoch: i64,
+    config: &RenderConfig,
 ) -> Option<usize> {
     let mut count = 0;
     let mut ref_epoch = None;
@@ -638,7 +689,13 @@ fn shared_window_marker_boundary(
         if used < 0 || window.unwrap_or(0) <= 0 {
             continue;
         }
-        let epoch = reset.and_then(|reset| reset_epoch(reset, now_epoch));
+        let epoch = reset.and_then(|reset| {
+            reset_epoch(
+                reset,
+                now_epoch,
+                config.reset_description_timezone_offset_minutes,
+            )
+        });
         if let (Some(epoch), Some(window)) = (epoch, window) {
             match (ref_epoch, ref_window) {
                 (None, None) => {
@@ -665,7 +722,13 @@ fn shared_window_marker_boundary(
             ]
             .iter()
             .filter_map(|&(reset, opt_window, re, rw)| {
-                let epoch = reset.and_then(|r| reset_epoch(r, now_epoch));
+                let epoch = reset.and_then(|r| {
+                    reset_epoch(
+                        r,
+                        now_epoch,
+                        config.reset_description_timezone_offset_minutes,
+                    )
+                });
                 if epoch == Some(re) && opt_window == Some(rw) {
                     reset
                 } else {
@@ -673,7 +736,13 @@ fn shared_window_marker_boundary(
                 }
             })
             .next();
-            elapsed_marker_boundary(matched_reset, Some(ref_window_val), width, now_epoch)
+            elapsed_marker_boundary(
+                matched_reset,
+                Some(ref_window_val),
+                width,
+                now_epoch,
+                config.reset_description_timezone_offset_minutes,
+            )
         } else {
             None
         }
@@ -823,12 +892,20 @@ fn format_countdown(minutes: i64) -> String {
     }
 }
 
-fn minutes_until(raw: &str, now_epoch: i64) -> Option<i64> {
-    let epoch = reset_epoch(raw, now_epoch)?;
+fn minutes_until(
+    raw: &str,
+    now_epoch: i64,
+    reset_description_offset_minutes: Option<i16>,
+) -> Option<i64> {
+    let epoch = reset_epoch(raw, now_epoch, reset_description_offset_minutes)?;
     Some(((epoch - now_epoch).max(0)) / 60)
 }
 
-fn reset_epoch(raw: &str, now_epoch: i64) -> Option<i64> {
+fn reset_epoch(
+    raw: &str,
+    now_epoch: i64,
+    reset_description_offset_minutes: Option<i16>,
+) -> Option<i64> {
     let raw = raw.trim();
     if raw.is_empty() || raw == "null" {
         return None;
@@ -841,7 +918,7 @@ fn reset_epoch(raw: &str, now_epoch: i64) -> Option<i64> {
         .strip_prefix("Resets ")
         .or_else(|| raw.strip_prefix("resets "))?;
 
-    parse_description_epoch(desc, now_epoch)
+    parse_description_epoch(desc, now_epoch, reset_description_offset_minutes)
 }
 
 fn parse_offset_datetime(raw: &str) -> Option<i64> {
@@ -879,7 +956,19 @@ fn local_offset_at(datetime: OffsetDateTime) -> UtcOffset {
         .unwrap_or(UtcOffset::UTC)
 }
 
-fn assume_local(local: PrimitiveDateTime, now_epoch: i64) -> Option<OffsetDateTime> {
+fn configured_reset_description_offset(offset_minutes: Option<i16>) -> Option<UtcOffset> {
+    let seconds = i32::from(offset_minutes?).checked_mul(60)?;
+    UtcOffset::from_whole_seconds(seconds).ok()
+}
+
+fn assume_local(
+    local: PrimitiveDateTime,
+    now_epoch: i64,
+    reset_description_offset_minutes: Option<i16>,
+) -> Option<OffsetDateTime> {
+    if let Some(offset) = configured_reset_description_offset(reset_description_offset_minutes) {
+        return Some(local.assume_offset(offset));
+    }
     let now = OffsetDateTime::from_unix_timestamp(now_epoch).ok()?;
     let mut offset = local_offset_at(now);
     for _ in 0..2 {
@@ -892,29 +981,35 @@ fn assume_local(local: PrimitiveDateTime, now_epoch: i64) -> Option<OffsetDateTi
     }
     Some(local.assume_offset(offset))
 }
-
-fn parse_description_epoch(desc: &str, now_epoch: i64) -> Option<i64> {
+fn parse_description_epoch(
+    desc: &str,
+    now_epoch: i64,
+    reset_description_offset_minutes: Option<i16>,
+) -> Option<i64> {
     let now = OffsetDateTime::from_unix_timestamp(now_epoch).ok()?;
-    let local_offset = local_offset_at(now);
+    let local_offset = configured_reset_description_offset(reset_description_offset_minutes)
+        .unwrap_or_else(|| local_offset_at(now));
     let short = format_description!(
-        "[month repr:short] [day], [year] [hour repr:12]:[minute] [period case:upper]"
+        "[month repr:short] [day padding:none], [year] [hour repr:12 padding:none]:[minute] [period case:upper]"
     );
     let long = format_description!(
-        "[month repr:long] [day], [year] [hour repr:12]:[minute] [period case:upper]"
+        "[month repr:long] [day padding:none], [year] [hour repr:12 padding:none]:[minute] [period case:upper]"
     );
     if let Ok(parsed) =
         PrimitiveDateTime::parse(desc, &short).or_else(|_| PrimitiveDateTime::parse(desc, &long))
     {
-        return assume_local(parsed, now_epoch).map(|parsed| parsed.unix_timestamp());
+        return assume_local(parsed, now_epoch, reset_description_offset_minutes)
+            .map(|parsed| parsed.unix_timestamp());
     }
 
     let clock = parse_time_12h(desc)?;
     let today = now.to_offset(local_offset).date();
     let mut local = PrimitiveDateTime::new(today, clock);
-    let mut epoch = assume_local(local, now_epoch)?.unix_timestamp();
+    let mut epoch =
+        assume_local(local, now_epoch, reset_description_offset_minutes)?.unix_timestamp();
     if epoch < now_epoch {
-        local += Duration::days(1);
-        epoch = assume_local(local, now_epoch)?.unix_timestamp();
+        local = local.checked_add(Duration::days(1))?;
+        epoch = assume_local(local, now_epoch, reset_description_offset_minutes)?.unix_timestamp();
     }
     Some(epoch)
 }
@@ -1027,6 +1122,28 @@ mod tests {
     }
 
     #[test]
+    fn idle_render_uses_configured_degraded_marker() {
+        let config = RenderConfig {
+            degraded_cli_glyph: "CLI".into(),
+            ..RenderConfig::default()
+        };
+
+        let output = render_zellij(
+            include_bytes!("../../../test/fixtures/codexbar-empty.json"),
+            &config,
+            RenderOptions {
+                color: false,
+                stale: false,
+                degraded_cli: true,
+                now_epoch: 4_070_908_800,
+            },
+        )
+        .expect("rendered idle fixture");
+
+        assert_eq!(output, "AI idle CLI\n");
+    }
+
+    #[test]
     fn countdown_format_matches_shell_contract() {
         assert_eq!(format_countdown(0), "now");
         assert_eq!(format_countdown(12), "12m");
@@ -1038,19 +1155,31 @@ mod tests {
 
     #[test]
     fn parses_reset_description_time_only() {
-        let epoch = reset_epoch("Resets 11:59 PM", 1_704_067_200).expect("reset epoch");
+        let epoch = reset_epoch("Resets 11:59 PM", 1_704_067_200, None).expect("reset epoch");
         assert!(epoch > 1_704_067_200);
     }
 
     #[test]
     fn parses_colonless_iso8601_offset() {
         assert_eq!(
-            reset_epoch("2099-01-01T01:40:00+0000", 0),
-            reset_epoch("2099-01-01T01:40:00+00:00", 0)
+            reset_epoch("2099-01-01T01:40:00+0000", 0, None),
+            reset_epoch("2099-01-01T01:40:00+00:00", 0, None)
         );
         assert_eq!(
-            reset_epoch("2099-01-01T01:40:00.123-0730", 0),
-            reset_epoch("2099-01-01T01:40:00.123-07:30", 0)
+            reset_epoch("2099-01-01T01:40:00.123-0730", 0, None),
+            reset_epoch("2099-01-01T01:40:00.123-07:30", 0, None)
+        );
+    }
+
+    #[test]
+    fn reset_description_uses_configured_timezone_offset() {
+        assert_eq!(
+            reset_epoch("Resets Jun 2, 2026 4:30 PM", 1_780_401_600, Some(0)),
+            Some(1_780_417_800)
+        );
+        assert_eq!(
+            reset_epoch("Resets Jun 2, 2026 4:30 PM", 1_780_401_600, Some(-420)),
+            Some(1_780_443_000)
         );
     }
 

@@ -140,6 +140,7 @@ plugin location="file:~/.config/zellij/plugins/showy-quota-zellij.wasm" {
     cli_interval_seconds 120
     // provider_failure_backoff_seconds 120
     // provider_discovery_backoff_seconds 60
+    // reset_description_timezone_offset "-07:00"  // fallback for local-time resetDescription text
     providers ""               // comma-separated allow-list and order
     providers_exclude ""       // comma-separated deny-list
     provider_order "codex,claude,copilot,opencode,gemini"

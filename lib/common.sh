@@ -348,10 +348,17 @@ showy_quota_scale_component() {
     printf '%02x' "${scaled}"
 }
 
+showy_quota_normalize_hex() {
+    local hex="$1"
+    hex="${hex#\#}"
+    [[ "${hex}" =~ ^[[:xdigit:]]{6}$ ]] || showy_quota_die "invalid palette hex: $1"
+    printf '%s' "${hex,,}"
+}
+
 showy_quota_scale_hex() {
     local hex="$1"
     local factor="${2:-1}"
-    [[ "${hex}" =~ ^[[:xdigit:]]{6}$ ]] || showy_quota_die "invalid palette hex: ${hex}"
+    hex="$(showy_quota_normalize_hex "${hex}")"
     [[ "${factor}" =~ ^([0-9]+([.][0-9]+)?|[.][0-9]+)$ ]] || showy_quota_die "invalid palette scale: ${factor}"
 
     local factor_num factor_den=1 factor_int factor_frac
@@ -380,17 +387,19 @@ showy_quota_scale_hex() {
 
 # Hex color (no '#') for a global palette token.
 showy_quota_palette() {
+    local value
     case "$1" in
-        bg)      printf '%s' "${SHOWY_QUOTA_PALETTE_BG}" ;;
-        surface) printf '%s' "${SHOWY_QUOTA_PALETTE_SURFACE}" ;;
-        track)   printf '%s' "${SHOWY_QUOTA_PALETTE_TRACK}" ;;
-        icon_text)      printf '%s' "${SHOWY_QUOTA_PALETTE_ICON_TEXT}" ;;
-        countdown)      printf '%s' "${SHOWY_QUOTA_PALETTE_COUNTDOWN}" ;;
-        countdown_warn) printf '%s' "${SHOWY_QUOTA_PALETTE_COUNTDOWN_WARN}" ;;
-        stale)          printf '%s' "${SHOWY_QUOTA_PALETTE_STALE}" ;;
-        elapsed)        printf '%s' "${SHOWY_QUOTA_PALETTE_ELAPSED}" ;;
+        bg)      value="${SHOWY_QUOTA_PALETTE_BG}" ;;
+        surface) value="${SHOWY_QUOTA_PALETTE_SURFACE}" ;;
+        track)   value="${SHOWY_QUOTA_PALETTE_TRACK}" ;;
+        icon_text)      value="${SHOWY_QUOTA_PALETTE_ICON_TEXT}" ;;
+        countdown)      value="${SHOWY_QUOTA_PALETTE_COUNTDOWN}" ;;
+        countdown_warn) value="${SHOWY_QUOTA_PALETTE_COUNTDOWN_WARN}" ;;
+        stale)          value="${SHOWY_QUOTA_PALETTE_STALE}" ;;
+        elapsed)        value="${SHOWY_QUOTA_PALETTE_ELAPSED}" ;;
         *)       showy_quota_die "unknown global palette token: $1" ;;
     esac
+    showy_quota_normalize_hex "${value}"
 }
 
 # Hex color (no '#') for a role + severity pair.
@@ -440,6 +449,7 @@ showy_quota_role_palette() {
         result="$(showy_quota_scale_hex "${!primary_var}" "${!scale_name}")"
     fi
 
+    result="$(showy_quota_normalize_hex "${result}")"
     SHOWY_QUOTA_ROLE_PALETTE_CACHE["${cache_key}"]="${result}"
     printf '%s' "${result}"
 }

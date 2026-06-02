@@ -6,6 +6,19 @@ set -euo pipefail
 CURRENT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 DEFAULT_BAR_BIN="${CURRENT_DIR}/bin/showy-quota-tmux-bar"
 
+showy_quota_tmux_message() {
+    local message="$1"
+    if command -v tmux >/dev/null 2>&1 && tmux display-message "${message}" >/dev/null 2>&1; then
+        return 0
+    fi
+    printf '%s\n' "${message}" >&2
+}
+
+if ! command -v tmux >/dev/null 2>&1; then
+    printf '%s\n' 'showy-quota: tmux command not found; cannot install tmux status integration' >&2
+    exit 1
+fi
+
 showy_quota_tmux_option() {
     local name="$1" default_value="$2" value
     if showy_quota_tmux_option_is_set "${name}"; then
@@ -84,11 +97,15 @@ case "${status_side}" in
 esac
 
 if [[ -n "${status_option}" ]]; then
-    showy_quota_min_status_length "${status_length_option}" "${status_length}"
-    current_status="$(tmux show-option -gqv "${status_option}" 2>/dev/null || true)"
-    if [[ "${current_status}" != *"showy-quota-tmux-bar"* && "${current_status}" != *"${bar_bin}"* ]]; then
-        escaped_bar_bin="$(showy_quota_escape_double_quotes "${bar_bin}")"
-        tmux set-option -gq -a "${status_option}" "${separator}#(\"${escaped_bar_bin}\")"
+    if [[ ! -x "${bar_bin}" ]]; then
+        showy_quota_tmux_message "showy-quota: renderer is not executable: ${bar_bin}"
+    else
+        showy_quota_min_status_length "${status_length_option}" "${status_length}"
+        current_status="$(tmux show-option -gqv "${status_option}" 2>/dev/null || true)"
+        if [[ "${current_status}" != *"showy-quota-tmux-bar"* && "${current_status}" != *"${bar_bin}"* ]]; then
+            escaped_bar_bin="$(showy_quota_escape_double_quotes "${bar_bin}")"
+            tmux set-option -gq -a "${status_option}" "${separator}#(\"${escaped_bar_bin}\")"
+        fi
     fi
 fi
 

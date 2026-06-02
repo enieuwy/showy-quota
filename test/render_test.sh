@@ -13,7 +13,7 @@ set -uo pipefail
 REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 FIXTURE_DIR="${REPO_ROOT}/test/fixtures"
 
-TMP=$(mktemp -d -t showy-quota-test.XXXXXX)
+TMP=$(mktemp -d "${TMPDIR:-/tmp}/showy-quota-test.XXXXXX")
 trap 'rm -rf "${TMP}"' EXIT
 export SHOWY_QUOTA_MANAGE_SERVE=0
 export SHOWY_QUOTA_CODEXBAR_SERVE_URL=
@@ -498,6 +498,12 @@ printf 'palette helpers\n'
 out=$(run_common_eval 'showy_quota_scale_hex 25be6a 0.55' SHOWY_QUOTA_NO_CONFIG=1)
 assert_equals "scale helper matches legacy 0.55 green" "14683a" "${out}"
 
+out=$(run_common_eval 'showy_quota_scale_hex "#25be6a" 0.55' SHOWY_QUOTA_NO_CONFIG=1)
+assert_equals "scale helper accepts leading hash" "14683a" "${out}"
+
+out=$(run_common_eval 'showy_quota_role_palette primary good' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_PALETTE_PRIMARY_GOOD="#25BE6A")
+assert_equals "role palette normalizes leading hash" "25be6a" "${out}"
+
 out=$(run_common_eval 'showy_quota_role_palette primary good' SHOWY_QUOTA_NO_CONFIG=1)
 assert_equals "primary role palette returns canonical primary color" "25be6a" "${out}"
 
@@ -701,6 +707,26 @@ if [[ ! -e "${theme_fallback_xdg}/showy-quota/config.env" ]]; then
     ok "theme fallback writes nothing"
 else
     fail "theme fallback writes nothing"
+fi
+
+diag_xdg=$(mktemp -d "${TMP}/xdg-diagnose.XXXXXX")
+diag_cache=$(mk_cache)
+cp "${FIXTURE_DIR}/codexbar-mixed.json" "${diag_cache}/usage.json"
+printf '%s\n' "cli" > "${diag_cache}/source"
+out=$(
+    env \
+        PATH="${stub_dir}:${PATH}" \
+        XDG_CONFIG_HOME="${diag_xdg}" \
+        SHOWY_QUOTA_NO_CONFIG=1 \
+        SHOWY_QUOTA_CACHE_DIR="${diag_cache}" \
+        SHOWY_QUOTA_TEST_FIXTURE="${FIXTURE_DIR}/codexbar-mixed.json" \
+        SHOWY_QUOTA_THEME=default \
+        "${REPO_ROOT}/bin/showy-quota" --diagnose --json
+)
+if printf '%s' "${out}" | jq -e '.paths.showyQuota and .tools.required.jq.available and .cache.path and .state.available == true and .env.SHOWY_QUOTA_THEME == "default" and .codexbarProbe.cachedProviderCount == 4' >/dev/null; then
+    ok "diagnose json exposes stable machine-readable state"
+else
+    fail "diagnose json exposes stable machine-readable state" "${out}"
 fi
 
 # ── zellij renderer ──────────────────────────────────────────────────
@@ -908,6 +934,40 @@ out=$(
     "${install_bin}/showy-quota-tmux-bar"
 )
 assert_contains "installed symlink resolves repo lib" "CL" "${out}"
+
+tmux_stub_dir="${TMP}/tmux-wrapper-bin"
+mkdir -p "${tmux_stub_dir}"
+tmux_log="${TMP}/tmux-wrapper.log"
+tmux_missing_bar="${TMP}/missing-showy-quota-tmux-bar"
+cat > "${tmux_stub_dir}/tmux" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "tmux $*" >> "${SHOWY_QUOTA_TEST_TMUX_LOG}"
+case "$1" in
+    show-options)
+        printf '%s\n' '@showy-quota-bin'
+        ;;
+    show-option)
+        if [[ "${*: -1}" == "@showy-quota-bin" ]]; then
+            printf '%s\n' "${SHOWY_QUOTA_TEST_TMUX_BAR_BIN}"
+        else
+            printf '0\n'
+        fi
+        ;;
+    display-message|set-option|bind-key|refresh-client)
+        ;;
+esac
+EOF
+chmod +x "${tmux_stub_dir}/tmux"
+out=$(
+    env \
+        PATH="${tmux_stub_dir}:${PATH}" \
+        SHOWY_QUOTA_TEST_TMUX_LOG="${tmux_log}" \
+        SHOWY_QUOTA_TEST_TMUX_BAR_BIN="${tmux_missing_bar}" \
+        "${REPO_ROOT}/showy-quota.tmux" 2>&1
+)
+tmux_wrapper_log="$(< "${tmux_log}")"
+assert_contains "tmux wrapper warns when renderer is not executable" "display-message showy-quota: renderer is not executable: ${tmux_missing_bar}" "${tmux_wrapper_log}"
+assert_not_contains "tmux wrapper does not append broken status command" "#(\"${tmux_missing_bar}\")" "${tmux_wrapper_log}"
 
 # ── filter ───────────────────────────────────────────────────────────
 
@@ -1148,7 +1208,7 @@ assert_contains "plugin can draw provider icons from app font without magick" "-
 assert_contains "plugin maps codex provider to app font icon" "showy_quota.codex.icon drawing=on icon.drawing=on icon=:codex:" "${plugin_log}"
 assert_contains "plugin maps gemini provider to app font icon" "showy_quota.gemini.icon drawing=on icon.drawing=on icon=:gemini:" "${plugin_log}"
 assert_contains "plugin widens font icon item to make a real native bar gap" "showy_quota.claude.icon drawing=on icon.drawing=on icon=:claude: icon.font=sketchybar-app-font:Regular:14.0 icon.color=0xfff2f4f8 icon.align=center icon.width=22 icon.padding_left=0 icon.padding_right=0 label.drawing=off background.image.drawing=off background.color=0x00000000 background.height=0 padding_left=5 padding_right=0 width=24" "${plugin_log}"
-assert_not_contains "font icon mode avoids provider PNG cache paths" "icon-v2-" "${plugin_log}"
+assert_not_contains "font icon mode avoids provider PNG cache paths" "icon-v3-" "${plugin_log}"
 
 copilot_fixture="${TMP}/codexbar-copilot.json"
 printf '%s\n' '[{"provider":"copilot","usage":{"primary":{"usedPercent":0},"secondary":{"usedPercent":0}}}]' > "${copilot_fixture}"
@@ -1166,19 +1226,20 @@ run_sketchybar_plugin_without_magick codexbar-status-major.json "${cache}" "${lo
 font_status_log="$(< "${log}")"
 assert_contains "font icon mode colors degraded providers without magick" "showy_quota.codex.icon drawing=on icon.drawing=on icon=:codex: icon.font=sketchybar-app-font:Regular:14.0 icon.color=0xffee5396" "${font_status_log}"
 assert_contains "font icon mode preserves degraded provider status click without magick" "click_script=open 'https://status.openai.com/'" "${font_status_log}"
-assert_not_contains "font icon mode skips status PNG for mapped provider without magick" "icon-v2-codex-major.png" "${font_status_log}"
+assert_not_contains "font icon mode skips status PNG for mapped provider without magick" "icon-v3-codex-" "${font_status_log}"
 
 if command -v magick >/dev/null 2>&1; then
     cache=$(mk_cache)
     log="${TMP}/sb-status.log"
     run_sketchybar_plugin codexbar-status-major.json "${cache}" "${log}"
-    if [[ -s "${cache}/sb/icon-v2-codex-major.png" ]]; then
+    status_icon_path=$(compgen -G "${cache}/sb/icon-v3-codex-*-major.png" | sort | head -n 1 || true)
+    if [[ -s "${status_icon_path}" ]]; then
         ok "plugin generates status-tinted icon"
     else
         fail "plugin generates status-tinted icon"
     fi
     status_log="$(< "${log}")"
-    assert_contains "plugin uses status-tinted icon" "icon-v2-codex-major.png" "${status_log}"
+    assert_contains "plugin uses status-tinted icon" "${status_icon_path}" "${status_log}"
     assert_contains "plugin routes degraded status icon to provider status page" "click_script=open 'https://status.openai.com/'" "${status_log}"
 
 
@@ -1190,12 +1251,13 @@ if command -v magick >/dev/null 2>&1; then
     cache=$(mk_cache)
     log="${TMP}/sb-opencode.log"
     run_sketchybar_plugin "${opencode_fixture}" "${cache}" "${log}" SHOWY_QUOTA_CODEXBAR_RESOURCES="${resource_dir}"
-    if [[ -s "${cache}/sb/icon-v2-opencode.png" ]]; then
+    opencode_icon_path=$(compgen -G "${cache}/sb/icon-v3-opencode-*.png" | sort | head -n 1 || true)
+    if [[ -s "${opencode_icon_path}" ]]; then
         ok "plugin generates tinted dark icon"
     else
         fail "plugin generates tinted dark icon"
     fi
-    opencode_mean=$(magick "${cache}/sb/icon-v2-opencode.png" -background black -alpha remove -format '%[fx:(mean.r+mean.g+mean.b)/3]' info: 2>/dev/null || true)
+    opencode_mean=$(magick "${opencode_icon_path}" -background black -alpha remove -format '%[fx:(mean.r+mean.g+mean.b)/3]' info: 2>/dev/null || true)
     if awk -v mean="${opencode_mean:-0}" 'BEGIN { exit !(mean > 0.25) }'; then
         ok "plugin tints near-black monochrome icons to text color"
     else
@@ -1206,7 +1268,7 @@ if command -v magick >/dev/null 2>&1; then
     log="${TMP}/sb-opencode-font-fallback.log"
     run_sketchybar_plugin "${opencode_fixture}" "${cache}" "${log}" SHOWY_QUOTA_CODEXBAR_RESOURCES="${resource_dir}" SHOWY_QUOTA_SKETCHYBAR_PROVIDER_ICON_MODE=font
     font_fallback_log="$(< "${log}")"
-    assert_contains "font icon mode falls back to SVG for unmapped opencode" "showy_quota.opencode.icon drawing=on icon.drawing=off label.drawing=off background.image=${cache}/sb/icon-v2-opencode.png" "${font_fallback_log}"
+    assert_contains "font icon mode falls back to SVG for unmapped opencode" "showy_quota.opencode.icon drawing=on icon.drawing=off label.drawing=off background.image=${cache}/sb/icon-v3-opencode-" "${font_fallback_log}"
     assert_not_contains "font icon mode avoids generic code glyph for opencode" "showy_quota.opencode.icon drawing=on icon.drawing=on icon=:code:" "${font_fallback_log}"
 
     copilot_resource_dir="${TMP}/copilot-resources"
@@ -1216,7 +1278,7 @@ if command -v magick >/dev/null 2>&1; then
     log="${TMP}/sb-copilot-svg-fallback.log"
     run_sketchybar_plugin "${copilot_fixture}" "${cache}" "${log}" SHOWY_QUOTA_CODEXBAR_RESOURCES="${copilot_resource_dir}" SHOWY_QUOTA_SKETCHYBAR_PROVIDER_ICON_MODE=font
     copilot_svg_log="$(< "${log}")"
-    assert_contains "font icon mode falls back to CodexBar SVG for copilot" "showy_quota.copilot.icon drawing=on icon.drawing=off label.drawing=off background.image=${cache}/sb/icon-v2-copilot.png" "${copilot_svg_log}"
+    assert_contains "font icon mode falls back to CodexBar SVG for copilot" "showy_quota.copilot.icon drawing=on icon.drawing=off label.drawing=off background.image=${cache}/sb/icon-v3-copilot-" "${copilot_svg_log}"
     assert_not_contains "font icon mode avoids pointer-like copilot app-font glyph" "showy_quota.copilot.icon drawing=on icon.drawing=on icon=:copilot:" "${copilot_svg_log}"
 else
     ok "plugin skips ImageMagick icon tests when magick is unavailable"
@@ -1392,10 +1454,75 @@ out=$(
     SHOWY_QUOTA_CODEXBAR_SERVE_URL='' \
     "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
 ) || rc=$?
-if (( rc != 0 )) && [[ -z "${out}" ]]; then
-    ok "fetcher rejects invalid fresh cache"
+corrupt_files=("${cache}"/usage.json.corrupt.*)
+if (( rc != 0 )) && [[ -z "${out}" ]] && [[ ! -e "${cache}/usage.json" ]] && [[ -s "${corrupt_files[0]}" ]]; then
+    ok "fetcher rejects and quarantines invalid fresh cache"
 else
-    fail "fetcher rejects invalid fresh cache" "rc=${rc}; out=${out}"
+    fail "fetcher rejects and quarantines invalid fresh cache" "rc=${rc}; out=${out}"
+fi
+
+cache=$(mk_cache)
+printf '%s\n' '[{"provider":"codex","usage":{"primary":{}}}]' > "${cache}/usage.json"
+rc=0
+out=$(
+    SHOWY_QUOTA_NO_CONFIG=1 \
+    SHOWY_QUOTA_CACHE_DIR="${cache}" \
+    "${REPO_ROOT}/bin/showy-quota-fetch" --stop-serve 2>/dev/null
+) || rc=$?
+if (( rc == 0 )) && [[ -f "${cache}/usage.json" ]] && [[ -z "${out}" ]]; then
+    ok "fetcher stop-serve does not quarantine usage cache"
+else
+    fail "fetcher stop-serve does not quarantine usage cache" "rc=${rc}; out=${out}; cache_exists=$([[ -f ${cache}/usage.json ]] && echo yes || echo no)"
+fi
+
+cache=$(mk_cache)
+printf '%s\n' '[{"provider":"codex","usage":{"primary":{}}}]' > "${cache}/usage.json"
+race_log="${cache}/race.log"
+(
+    SHOWY_QUOTA_NO_CONFIG=1 \
+    SHOWY_QUOTA_CACHE_DIR="${cache}" \
+    SHOWY_QUOTA_CODEXBAR_BIN="${missing_bin:-${TMP}/no-such-codexbar}" \
+    SHOWY_QUOTA_CODEXBAR_SERVE_URL='' \
+    SHOWY_QUOTA_DEBUG=1 \
+    "${REPO_ROOT}/bin/showy-quota-fetch" 2>>"${race_log}" >/dev/null || true
+) &
+(
+    SHOWY_QUOTA_NO_CONFIG=1 \
+    SHOWY_QUOTA_CACHE_DIR="${cache}" \
+    SHOWY_QUOTA_CODEXBAR_BIN="${missing_bin:-${TMP}/no-such-codexbar}" \
+    SHOWY_QUOTA_CODEXBAR_SERVE_URL='' \
+    SHOWY_QUOTA_DEBUG=1 \
+    "${REPO_ROOT}/bin/showy-quota-fetch" 2>>"${race_log}" >/dev/null || true
+) &
+wait
+corrupt_files=("${cache}"/usage.json.corrupt.*)
+if [[ -s "${corrupt_files[0]}" ]] && ! grep -q 'quarantine failed' "${race_log}" 2>/dev/null; then
+    ok "fetcher tolerates concurrent corrupt cache quarantine"
+else
+    race_details=""
+    [[ -r "${race_log}" ]] && race_details="$(< "${race_log}")"
+    fail "fetcher tolerates concurrent corrupt cache quarantine" "${race_details}"
+fi
+
+cache=$(mk_cache)
+for idx in 1 2 3 4 5; do
+    printf '%s\n' 'invalid' > "${cache}/usage.json.corrupt.000${idx}.${idx}"
+done
+printf '%s\n' '[{"provider":"codex","usage":{"primary":{}}}]' > "${cache}/usage.json"
+rc=0
+out=$(
+    SHOWY_QUOTA_NO_CONFIG=1 \
+    SHOWY_QUOTA_CACHE_DIR="${cache}" \
+    SHOWY_QUOTA_CODEXBAR_BIN="${missing_bin:-${TMP}/no-such-codexbar}" \
+    SHOWY_QUOTA_CODEXBAR_SERVE_URL='' \
+    SHOWY_QUOTA_CORRUPT_CACHE_RETENTION=3 \
+    "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
+) || rc=$?
+corrupt_files=("${cache}"/usage.json.corrupt.*)
+if (( rc != 0 )) && (( ${#corrupt_files[@]} == 3 )); then
+    ok "fetcher bounds corrupt cache quarantine retention"
+else
+    fail "fetcher bounds corrupt cache quarantine retention" "rc=${rc}; corrupt_count=${#corrupt_files[@]}; out=${out}"
 fi
 
 cache=$(mk_cache)
@@ -2830,6 +2957,7 @@ fi
 cache=$(mk_cache)
 cp "${FIXTURE_DIR}/codexbar-low.json" "${cache}/usage.json"
 touch -t 198801010000 "${cache}/usage.json"
+expected_stale=$(< "${cache}/usage.json")
 counter="${cache}/retry-stale-empty-lock-call-count"
 : > "${counter}"
 mkdir "${cache}/usage.lock.d"
@@ -2846,12 +2974,48 @@ out=$(
     SHOWY_QUOTA_PROVIDERS=codex \
     "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
 ) || rc=$?
-if (( rc == 0 )) && grep -F -q 'futureUnknownTopLevelField' <<< "${out}"; then
-    ok "mkdir path: retries stale empty owner lock before fallback"
+if (( rc == 0 )) && [[ "${out}" == "${expected_stale}" ]]; then
+    ok "mkdir path: stale valid cache skips empty owner lock wait"
 else
-    fail "mkdir path: retries stale empty owner lock before fallback" "rc=${rc}; out=${out}"
+    fail "mkdir path: stale valid cache skips empty owner lock wait" "rc=${rc}; out=${out}"
 fi
 
+
+cache=$(mk_cache)
+cp "${FIXTURE_DIR}/codexbar-low.json" "${cache}/usage.json"
+touch -t 198801010000 "${cache}/usage.json"
+counter="${cache}/nonforced-valid-lock-call-count"
+expected_stale=$(< "${cache}/usage.json")
+: > "${counter}"
+(
+    SHOWY_QUOTA_NO_CONFIG=1 \
+    SHOWY_QUOTA_CACHE_DIR="${cache}" \
+    SHOWY_QUOTA_CODEXBAR_BIN="${slow_dir}/codexbar" \
+    SHOWY_QUOTA_FORCE_NO_FLOCK=1 \
+    SHOWY_QUOTA_TEST_COUNTER="${counter}" \
+    SHOWY_QUOTA_TEST_FIXTURE="${FIXTURE_DIR}/codexbar-realistic.json" \
+    SHOWY_QUOTA_PROVIDERS=codex \
+    "${REPO_ROOT}/bin/showy-quota-fetch" --refresh >/dev/null 2>/dev/null
+) &
+holder_pid=$!
+sleep 0.2
+rc=0
+out=$(
+    SHOWY_QUOTA_NO_CONFIG=1 \
+    SHOWY_QUOTA_CACHE_DIR="${cache}" \
+    SHOWY_QUOTA_CODEXBAR_BIN="${slow_dir}/codexbar" \
+    SHOWY_QUOTA_FORCE_NO_FLOCK=1 \
+    SHOWY_QUOTA_LOCK_WAIT_TENTHS=20 \
+    SHOWY_QUOTA_TEST_COUNTER="${counter}" \
+    SHOWY_QUOTA_TEST_FIXTURE="${FIXTURE_DIR}/codexbar-realistic.json" \
+    "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
+) || rc=$?
+wait "${holder_pid}" || true
+if (( rc == 0 )) && [[ "${out}" == "${expected_stale}" ]]; then
+    ok "non-forced valid cache skips mkdir lock wait"
+else
+    fail "non-forced valid cache skips mkdir lock wait" "rc=${rc}; out=${out}"
+fi
 printf '\nforced refresh lock wait\n'
 cache=$(mk_cache)
 cp "${FIXTURE_DIR}/codexbar-low.json" "${cache}/usage.json"

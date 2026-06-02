@@ -137,6 +137,10 @@ interactive shell's. If `tmux source ~/.tmux.conf` works but a fresh
 `tmux` session shows nothing, ensure `~/.local/bin` is on the PATH that
 exists when the server starts (e.g. set it in `/etc/launchd.conf` on
 macOS, or via `tmux set-environment -g PATH ...`).
+The TPM wrapper now checks that `tmux` is callable and that the configured
+`@showy-quota-bin` renderer is executable before appending a `#(...)` status
+command. If the renderer path is wrong, it displays a tmux message instead of
+installing a broken status segment.
 
 ## Detail popup
 

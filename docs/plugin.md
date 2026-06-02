@@ -154,10 +154,11 @@ Common options:
 |`serve_command`|`codexbar`|Command used for managed serve startup.|
 |`serve_port`|URL port|Port passed to `codexbar serve --port`; defaults to the port in `serve_url` so custom localhost ports stay aligned.|
 |`interval_seconds`|`10`|Serve refresh cadence; timers are one-shot and re-armed after each tick.|
-|`cli_fallback`|`degraded`|`degraded` or `off`. Degraded fallback appends `⚠cli`.|
+|`cli_fallback`|`degraded`|`degraded` or `off`. Degraded fallback appends `degraded_cli_glyph`.|
 |`cli_command`|`codexbar`|Command used for provider discovery (`codexbar config providers …`) and per-provider fallback (`codexbar usage --provider <id> …`). Do not point this at `showy-quota-fetch`; the plugin is intentionally self-contained.|
 |`cli_interval_seconds`|`120`|Slow cadence while fallback is active; the plugin still probes serve every tick and switches back when it recovers.|
 |`provider_failure_backoff_seconds`|`cli_interval_seconds`|How long to skip a provider after one of its CLI calls fails.|
+|`reset_description_timezone_offset`|`UTC`|Optional fixed offset (`UTC`, `+HH:MM`, or `-HH:MM`) used only when CodexBar provides local-time `resetDescription` text without an ISO `resetsAt`. The WASM plugin cannot infer the host timezone reliably, so set this explicitly if CodexBar emits local-time descriptions and your local zone is not UTC. Prefer ISO timestamps when available; this fallback cannot model DST transitions.|
 |`provider_discovery_backoff_seconds`|`60`|How long to skip provider discovery after failure, and how long a successful CodexBar provider inventory is reused before refresh.|
 |`providers`|empty|Comma-separated allow-list and render order. When set, it also constrains the per-provider fallback work list.|
 |`providers_exclude`|empty|Comma-separated deny-list. Excluded providers are dropped from the per-provider fallback work list before any CLI call.|
@@ -180,6 +181,8 @@ plugin location="file:~/.config/zellij/plugins/showy-quota-zellij.wasm" {
     good_min_remaining 35
     time_warn_minutes 45
     stale_glyph "⚠"
+    degraded_cli_glyph "⚠cli"
+    // reset_description_timezone_offset "-07:00"
 }
 ```
 

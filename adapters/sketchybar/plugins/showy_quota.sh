@@ -41,6 +41,13 @@ STATE_FILE="${CACHE_DIR}/providers.txt"
 CLICK="${SHOWY_QUOTA_SKETCHYBAR_CLICK}"
 RENDER_LOCK_DIR="${CACHE_DIR}/render.lock"
 RENDER_LOCK_OWNER="${RENDER_LOCK_DIR}/owner.pid"
+ICON_TMP_FILES=()
+
+cleanup_icon_tmp_files() {
+    ((${#ICON_TMP_FILES[@]} == 0)) && return 0
+    rm -f -- "${ICON_TMP_FILES[@]}" 2>/dev/null || true
+}
+
 
 render_lock_age_seconds() {
     local now mtime
@@ -54,6 +61,7 @@ render_lock_age_seconds() {
 }
 
 release_render_lock() {
+    cleanup_icon_tmp_files
     local owner_pid=""
     if [[ -r "${RENDER_LOCK_OWNER}" ]]; then
         IFS= read -r owner_pid < "${RENDER_LOCK_OWNER}" || owner_pid=""
@@ -473,7 +481,7 @@ click_script_for_status() {
 
 # Bump when icon rendering semantics change so stale cached PNGs are replaced
 # on the next plugin tick.
-ICON_CACHE_VERSION="2"
+ICON_CACHE_VERSION="3"
 
 # ── provider icon: native app-font experiment ────────────────────────
 provider_font_icon() {
@@ -537,16 +545,18 @@ provider_icon_png() {
     (( HAVE_MAGICK )) || return 1
 
     local pid="$1" status="${2:-none}"
-    local status_color="" tint_color="" suffix="" out
+    local status_color="" tint_color="" suffix="" out cache_key
     if status_color=$(status_color_for_indicator "${status}"); then
         suffix="-${status}"
     fi
-    out="${CACHE_DIR}/icon-v${ICON_CACHE_VERSION}-${pid}${suffix}.png"
+    cache_key="${ICON_TEXT_HEX}-${PRIMARY_UNKNOWN_HEX}-${PRIMARY_WARN_HEX}-${PRIMARY_BAD_HEX}"
+    out="${CACHE_DIR}/icon-v${ICON_CACHE_VERSION}-${pid}-${cache_key}${suffix}.png"
     [[ -s "${out}" ]] && { printf '%s\n' "${out}"; return 0; }
 
     # Per-process tmp files in the same directory so `mv` is atomic.
     local tmp normal_tmp
     normal_tmp=$(mktemp "${CACHE_DIR}/.icon-${pid}.normal.XXXXXX") || return 1
+    ICON_TMP_FILES+=("${normal_tmp}")
 
     local svg="${SHOWY_QUOTA_CODEXBAR_RESOURCES}/ProviderIcon-${pid}.svg"
     if [[ ! -r "${svg}" ]]; then
@@ -570,6 +580,7 @@ provider_icon_png() {
 
     if [[ -n "${tint_color}" ]]; then
         tmp=$(mktemp "${CACHE_DIR}/.icon-${pid}.tint.XXXXXX") || { rm -f "${normal_tmp}"; return 1; }
+        ICON_TMP_FILES+=("${tmp}")
         if ! recolor_icon_png "${normal_tmp}" "${tint_color}" "${tmp}"; then
             rm -f "${tmp}"
             tmp="${normal_tmp}"

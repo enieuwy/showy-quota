@@ -10,4 +10,11 @@ edition = "2021"
 license = "MIT"
 repository = "https://github.com/enieuwy/showy-quota"
 rust-version = "1.80"
-version = "0.2.0"
+version = "0.2.1"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "z"
+panic = "abort"
+strip = "debuginfo"
