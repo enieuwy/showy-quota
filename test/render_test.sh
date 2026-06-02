@@ -1178,6 +1178,27 @@ fi
 
 cache=$(mk_cache)
 cp "${FIXTURE_DIR}/codexbar-mixed.json" "${cache}/usage.json"
+printf '%s\n' "serve" > "${cache}/source"
+race_fetch="${cache}/race-fetch"
+cat > "${race_fetch}" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == "--cache-only" ]]; then
+    cat "${SHOWY_QUOTA_CACHE_DIR}/usage.json"
+    exit 0
+fi
+printf '%s\n' "cli" > "${SHOWY_QUOTA_CACHE_DIR}/source"
+exit 0
+EOF
+chmod +x "${race_fetch}"
+log="${TMP}/sb-source-race.log"
+run_sketchybar_plugin codexbar-mixed.json "${cache}" "${log}" SHOWY_QUOTA_DEGRADED_CLI= SHOWY_QUOTA_FETCH_BIN="${race_fetch}"
+plugin_log="$(< "${log}")"
+assert_contains "plugin samples degraded source before background refresh" "--set showy_quota.degraded drawing=off" "${plugin_log}"
+
+
+cache=$(mk_cache)
+cp "${FIXTURE_DIR}/codexbar-mixed.json" "${cache}/usage.json"
 touch -t 198801010000 "${cache}/usage.json"
 log="${TMP}/sb-stale.log"
 run_sketchybar_plugin codexbar-mixed.json "${cache}" "${log}" SHOWY_QUOTA_CODEXBAR_BIN="${TMP}/no-such-codexbar-plugin" SHOWY_QUOTA_CODEXBAR_SERVE_URL=''
@@ -1954,6 +1975,186 @@ if (( rc == 0 )) && printf '%s' "${out}" | jq -e 'type == "array" and any(.provi
     ok "fetcher skips CLI fallback after failed fast serve probe"
 else
     fail "fetcher skips CLI fallback after failed fast serve probe" "rc=${rc}; out=${out}"
+fi
+
+cache=$(mk_cache)
+cp "${FIXTURE_DIR}/codexbar-mixed.json" "${cache}/usage.json"
+printf '%s\n' "serve" > "${cache}/source"
+python3 - "${cache}/usage.json" <<'PY'
+import os
+import sys
+
+os.utime(sys.argv[1], (1000, 1000))
+PY
+rc=0
+out=$(
+    PATH="${stub_dir}:${PATH}" \
+    SHOWY_QUOTA_NO_CONFIG=1 \
+    SHOWY_QUOTA_CACHE_DIR="${cache}" \
+    SHOWY_QUOTA_NOW_EPOCH=1015 \
+    SHOWY_QUOTA_REFRESH_SECONDS=10 \
+    SHOWY_QUOTA_CODEXBAR_SERVE_URL="${serve_url}" \
+    SHOWY_QUOTA_TEST_SERVE_URL="${serve_url}" \
+    SHOWY_QUOTA_TEST_SERVE_FIXTURE="${FIXTURE_DIR}/codexbar-non-array.json" \
+    SHOWY_QUOTA_TEST_FIXTURE="${FIXTURE_DIR}/codexbar-realistic.json" \
+    "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
+) || rc=$?
+source_value="missing"
+[[ -r "${cache}/source" ]] && source_value="$(< "${cache}/source")"
+if (( rc == 0 )) \
+    && [[ "${source_value}" == "serve" ]] \
+    && printf '%s' "${out}" | jq -e 'type == "array" and any(.provider == "cursor")' >/dev/null 2>&1
+then
+    ok "fetcher preserves serve cache before stale CLI fallback"
+else
+    fail "fetcher preserves serve cache before stale CLI fallback" "rc=${rc}; source=${source_value}; out=${out}"
+fi
+
+cache=$(mk_cache)
+cp "${FIXTURE_DIR}/codexbar-mixed.json" "${cache}/usage.json"
+printf '%s\n' "serve" > "${cache}/source"
+python3 - "${cache}/usage.json" <<'PY'
+import os
+import sys
+
+os.utime(sys.argv[1], (1000, 1000))
+PY
+rc=0
+out=$(
+    PATH="${stub_dir}:${PATH}" \
+    SHOWY_QUOTA_NO_CONFIG=1 \
+    SHOWY_QUOTA_CACHE_DIR="${cache}" \
+    SHOWY_QUOTA_NOW_EPOCH=1300 \
+    SHOWY_QUOTA_REFRESH_SECONDS=10 \
+    SHOWY_QUOTA_CODEXBAR_SERVE_URL="${serve_url}" \
+    SHOWY_QUOTA_TEST_SERVE_URL="${serve_url}" \
+    SHOWY_QUOTA_TEST_SERVE_FIXTURE="${FIXTURE_DIR}/codexbar-non-array.json" \
+    SHOWY_QUOTA_TEST_FIXTURE="${FIXTURE_DIR}/codexbar-realistic.json" \
+    "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
+) || rc=$?
+source_value="missing"
+[[ -r "${cache}/source" ]] && source_value="$(< "${cache}/source")"
+failure_count="missing"
+[[ -r "${cache}/serve-failed-count" ]] && failure_count="$(< "${cache}/serve-failed-count")"
+if (( rc == 0 )) \
+    && [[ "${source_value}" == "serve" ]] \
+    && [[ "${failure_count}" == "1" ]] \
+    && printf '%s' "${out}" | jq -e 'type == "array" and any(.provider == "cursor")' >/dev/null 2>&1
+then
+    ok "fetcher preserves stale serve cache before CLI failure threshold"
+else
+    fail "fetcher preserves stale serve cache before CLI failure threshold" "rc=${rc}; source=${source_value}; failures=${failure_count}; out=${out}"
+fi
+
+cache=$(mk_cache)
+cp "${FIXTURE_DIR}/codexbar-mixed.json" "${cache}/usage.json"
+printf '%s\n' "serve" > "${cache}/source"
+printf '%s\n' "1299" > "${cache}/serve-failed-at"
+printf '%s\n' "1" > "${cache}/serve-failed-count"
+python3 - "${cache}/usage.json" <<'PY'
+import os
+import sys
+
+os.utime(sys.argv[1], (1000, 1000))
+PY
+rc=0
+out=$(
+    PATH="${stub_dir}:${PATH}" \
+    SHOWY_QUOTA_NO_CONFIG=1 \
+    SHOWY_QUOTA_CACHE_DIR="${cache}" \
+    SHOWY_QUOTA_NOW_EPOCH=1300 \
+    SHOWY_QUOTA_REFRESH_SECONDS=10 \
+    SHOWY_QUOTA_CODEXBAR_SERVE_FAILURE_BACKOFF_SECONDS=60 \
+    SHOWY_QUOTA_CODEXBAR_SERVE_URL="${serve_url}" \
+    SHOWY_QUOTA_TEST_SERVE_URL="${serve_url}" \
+    SHOWY_QUOTA_TEST_SERVE_FIXTURE="${FIXTURE_DIR}/codexbar-realistic.json" \
+    SHOWY_QUOTA_TEST_FIXTURE="${FIXTURE_DIR}/codexbar-mixed.json" \
+    "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
+) || rc=$?
+source_value="missing"
+[[ -r "${cache}/source" ]] && source_value="$(< "${cache}/source")"
+if (( rc == 0 )) \
+    && [[ "${source_value}" == "serve" ]] \
+    && [[ ! -e "${cache}/serve-failed-count" ]] \
+    && printf '%s' "${out}" | jq -e 'type == "array" and any(.provider == "codex") and all(.[]; .provider != "cursor")' >/dev/null 2>&1
+then
+    ok "fetcher bypasses serve failure backoff for stale serve cache"
+else
+    fail "fetcher bypasses serve failure backoff for stale serve cache" "rc=${rc}; source=${source_value}; out=${out}"
+fi
+
+cache=$(mk_cache)
+cp "${FIXTURE_DIR}/codexbar-mixed.json" "${cache}/usage.json"
+printf '%s\n' "serve" > "${cache}/source"
+printf '%s\n' "2" > "${cache}/serve-failed-count"
+python3 - "${cache}/usage.json" <<'PY'
+import os
+import sys
+
+os.utime(sys.argv[1], (1000, 1000))
+PY
+rc=0
+out=$(
+    PATH="${stub_dir}:${PATH}" \
+    SHOWY_QUOTA_NO_CONFIG=1 \
+    SHOWY_QUOTA_CACHE_DIR="${cache}" \
+    SHOWY_QUOTA_NOW_EPOCH=1300 \
+    SHOWY_QUOTA_REFRESH_SECONDS=10 \
+    SHOWY_QUOTA_CODEXBAR_SERVE_URL="${serve_url}" \
+    SHOWY_QUOTA_TEST_SERVE_URL="${serve_url}" \
+    SHOWY_QUOTA_TEST_SERVE_FIXTURE="${FIXTURE_DIR}/codexbar-non-array.json" \
+    SHOWY_QUOTA_TEST_FIXTURE="${FIXTURE_DIR}/codexbar-realistic.json" \
+    "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
+) || rc=$?
+source_value="missing"
+[[ -r "${cache}/source" ]] && source_value="$(< "${cache}/source")"
+failure_count="missing"
+[[ -r "${cache}/serve-failed-count" ]] && failure_count="$(< "${cache}/serve-failed-count")"
+if (( rc == 0 )) \
+    && [[ "${source_value}" == "cli" ]] \
+    && [[ "${failure_count}" == "3" ]] \
+    && printf '%s' "${out}" | jq -e 'type == "array" and any(.provider == "codex") and all(.[]; .provider != "cursor")' >/dev/null 2>&1
+then
+    ok "fetcher falls back to CLI after repeated serve usage failures"
+else
+    fail "fetcher falls back to CLI after repeated serve usage failures" "rc=${rc}; source=${source_value}; failures=${failure_count}; out=${out}"
+fi
+
+cache=$(mk_cache)
+cp "${FIXTURE_DIR}/codexbar-mixed.json" "${cache}/usage.json"
+printf '%s\n' "serve" > "${cache}/source"
+printf '%s\n' "2" > "${cache}/serve-failed-count"
+python3 - "${cache}/usage.json" <<'PY'
+import os
+import sys
+
+os.utime(sys.argv[1], (1000, 1000))
+PY
+rc=0
+out=$(
+    PATH="${stub_dir}:${PATH}" \
+    SHOWY_QUOTA_NO_CONFIG=1 \
+    SHOWY_QUOTA_CACHE_DIR="${cache}" \
+    SHOWY_QUOTA_NOW_EPOCH=1300 \
+    SHOWY_QUOTA_REFRESH_SECONDS=10 \
+    SHOWY_QUOTA_CODEXBAR_SERVE_URL="${serve_url}" \
+    SHOWY_QUOTA_TEST_SERVE_URL="http://127.0.0.1:18081" \
+    SHOWY_QUOTA_TEST_SERVE_FIXTURE="${FIXTURE_DIR}/codexbar-non-array.json" \
+    SHOWY_QUOTA_TEST_FIXTURE="${FIXTURE_DIR}/codexbar-realistic.json" \
+    "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
+) || rc=$?
+source_value="missing"
+[[ -r "${cache}/source" ]] && source_value="$(< "${cache}/source")"
+failure_count="missing"
+[[ -r "${cache}/serve-failed-count" ]] && failure_count="$(< "${cache}/serve-failed-count")"
+if (( rc == 0 )) \
+    && [[ "${source_value}" == "cli" ]] \
+    && [[ "${failure_count}" == "3" ]] \
+    && printf '%s' "${out}" | jq -e 'type == "array" and any(.provider == "codex") and all(.[]; .provider != "cursor")' >/dev/null 2>&1
+then
+    ok "fetcher falls back to CLI after repeated unavailable serve failures"
+else
+    fail "fetcher falls back to CLI after repeated unavailable serve failures" "rc=${rc}; source=${source_value}; failures=${failure_count}; out=${out}"
 fi
 
 cache=$(mk_cache)
@@ -2968,7 +3169,7 @@ out=$(
     SHOWY_QUOTA_CACHE_DIR="${cache}" \
     SHOWY_QUOTA_CODEXBAR_BIN="${slow_dir}/codexbar" \
     SHOWY_QUOTA_FORCE_NO_FLOCK=1 \
-    SHOWY_QUOTA_LOCK_WAIT_TENTHS=10 \
+    SHOWY_QUOTA_LOCK_WAIT_TENTHS=50 \
     SHOWY_QUOTA_TEST_COUNTER="${counter}" \
     SHOWY_QUOTA_TEST_FIXTURE="${FIXTURE_DIR}/codexbar-realistic.json" \
     SHOWY_QUOTA_PROVIDERS=codex \

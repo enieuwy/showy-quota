@@ -371,6 +371,27 @@ serve_failure_restart_threshold() {
     positive_integer_or_default "${SHOWY_QUOTA_CODEXBAR_SERVE_FAILURES_BEFORE_RESTART:-3}" 3
 }
 
+serve_failure_cli_threshold() {
+    positive_integer_or_default "${SHOWY_QUOTA_CODEXBAR_SERVE_FAILURES_BEFORE_CLI:-3}" 3
+}
+
+serve_failure_count() {
+    local count="0"
+    if [[ -r "${SHOWY_QUOTA_CODEXBAR_SERVE_FAILURE_COUNT_FILE}" ]]; then
+        IFS= read -r count < "${SHOWY_QUOTA_CODEXBAR_SERVE_FAILURE_COUNT_FILE}" || count="0"
+    fi
+    [[ "${count}" =~ ^[0-9]+$ ]] || count="0"
+    printf '%s\n' "${count}"
+}
+
+serve_failure_cli_fallback_allowed() {
+    local count threshold
+    count=$(serve_failure_count)
+    threshold=$(serve_failure_cli_threshold)
+    (( count >= threshold ))
+}
+
+
 serve_failure_backoff_seconds() {
     positive_integer_or_default "${SHOWY_QUOTA_CODEXBAR_SERVE_FAILURE_BACKOFF_SECONDS:-60}" 60
 }
@@ -394,11 +415,15 @@ serve_failure_backoff_active() {
 }
 
 record_serve_failure() {
+    local count
+    count=$(serve_failure_count)
+    count=$((count + 1))
+    printf '%s\n' "${count}" > "${SHOWY_QUOTA_CODEXBAR_SERVE_FAILURE_COUNT_FILE}" 2>/dev/null || true
     printf '%s\n' "$(showy_quota_now_epoch)" > "${SHOWY_QUOTA_CODEXBAR_SERVE_FAILURE_STAMP}" 2>/dev/null || true
 }
 
 clear_serve_failure() {
-    rm -f -- "${SHOWY_QUOTA_CODEXBAR_SERVE_FAILURE_STAMP}" 2>/dev/null || true
+    rm -f -- "${SHOWY_QUOTA_CODEXBAR_SERVE_FAILURE_STAMP}" "${SHOWY_QUOTA_CODEXBAR_SERVE_FAILURE_COUNT_FILE}" 2>/dev/null || true
 }
 
 cli_failure_backoff_seconds() {
@@ -1121,7 +1146,9 @@ run_codexbar_serve_with_recovery() {
     if [[ "${SHOWY_QUOTA_MANAGE_SERVE:-1}" == "1" ]] && managed_serve_pid_alive; then
         max_attempts="${threshold}"
     fi
-    serve_failure_backoff_active && return 1
+    if ! { (( force_refresh == 0 )) && cache_is_valid && [[ "$(showy_quota_cache_source)" == "serve" ]]; }; then
+        serve_failure_backoff_active && return 1
+    fi
 
 
     for (( attempt=1; attempt<=max_attempts; attempt++ )); do
@@ -1205,15 +1232,23 @@ PY
 }
 
 run_codexbar() {
-    local out
+    local out cache_source="" probe_serve=1
     if [[ -n "${SHOWY_QUOTA_CODEXBAR_SERVE_URL}" ]]; then
-        if ! serve_failure_backoff_active; then
+        cache_source="$(showy_quota_cache_source)"
+        if (( force_refresh == 0 )) && cache_is_valid && [[ "${cache_source}" != "serve" ]] && serve_failure_backoff_active; then
+            probe_serve=0
+        fi
+        if (( probe_serve )); then
             ensure_serve_running || true
             if out=$(run_codexbar_serve_with_recovery); then
                 printf '%s\n' "serve" > "${SHOWY_QUOTA_REFRESH_SOURCE_FILE}"
                 printf '%s' "${out}"
                 return 0
             fi
+        fi
+        if (( force_refresh == 0 )) && cache_is_valid && ! serve_failure_cli_fallback_allowed; then
+            showy_quota_log "preserving valid cache after codexbar serve failure ($(serve_failure_count)/$(serve_failure_cli_threshold)); skipping CLI fallback"
+            return 1
         fi
         showy_quota_log "codexbar serve fetch failed or returned no renderable usage; falling back to CLI"
     fi

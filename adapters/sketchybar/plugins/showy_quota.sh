@@ -638,8 +638,9 @@ label_for_minutes() {
 # ── main ─────────────────────────────────────────────────────────────
 
 acquire_render_lock || exit 0
+refresh_in_background=0
 if data=$("${FETCH}" --cache-only 2>/dev/null); then
-    start_background_refresh
+    refresh_in_background=1
 else
     data=$("${FETCH}" 2>/dev/null || printf '[]')
 fi
@@ -651,6 +652,9 @@ fi
 degraded_cli=0
 if [[ "${SHOWY_QUOTA_DEGRADED_CLI:-}" == "1" ]] || { [[ -z "${SHOWY_QUOTA_DEGRADED_CLI:-}" ]] && showy_quota_cache_degraded_cli; }; then
     degraded_cli=1
+fi
+if (( refresh_in_background )); then
+    start_background_refresh
 fi
 
 elapsed_marker_x() {

@@ -6,6 +6,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.2.2] — 2026-06-02
+
+### Fixed
+- `bin/showy-quota-fetch`: preserve serve-backed last-known-good usage data
+  during transient `/usage` failures, retry serve normally while the serve cache
+  is active, and fall back to CLI only after repeated serve-unavailable failures.
+- SketchyBar: render stale/degraded markers from the same cache snapshot as the
+  quota payload, avoiding background-refresh races that could show stale `cli`
+  markers.
+
 ## [0.2.1] — 2026-06-02
 
 ### Added
@@ -137,6 +147,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `bin/showy-quota-fetch`: cache dir and files now persist as `0700`/`0600`
   instead of the user's default umask. CodexBar usage JSON stays user-only.
 
-[Unreleased]: https://github.com/enieuwy/showy-quota/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/enieuwy/showy-quota/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/enieuwy/showy-quota/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/enieuwy/showy-quota/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/enieuwy/showy-quota/releases/tag/v0.2.0
