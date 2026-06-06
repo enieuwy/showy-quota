@@ -421,6 +421,45 @@ wait_for_state_prefix() {
     return 1
 }
 
+run_with_test_timeout() {
+    local timeout_seconds="$1"
+    shift
+    python3 -c '
+import os
+import signal
+import subprocess
+import sys
+
+timeout = float(sys.argv[1])
+argv = sys.argv[2:]
+
+proc = subprocess.Popen(
+    argv,
+    stdout=sys.stdout.buffer,
+    stderr=sys.stderr.buffer,
+    stdin=subprocess.DEVNULL,
+    start_new_session=True,
+)
+try:
+    sys.exit(proc.wait(timeout=timeout))
+except subprocess.TimeoutExpired:
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    try:
+        proc.wait(timeout=1)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        proc.wait()
+    sys.exit(124)
+' "${timeout_seconds}" "$@"
+}
+
+
 
 assert_contains() {
     local label="$1" needle="$2" haystack="$3"
@@ -1645,6 +1684,64 @@ else
     fail "fetcher reads codexbar serve usage endpoint" "rc=${rc}; out=${out}"
 fi
 assert_equals "fetcher records serve cache source" "serve" "$(< "${cache}/source")"
+
+large_payload_fixture="${TMP}/codexbar-large-payload.json"
+python3 -c '
+import json
+import sys
+
+payload = [
+    {
+        "provider": "codex",
+        "usage": {"primary": {"usedPercent": 12}},
+        "pad": "x" * 600,
+    },
+    {
+        "provider": "claude",
+        "usage": {"primary": {"usedPercent": 34}},
+        "pad": "y" * 601,
+    },
+]
+with open(sys.argv[1], "w", encoding="utf-8") as fh:
+    json.dump(payload, fh, separators=(",", ":"))
+' "${large_payload_fixture}"
+
+cache=$(mk_cache)
+rc=0
+serve_url="http://127.0.0.1:18080"
+out=$(
+    run_with_test_timeout 5 env \
+        PATH="${stub_dir}:${PATH}" \
+        SHOWY_QUOTA_NO_CONFIG=1 \
+        SHOWY_QUOTA_CACHE_DIR="${cache}" \
+        SHOWY_QUOTA_CODEXBAR_BIN="${missing_bin}" \
+        SHOWY_QUOTA_CODEXBAR_SERVE_URL="${serve_url}" \
+        SHOWY_QUOTA_TEST_SERVE_URL="${serve_url}" \
+        SHOWY_QUOTA_TEST_SERVE_FIXTURE="${large_payload_fixture}" \
+        "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
+) || rc=$?
+if (( rc == 0 )) && printf '%s' "${out}" | jq -e 'type == "array" and (length == 2) and any(.[]; .provider == "codex" and (.pad | length == 600)) and any(.[]; .provider == "claude" and (.pad | length == 601))' >/dev/null 2>&1; then
+    ok "fetcher validates large serve payload without hanging"
+else
+    fail "fetcher validates large serve payload without hanging" "rc=${rc}; out=${out}"
+fi
+
+cache=$(mk_cache)
+rc=0
+out=$(
+    run_with_test_timeout 5 env \
+        PATH="${stub_dir}:${PATH}" \
+        SHOWY_QUOTA_NO_CONFIG=1 \
+        SHOWY_QUOTA_CACHE_DIR="${cache}" \
+        SHOWY_QUOTA_CODEXBAR_SERVE_URL='' \
+        SHOWY_QUOTA_TEST_FIXTURE="${large_payload_fixture}" \
+        "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
+) || rc=$?
+if (( rc == 0 )) && printf '%s' "${out}" | jq -e 'type == "array" and (length == 2) and any(.[]; .provider == "codex" and (.pad | length == 600)) and any(.[]; .provider == "claude" and (.pad | length == 601))' >/dev/null 2>&1; then
+    ok "fetcher validates large provider payload without hanging"
+else
+    fail "fetcher validates large provider payload without hanging" "rc=${rc}; out=${out}"
+fi
 
 managed_bin_dir="${TMP}/managed-bin"
 mkdir -p "${managed_bin_dir}"

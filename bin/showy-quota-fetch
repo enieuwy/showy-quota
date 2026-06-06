@@ -555,7 +555,7 @@ discover_providers() {
         return 1
     fi
     showy_quota_have jq || { record_config_providers_failure; return 1; }
-    type_check=$(jq -r 'if type == "array" then "ok" else "no" end' <<< "${raw}" 2>/dev/null) || type_check="no"
+    type_check=$(printf '%s' "${raw}" | jq -r 'if type == "array" then "ok" else "no" end' 2>/dev/null) || type_check="no"
     if [[ "${type_check}" != "ok" ]]; then
         record_config_providers_failure
         return 1
@@ -564,22 +564,22 @@ discover_providers() {
     # strings, then keep only ids that pass `valid_provider_id`. Empty, null,
     # or missing ids in enabled records are invalid inventory, not canonical
     # empty inventory.
-    enabled_count=$(jq -r '
+    enabled_count=$(printf '%s' "${raw}" | jq -r '
         [.[] | select(type == "object") | select(.enabled == true)] | length
-    ' <<< "${raw}" 2>/dev/null) || enabled_count=0
+    ' 2>/dev/null) || enabled_count=0
     [[ "${enabled_count}" =~ ^[0-9]+$ ]] || enabled_count=0
-    ids=$(jq -r '
+    ids=$(printf '%s' "${raw}" | jq -r '
         .[]
         | select(type == "object")
         | select(.enabled == true)
         | .provider
         | select(type == "string")
         | select(test("^[A-Za-z0-9_.-]+$"))
-    ' <<< "${raw}" 2>/dev/null) || ids=""
+    ' 2>/dev/null) || ids=""
     if [[ -n "${ids}" ]]; then
         while IFS= read -r id_line; do
             [[ -n "${id_line}" ]] && valid_count=$((valid_count + 1))
-        done <<< "${ids}"
+        done < <(printf '%s\n' "${ids}")
     fi
     if (( enabled_count != valid_count )); then
         showy_quota_log "codexbar config providers returned only invalid provider ids"
@@ -606,13 +606,13 @@ apply_provider_filters() {
     IFS=$'\n' read -r -d '' -a raw < <(printf '%s\0' "${input}") || true
 
     if [[ -n "${allow_csv}" ]]; then
-        IFS=',' read -r -a allow <<< "${allow_csv}"
+        IFS=',' read -r -a allow < <(printf '%s\n' "${allow_csv}")
     fi
     if [[ -n "${exclude_csv}" ]]; then
-        IFS=',' read -r -a exclude <<< "${exclude_csv}"
+        IFS=',' read -r -a exclude < <(printf '%s\n' "${exclude_csv}")
     fi
     if [[ -n "${order_csv}" ]]; then
-        IFS=',' read -r -a order <<< "${order_csv}"
+        IFS=',' read -r -a order < <(printf '%s\n' "${order_csv}")
     fi
 
     for id in "${raw[@]}"; do
@@ -712,7 +712,7 @@ provider_inventory_for_fallback() {
             selection=$(apply_provider_filters "${discovery_raw}") || selection=""
         fi
         if [[ -n "${selection}" ]]; then
-            showy_quota_log "provider inventory from codexbar-config: $(tr '\n' ' ' <<< "${selection}")"
+            showy_quota_log "provider inventory from codexbar-config: $(printf '%s' "${selection}" | tr '\n' ' ')"
             printf '%s' "${selection}"
             return 0
         fi
@@ -726,7 +726,7 @@ provider_inventory_for_fallback() {
         && [[ -n "${ids}" ]]; then
         selection=$(apply_provider_filters "${ids}") || selection=""
         if [[ -n "${selection}" ]]; then
-            showy_quota_log "provider inventory from cache: $(tr '\n' ' ' <<< "${selection}")"
+            showy_quota_log "provider inventory from cache: $(printf '%s' "${selection}" | tr '\n' ' ')"
             printf '%s' "${selection}"
             return 0
         fi
@@ -737,7 +737,7 @@ provider_inventory_for_fallback() {
         ids=$(printf '%s' "${SHOWY_QUOTA_PROVIDERS}" | tr ',' '\n')
         selection=$(apply_provider_filters "${ids}") || selection=""
         if [[ -n "${selection}" ]]; then
-            showy_quota_log "provider inventory from allow-list: $(tr '\n' ' ' <<< "${selection}")"
+            showy_quota_log "provider inventory from allow-list: $(printf '%s' "${selection}" | tr '\n' ' ')"
             printf '%s' "${selection}"
             return 0
         fi
@@ -757,7 +757,7 @@ provider_inventory_for_fallback() {
 provider_payload_is_publishable() {
     local provider="$1" payload="$2"
     [[ -n "${payload}" ]] || return 1
-    jq --arg p "${provider}" -e '
+    printf '%s' "${payload}" | jq --arg p "${provider}" -e '
         type == "array"
         and all(.[]?;
             type == "object"
@@ -774,7 +774,7 @@ provider_payload_is_publishable() {
                 )
             )
         )
-    ' >/dev/null 2>&1 <<< "${payload}"
+    ' >/dev/null 2>&1
 }
 
 # Run `codexbar usage --provider <id> --format json --pretty [--status]`
@@ -845,7 +845,7 @@ run_codexbar_cli_per_provider() {
         fi
         clear_provider_failure "${provider}"
         accumulated+=("${out}")
-    done <<< "${providers}"
+    done < <(printf '%s\n' "${providers}")
 
     (( ${#accumulated[@]} > 0 )) || return 1
 
@@ -856,7 +856,7 @@ run_codexbar_cli_per_provider() {
     merged=$(printf '%s' "${accumulated[0]}")
     local i
     for (( i = 1; i < ${#accumulated[@]}; i++ )); do
-        merged=$(jq -s '
+        merged=$(printf '%s\n%s' "${merged}" "${accumulated[$i]}" | jq -s -c '
             map(select(type == "array")) | add // []
             | reduce .[] as $r ([];
                 if ($r.provider | type == "string")
@@ -864,7 +864,7 @@ run_codexbar_cli_per_provider() {
                 then . + [$r]
                 else . end
               )
-        ' <<< "${merged}"$'\n'"${accumulated[$i]}" 2>/dev/null) || return 1
+        ' 2>/dev/null) || return 1
     done
 
     [[ -n "${merged}" && "${merged:0:1}" == '[' ]] || return 1
@@ -1118,7 +1118,7 @@ run_codexbar_serve() {
 }
 
 serve_payload_is_publishable() {
-    jq -e '
+    printf '%s' "$1" | jq -e '
         type == "array"
         and all(.[]; type == "object"
             and (.provider | type == "string" and test("^[A-Za-z0-9_.-]+$"))
@@ -1137,7 +1137,7 @@ serve_payload_is_publishable() {
             (.provider? | type == "string" and length > 0)
             and (.usage?.primary?.usedPercent? | type == "number")
         )
-    ' >/dev/null 2>&1 <<< "$1"
+    ' >/dev/null 2>&1
 }
 
 run_codexbar_serve_with_recovery() {
@@ -1182,7 +1182,7 @@ run_with_hard_timeout() {
     shift
 
     if showy_quota_have python3; then
-        python3 - "${timeout_seconds}" "$@" <<'PY'
+        python3 -c '
 import os
 import signal
 import subprocess
@@ -1218,7 +1218,7 @@ except subprocess.TimeoutExpired:
             pass
         proc.wait()
     sys.exit(124)
-PY
+' "${timeout_seconds}" "$@"
         return $?
     fi
 
