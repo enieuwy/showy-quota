@@ -8,6 +8,13 @@
 # Usage: test/render_test.sh
 # shellcheck disable=SC2030,SC2031
 
+
+# Homebrew Bash 5.3 on macOS can hang while materializing here-doc/here-string
+# payloads around 512 bytes. Bash 4.4 compatibility mode avoids that runtime
+# regression while keeping the suite on a Bash 4-compatible feature set.
+if [[ "${BASH_VERSION:-}" == 5.3.* && -z "${BASH_COMPAT:-}" ]]; then
+    export BASH_COMPAT=4.4
+fi
 set -uo pipefail
 
 REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
@@ -463,7 +470,7 @@ except subprocess.TimeoutExpired:
 
 assert_contains() {
     local label="$1" needle="$2" haystack="$3"
-    if printf '%s' "${haystack}" | grep -F -q -- "${needle}"; then
+    if [[ "${haystack}" == *"${needle}"* ]]; then
         ok "${label}"
     else
         fail "${label}" "expected to contain: ${needle}"
@@ -473,7 +480,7 @@ assert_contains() {
 
 assert_not_contains() {
     local label="$1" needle="$2" haystack="$3"
-    if printf '%s' "${haystack}" | grep -F -q -- "${needle}"; then
+    if [[ "${haystack}" == *"${needle}"* ]]; then
         fail "${label}" "expected NOT to contain: ${needle}"
     else
         ok "${label}"
