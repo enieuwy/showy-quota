@@ -110,6 +110,9 @@ while [ "$#" -gt 0 ]; do
                     exit 89
                     ;;
             esac
+            if [ -n "${SHOWY_QUOTA_TEST_CURL_MAX_TIME_FILE:-}" ]; then
+                printf '%s\n' "$1" > "${SHOWY_QUOTA_TEST_CURL_MAX_TIME_FILE}"
+            fi
             ;;
         http://*)
             url="$1"
@@ -1737,6 +1740,7 @@ cache=$(mk_cache)
 rc=0
 out=$(
     run_with_test_timeout 5 env \
+    SHOWY_QUOTA_TEST_CURL_MAX_TIME_FILE="${cache}/curl-max-time" \
         PATH="${stub_dir}:${PATH}" \
         SHOWY_QUOTA_NO_CONFIG=1 \
         SHOWY_QUOTA_CACHE_DIR="${cache}" \
@@ -1745,6 +1749,7 @@ out=$(
         "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
 ) || rc=$?
 if (( rc == 0 )) && printf '%s' "${out}" | jq -e 'type == "array" and (length == 2) and any(.[]; .provider == "codex" and (.pad | length == 600)) and any(.[]; .provider == "claude" and (.pad | length == 601))' >/dev/null 2>&1; then
+assert_equals "fetcher uses production-safe default serve timeout" "10" "$(< "${cache}/curl-max-time")"
     ok "fetcher validates large provider payload without hanging"
 else
     fail "fetcher validates large provider payload without hanging" "rc=${rc}; out=${out}"

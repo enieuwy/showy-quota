@@ -5,6 +5,11 @@ All notable changes to `showy-quota` are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
+### Changed
+- Shell cache refreshes now allow local `codexbar serve /usage` requests up to
+  10 seconds by default, preventing slow provider collection from being
+  misclassified as CLI fallback and shown as `⚠cli` in SketchyBar/Zellij.
+
 
 ## [0.2.3] — 2026-06-05
 

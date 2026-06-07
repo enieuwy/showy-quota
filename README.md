@@ -223,6 +223,7 @@ Most users only need these; the full environment surface lives in
 | `SHOWY_QUOTA_REFRESH_SECONDS` | `120` | Slow CLI fallback refresh interval. |
 | `SHOWY_QUOTA_MANAGE_SERVE` | `1` | Start `codexbar serve` automatically before CLI fallback; set `0` to disable. |
 | `SHOWY_QUOTA_CODEXBAR_SERVE_URL` | `http://127.0.0.1:8080` | Local `codexbar serve` base URL; set empty to skip HTTP probing. |
+| `SHOWY_QUOTA_CODEXBAR_SERVE_TIMEOUT_SECONDS` | `10` | Per-request timeout for local `/health` and `/usage` probes. |
 | `SHOWY_QUOTA_CODEXBAR_SERVE_PORT` | `8080` | Port passed to managed `codexbar serve --port`. |
 | `SHOWY_QUOTA_CODEXBAR_SERVE_REFRESH_SECONDS` | `10` | Refresh interval when `codexbar serve` is available. |
 | `SHOWY_QUOTA_TIME_WARN_MINUTES` | `30` | Urgent countdown threshold. |
