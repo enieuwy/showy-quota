@@ -5,11 +5,27 @@ All notable changes to `showy-quota` are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
+
+## [0.2.4] — 2026-06-07
+
+### Added
+- `showy-quota --grant-zellij [path]` and `make grant-zellij-permissions`
+  can pre-grant the standalone plugin's Zellij permissions by writing
+  `permissions.kdl` for the installed plugin path. This is optional setup
+  convenience for source/shell users; the release WASM remains standalone and
+  can still be used by accepting Zellij's native prompt or adding the documented
+  KDL block by hand. The helper is idempotent, preserves other plugins' grants,
+  and re-heals after a macOS cache purge. `make install-plugin` now prints the
+  command as an optional follow-up.
+
 ### Changed
+- Zellij plugin permission requests now match enabled runtime paths: `WebAccess`
+  is always requested, while `OpenTerminalsOrPlugins` is skipped when
+  `manage_serve` is disabled and `RunCommands` is skipped when degraded CLI
+  fallback is off.
 - Shell cache refreshes now allow local `codexbar serve /usage` requests up to
   10 seconds by default, preventing slow provider collection from being
   misclassified as CLI fallback and shown as `⚠cli` in SketchyBar/Zellij.
-
 
 ## [0.2.3] — 2026-06-05
 
@@ -160,7 +176,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `bin/showy-quota-fetch`: cache dir and files now persist as `0700`/`0600`
   instead of the user's default umask. CodexBar usage JSON stays user-only.
 
-[Unreleased]: https://github.com/enieuwy/showy-quota/compare/v0.2.3...HEAD
+[Unreleased]: https://github.com/enieuwy/showy-quota/compare/v0.2.4...HEAD
+[0.2.4]: https://github.com/enieuwy/showy-quota/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/enieuwy/showy-quota/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/enieuwy/showy-quota/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/enieuwy/showy-quota/compare/v0.2.0...v0.2.1

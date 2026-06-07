@@ -81,7 +81,7 @@ its own in-memory last-known-good output.
 
 ## Permissions
 
-The plugin requests these permissions up front:
+The default configuration requests these permissions:
 
 ```text
 WebAccess
@@ -89,13 +89,43 @@ OpenTerminalsOrPlugins
 RunCommands
 ```
 
-`WebAccess` is for localhost `/health` and `/usage`, `OpenTerminalsOrPlugins`
-is for the managed `codexbar serve` background command pane, and `RunCommands`
-is used twice in the fallback path: once for provider discovery
-(`codexbar config providers --format json --pretty`) and once per enabled
-provider for `codexbar usage --provider <id> --format json --pretty`.
+`WebAccess` is always needed for localhost `/health` and `/usage`.
+`OpenTerminalsOrPlugins` is requested only when `manage_serve` is enabled,
+because that path starts the managed `codexbar serve` background command pane.
+`RunCommands` is requested only when degraded CLI fallback is enabled, for
+provider discovery (`codexbar config providers --format json --pretty`) and
+one `codexbar usage --provider <id> --format json --pretty` call per enabled
+provider.
 
-Zellij can show plugin permission prompts in a hidden floating pane. To avoid a blank pane on first launch, pre-grant permissions. Zellij versions differ on whether file plugins are stored by absolute path, expanded `file:` URL, or the literal `file:~` URL from the layout, so include all forms when editing the file by hand.
+The grant is **not** invalidated when you cut a new release or rebuild the
+`.wasm` — Zellij keys it on the plugin's path, not the binary's contents. A
+re-prompt means the grant is missing for that path. On macOS the grant lives in
+a cache file that the OS can purge under disk pressure, which is the usual cause
+of an "occasional" prompt.
+
+You do not need this repo to silence the prompt. Standalone, pick one:
+
+1. **Accept once.** Reveal floating panes, focus the pending permission pane,
+   and press `y`. This is native Zellij and persists until the cache is purged.
+2. **Pre-grant by hand.** Add the block below to `permissions.kdl` for the exact
+   plugin path used in your layout. Zellij versions differ on whether file
+   plugins are keyed by absolute path, expanded `file:` URL, or the literal
+   `file:~` URL from the layout, so include all forms. If your dotfile manager
+   installs a renamed artifact such as `showy-quota-zellij-chezmoi.wasm`, use
+   that filename in every grant entry.
+3. **Request less.** Set `manage_serve false` and `cli_fallback "off"` (when you
+   run `codexbar serve` yourself); the plugin then only asks for `WebAccess`.
+
+If you already have the repo or the shell tools installed, the bundled helper
+just writes the same block for you and is safe to re-run:
+
+```sh
+make grant-zellij-permissions
+# or, for a renamed/relocated artifact:
+make grant-zellij-permissions PLUGIN=~/.config/zellij/plugins/showy-quota-zellij-chezmoi.wasm
+# or call the CLI directly:
+showy-quota --grant-zellij [/abs/path/to/plugin.wasm]
+```
 
 macOS:
 

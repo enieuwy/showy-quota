@@ -778,8 +778,62 @@ else
     fail "diagnose json exposes stable machine-readable state" "${out}"
 fi
 
-# ── zellij renderer ──────────────────────────────────────────────────
+# ── grant zellij permissions ──────────────────────────────────────────
+printf '\ngrant zellij permissions\n'
 
+grant_home=$(mktemp -d "${TMP}/grant-home.XXXXXX")
+grant_perms="${grant_home}/permissions.kdl"
+grant_plugin="${grant_home}/.config/zellij/plugins/showy-quota-zellij-chezmoi.wasm"
+mkdir -p "$(dirname "${grant_plugin}")"
+: > "${grant_plugin}"
+
+# Pre-seed an unrelated plugin block to prove merge-safety.
+printf '%s\n' \
+    '"/other/plugin.wasm" {' \
+    '    ReadApplicationState' \
+    '}' > "${grant_perms}"
+
+run_grant() {
+    env \
+        PATH="${stub_dir}:${PATH}" \
+        HOME="${grant_home}" \
+        SHOWY_QUOTA_ZELLIJ_PERMISSIONS_FILE="${grant_perms}" \
+        "${REPO_ROOT}/bin/showy-quota" --grant-zellij "$@"
+}
+
+run_grant "${grant_plugin}" >/dev/null
+grant_content="$(< "${grant_perms}")"
+assert_contains "grant writes bare absolute path key" "\"${grant_plugin}\" {" "${grant_content}"
+assert_contains "grant writes file: url key" "\"file:${grant_plugin}\" {" "${grant_content}"
+assert_contains "grant writes home-relative file:~ key" '"file:~/.config/zellij/plugins/showy-quota-zellij-chezmoi.wasm" {' "${grant_content}"
+assert_contains "grant requests RunCommands" "RunCommands" "${grant_content}"
+assert_contains "grant preserves unrelated plugin block" '"/other/plugin.wasm" {' "${grant_content}"
+assert_contains "grant preserves unrelated permission" "ReadApplicationState" "${grant_content}"
+
+# Re-running must not duplicate our own blocks (idempotent + self-healing).
+run_grant "${grant_plugin}" >/dev/null
+grant_dupes=$(grep -c -F "\"${grant_plugin}\" {" "${grant_perms}" || true)
+assert_equals "grant is idempotent for the bare key block" "1" "${grant_dupes}"
+assert_contains "idempotent re-run keeps unrelated block" '"/other/plugin.wasm" {' "$(< "${grant_perms}")"
+
+# A missing plugin file still grants (warns, exits 0) so deploys can pre-grant.
+grant_missing="${grant_home}/nope/ghost.wasm"
+grant_rc=0
+run_grant "${grant_missing}" >/dev/null 2>&1 || grant_rc=$?
+assert_equals "grant succeeds even when plugin file is absent" "0" "${grant_rc}"
+assert_contains "grant writes key for absent plugin" "\"${grant_missing}\" {" "$(< "${grant_perms}")"
+
+# No-arg grant targets the default installed wasm under ZELLIJ_PLUGINS.
+grant_default_perms="${grant_home}/default-permissions.kdl"
+env \
+    PATH="${stub_dir}:${PATH}" \
+    HOME="${grant_home}" \
+    ZELLIJ_PLUGINS="${grant_home}/.config/zellij/plugins" \
+    SHOWY_QUOTA_ZELLIJ_PERMISSIONS_FILE="${grant_default_perms}" \
+    "${REPO_ROOT}/bin/showy-quota" --grant-zellij >/dev/null
+assert_contains "no-arg grant targets default plugin name" "/showy-quota-zellij.wasm\" {" "$(< "${grant_default_perms}")"
+
+# ── zellij renderer ──────────────────────────────────────────────────
 printf 'zellij renderer\n'
 
 sextant_fixture="${TMP}/codexbar-sextant.json"
@@ -1686,6 +1740,7 @@ out=$(
     SHOWY_QUOTA_CODEXBAR_SERVE_URL="${serve_url}" \
     SHOWY_QUOTA_TEST_SERVE_URL="${serve_url}" \
     SHOWY_QUOTA_TEST_SERVE_FIXTURE="${FIXTURE_DIR}/codexbar-realistic.json" \
+    SHOWY_QUOTA_TEST_CURL_MAX_TIME_FILE="${cache}/curl-max-time" \
     "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
 ) || rc=$?
 if (( rc == 0 )) && printf '%s' "${out}" | jq -e 'type == "array" and any(.provider == "codex")' >/dev/null 2>&1; then
@@ -1694,6 +1749,7 @@ else
     fail "fetcher reads codexbar serve usage endpoint" "rc=${rc}; out=${out}"
 fi
 assert_equals "fetcher records serve cache source" "serve" "$(< "${cache}/source")"
+assert_equals "fetcher uses production-safe default serve timeout" "10" "$(< "${cache}/curl-max-time")"
 
 large_payload_fixture="${TMP}/codexbar-large-payload.json"
 python3 -c '
@@ -1740,7 +1796,6 @@ cache=$(mk_cache)
 rc=0
 out=$(
     run_with_test_timeout 5 env \
-    SHOWY_QUOTA_TEST_CURL_MAX_TIME_FILE="${cache}/curl-max-time" \
         PATH="${stub_dir}:${PATH}" \
         SHOWY_QUOTA_NO_CONFIG=1 \
         SHOWY_QUOTA_CACHE_DIR="${cache}" \
@@ -1749,7 +1804,6 @@ out=$(
         "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
 ) || rc=$?
 if (( rc == 0 )) && printf '%s' "${out}" | jq -e 'type == "array" and (length == 2) and any(.[]; .provider == "codex" and (.pad | length == 600)) and any(.[]; .provider == "claude" and (.pad | length == 601))' >/dev/null 2>&1; then
-assert_equals "fetcher uses production-safe default serve timeout" "10" "$(< "${cache}/curl-max-time")"
     ok "fetcher validates large provider payload without hanging"
 else
     fail "fetcher validates large provider payload without hanging" "rc=${rc}; out=${out}"

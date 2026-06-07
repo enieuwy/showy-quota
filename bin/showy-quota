@@ -26,7 +26,7 @@ THEME_NAME_RE='^[A-Za-z0-9._-]+$'
 
 usage() {
     printf '%s\n' \
-        'Usage: showy-quota [--set <name>|--unset|--current|--list|--preview <name>|--diagnose [--json]]' \
+        'Usage: showy-quota [--set <name>|--unset|--current|--list|--preview <name>|--diagnose [--json]|--grant-zellij [path]]' \
         '' \
         'With no flags, opens an interactive theme selector when fzf and a TTY are available.' \
         'Without fzf or a TTY, prints a deterministic theme list and exact set/unset commands.' \
@@ -38,6 +38,7 @@ usage() {
         '  --list            Print available theme names, one per line' \
         '  --preview <name>  Print one ANSI preview strip for a theme' \
         '  --diagnose        Print runtime state useful for bug reports (--json for machines)' \
+        '  --grant-zellij [p] Pre-grant Zellij plugin permissions (writes permissions.kdl)' \
         '  -h, --help        Show this help'
 }
 
@@ -572,6 +573,117 @@ diagnose() {
     fi
 }
 
+zellij_permissions_file() {
+    if [[ -n "${SHOWY_QUOTA_ZELLIJ_PERMISSIONS_FILE:-}" ]]; then
+        printf '%s' "${SHOWY_QUOTA_ZELLIJ_PERMISSIONS_FILE}"
+        return 0
+    fi
+    local dir
+    case "$(uname -s 2>/dev/null || printf 'unknown')" in
+        Darwin) dir="${HOME}/Library/Caches/org.Zellij-Contributors.Zellij" ;;
+        *)      dir="${XDG_CACHE_HOME:-${HOME}/.cache}/zellij" ;;
+    esac
+    printf '%s/permissions.kdl' "${dir}"
+}
+
+# Expand a leading ~ and make the path absolute without resolving symlinks,
+# matching how Zellij derives a plugin's permission-cache key (shellexpand only).
+resolve_abs_path() {
+    local path="$1" tilde='~'
+    if [[ "${path}" == "${tilde}" ]]; then
+        path="${HOME}"
+    elif [[ "${path}" == "${tilde}/"* ]]; then
+        path="${HOME}/${path:2}"
+    fi
+    [[ "${path}" == /* ]] || path="$(pwd -P)/${path}"
+    printf '%s' "${path}"
+}
+
+# Pre-grant the standalone Zellij plugin's permissions so it never prompts on
+# first launch. The grant lives in Zellij's permissions.kdl (a cache file that
+# macOS may purge), keyed by the plugin's location; re-running this is safe and
+# re-heals after a purge. Other plugins' grants are preserved.
+grant_zellij() {
+    local plugin_arg="${1:-}" plugin_path plugins_dir
+    if [[ -n "${plugin_arg}" ]]; then
+        plugin_path="$(resolve_abs_path "${plugin_arg}")"
+    else
+        plugins_dir="${ZELLIJ_PLUGINS:-${HOME}/.config/zellij/plugins}"
+        plugin_path="$(resolve_abs_path "${plugins_dir}/showy-quota-zellij.wasm")"
+    fi
+
+    if [[ ! -e "${plugin_path}" ]]; then
+        printf 'showy-quota: warning: no plugin file at %s\n' "${plugin_path}" >&2
+        printf 'showy-quota: granting anyway — ensure this matches the layout "location" entry\n' >&2
+    fi
+
+    # Zellij 0.44.x keys grants on the bare absolute path; older versions used
+    # the `file:` URL form. Write every plausible key so the grant survives
+    # version differences and home-relative `file:~` layout entries.
+    local -a keys=("${plugin_path}" "file:${plugin_path}")
+    [[ "${plugin_path}" == "${HOME}/"* ]] && keys+=("file:~/${plugin_path#"${HOME}/"}")
+
+    local perms_file perms_dir
+    perms_file="$(zellij_permissions_file)"
+    perms_dir="${perms_file%/*}"
+    mkdir -p -- "${perms_dir}" || die "cannot create ${perms_dir}"
+
+    # Rebuild the file: drop any block we own (idempotent), preserve the rest.
+    local block_re='^[[:space:]]*"?([^"{]*[^"[:space:]{])"?[[:space:]]*\{[[:space:]]*$'
+    local close_re='^[[:space:]]*\}[[:space:]]*$'
+    local -a kept=()
+    local skipping=0 line name key managed last
+    if [[ -f "${perms_file}" ]]; then
+        while IFS= read -r line || [[ -n "${line}" ]]; do
+            if (( skipping )); then
+                [[ "${line}" =~ ${close_re} ]] && skipping=0
+                continue
+            fi
+            if [[ "${line}" =~ ${block_re} ]]; then
+                name="${BASH_REMATCH[1]}"
+                managed=0
+                for key in "${keys[@]}"; do
+                    [[ "${name}" == "${key}" ]] && { managed=1; break; }
+                done
+                if (( managed )); then
+                    skipping=1
+                    continue
+                fi
+            fi
+            kept+=("${line}")
+        done < "${perms_file}"
+    fi
+    # Drop trailing blank lines so appended blocks sit flush.
+    while ((${#kept[@]})); do
+        last=$(( ${#kept[@]} - 1 ))
+        [[ -z "${kept[$last]}" ]] || break
+        unset "kept[$last]"
+    done
+
+    local tmp
+    tmp="$(mktemp "${perms_file}.tmp.XXXXXX")" || die "cannot create temporary file next to ${perms_file}"
+    if ! {
+        if ((${#kept[@]})); then printf '%s\n' "${kept[@]}"; fi
+        for key in "${keys[@]}"; do
+            printf '"%s" {\n    WebAccess\n    OpenTerminalsOrPlugins\n    RunCommands\n}\n' "${key}"
+        done
+    } > "${tmp}"; then
+        rm -f -- "${tmp}"
+        die "cannot write temporary file next to ${perms_file}"
+    fi
+    if ! mv -f -- "${tmp}" "${perms_file}"; then
+        rm -f -- "${tmp}"
+        die "cannot replace ${perms_file}; temporary file left behind"
+    fi
+
+    printf 'showy-quota: pre-granted Zellij plugin permissions\n'
+    printf '  permissions file: %s\n' "${perms_file}"
+    printf '  plugin path:      %s\n' "${plugin_path}"
+    printf '  keys written:     %s\n' "${#keys[@]}"
+    printf '  permissions:      WebAccess OpenTerminalsOrPlugins RunCommands\n'
+    printf 'Open a new Zellij tab (or restart Zellij) for the grant to take effect.\n'
+}
+
 main() {
     if (($# == 0)); then
         run_selector
@@ -606,6 +718,14 @@ main() {
             else
                 (($# == 1)) || usage_error '--diagnose only accepts --json'
                 diagnose
+            fi
+            ;;
+        --grant-zellij)
+            if (($# == 2)); then
+                grant_zellij "$2"
+            else
+                (($# == 1)) || usage_error '--grant-zellij accepts at most one plugin path'
+                grant_zellij ""
             fi
             ;;
         -h|--help)

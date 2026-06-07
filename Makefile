@@ -29,7 +29,7 @@ PLUGIN_CRATE  := showy-quota-zellij
 PLUGIN_WASM   := $(REPO)/target/wasm32-wasip1/release/showy-quota-zellij.wasm
 PLUGIN_TARGET := $(ZELLIJ_PLUGINS)/showy-quota-zellij.wasm
 
-.PHONY: help doctor diagnose install install-bin install-sketchybar plugin install-plugin install-all uninstall test lint clean
+.PHONY: help doctor diagnose install install-bin install-sketchybar plugin install-plugin grant-zellij-permissions install-all uninstall test lint clean
 
 help: ## Show this help.
 	@awk 'BEGIN{FS=":.*##"}/^[a-zA-Z_-]+:.*##/{printf "  \033[36m%-20s\033[0m %s\n",$$1,$$2}' $(MAKEFILE_LIST)
@@ -110,7 +110,10 @@ install-plugin: plugin ## Install the standalone Zellij WASM plugin.
 	fi
 	@cp -f "$(PLUGIN_WASM)" "$(PLUGIN_TARGET)"
 	@printf 'installed %s\n' "$(PLUGIN_TARGET)"
+	@printf 'optional: run `make grant-zellij-permissions` to pre-grant Zellij permissions and avoid the first-launch prompt\n'
 
+grant-zellij-permissions: ## Pre-grant Zellij plugin permissions (override path with PLUGIN=/abs/plugin.wasm).
+	@ZELLIJ_PLUGINS="$(ZELLIJ_PLUGINS)" "$(REPO)/bin/showy-quota" --grant-zellij $(PLUGIN)
 
 install-all: install-bin install-sketchybar install-plugin ## Install shared scripts and every optional integration.
 uninstall: ## Remove symlinks that this Makefile created.

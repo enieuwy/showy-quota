@@ -111,6 +111,17 @@ enum CliFallback {
     Degraded,
 }
 
+fn requested_permissions(manage_serve: bool, cli_fallback: CliFallback) -> Vec<PermissionType> {
+    let mut permissions = vec![PermissionType::WebAccess];
+    if manage_serve {
+        permissions.push(PermissionType::OpenTerminalsOrPlugins);
+    }
+    if cli_fallback != CliFallback::Off {
+        permissions.push(PermissionType::RunCommands);
+    }
+    permissions
+}
+
 #[derive(Debug, Default, Clone)]
 struct ProviderFallbackState {
     in_flight: bool,
@@ -276,11 +287,8 @@ impl ZellijPlugin for State {
         self.permissions_granted = true;
         shim_set_timeout(0.1);
 
-        shim_request_permission(&[
-            PermissionType::WebAccess,
-            PermissionType::OpenTerminalsOrPlugins,
-            PermissionType::RunCommands,
-        ]);
+        let permissions = requested_permissions(self.manage_serve, self.cli_fallback);
+        shim_request_permission(&permissions);
     }
     fn update(&mut self, event: Event) -> bool {
         match event {
@@ -1232,6 +1240,33 @@ mod tests {
             .cloned()
             .collect();
         serde_json::to_vec(&serde_json::Value::Array(filtered)).expect("re-serialize")
+    }
+
+    #[test]
+    fn requested_permissions_follow_enabled_runtime_paths() {
+        assert_eq!(
+            requested_permissions(true, CliFallback::Degraded),
+            vec![
+                PermissionType::WebAccess,
+                PermissionType::OpenTerminalsOrPlugins,
+                PermissionType::RunCommands,
+            ]
+        );
+        assert_eq!(
+            requested_permissions(false, CliFallback::Degraded),
+            vec![PermissionType::WebAccess, PermissionType::RunCommands]
+        );
+        assert_eq!(
+            requested_permissions(true, CliFallback::Off),
+            vec![
+                PermissionType::WebAccess,
+                PermissionType::OpenTerminalsOrPlugins,
+            ]
+        );
+        assert_eq!(
+            requested_permissions(false, CliFallback::Off),
+            vec![PermissionType::WebAccess]
+        );
     }
 
     #[test]
