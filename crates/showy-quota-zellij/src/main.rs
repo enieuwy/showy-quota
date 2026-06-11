@@ -13,6 +13,7 @@ use zellij_tile::prelude::*;
 const HEALTH_KIND: &str = "showy-quota-health";
 const USAGE_KIND: &str = "showy-quota-usage";
 const FALLBACK_DISCOVER_KIND: &str = "showy-quota-fallback-discover";
+const FALLBACK_DISCOVER_ATTEMPT_KEY: &str = "showy-quota-discover-attempt";
 const FALLBACK_PROVIDER_KIND: &str = "showy-quota-fallback-provider";
 const FALLBACK_PROVIDER_CONTEXT_KEY: &str = "showy-quota-provider";
 const FALLBACK_PROVIDER_ATTEMPT_KEY: &str = "showy-quota-provider-attempt";
@@ -166,6 +167,10 @@ struct State {
     discovered_providers: Vec<String>,
     discovered_providers_at: Option<f64>,
     discovery_in_flight: bool,
+    discovery_attempt_token: Option<String>,
+    discovery_started_at: Option<f64>,
+    usage_after_discovery: bool,
+    serve_inventory_mismatch: bool,
     discovery_failed_at: Option<f64>,
     discovery_failure_backoff_seconds: f64,
     // Per-provider fallback state: tracks in-flight commands and last-known
@@ -200,6 +205,10 @@ impl Default for State {
             discovered_providers: Vec::new(),
             discovered_providers_at: None,
             discovery_in_flight: false,
+            discovery_attempt_token: None,
+            discovery_started_at: None,
+            usage_after_discovery: false,
+            serve_inventory_mismatch: false,
             discovery_failed_at: None,
             discovery_failure_backoff_seconds: PROVIDER_DISCOVERY_BACKOFF_SECONDS_DEFAULT,
             provider_states: BTreeMap::new(),
@@ -298,6 +307,10 @@ impl ZellijPlugin for State {
                 self.health_in_flight = false;
                 self.usage_in_flight = false;
                 self.discovery_in_flight = false;
+                self.discovery_attempt_token = None;
+                self.discovery_started_at = None;
+                self.usage_after_discovery = false;
+                self.serve_inventory_mismatch = false;
                 self.clear_all_provider_in_flight();
                 self.schedule_timer();
                 self.tick();
@@ -308,6 +321,10 @@ impl ZellijPlugin for State {
                 self.health_in_flight = false;
                 self.usage_in_flight = false;
                 self.discovery_in_flight = false;
+                self.discovery_attempt_token = None;
+                self.discovery_started_at = None;
+                self.usage_after_discovery = false;
+                self.serve_inventory_mismatch = false;
                 self.clear_all_provider_in_flight();
                 self.last_output = " showy-quota: permission denied ".into();
                 true
@@ -348,7 +365,10 @@ impl ZellijPlugin for State {
                 match context.get("kind").map(String::as_str) {
                     Some(FALLBACK_DISCOVER_KIND) => {
                         let previous_output = self.last_output.clone();
-                        self.handle_discovery_result(exit, stdout);
+                        let attempt = context
+                            .get(FALLBACK_DISCOVER_ATTEMPT_KEY)
+                            .map(String::as_str);
+                        self.handle_discovery_result(exit, stdout, attempt);
                         self.last_output != previous_output
                     }
                     Some(FALLBACK_PROVIDER_KIND) => {
@@ -405,10 +425,42 @@ impl State {
     fn schedule_timer(&self) {
         shim_set_timeout(self.interval_seconds);
     }
+    fn expire_stale_discovery(&mut self) {
+        if !self.discovery_in_flight {
+            return;
+        }
+        let now = now_seconds();
+        let Some(started_at) = self.discovery_started_at else {
+            self.discovery_started_at = Some(now);
+            return;
+        };
+        if (now - started_at).max(0.0) < self.discovery_failure_backoff_seconds {
+            return;
+        }
+        self.discovery_in_flight = false;
+        self.discovery_attempt_token = None;
+        self.discovered_providers_at = None;
+        self.usage_after_discovery = false;
+        self.discovery_started_at = None;
+        self.discovery_failed_at = Some(now);
+    }
+
 
     fn tick(&mut self) {
         if !self.permissions_granted {
             return;
+        }
+        self.expire_stale_discovery();
+        if self.source == Source::Serve {
+            if self.discovery_in_flight {
+                self.usage_after_discovery = true;
+                return;
+            }
+            if self.needs_discovery() {
+                self.usage_after_discovery = true;
+                self.kick_discovery();
+                return;
+            }
         }
         match self.source {
             Source::Unknown | Source::Unavailable => self.kick_health_probe(),
@@ -461,6 +513,16 @@ impl State {
         if !self.permissions_granted || self.usage_in_flight || self.serve_url.trim().is_empty() {
             return;
         }
+        self.expire_stale_discovery();
+        if self.discovery_in_flight {
+            self.usage_after_discovery = true;
+            return;
+        }
+        if self.needs_discovery() {
+            self.usage_after_discovery = true;
+            self.kick_discovery();
+            return;
+        }
         self.usage_in_flight = true;
         let mut headers = BTreeMap::new();
         headers.insert("Accept".to_string(), "application/json".to_string());
@@ -480,7 +542,20 @@ impl State {
 
     fn handle_usage_failure(&mut self) {
         self.consecutive_serve_failures = self.consecutive_serve_failures.saturating_add(1);
-        if self.last_payload.is_some()
+        let inventory_mismatch = self.serve_inventory_mismatch;
+        self.serve_inventory_mismatch = false;
+        if self.cli_fallback != CliFallback::Off
+            && self.discovered_providers_at.is_some()
+            && self.discovered_providers.is_empty()
+        {
+            self.publish_empty_cli_payload();
+            return;
+        }
+        if inventory_mismatch && self.cli_fallback != CliFallback::Off {
+            self.set_source(Source::Cli);
+        }
+        if !inventory_mismatch
+            && self.last_payload.is_some()
             && self.consecutive_serve_failures < SERVE_FAILURES_BEFORE_CLI
         {
             self.refresh_output();
@@ -527,6 +602,10 @@ impl State {
         if !self.permissions_granted {
             return;
         }
+        self.expire_stale_discovery();
+        if self.discovery_in_flight {
+            return;
+        }
         if self.needs_discovery() {
             self.kick_discovery();
             return;
@@ -562,7 +641,7 @@ impl State {
     }
 
     fn needs_discovery(&self) -> bool {
-        if self.discovery_in_flight {
+        if self.cli_fallback == CliFallback::Off || self.discovery_in_flight {
             return false;
         }
         if let Some(discovered_at) = self.discovered_providers_at {
@@ -581,9 +660,19 @@ impl State {
     }
 
     fn kick_discovery(&mut self) {
+        if self.cli_fallback == CliFallback::Off || self.discovery_in_flight || !self.permissions_granted {
+            return;
+        }
+        let attempt_token = format!("{:.6}", now_seconds());
+        self.discovery_started_at = Some(now_seconds());
+        self.discovery_attempt_token = Some(attempt_token.clone());
         self.discovery_in_flight = true;
         let mut context = BTreeMap::new();
         context.insert("kind".to_string(), FALLBACK_DISCOVER_KIND.to_string());
+        context.insert(
+            FALLBACK_DISCOVER_ATTEMPT_KEY.to_string(),
+            attempt_token,
+        );
         let argv = [
             self.cli_command.as_str(),
             "config",
@@ -595,12 +684,24 @@ impl State {
         shim_run_command(&argv, context);
     }
 
-    fn handle_discovery_result(&mut self, exit: Option<i32>, stdout: Vec<u8>) {
+    fn handle_discovery_result(&mut self, exit: Option<i32>, stdout: Vec<u8>, attempt: Option<&str>) {
+        if attempt != self.discovery_attempt_token.as_deref() {
+            return;
+        }
         self.discovery_in_flight = false;
+        self.discovery_attempt_token = None;
+        self.discovery_started_at = None;
         let now = now_seconds();
+        let resume_usage = self.usage_after_discovery;
+        self.usage_after_discovery = false;
         if exit != Some(0) {
             self.discovery_failed_at = Some(now);
-            self.fallback_after_discovery();
+            if resume_usage {
+                self.discovered_providers_at = None;
+                self.kick_usage();
+            } else {
+                self.fallback_after_discovery();
+            }
             return;
         }
         match parse_provider_config_payload(&stdout) {
@@ -614,11 +715,20 @@ impl State {
                     self.discovered_providers.iter().cloned().collect();
                 self.provider_states.retain(|id, _| allowed.contains(id));
                 self.prune_last_payload_to_current_inventory();
-                self.fallback_after_discovery();
+                if resume_usage {
+                    self.kick_usage();
+                } else {
+                    self.fallback_after_discovery();
+                }
             }
             Err(ProviderConfigError::AllInvalid) | Err(ProviderConfigError::Parse(_)) => {
                 self.discovery_failed_at = Some(now);
-                self.fallback_after_discovery();
+                if resume_usage {
+                    self.discovered_providers_at = None;
+                    self.kick_usage();
+                } else {
+                    self.fallback_after_discovery();
+                }
             }
         }
     }
@@ -986,12 +1096,36 @@ impl State {
         let Ok(records) = parse_usage_payload(&payload) else {
             return self.render_failure();
         };
+        if source == Source::Serve
+            && self.cli_fallback != CliFallback::Off
+            && self.discovered_providers_at.is_some()
+        {
+            self.serve_inventory_mismatch = false;
+            let payload_providers: std::collections::BTreeSet<&str> = records.iter().map(|r| r.provider.as_str()).filter(|id| valid_provider_id(id)).collect();
+            let discovered_providers: std::collections::BTreeSet<&str> = self.discovered_providers.iter().map(|s| s.as_str()).filter(|id| valid_provider_id(id)).collect();
+            if discovered_providers.is_empty() && !payload_providers.is_empty() {
+                self.serve_inventory_mismatch = true;
+                return false;
+            }
+            if !discovered_providers.is_subset(&payload_providers) {
+                self.serve_inventory_mismatch = true;
+                return false;
+            }
+            // Serve may have extra providers (newly enabled) — accept the
+            // payload but force re-discovery so subsequent ticks use the
+            // updated inventory for per-provider fallback eligibility.
+            if payload_providers != discovered_providers {
+                self.discovered_providers_at = None;
+            }
+        }
+
         if !payload_has_renderable_provider(&records)
             && self.last_payload.is_some()
             && !(source == Source::Cli && records.is_empty())
         {
             return self.render_failure();
         }
+
         // When serve returns a fresh aggregate, refresh per-provider state so
         // a future degraded transition has a baseline of every record CodexBar
         // just published.
@@ -1430,6 +1564,191 @@ mod tests {
     }
 
     #[test]
+    fn accept_payload_drift_handling() {
+        let mut state = State {
+            permissions_granted: true,
+            source: Source::Serve,
+            ..State::default()
+        };
+
+        // 1. Exact match is accepted and discovery remains valid
+        state.discovered_providers = vec!["claude".to_string(), "codex".to_string(), "gemini".to_string(), "cursor".to_string()];
+        state.discovered_providers_at = Some(now_seconds());
+        assert!(state.accept_payload(mixed_payload(), Source::Serve));
+        assert!(state.discovered_providers_at.is_some());
+
+        // 2. Superset is accepted (serve has new providers) but discovery is invalidated
+        state.discovered_providers = vec!["claude".to_string(), "codex".to_string()];
+        state.discovered_providers_at = Some(now_seconds());
+        assert!(state.accept_payload(mixed_payload(), Source::Serve));
+        assert!(state.discovered_providers_at.is_none());
+
+        // 3. Subset is rejected (serve missing expected providers) and discovery remains valid
+        // so the fallback path can query the expected providers immediately.
+        state.discovered_providers = vec!["claude".to_string(), "codex".to_string(), "gemini".to_string(), "cursor".to_string(), "antigravity".to_string()];
+        state.discovered_providers_at = Some(now_seconds());
+        assert!(!state.accept_payload(mixed_payload(), Source::Serve));
+        assert!(state.discovered_providers_at.is_some());
+
+        // 4. Canonical empty inventory rejects stale non-empty serve payloads.
+        state.discovered_providers = Vec::new();
+        state.discovered_providers_at = Some(now_seconds());
+        assert!(!state.accept_payload(mixed_payload(), Source::Serve));
+        assert!(state.discovered_providers_at.is_some());
+    }
+
+    #[test]
+    fn serve_inventory_rejection_launches_provider_fallback() {
+        let mut state = State {
+            permissions_granted: true,
+            source: Source::Serve,
+            discovered_providers: vec!["claude".to_string(), "antigravity".to_string()],
+            discovered_providers_at: Some(now_seconds()),
+            last_payload: Some(mixed_payload()),
+            ..State::default()
+        };
+
+        assert!(!state.accept_payload(mixed_payload(), Source::Serve));
+        state.handle_usage_failure();
+
+        assert!(!state.discovery_in_flight);
+        assert!(state
+            .provider_states
+            .get("claude")
+            .is_some_and(|provider| provider.in_flight));
+        assert!(state
+            .provider_states
+            .get("antigravity")
+            .is_some_and(|provider| provider.in_flight));
+
+        let claude_attempt = state
+            .provider_states
+            .get("claude")
+            .and_then(|provider| provider.active_attempt_token.clone())
+            .expect("claude attempt token");
+
+        assert!(state.update(Event::RunCommandResult(
+            Some(0),
+            provider_record(&mixed_payload(), "claude"),
+            Vec::new(),
+            provider_fallback_context_with_attempt("claude", &claude_attempt),
+        )));
+        assert_eq!(state.source, Source::Cli);
+        assert!(state.last_output.contains("⚠cli"));
+    }
+
+    #[test]
+    fn empty_inventory_rejection_publishes_idle_payload() {
+        let mut state = State {
+            permissions_granted: true,
+            source: Source::Serve,
+            discovered_providers: Vec::new(),
+            discovered_providers_at: Some(now_seconds()),
+            last_payload: Some(mixed_payload()),
+            ..State::default()
+        };
+
+        assert!(!state.accept_payload(mixed_payload(), Source::Serve));
+        state.handle_usage_failure();
+
+        assert_eq!(state.last_payload.as_deref(), Some(b"[]".as_ref()));
+        assert_eq!(state.source, Source::Cli);
+    }
+
+    #[test]
+    fn health_success_waits_for_discovery_before_usage_poll() {
+        let mut state = State {
+            permissions_granted: true,
+            source: Source::Probing,
+            health_in_flight: true,
+            ..State::default()
+        };
+
+        assert!(!state.update(Event::WebRequestResult(
+            200,
+            BTreeMap::new(),
+            Vec::new(),
+            event_context(HEALTH_KIND),
+        )));
+
+        assert!(state.discovery_in_flight);
+        assert!(state.usage_after_discovery);
+        assert!(!state.usage_in_flight);
+
+        let attempt = state.discovery_attempt_token.clone().expect("discovery attempt");
+        state.handle_discovery_result(
+            Some(0),
+            br#"[{"provider":"claude","enabled":true}]"#.to_vec(),
+            Some(&attempt),
+        );
+        assert!(!state.discovery_in_flight);
+        assert!(!state.usage_after_discovery);
+        assert!(state.usage_in_flight);
+    }
+
+    #[test]
+    fn stale_discovery_result_is_ignored() {
+        let mut state = State {
+            permissions_granted: true,
+            source: Source::Serve,
+            discovery_in_flight: true,
+            discovery_attempt_token: Some("new".to_string()),
+            discovered_providers: vec!["claude".to_string()],
+            ..State::default()
+        };
+
+        state.handle_discovery_result(
+            Some(0),
+            br#"[{"provider":"codex","enabled":true}]"#.to_vec(),
+            Some("old"),
+        );
+
+        assert!(state.discovery_in_flight);
+        assert_eq!(state.discovered_providers, vec!["claude".to_string()]);
+    }
+
+    #[test]
+    fn discovery_failure_resume_does_not_validate_against_stale_inventory() {
+        let mut state = State {
+            permissions_granted: true,
+            source: Source::Serve,
+            discovery_in_flight: true,
+            usage_after_discovery: true,
+            discovered_providers: vec!["claude".to_string(), "antigravity".to_string()],
+            discovered_providers_at: Some(now_seconds() - 120.0),
+            ..State::default()
+        };
+
+        state.handle_discovery_result(Some(7), Vec::new(), None);
+
+        assert!(state.discovered_providers_at.is_none());
+        assert!(state.usage_in_flight);
+    }
+
+    #[test]
+    fn stale_discovery_in_flight_expires_before_serve_tick() {
+        let mut state = State {
+            permissions_granted: true,
+            source: Source::Serve,
+            discovery_in_flight: true,
+            discovered_providers: vec!["claude".to_string(), "antigravity".to_string()],
+            discovered_providers_at: Some(now_seconds() - 120.0),
+            usage_after_discovery: true,
+            discovery_started_at: Some(now_seconds() - 120.0),
+            discovery_failure_backoff_seconds: 60.0,
+            ..State::default()
+        };
+
+        state.tick();
+
+        assert!(!state.discovery_in_flight);
+        assert!(!state.usage_after_discovery);
+        assert!(state.discovered_providers_at.is_none());
+        assert!(state.discovery_failed_at.is_some());
+        assert!(state.usage_in_flight);
+    }
+
+    #[test]
     fn per_provider_result_after_usage_failure_is_accepted_while_probing() {
         let mut state = State {
             permissions_granted: false,
@@ -1468,6 +1787,54 @@ mod tests {
 
         assert!(state.provider_states.values().all(|s| !s.in_flight));
         assert!(!state.discovery_in_flight);
+    }
+
+    #[test]
+    fn cli_tick_waits_for_discovery_before_cache_derived_fallback() {
+        let mut state = State {
+            permissions_granted: true,
+            source: Source::Cli,
+            serve_url: String::new(),
+            last_payload: Some(mixed_payload()),
+            ..State::default()
+        };
+
+        state.tick();
+
+        assert!(state.discovery_in_flight);
+        assert!(state.provider_states.is_empty());
+    }
+
+    #[test]
+    fn serve_tick_waits_for_discovery_before_usage_poll() {
+        let mut state = State {
+            permissions_granted: true,
+            source: Source::Serve,
+            last_payload: Some(mixed_payload()),
+            discovered_providers: vec!["claude".to_string(), "antigravity".to_string()],
+            discovered_providers_at: None,
+            ..State::default()
+        };
+
+        state.tick();
+
+        assert!(state.discovery_in_flight);
+        assert!(!state.usage_in_flight);
+    }
+
+    #[test]
+    fn serve_only_tick_does_not_start_discovery_without_run_command_permission() {
+        let mut state = State {
+            permissions_granted: true,
+            source: Source::Serve,
+            cli_fallback: CliFallback::Off,
+            ..State::default()
+        };
+
+        state.tick();
+
+        assert!(!state.discovery_in_flight);
+        assert!(state.usage_in_flight);
     }
 
     #[test]
@@ -1683,7 +2050,7 @@ mod tests {
         };
         state.serve_url.clear();
         // Simulate a malformed discovery payload → records a failure stamp.
-        state.handle_discovery_result(Some(0), b"{\"providers\":[]}".to_vec());
+        state.handle_discovery_result(Some(0), b"{\"providers\":[]}".to_vec(), None);
         assert!(state.discovery_failed_at.is_some());
         // Without discovery, the eligible inventory comes from cache ids.
         let providers = state.eligible_provider_inventory();
@@ -1710,7 +2077,7 @@ mod tests {
             {"provider": "claude", "enabled": true}
         ]"#
         .to_vec();
-        state.handle_discovery_result(Some(0), payload);
+        state.handle_discovery_result(Some(0), payload, None);
         assert!(!state.provider_states.contains_key("antigravity"));
         assert_eq!(state.discovered_providers, vec!["claude".to_string()]);
     }
@@ -1729,7 +2096,7 @@ mod tests {
         ]"#
         .to_vec();
 
-        state.handle_discovery_result(Some(0), payload);
+        state.handle_discovery_result(Some(0), payload, None);
 
         let payload = state.last_payload.as_deref().expect("payload");
         let records = parse_usage_payload(payload).expect("valid payload");

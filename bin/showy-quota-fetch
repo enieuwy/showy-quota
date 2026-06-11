@@ -590,6 +590,14 @@ discover_providers() {
     [[ -n "${ids}" ]] && printf '%s\n' "${ids}"
     return 0
 }
+canonical_empty_inventory_payload() {
+    local discovered=""
+    if ! discovered=$(discover_providers 2>/dev/null | sort -u); then
+        return 1
+    fi
+    [[ -z "${discovered}" ]] || return 1
+    printf '[]'
+}
 
 # Newline-separated provider ids, deduplicated in first-seen order, after
 # applying SHOWY_QUOTA_PROVIDERS allow-list, SHOWY_QUOTA_PROVIDERS_EXCLUDE,
@@ -1140,8 +1148,22 @@ serve_payload_is_publishable() {
     ' >/dev/null 2>&1
 }
 
+serve_payload_inventory() {
+    printf '%s' "$1" | jq -r '
+        if type == "array" then
+            .[]
+            | .provider?
+            | select(type == "string")
+            | select(test("^[A-Za-z0-9_.-]+$"))
+        else
+            error("not an array")
+        end
+    ' 2>/dev/null | sort -u
+}
+
 run_codexbar_serve_with_recovery() {
-    local out attempt threshold max_attempts=1
+    local check_inventory="${1:-0}"
+    local out attempt threshold max_attempts=1 inventory_check_available=0 inventory_drift=0
     threshold=$(serve_failure_restart_threshold)
     if [[ "${SHOWY_QUOTA_MANAGE_SERVE:-1}" == "1" ]] && managed_serve_pid_alive; then
         max_attempts="${threshold}"
@@ -1150,12 +1172,47 @@ run_codexbar_serve_with_recovery() {
         serve_failure_backoff_active && return 1
     fi
 
-
+    local expected_inventory=""
+    if (( check_inventory )); then
+        if expected_inventory=$(discover_providers 2>/dev/null | sort -u); then
+            inventory_check_available=1
+        else
+            expected_inventory=""
+        fi
+    fi
+    if (( inventory_check_available )) && [[ -z "${expected_inventory}" ]]; then
+        showy_quota_log "codexbar reports no enabled providers; skipping serve usage probe"
+        return 2
+    fi
     for (( attempt=1; attempt<=max_attempts; attempt++ )); do
-        if out=$(run_codexbar_serve) && serve_payload_is_publishable "${out}"; then
-            clear_serve_failure
-            printf '%s' "${out}"
-            return 0
+        if out=$(run_codexbar_serve); then
+            if serve_payload_is_publishable "${out}"; then
+                if (( inventory_check_available )); then
+                    local actual_inventory
+                    actual_inventory=$(serve_payload_inventory "${out}") || actual_inventory=""
+                    if [[ "${expected_inventory}" != "${actual_inventory}" ]]; then
+                        showy_quota_log "codexbar serve inventory is stale: expected [$(printf '%s' "${expected_inventory}" | tr '\n' ' ')] but got [$(printf '%s' "${actual_inventory}" | tr '\n' ' ')]"
+                        inventory_drift=1
+                        break
+                    fi
+                fi
+                clear_serve_failure
+                printf '%s' "${out}"
+                return 0
+            elif (( inventory_check_available )); then
+                local actual_inventory
+                if actual_inventory=$(serve_payload_inventory "${out}"); then
+                    if [[ -z "${expected_inventory}" ]] || [[ "${expected_inventory}" != "${actual_inventory}" ]]; then
+                        showy_quota_log "codexbar serve inventory is stale or empty: expected [$(printf '%s' "${expected_inventory}" | tr '\n' ' ')] but got [$(printf '%s' "${actual_inventory}" | tr '\n' ' ')]"
+                        inventory_drift=1
+                        break
+                    fi
+                elif [[ -z "${expected_inventory}" ]]; then
+                    showy_quota_log "codexbar serve inventory is empty; rejecting invalid serve payload"
+                    inventory_drift=1
+                    break
+                fi
+            fi
         fi
     done
 
@@ -1165,15 +1222,43 @@ run_codexbar_serve_with_recovery() {
     then
         showy_quota_log "codexbar serve /usage failed ${max_attempts} time(s) while /health was OK; restarting managed serve"
         if restart_managed_serve_once && wait_for_serve_health; then
-            if out=$(run_codexbar_serve) && serve_payload_is_publishable "${out}"; then
-                clear_serve_failure
-                printf '%s' "${out}"
-                return 0
+            if out=$(run_codexbar_serve); then
+                if serve_payload_is_publishable "${out}"; then
+                    if (( inventory_check_available )); then
+                        local actual_inventory
+                        actual_inventory=$(serve_payload_inventory "${out}") || actual_inventory=""
+                        if [[ "${expected_inventory}" != "${actual_inventory}" ]]; then
+                            showy_quota_log "codexbar serve inventory still stale after restart: expected [$(printf '%s' "${expected_inventory}" | tr '\n' ' ')] but got [$(printf '%s' "${actual_inventory}" | tr '\n' ' ')]"
+                            inventory_drift=1
+                            record_serve_failure
+                            return 2
+                        fi
+                    fi
+                    clear_serve_failure
+                    printf '%s' "${out}"
+                    return 0
+                elif (( inventory_check_available )); then
+                    local actual_inventory
+                    if actual_inventory=$(serve_payload_inventory "${out}"); then
+                        if [[ -z "${expected_inventory}" ]] || [[ "${expected_inventory}" != "${actual_inventory}" ]]; then
+                            showy_quota_log "codexbar serve inventory still stale or empty after restart: expected [$(printf '%s' "${expected_inventory}" | tr '\n' ' ')] but got [$(printf '%s' "${actual_inventory}" | tr '\n' ' ')]"
+                            inventory_drift=1
+                            record_serve_failure
+                            return 2
+                        fi
+                    elif [[ -z "${expected_inventory}" ]]; then
+                        showy_quota_log "codexbar serve inventory still empty after restart; rejecting invalid serve payload"
+                        inventory_drift=1
+                        record_serve_failure
+                        return 2
+                    fi
+                fi
             fi
         fi
     fi
 
     record_serve_failure
+    (( inventory_drift )) && return 2
     return 1
 }
 
@@ -1232,28 +1317,38 @@ except subprocess.TimeoutExpired:
 }
 
 run_codexbar() {
-    local out cache_source="" probe_serve=1
+    local out cache_source="" probe_serve=1 serve_rc=0
     if [[ -n "${SHOWY_QUOTA_CODEXBAR_SERVE_URL}" ]]; then
+        if out=$(canonical_empty_inventory_payload); then
+            clear_serve_failure
+            clear_cli_failure
+            printf '%s\n' "cli" > "${SHOWY_QUOTA_REFRESH_SOURCE_FILE}"
+            printf '%s' "${out}"
+            return 0
+        fi
         cache_source="$(showy_quota_cache_source)"
         if (( force_refresh == 0 )) && cache_is_valid && [[ "${cache_source}" != "serve" ]] && serve_failure_backoff_active; then
             probe_serve=0
         fi
         if (( probe_serve )); then
             ensure_serve_running || true
-            if out=$(run_codexbar_serve_with_recovery); then
+            serve_rc=0
+            if out=$(run_codexbar_serve_with_recovery 1); then
                 printf '%s\n' "serve" > "${SHOWY_QUOTA_REFRESH_SOURCE_FILE}"
                 printf '%s' "${out}"
                 return 0
+            else
+                serve_rc=$?
             fi
         fi
-        if (( force_refresh == 0 )) && cache_is_valid && ! serve_failure_cli_fallback_allowed; then
+        if (( force_refresh == 0 )) && cache_is_valid && (( serve_rc != 2 )) && ! serve_failure_cli_fallback_allowed; then
             showy_quota_log "preserving valid cache after codexbar serve failure ($(serve_failure_count)/$(serve_failure_cli_threshold)); skipping CLI fallback"
             return 1
         fi
         showy_quota_log "codexbar serve fetch failed or returned no renderable usage; falling back to CLI"
     fi
 
-    if cli_failure_backoff_active; then
+    if (( serve_rc != 2 )) && cli_failure_backoff_active; then
         return 1
     fi
 
@@ -1315,13 +1410,31 @@ publish_cache_payload() {
 }
 
 refresh_cache_from_serve() {
-    local out
+    local out serve_rc=0
     [[ -n "${SHOWY_QUOTA_CODEXBAR_SERVE_URL}" ]] || return 127
+    if out=$(canonical_empty_inventory_payload); then
+        clear_serve_failure
+        clear_cli_failure
+        publish_cache_payload "${out}" "cli"
+        return $?
+    fi
     serve_failure_backoff_active && return 1
     ensure_serve_running || true
-    if out=$(run_codexbar_serve_with_recovery); then
+    serve_rc=0
+    if out=$(run_codexbar_serve_with_recovery 1); then
         publish_cache_payload "${out}" "serve"
         return $?
+    else
+        serve_rc=$?
+    fi
+    if (( serve_rc == 2 )); then
+        showy_quota_log "codexbar serve inventory drift; falling back to CLI"
+        if out=$(run_codexbar_cli_per_provider); then
+            clear_cli_failure
+            publish_cache_payload "${out}" "cli"
+            return $?
+        fi
+        record_cli_failure
     fi
     showy_quota_log "codexbar serve fetch failed or returned no renderable usage"
     return 1

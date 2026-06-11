@@ -2231,7 +2231,7 @@ out=$(
     SHOWY_QUOTA_CODEXBAR_SERVE_URL="${serve_url}" \
     SHOWY_QUOTA_TEST_SERVE_URL="${serve_url}" \
     SHOWY_QUOTA_TEST_SERVE_FIXTURE="${FIXTURE_DIR}/codexbar-realistic.json" \
-    SHOWY_QUOTA_TEST_FIXTURE="${FIXTURE_DIR}/codexbar-mixed.json" \
+    SHOWY_QUOTA_TEST_FIXTURE="${FIXTURE_DIR}/codexbar-realistic.json" \
     "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
 ) || rc=$?
 source_value="missing"
@@ -2356,6 +2356,7 @@ if (( rc == 0 )) && printf '%s' "${out}" | jq -e 'type == "array" and any(.provi
 else
     fail "fetcher backs off repeated fast serve probes" "rc=${rc}; out=${out}"
 fi
+cp "${FIXTURE_DIR}/codexbar-low.json" "${cache}/usage.json"
 rc=0
 out=$(
     PATH="${stub_dir}:${PATH}" \
@@ -2366,6 +2367,7 @@ out=$(
     SHOWY_QUOTA_CODEXBAR_SERVE_REFRESH_SECONDS=0 \
     SHOWY_QUOTA_TEST_SERVE_URL="${serve_url}" \
     SHOWY_QUOTA_TEST_SERVE_FIXTURE="${FIXTURE_DIR}/codexbar-low.json" \
+    SHOWY_QUOTA_TEST_FIXTURE="${FIXTURE_DIR}/codexbar-low.json" \
     "${REPO_ROOT}/bin/showy-quota-fetch" --refresh 2>/dev/null
 ) || rc=$?
 if (( rc == 0 )) && printf '%s' "${out}" | jq -e 'type == "array" and length == 1 and .[0].provider == "claude"' >/dev/null 2>&1; then
@@ -2861,6 +2863,86 @@ if (( rc == 0 )) && [[ "${out}" == "[]" ]] && [[ "$(< "${cache}/source")" == "cl
     ok "fetcher publishes empty cache when codexbar reports no enabled providers"
 else
     fail "fetcher publishes empty cache when codexbar reports no enabled providers" "rc=${rc}; out=${out}"
+fi
+
+cache=$(mk_cache)
+cp "${FIXTURE_DIR}/codexbar-mixed.json" "${cache}/usage.json"
+rc=0
+out=$(
+    PATH="${stub_dir}:${PATH}" \
+    SHOWY_QUOTA_NO_CONFIG=1 \
+    SHOWY_QUOTA_CACHE_DIR="${cache}" \
+    SHOWY_QUOTA_CODEXBAR_BIN="${empty_inv_dir}/codexbar" \
+    SHOWY_QUOTA_CODEXBAR_SERVE_URL="${serve_url}" \
+    SHOWY_QUOTA_REFRESH_SECONDS=0 \
+    SHOWY_QUOTA_TEST_SERVE_URL="${serve_url}" \
+    SHOWY_QUOTA_TEST_SERVE_FIXTURE="${FIXTURE_DIR}/codexbar-mixed.json" \
+    "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
+) || rc=$?
+if (( rc == 0 )) && [[ "${out}" == "[]" ]] && [[ "$(< "${cache}/source")" == "cli" ]]; then
+    ok "fetcher rejects stale serve payload when inventory is empty"
+else
+    fail "fetcher rejects stale serve payload when inventory is empty" "rc=${rc}; out=${out}"
+fi
+
+cache=$(mk_cache)
+cp "${FIXTURE_DIR}/codexbar-mixed.json" "${cache}/usage.json"
+rc=0
+out=$(
+    PATH="${stub_dir}:${PATH}" \
+    SHOWY_QUOTA_NO_CONFIG=1 \
+    SHOWY_QUOTA_CACHE_DIR="${cache}" \
+    SHOWY_QUOTA_CODEXBAR_BIN="${empty_inv_dir}/codexbar" \
+    SHOWY_QUOTA_CODEXBAR_SERVE_URL="${serve_url}" \
+    SHOWY_QUOTA_REFRESH_SECONDS=0 \
+    SHOWY_QUOTA_TEST_SERVE_URL="${serve_url}" \
+    SHOWY_QUOTA_TEST_SERVE_FIXTURE="${FIXTURE_DIR}/codexbar-empty.json" \
+    "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
+) || rc=$?
+if (( rc == 0 )) && [[ "${out}" == "[]" ]] && [[ "$(< "${cache}/source")" == "cli" ]]; then
+    ok "fetcher rejects empty serve payload when inventory is empty"
+else
+    fail "fetcher rejects empty serve payload when inventory is empty" "rc=${rc}; out=${out}"
+fi
+
+cache=$(mk_cache)
+cp "${FIXTURE_DIR}/codexbar-mixed.json" "${cache}/usage.json"
+rc=0
+out=$(
+    PATH="${stub_dir}:${PATH}" \
+    SHOWY_QUOTA_NO_CONFIG=1 \
+    SHOWY_QUOTA_CACHE_DIR="${cache}" \
+    SHOWY_QUOTA_CODEXBAR_BIN="${empty_inv_dir}/codexbar" \
+    SHOWY_QUOTA_CODEXBAR_SERVE_URL="${serve_url}" \
+    SHOWY_QUOTA_REFRESH_SECONDS=0 \
+    SHOWY_QUOTA_TEST_SERVE_URL="${serve_url}" \
+    SHOWY_QUOTA_TEST_SERVE_FIXTURE="${FIXTURE_DIR}/codexbar-non-array.json" \
+    "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
+) || rc=$?
+if (( rc == 0 )) && [[ "${out}" == "[]" ]] && [[ "$(< "${cache}/source")" == "cli" ]]; then
+    ok "fetcher rejects invalid serve payload when inventory is empty"
+else
+    fail "fetcher rejects invalid serve payload when inventory is empty" "rc=${rc}; out=${out}"
+fi
+
+cache=$(mk_cache)
+cp "${FIXTURE_DIR}/codexbar-mixed.json" "${cache}/usage.json"
+rc=0
+out=$(
+    PATH="${stub_dir}:${PATH}" \
+    SHOWY_QUOTA_NO_CONFIG=1 \
+    SHOWY_QUOTA_CACHE_DIR="${cache}" \
+    SHOWY_QUOTA_CODEXBAR_BIN="${empty_inv_dir}/codexbar" \
+    SHOWY_QUOTA_CODEXBAR_SERVE_URL="${serve_url}" \
+    SHOWY_QUOTA_REFRESH_SECONDS=0 \
+    SHOWY_QUOTA_TEST_SERVE_URL="http://127.0.0.1:18081" \
+    SHOWY_QUOTA_TEST_SERVE_FIXTURE="${FIXTURE_DIR}/codexbar-mixed.json" \
+    "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
+) || rc=$?
+if (( rc == 0 )) && [[ "${out}" == "[]" ]] && [[ "$(< "${cache}/source")" == "cli" ]]; then
+    ok "fetcher skips unreachable serve probe when inventory is empty"
+else
+    fail "fetcher skips unreachable serve probe when inventory is empty" "rc=${rc}; out=${out}"
 fi
 
 # All-invalid inventory: a discovery response containing only unsafe provider
