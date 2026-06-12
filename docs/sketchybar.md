@@ -72,6 +72,13 @@ For compatibility with existing sketchybarrc setups, the bootstrap item also
 forwards `PILL_RADIUS` / `PILL_HEIGHT` into those envs when the explicit
 `SHOWY_QUOTA_SKETCHYBAR_PILL_*` knobs are unset.
 
+## Countdown label
+
+Each provider's countdown label is pinned to a fixed width
+(`SHOWY_QUOTA_SKETCHYBAR_LABEL_WIDTH`, default `27`) so the pill does not
+jitter as the remaining-time string changes length (`59m` → `1:00` →
+`idle`). Set it to `dynamic` to restore auto-sizing.
+
 ## Click action
 
 Clicking the usage rows, label, or a non-degraded provider icon runs

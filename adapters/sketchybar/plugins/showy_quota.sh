@@ -303,6 +303,8 @@ declare_provider_items() {
                    label.font.size=11 \
                    label.padding_left=0 \
                    label.padding_right=4 \
+                   label.width="${SHOWY_QUOTA_SKETCHYBAR_LABEL_WIDTH}" \
+                   label.align=left \
                    background.color=0x00000000 \
                    background.height=0 \
                    click_script="${CLICK}" >/dev/null 2>&1 || true
@@ -825,7 +827,7 @@ while IFS=$'\x1f' read -r pid rem_p p_reset rem_s s_reset s_window rem_t t_reset
     tertiary_marker_click=$(slider_click_script "${tertiary_marker_item}" "${marker_t_pct:-0}")
 
     args=(
-        --set "showy_quota.${pid}.label" drawing=on label="${label}" label.color="${color}" background.color=0x00000000 background.height=0
+        --set "showy_quota.${pid}.label" drawing=on label="${label}" label.color="${color}" label.width="${SHOWY_QUOTA_SKETCHYBAR_LABEL_WIDTH}" label.align=left background.color=0x00000000 background.height=0
     )
     if [[ -n "${font_icon}" ]]; then
         args+=( --set "showy_quota.${pid}.icon" drawing=on icon.drawing=on icon="${font_icon}" icon.font="${SHOWY_QUOTA_SKETCHYBAR_PROVIDER_ICON_FONT}" icon.color="${font_icon_color}" icon.align=center icon.width="${SHOWY_QUOTA_SKETCHYBAR_ICON_WIDTH}" icon.padding_left=0 icon.padding_right=0 label.drawing=off background.image.drawing=off background.color=0x00000000 background.height=0 padding_left="${SHOWY_QUOTA_SKETCHYBAR_ICON_PADDING_LEFT}" padding_right=0 width="${font_icon_item_width}" click_script="${icon_click}" )
