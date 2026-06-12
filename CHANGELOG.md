@@ -6,6 +6,27 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- Shell and standalone Zellij renderers now keep providers whose primary quota
+  window is absent when secondary or tertiary quota windows are still valid.
+  This restores Antigravity, whose CodexBar payload currently reports
+  `usage.primary: null` with usable secondary/tertiary windows.
+- Usage window slots are now semantic across every renderer (SketchyBar,
+  tmux, Zellij shell strip, and the standalone Zellij plugin): primary,
+  secondary, and tertiary windows always map to their documented top, middle,
+  and bottom rows. Previously missing windows were compacted away, so a
+  provider without a primary window rendered its secondary window in the
+  primary row and borrowed its reset for the countdown. A missing primary now
+  renders an empty top row with an `idle` label, while present windows stay
+  in their own rows, markers, and color roles.
+- `bin/showy-quota-fetch` now treats a successful empty CodexBar provider
+  inventory as canonical empty state, publishes `[]`, and bypasses stale serve
+  or CLI backoff data instead of preserving disabled providers.
+- The standalone Zellij plugin now validates `codexbar serve /usage` provider
+  sets against the discovered canonical inventory before publishing. Any
+  mismatch falls back to per-provider CLI data or an empty payload, preventing
+  stale disabled providers from rendering after CodexBar config changes.
+
 ## [0.2.4] — 2026-06-07
 
 ### Added

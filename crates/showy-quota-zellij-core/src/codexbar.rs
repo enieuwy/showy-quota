@@ -52,6 +52,20 @@ impl UsageWindow {
     }
 }
 
+impl Usage {
+    pub fn has_renderable_window(&self) -> bool {
+        [
+            self.primary.as_ref(),
+            self.secondary.as_ref(),
+            self.tertiary.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|window| window.used_percent.is_some())
+    }
+}
+
+
 pub fn parse_usage_payload(payload: &[u8]) -> Result<Vec<ProviderRecord>, serde_json::Error> {
     let records: Vec<ProviderRecord> = serde_json::from_slice(payload)?;
     if records.iter().all(valid_provider_record) {
@@ -74,9 +88,7 @@ pub fn is_renderable(record: &ProviderRecord) -> bool {
         && record
             .usage
             .as_ref()
-            .and_then(|usage| usage.primary.as_ref())
-            .and_then(|window| window.used_percent)
-            .is_some()
+            .is_some_and(Usage::has_renderable_window)
 }
 
 pub fn valid_provider_id(provider: &str) -> bool {
@@ -273,5 +285,36 @@ mod tests {
         .expect("valid payload");
         let ids = provider_ids_from_records(&records);
         assert_eq!(ids, vec!["claude", "codex"]);
+    }
+
+    #[test]
+    fn secondary_only_usage_is_renderable_with_semantic_slots() {
+        let records = parse_usage_payload(
+            br#"[
+                {
+                    "provider": "antigravity",
+                    "usage": {
+                        "primary": null,
+                        "secondary": {"usedPercent": 0},
+                        "tertiary": {"usedPercent": 25}
+                    }
+                }
+            ]"#,
+        )
+        .expect("valid payload");
+
+        assert!(is_renderable(&records[0]));
+        // Slots are semantic: a missing primary stays missing instead of
+        // being backfilled by later windows.
+        let usage = records[0].usage.as_ref().unwrap();
+        assert!(usage.primary.is_none());
+        assert_eq!(
+            usage.secondary.as_ref().unwrap().used_percent,
+            Some(0.0)
+        );
+        assert_eq!(
+            usage.tertiary.as_ref().unwrap().used_percent,
+            Some(25.0)
+        );
     }
 }

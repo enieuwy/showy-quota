@@ -129,21 +129,22 @@ fn render_provider(
         .usage
         .as_ref()
         .expect("renderable provider has usage");
-    let primary = usage
-        .primary
-        .as_ref()
-        .expect("renderable provider has primary");
-    let secondary = usage.secondary.as_ref();
-    let tertiary = usage.tertiary.as_ref();
+    // Slots are semantic: primary/secondary/tertiary map to fixed rows and
+    // roles. A slot only counts when that exact window reports a numeric
+    // usedPercent; missing slots stay missing (used = -1, remaining = 0)
+    // instead of later windows shifting up.
+    let primary = semantic_slot(&usage.primary);
+    let secondary = semantic_slot(&usage.secondary);
+    let tertiary = semantic_slot(&usage.tertiary);
 
-    let p_used = primary.used_pct_floor();
+    let p_used = primary.map_or(-1, UsageWindow::used_pct_floor);
     let s_used = secondary.map_or(-1, UsageWindow::used_pct_floor);
     let t_used = tertiary.map_or(-1, UsageWindow::used_pct_floor);
-    let p_remaining = 100 - p_used;
+    let p_remaining = if p_used >= 0 { 100 - p_used } else { 0 };
     let s_remaining = if s_used >= 0 { 100 - s_used } else { 0 };
     let t_remaining = if t_used >= 0 { 100 - t_used } else { 0 };
 
-    let p_reset = primary.reset_value();
+    let p_reset = primary.and_then(UsageWindow::reset_value);
     let minutes = p_reset.and_then(|reset| {
         minutes_until(
             reset,
@@ -165,7 +166,13 @@ fn render_provider(
     } else {
         minutes
     };
-    let countdown = primary_label(minutes, p_remaining, p_reset);
+    let countdown = if primary.is_some() {
+        primary_label(minutes, p_remaining, p_reset)
+    } else {
+        // No primary window at all (e.g. Antigravity): nothing consumed and
+        // nothing to count down, which is the existing "idle" contract.
+        String::from("idle")
+    };
 
     let time_color = if options.stale {
         config.palette_stale.as_str()
@@ -231,7 +238,7 @@ fn render_provider(
     let marker_primary_window = if options.stale {
         None
     } else {
-        primary.window_minutes()
+        primary.and_then(UsageWindow::window_minutes)
     };
     let marker_secondary_reset = if options.stale {
         None
@@ -319,6 +326,12 @@ fn render_provider(
         Weight::Normal,
         options.color,
     );
+}
+
+/// A usage slot is present only when that exact window reports a numeric
+/// usedPercent; renderers never shift later windows into earlier slots.
+fn semantic_slot(window: &Option<UsageWindow>) -> Option<&UsageWindow> {
+    window.as_ref().filter(|window| window.used_percent.is_some())
 }
 
 struct DualArgs<'a> {
@@ -1199,5 +1212,46 @@ mod tests {
 
         assert!(!output.contains('\x1b'), "{output:?}");
         assert!(output.contains("CL"));
+    }
+
+    #[test]
+    fn renders_provider_without_primary_window() {
+        let output = render_zellij(
+            br#"[
+                {
+                    "provider": "antigravity",
+                    "usage": {
+                        "primary": null,
+                        "secondary": {"usedPercent": 0},
+                        "tertiary": {"usedPercent": 25}
+                    }
+                }
+            ]"#,
+            &RenderConfig::default(),
+            RenderOptions {
+                color: false,
+                stale: false,
+                degraded_cli: false,
+                now_epoch: 4_070_908_800,
+            },
+        )
+        .expect("rendered secondary-only provider");
+
+        assert!(output.contains("AG"), "{output}");
+        // No primary window: nothing to count down.
+        assert!(output.contains("idle"), "{output}");
+        // Default config renders antigravity as mono3 (width 12):
+        // secondary fills the middle row (100 remaining → 12 cells) and
+        // tertiary the bottom row (75 remaining → 9 cells), so cells are
+        // middle+bottom (mask 6) then middle-only (mask 2).
+        assert!(output.contains("🬹"), "{output}");
+        assert!(output.contains("🬋"), "{output}");
+        // The top row must stay empty: no glyph with the primary bit set.
+        for top_lit in ["🬂", "🬎", "🬰", "█"] {
+            assert!(
+                !output.contains(top_lit),
+                "missing primary must not light the top row: {output}"
+            );
+        }
     }
 }

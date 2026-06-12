@@ -1263,6 +1263,20 @@ else
     ok "plugin no longer writes provider bar PNGs"
 fi
 
+secondary_only_fixture="${TMP}/codexbar-secondary-only-sketchybar.json"
+printf '%s\n' \
+    '[' \
+    '{"provider":"antigravity","usage":{"primary":null,"secondary":{"usedPercent":0},"tertiary":{"usedPercent":25}}}' \
+    ']' > "${secondary_only_fixture}"
+cache=$(mk_cache)
+log="${TMP}/sb-secondary-only.log"
+run_sketchybar_plugin "${secondary_only_fixture}" "${cache}" "${log}"
+plugin_log="$(< "${log}")"
+assert_contains "plugin keeps missing primary slot as empty top row" "--set showy_quota.antigravity.primary drawing=on slider.percentage=0" "${plugin_log}"
+assert_contains "plugin keeps secondary window in semantic middle row" "--set showy_quota.antigravity.secondary drawing=on slider.percentage=100" "${plugin_log}"
+assert_contains "plugin keeps tertiary window in semantic bottom row" "--set showy_quota.antigravity.tertiary drawing=on slider.percentage=75" "${plugin_log}"
+assert_contains "plugin labels missing-primary provider idle" "showy_quota.antigravity.label drawing=on label=idle" "${plugin_log}"
+
 cache=$(mk_cache)
 log="${TMP}/sb-degraded.log"
 run_sketchybar_plugin codexbar-mixed.json "${cache}" "${log}" SHOWY_QUOTA_DEGRADED_CLI=1
@@ -1549,6 +1563,25 @@ assert_not_contains "resetDescription fixture avoids '?' countdown" "?" "${out}"
 out=$(run_renderer showy-quota-zellij-bar codexbar-idle-no-reset.json)
 assert_contains "idle-no-reset fixture renders claude" "CL" "${out}"
 assert_contains "idle-no-reset fixture shows idle label" "idle" "${out}"
+
+secondary_only_fixture="${TMP}/codexbar-secondary-only.json"
+printf '%s\n' \
+    '[' \
+    '{"provider":"antigravity","usage":{"primary":null,"secondary":{"usedPercent":0},"tertiary":{"usedPercent":25}}}' \
+    ']' > "${secondary_only_fixture}"
+out=$(run_renderer showy-quota-zellij-bar "${secondary_only_fixture}" SHOWY_QUOTA_ZELLIJ_BAR_WIDTH=8 SHOWY_QUOTA_REFRESH_SECONDS=9999999999 NO_COLOR=1 SHOWY_QUOTA_FORCE_COLOR=0)
+assert_contains "secondary-only provider renders in zellij" "AG" "${out}"
+assert_contains "secondary-only provider shows idle label" "idle" "${out}"
+assert_contains "secondary-only provider keeps semantic middle/bottom rows" "AG▕🬹🬹🬹🬹🬹🬹🬋🬋▏" "${out}"
+for top_lit in '🬂' '🬎' '🬰' '█'; do
+    assert_not_contains "secondary-only provider keeps top row empty (${top_lit})" "${top_lit}" "${out}"
+done
+out=$(run_renderer showy-quota-tmux-bar "${secondary_only_fixture}" SHOWY_QUOTA_TMUX_BAR_WIDTH=8 SHOWY_QUOTA_REFRESH_SECONDS=9999999999)
+visible=$(strip_tmux_markup "${out}")
+assert_contains "secondary-only provider renders in tmux" "AG" "${visible}"
+assert_contains "secondary-only provider keeps semantic rows in tmux" "AG▕🬹🬹🬹🬹🬹🬹🬋🬋▏" "${visible}"
+out=$(run_state "${secondary_only_fixture}")
+assert_equals "secondary-only provider is renderable state" "antigravity" "$(printf '%s' "${out}" | jq -r '.providers | join(",")')"
 # 3. Non-array JSON must be rejected by the fetcher (refresh path).
 printf '\ncache fetcher\n'
 
@@ -2863,6 +2896,26 @@ if (( rc == 0 )) && [[ "${out}" == "[]" ]] && [[ "$(< "${cache}/source")" == "cl
     ok "fetcher publishes empty cache when codexbar reports no enabled providers"
 else
     fail "fetcher publishes empty cache when codexbar reports no enabled providers" "rc=${rc}; out=${out}"
+fi
+
+cache=$(mk_cache)
+cp "${FIXTURE_DIR}/codexbar-mixed.json" "${cache}/usage.json"
+printf '%s\n' "cli" > "${cache}/source"
+printf '%s\n' "$(date +%s)" > "${cache}/cli-failed-at"
+rc=0
+out=$(
+    SHOWY_QUOTA_NO_CONFIG=1 \
+    SHOWY_QUOTA_CACHE_DIR="${cache}" \
+    SHOWY_QUOTA_CODEXBAR_BIN="${empty_inv_dir}/codexbar" \
+    SHOWY_QUOTA_CODEXBAR_SERVE_URL='' \
+    SHOWY_QUOTA_REFRESH_SECONDS=0 \
+    SHOWY_QUOTA_CODEXBAR_CLI_FAILURE_BACKOFF_SECONDS=3600 \
+    "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
+) || rc=$?
+if (( rc == 0 )) && [[ "${out}" == "[]" ]] && [[ "$(< "${cache}/source")" == "cli" ]] && ! [[ -e "${cache}/cli-failed-at" ]]; then
+    ok "fetcher publishes empty inventory before CLI backoff"
+else
+    fail "fetcher publishes empty inventory before CLI backoff" "rc=${rc}; out=${out}"
 fi
 
 cache=$(mk_cache)

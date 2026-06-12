@@ -1103,19 +1103,9 @@ impl State {
             self.serve_inventory_mismatch = false;
             let payload_providers: std::collections::BTreeSet<&str> = records.iter().map(|r| r.provider.as_str()).filter(|id| valid_provider_id(id)).collect();
             let discovered_providers: std::collections::BTreeSet<&str> = self.discovered_providers.iter().map(|s| s.as_str()).filter(|id| valid_provider_id(id)).collect();
-            if discovered_providers.is_empty() && !payload_providers.is_empty() {
-                self.serve_inventory_mismatch = true;
-                return false;
-            }
-            if !discovered_providers.is_subset(&payload_providers) {
-                self.serve_inventory_mismatch = true;
-                return false;
-            }
-            // Serve may have extra providers (newly enabled) — accept the
-            // payload but force re-discovery so subsequent ticks use the
-            // updated inventory for per-provider fallback eligibility.
             if payload_providers != discovered_providers {
-                self.discovered_providers_at = None;
+                self.serve_inventory_mismatch = true;
+                return false;
             }
         }
 
@@ -1571,20 +1561,21 @@ mod tests {
             ..State::default()
         };
 
-        // 1. Exact match is accepted and discovery remains valid
+        // 1. Exact match is accepted and discovery remains valid.
         state.discovered_providers = vec!["claude".to_string(), "codex".to_string(), "gemini".to_string(), "cursor".to_string()];
         state.discovered_providers_at = Some(now_seconds());
         assert!(state.accept_payload(mixed_payload(), Source::Serve));
         assert!(state.discovered_providers_at.is_some());
 
-        // 2. Superset is accepted (serve has new providers) but discovery is invalidated
+        // 2. Superset is rejected (serve has stale disabled providers) and
+        // discovery remains valid so fallback can query the canonical set.
         state.discovered_providers = vec!["claude".to_string(), "codex".to_string()];
         state.discovered_providers_at = Some(now_seconds());
-        assert!(state.accept_payload(mixed_payload(), Source::Serve));
-        assert!(state.discovered_providers_at.is_none());
+        assert!(!state.accept_payload(mixed_payload(), Source::Serve));
+        assert!(state.discovered_providers_at.is_some());
 
-        // 3. Subset is rejected (serve missing expected providers) and discovery remains valid
-        // so the fallback path can query the expected providers immediately.
+        // 3. Subset is rejected (serve missing expected providers) and
+        // discovery remains valid so fallback can query the expected providers.
         state.discovered_providers = vec!["claude".to_string(), "codex".to_string(), "gemini".to_string(), "cursor".to_string(), "antigravity".to_string()];
         state.discovered_providers_at = Some(now_seconds());
         assert!(!state.accept_payload(mixed_payload(), Source::Serve));

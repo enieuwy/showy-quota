@@ -42,9 +42,9 @@ showy_quota_provider_sigil() {
     esac
 }
 
-# Filter the cached JSON down to renderable provider records, honoring
-# SHOWY_QUOTA_PROVIDERS, SHOWY_QUOTA_PROVIDERS_EXCLUDE, and provider ordering when
-# set. Reads from stdin, writes JSON array to stdout.
+# Filter the cached JSON down to provider records with at least one numeric
+# usage window, honoring SHOWY_QUOTA_PROVIDERS, SHOWY_QUOTA_PROVIDERS_EXCLUDE,
+# and provider ordering when set. Reads from stdin, writes JSON array to stdout.
 showy_quota_filter_renderable() {
     local allow="${SHOWY_QUOTA_PROVIDERS:-}"
     local exclude="${SHOWY_QUOTA_PROVIDERS_EXCLUDE:-}"
@@ -64,7 +64,11 @@ showy_quota_filter_renderable() {
         | [ .[] | select(
             (.error // null) == null
             and (.provider | type == "string" and test("^[A-Za-z0-9_.-]+$"))
-            and (.usage.primary.usedPercent | type == "number")
+            and ([
+                .usage.primary,
+                .usage.secondary,
+                .usage.tertiary
+            ] | any(. != null and (.usedPercent | type == "number")))
             and (.provider as $p | (($allow_list | length) == 0 or ($allow_list | index($p) != null)))
             and (.provider as $p | ($exclude_list | index($p) == null))
         ) ] as $filtered

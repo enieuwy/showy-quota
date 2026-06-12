@@ -725,18 +725,26 @@ if (( force_redeclare )) || [[ "${desired_providers}" != "${declared_providers}"
     trigger_provider_change "${desired_providers}"
 fi
 
+# Slots are semantic: primary/secondary/tertiary map to fixed item rows.
+# A slot only counts when that exact window has a numeric usedPercent;
+# missing slots stay empty instead of later windows shifting up.
 rows=$(printf '%s' "${filtered}" | jq -r '
     def pct(x): if x == null then 0 else ([0, ([100, (x|tonumber|floor)] | min)] | max) end;
-    .[] | [
+    def slot(w): if (w != null and (w.usedPercent | type == "number")) then w else null end;
+    .[]
+    | (slot(.usage.primary)) as $p
+    | (slot(.usage.secondary)) as $s
+    | (slot(.usage.tertiary)) as $t
+    | [
         .provider,
-        (100 - pct(.usage.primary.usedPercent)),
-        (.usage.primary.resetsAt // .usage.primary.resetDescription // ""),
-        (if .usage.secondary then (100 - pct(.usage.secondary.usedPercent)) else "" end),
-        (.usage.secondary.resetsAt // .usage.secondary.resetDescription // ""),
-        (.usage.secondary.windowMinutes // ""),
-        (if .usage.tertiary  then (100 - pct(.usage.tertiary.usedPercent))  else "" end),
-        (.usage.tertiary.resetsAt // .usage.tertiary.resetDescription // ""),
-        (.usage.tertiary.windowMinutes // ""),
+        (if $p then (100 - pct($p.usedPercent)) else "" end),
+        ($p.resetsAt // $p.resetDescription // ""),
+        (if $s then (100 - pct($s.usedPercent)) else "" end),
+        ($s.resetsAt // $s.resetDescription // ""),
+        ($s.windowMinutes // ""),
+        (if $t then (100 - pct($t.usedPercent)) else "" end),
+        ($t.resetsAt // $t.resetDescription // ""),
+        ($t.windowMinutes // ""),
         (.status.indicator // "none"),
         (.status.url // "")
     ] | map(tostring) | join("\u001f")')
@@ -785,7 +793,12 @@ while IFS=$'\x1f' read -r pid rem_p p_reset rem_s s_reset s_window rem_t t_reset
     if [[ -n "${status_icon_hex}" ]]; then
         font_icon_color="$(argb_from_hex "${status_icon_hex}")"
     fi
-    { IFS= read -r label; IFS= read -r color; } < <(label_for_minutes "${minutes}" "${rem_p}" "${p_reset}") || true
+    if [[ -n "${rem_p}" ]]; then
+        { IFS= read -r label; IFS= read -r color; } < <(label_for_minutes "${minutes}" "${rem_p}" "${p_reset}") || true
+    else
+        # No primary window at all: nothing consumed, nothing to count down.
+        label='idle'
+    fi
     [[ -n "${color}" ]] || color="${COUNTDOWN_ARGB}"
     primary_highlight="$(argb_from_hex "$(showy_quota_role_color primary "${rem_p_pct}")")"
     secondary_highlight="$(argb_from_hex "$(showy_quota_role_color secondary "${rem_s_pct}")")"

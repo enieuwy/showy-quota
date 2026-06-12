@@ -91,6 +91,27 @@ fn rust_renderer_matches_shell_zellij_renderer() {
             configure: |_| {},
         },
         Case {
+            name: "missing primary mono color",
+            fixture: "codexbar-missing-primary.json",
+            color: true,
+            now_epoch: 4_070_908_800,
+            stale: false,
+            degraded_cli: false,
+            configure: |_| {},
+        },
+        Case {
+            name: "missing primary forced dual no color",
+            fixture: "codexbar-missing-primary.json",
+            color: false,
+            now_epoch: 4_070_908_800,
+            stale: false,
+            degraded_cli: false,
+            configure: |config| {
+                config.terminal_bar_mode = "dual".into();
+                config.zellij_bar_width = 8;
+            },
+        },
+        Case {
             name: "stale mixed color",
             fixture: "codexbar-mixed.json",
             color: true,

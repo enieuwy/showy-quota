@@ -78,6 +78,8 @@ The Rust renderer intentionally duplicates only the terminal strip logic. Golden
 
 Forced `sextant3` keeps the older bottom-most-row cell-color policy and does not draw elapsed markers; forced `dual` and `mono3` apply those bodies to every provider.
 
+Window slots are semantic in every mode: a provider is renderable when any of its primary/secondary/tertiary windows reports a numeric `usedPercent`, and each window only ever renders in its own row, marker, and color role. A missing window leaves its row empty rather than shifting later windows up; a missing primary additionally renders an `idle` countdown label because there is no primary reset to count down (Antigravity reports `usage.primary: null` with live secondary/tertiary windows).
+
 ## Failure semantics
 
 | Condition | Shell integrations | Standalone Zellij plugin |

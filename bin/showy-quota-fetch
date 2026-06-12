@@ -1143,7 +1143,9 @@ serve_payload_is_publishable() {
         )
         and any(.[]?;
             (.provider? | type == "string" and length > 0)
-            and (.usage?.primary?.usedPercent? | type == "number")
+            and any([.usage?.primary, .usage?.secondary, .usage?.tertiary][];
+                . != null and (.usedPercent? | type == "number")
+            )
         )
     ' >/dev/null 2>&1
 }
@@ -1318,7 +1320,7 @@ except subprocess.TimeoutExpired:
 
 run_codexbar() {
     local out cache_source="" probe_serve=1 serve_rc=0
-    if [[ -n "${SHOWY_QUOTA_CODEXBAR_SERVE_URL}" ]]; then
+    if [[ -n "${SHOWY_QUOTA_CODEXBAR_SERVE_URL}" ]] || cli_failure_backoff_active; then
         if out=$(canonical_empty_inventory_payload); then
             clear_serve_failure
             clear_cli_failure
@@ -1326,6 +1328,9 @@ run_codexbar() {
             printf '%s' "${out}"
             return 0
         fi
+    fi
+
+    if [[ -n "${SHOWY_QUOTA_CODEXBAR_SERVE_URL}" ]]; then
         cache_source="$(showy_quota_cache_source)"
         if (( force_refresh == 0 )) && cache_is_valid && [[ "${cache_source}" != "serve" ]] && serve_failure_backoff_active; then
             probe_serve=0

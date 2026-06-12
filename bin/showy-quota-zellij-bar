@@ -274,21 +274,29 @@ fi
 # (0x1f) to preserve empty fields that read+IFS=$'\t' would collapse.
 # CodexBar may emit usedPercent as int OR float; we floor to a 0..100
 # integer so bash arithmetic later cannot trip over decimals.
+# Slots are semantic: primary/secondary/tertiary map to fixed rows and
+# roles. A slot only counts when that exact window has a numeric
+# usedPercent; missing slots stay -1/empty instead of shifting up.
 rows=$(printf '%s' "${filtered}" | jq -r '
     def pct(x): if x == null then -1 else ([0, ([100, (x|tonumber|floor)] | min)] | max) end;
+    def slot(w): if (w != null and (w.usedPercent | type == "number")) then w else null end;
     .[]
-    | select((.provider | type == "string" and length > 0) and (.usage.primary.usedPercent | type == "number"))
+    | (slot(.usage.primary)) as $p
+    | (slot(.usage.secondary)) as $s
+    | (slot(.usage.tertiary)) as $t
+    | select((.provider | type == "string" and length > 0)
+        and ($p != null or $s != null or $t != null))
     | [
         .provider,
-        pct(.usage.primary.usedPercent),
-        (.usage.primary.resetsAt // .usage.primary.resetDescription // ""),
-        (.usage.primary.windowMinutes // ""),
-        pct(.usage.secondary.usedPercent),
-        (.usage.secondary.resetsAt // .usage.secondary.resetDescription // ""),
-        (.usage.secondary.windowMinutes // ""),
-        pct(.usage.tertiary.usedPercent),
-        (.usage.tertiary.resetsAt // .usage.tertiary.resetDescription // ""),
-        (.usage.tertiary.windowMinutes // "")
+        pct($p.usedPercent),
+        ($p.resetsAt // $p.resetDescription // ""),
+        ($p.windowMinutes // ""),
+        pct($s.usedPercent),
+        ($s.resetsAt // $s.resetDescription // ""),
+        ($s.windowMinutes // ""),
+        pct($t.usedPercent),
+        ($t.resetsAt // $t.resetDescription // ""),
+        ($t.windowMinutes // "")
     ] | map(tostring) | join("\u001f")')
 
 first_chunk=1
@@ -298,7 +306,10 @@ countdown_warn=$(showy_quota_palette countdown_warn)
 while IFS=$'\x1f' read -r provider p_used p_reset p_window s_used s_reset s_window t_used t_reset t_window; do
     [[ -n "${provider}" ]] || continue
 
-    p_remaining=$((100 - p_used))
+    p_remaining=0
+    if (( p_used >= 0 )); then
+        p_remaining=$((100 - p_used))
+    fi
     s_remaining=0
     if (( s_used >= 0 )); then
         s_remaining=$((100 - s_used))
@@ -321,7 +332,12 @@ while IFS=$'\x1f' read -r provider p_used p_reset p_window s_used s_reset s_wind
             fi
         fi
     fi
-    countdown=$(showy_quota_primary_label "${minutes}" "${p_remaining}" "${p_reset}")
+    if (( p_used >= 0 )); then
+        countdown=$(showy_quota_primary_label "${minutes}" "${p_remaining}" "${p_reset}")
+    else
+        # No primary window at all: nothing consumed, nothing to count down.
+        countdown='idle'
+    fi
 
     time_color=$(showy_quota_palette countdown)
     if (( stale )); then

@@ -171,6 +171,38 @@ Linux:
 
 If you do not pre-grant, reveal floating panes once, focus the pending permission pane, and accept.
 
+## Upgrading in live sessions
+
+Replacing the `.wasm` on disk does not update running Zellij sessions: each
+session caches the compiled module by plugin path, and new tabs reuse that
+cached module. Restarting the session always picks up the new build. To
+upgrade a live session instead (verified on Zellij 0.44.x):
+
+1. Refresh the session's module cache so new tabs load the new build. A
+   plugin `new-pane` with `--skip-plugin-cache` always performs a fresh
+   from-disk load and returns its pane id for cleanup:
+
+   ```sh
+   pane=$(zellij action new-pane --plugin "file:$HOME/.config/zellij/plugins/showy-quota-zellij.wasm" --skip-plugin-cache --floating --width 60 --height 3)
+   zellij action close-pane --pane-id "$pane"
+   ```
+
+2. Reload existing strip panes by id with the built-in plugin-manager
+   (`zellij action launch-or-focus-plugin plugin-manager --floating`):
+   navigate with arrows, `Tab` reloads the selected instance, `Del` closes
+   one, `Esc` exits. If its list is empty, open the session-manager once
+   (`zellij action launch-or-focus-plugin session-manager --floating`) and
+   close it — on 0.44.x the plugin list only populates after a session-list
+   query.
+
+Avoid `zellij action start-or-reload-plugin` for strips configured in a
+layout: it matches instances by location **and** configuration, its
+`--configuration` flag cannot express values containing commas (such as
+`provider_order`), and when the server believes a load is already in flight
+at that location it silently queues the request and does nothing. Depending
+on state it either has no effect or starts a duplicate instance instead of
+reloading.
+
 ## Configuration
 
 The plugin does not read `~/.config/showy-quota/config.env`. Configure it in KDL.
