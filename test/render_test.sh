@@ -1177,7 +1177,7 @@ assert_contains "bootstrap declares degraded indicator" "--add item showy_quota.
 assert_contains "bootstrap places indicators rightmost in bracket" "showy_quota.gemini.label showy_quota.stale showy_quota.degraded --set showy_quota_bracket" "${item_log}"
 assert_contains "bootstrap preserves icon width" "width=22" "${item_log}"
 assert_contains "bootstrap preserves native bar slot width" "showy_quota.claude.slot icon.drawing=off" "${item_log}"
-assert_contains "bootstrap preserves native bar width" "width=84" "${item_log}"
+assert_contains "bootstrap preserves native bar width" "width=83" "${item_log}"
 
 cache=$(mk_cache)
 log="${TMP}/sb-items-pill.log"
@@ -1235,7 +1235,7 @@ else
     fail "label.color is well-formed"
 fi
 assert_contains "plugin uses countdown label color" "label.color=0xff7b8496" "$(< "${log}")"
-if grep -q 'width=84' "${log}" 2>/dev/null; then
+if grep -q 'width=83' "${log}" 2>/dev/null; then
     ok "plugin repairs native bar slot width"
 else
     fail "plugin repairs native bar slot width"
@@ -1246,7 +1246,7 @@ assert_contains "plugin keeps degraded indicator off on fresh cache" "--set show
 assert_contains "plugin updates native primary row percentage" "--set showy_quota.claude.primary drawing=on slider.percentage=83" "${plugin_log}"
 assert_contains "plugin updates native secondary row percentage" "--set showy_quota.claude.secondary drawing=on slider.percentage=81" "${plugin_log}"
 assert_contains "plugin hides missing tertiary row" "--set showy_quota.claude.tertiary drawing=off" "${plugin_log}"
-assert_contains "plugin pins countdown label width" "label.width=27 label.align=left" "${plugin_log}"
+assert_contains "plugin pins countdown label width" "label.width=32 label.align=left" "${plugin_log}"
 assert_contains "plugin updates native tertiary row when present" "--set showy_quota.gemini.tertiary drawing=on slider.percentage=100" "${plugin_log}"
 assert_contains "plugin uses derived secondary row color" "showy_quota.claude.secondary drawing=on slider.percentage=81 slider.highlight_color=0xff14683a" "${plugin_log}"
 assert_contains "plugin uses derived tertiary row color" "showy_quota.gemini.tertiary drawing=on slider.percentage=100 slider.highlight_color=0xff14683a" "${plugin_log}"

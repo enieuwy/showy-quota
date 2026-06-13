@@ -6,6 +6,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- The SketchyBar countdown label no longer truncates the widest `HH:MM`
+  reset times (e.g. Gemini's `23:59` lost its last digit). The pinned
+  `SHOWY_QUOTA_SKETCHYBAR_LABEL_WIDTH` default is now `32` (was `27`), which
+  fits the longest countdown form; shorter strings stay jitter-free as before.
+
+### Changed
+- The SketchyBar bar slot default (`SHOWY_QUOTA_SKETCHYBAR_BAR_WIDTH`) is now
+  `SHOWY_QUOTA_PNG_BAR_W + 3` (was `+ 4`), trimming 1px of dead space between
+  each provider's bars and its countdown. This offsets the wider countdown
+  label above so per-provider width stays effectively unchanged; the 80px bars
+  are untouched.
+
 ## [0.2.5] — 2026-06-12
 
 ### Changed

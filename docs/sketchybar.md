@@ -75,9 +75,10 @@ forwards `PILL_RADIUS` / `PILL_HEIGHT` into those envs when the explicit
 ## Countdown label
 
 Each provider's countdown label is pinned to a fixed width
-(`SHOWY_QUOTA_SKETCHYBAR_LABEL_WIDTH`, default `27`) so the pill does not
+(`SHOWY_QUOTA_SKETCHYBAR_LABEL_WIDTH`, default `32`) so the pill does not
 jitter as the remaining-time string changes length (`59m` → `1:00` →
-`idle`). Set it to `dynamic` to restore auto-sizing.
+`23:59` → `idle`). The default fits the widest countdown form (`HH:MM`); set
+it to `dynamic` to restore auto-sizing.
 
 ## Click action
 
