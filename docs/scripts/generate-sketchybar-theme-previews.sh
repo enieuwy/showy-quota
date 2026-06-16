@@ -75,11 +75,11 @@ palette_value() {
         "${BASH_BIN}" -c '. "$1"; showy_quota_palette "$2"' _ "${REPO_ROOT}/lib/common.sh" "${key}"
 }
 
-role_color() {
-    local theme="$1" role="$2" remaining="$3"
+window_color() {
+    local theme="$1" remaining="$2" is_long="$3"
     SHOWY_QUOTA_THEME="${theme}" \
         SHOWY_QUOTA_NO_CONFIG=1 \
-        "${BASH_BIN}" -c '. "$1"; showy_quota_role_color "$2" "$3"' _ "${REPO_ROOT}/lib/common.sh" "${role}" "${remaining}"
+        "${BASH_BIN}" -c '. "$1"; showy_quota_window_color "$2" "$3"' _ "${REPO_ROOT}/lib/common.sh" "${remaining}" "${is_long}"
 }
 
 png_data_uri() {
@@ -141,8 +141,8 @@ draw_provider() {
     local icon primary_hex secondary_hex track_hex elapsed_hex marker
 
     icon="$(png_data_uri "${cache_dir}/icon-v2-${provider}.png")"
-    primary_hex="$(role_color "${theme}" primary "${rem_p}")"
-    secondary_hex="$(role_color "${theme}" secondary "${rem_s}")"
+    primary_hex="$(window_color "${theme}" "${rem_p}" 0)"
+    secondary_hex="$(window_color "${theme}" "${rem_s}" 1)"
     track_hex="$(palette_value "${theme}" track)"
     elapsed_hex="$(palette_value "${theme}" elapsed)"
     marker="$(elapsed_marker_x "${s_reset}" "${s_window}" "${BAR_W}" || true)"

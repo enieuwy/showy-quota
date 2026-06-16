@@ -10,9 +10,11 @@ provider chunks as the Zellij strip:
 ```
 
 Default `SHOWY_QUOTA_TERMINAL_BAR_MODE=auto` renders each provider according to
-its configured terminal body. Time-tier providers use `dual`: upper-half blocks
-(`▀`) where foreground is primary and background is secondary, with the
-secondary elapsed marker in `SHOWY_QUOTA_PALETTE_ELAPSED`. Providers listed in
+its configured terminal body. Most providers use `dual`: upper-half blocks
+(`▀`) where foreground is the primary window and background is the secondary,
+each colored by its remaining-quota severity and dimmed when it is a
+weekly/monthly cap, with a pacing marker on both rows in
+`SHOWY_QUOTA_PALETTE_ELAPSED`. Providers listed in
 `SHOWY_QUOTA_MONO3_PROVIDERS` (`gemini,antigravity` by default) use `mono3`:
 primary, secondary, and tertiary are top/middle/bottom sextant rows with one
 provider-level foreground color and one fixed light `│` pacing separator. The
@@ -32,7 +34,10 @@ hide mono3 pacing separators. `SHOWY_QUOTA_MONO3_MARKER_STYLE` toggles the separ
 between `replace` (fixed width, default) and `insert`. Set `SHOWY_QUOTA_TERMINAL_BAR_MODE=dual`, `sextant3`,
 or `mono3` to force one body mode for every provider. Forced `sextant3` uses
 the same top/middle/bottom geometry as `mono3`, but keeps the bottom-most filled
-row as the cell color and omits elapsed markers.
+row as the cell color and omits elapsed markers. Both `mono3` and `sextant3`
+collapse to the two-lane `dual` body for any provider without a tertiary window
+(two pools at most, e.g. Antigravity's Gemini weekly + Claude+GPT weekly), so it
+renders two bars instead of a three-lane bar with an empty bottom row.
 
 When the cache is older than `2 × SHOWY_QUOTA_REFRESH_SECONDS`, tmux gets one
 trailing `SHOWY_QUOTA_STALE_GLYPH` (default `⚠`) after the last provider. The

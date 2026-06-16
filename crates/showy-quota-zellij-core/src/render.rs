@@ -6,7 +6,7 @@ use time::{Duration, OffsetDateTime, PrimitiveDateTime, Time, UtcOffset};
 
 use crate::codexbar::{is_renderable, parse_usage_payload, ProviderRecord, UsageWindow};
 use crate::config::RenderConfig;
-use crate::palette::{hex_to_rgb, Role};
+use crate::palette::hex_to_rgb;
 
 #[derive(Debug, Clone, Copy)]
 pub struct RenderOptions {
@@ -183,13 +183,27 @@ fn render_provider(
     };
 
     let surface_color = &config.palette_surface;
-    let mut primary_color = config.role_color(Role::Primary, p_remaining);
-    let mut secondary_color = config.role_color(Role::Secondary, s_remaining);
-    let mut tertiary_color = config.role_color(Role::Tertiary, t_remaining);
-    let bar_mode = terminal_mode_for_provider(config, &record.provider);
+    let p_long = is_long_window(primary, config.dim_window_minutes);
+    let s_long = is_long_window(secondary, config.dim_window_minutes);
+    let t_long = is_long_window(tertiary, config.dim_window_minutes);
+    let mut primary_color = config.window_color(p_remaining, p_long);
+    let mut secondary_color = config.window_color(s_remaining, s_long);
+    let mut tertiary_color = config.window_color(t_remaining, t_long);
+    let bar_mode = terminal_mode_for_provider(config, &record.provider, tertiary.is_some());
     let mut mono_color = String::new();
     if bar_mode == "mono3" {
-        mono_color = mono3_color(
+        // mono3 has one color for the whole chunk, so dimming is all-or-nothing:
+        // dim only when every present window is a long-horizon cap (e.g.
+        // all-monthly), bright when any live short tier is present.
+        let mut any = false;
+        let mut all_long = true;
+        for (used, long) in [(p_used, p_long), (s_used, s_long), (t_used, t_long)] {
+            if used >= 0 {
+                any = true;
+                all_long &= long;
+            }
+        }
+        let remaining = mono3_remaining(
             config,
             p_remaining,
             s_remaining,
@@ -198,6 +212,7 @@ fn render_provider(
             s_used,
             t_used,
         );
+        mono_color = config.window_color(remaining, any && all_long);
         primary_color.clone_from(&mono_color);
     }
     if options.stale {
@@ -302,6 +317,8 @@ fn render_provider(
             DualArgs {
                 p_remaining,
                 s_remaining,
+                p_reset: marker_primary_reset,
+                p_window: marker_primary_window,
                 s_reset: marker_secondary_reset,
                 s_window: marker_secondary_window,
                 primary_color: &primary_color,
@@ -334,9 +351,20 @@ fn semantic_slot(window: &Option<UsageWindow>) -> Option<&UsageWindow> {
     window.as_ref().filter(|window| window.used_percent.is_some())
 }
 
+/// A window is "long-horizon" (a weekly/monthly cap, rendered dimmed) when it
+/// reports a windowMinutes at or beyond the dim threshold. Windows without a
+/// known horizon stay bright.
+fn is_long_window(window: Option<&UsageWindow>, dim_window_minutes: i64) -> bool {
+    window
+        .and_then(UsageWindow::window_minutes)
+        .is_some_and(|minutes| minutes >= dim_window_minutes)
+}
+
 struct DualArgs<'a> {
     p_remaining: i32,
     s_remaining: i32,
+    p_reset: Option<&'a str>,
+    p_window: Option<i64>,
     s_reset: Option<&'a str>,
     s_window: Option<i64>,
     primary_color: &'a str,
@@ -354,7 +382,14 @@ fn dual_metric_bar(
     let elapsed_color = &config.palette_elapsed;
     let p_fill = filled_cells(args.p_remaining, width);
     let s_fill = filled_cells(args.s_remaining, width);
-    let marker = elapsed_marker_cell(
+    let p_marker = elapsed_marker_cell(
+        args.p_reset,
+        args.p_window,
+        width,
+        options.now_epoch,
+        config.reset_description_timezone_offset_minutes,
+    );
+    let s_marker = elapsed_marker_cell(
         args.s_reset,
         args.s_window,
         width,
@@ -363,35 +398,31 @@ fn dual_metric_bar(
     );
 
     for i in 0..width {
-        let top_color = if i < p_fill {
+        // Top half = primary window, bottom half = secondary window. Each row
+        // shows its own pacing marker via the elapsed color: primary on the
+        // foreground of the upper-half-block, secondary on the background.
+        let top_color = if Some(i) == p_marker {
+            elapsed_color
+        } else if i < p_fill {
             args.primary_color
         } else {
             surface_color
         };
-        let bottom_color = if i < s_fill {
+        let bottom_color = if Some(i) == s_marker {
+            elapsed_color
+        } else if i < s_fill {
             args.secondary_color
         } else {
             surface_color
         };
-        if marker == Some(i) {
-            style_text(
-                out,
-                "▀",
-                Some(top_color),
-                Some(elapsed_color),
-                Weight::Normal,
-                options.color,
-            );
-        } else {
-            style_text(
-                out,
-                "▀",
-                Some(top_color),
-                Some(bottom_color),
-                Weight::Normal,
-                options.color,
-            );
-        }
+        style_text(
+            out,
+            "▀",
+            Some(top_color),
+            Some(bottom_color),
+            Weight::Normal,
+            options.color,
+        );
     }
     style_text(
         out,
@@ -764,7 +795,7 @@ fn shared_window_marker_boundary(
     }
 }
 
-fn mono3_color(
+fn mono3_remaining(
     config: &RenderConfig,
     p_remaining: i32,
     s_remaining: i32,
@@ -772,8 +803,8 @@ fn mono3_color(
     p_used: i32,
     s_used: i32,
     t_used: i32,
-) -> String {
-    let remaining = match config.mono3_color_mode.as_str() {
+) -> i32 {
+    match config.mono3_color_mode.as_str() {
         "primary" => p_remaining,
         "lowest" | "" => min_remaining(
             p_remaining,
@@ -791,8 +822,7 @@ fn mono3_color(
             s_used,
             t_used,
         ),
-    };
-    config.role_palette(Role::Primary, config.color_key(remaining))
+    }
 }
 
 fn min_remaining(
@@ -816,21 +846,30 @@ fn min_remaining(
     lowest.unwrap_or(0)
 }
 
-fn terminal_mode_for_provider(config: &RenderConfig, provider: &str) -> String {
-    match config.terminal_bar_mode.as_str() {
-        "dual" => "dual".to_string(),
-        "sextant3" => "sextant3".to_string(),
-        "mono3" => "mono3".to_string(),
+fn terminal_mode_for_provider(config: &RenderConfig, provider: &str, has_tertiary: bool) -> String {
+    let mode = match config.terminal_bar_mode.as_str() {
+        "dual" => "dual",
+        "sextant3" => "sextant3",
+        "mono3" => "mono3",
         "auto" | "" => {
             if contains(&config.mono3_providers_exclude, provider) {
-                "dual".to_string()
+                "dual"
             } else if contains(&config.mono3_providers, provider) {
-                "mono3".to_string()
+                "mono3"
             } else {
-                "dual".to_string()
+                "dual"
             }
         }
-        _ => "dual".to_string(),
+        _ => "dual",
+    };
+    // A provider with no tertiary window has only two pools; the fixed
+    // three-lane modes would draw the absent lane as an empty bar. Collapse
+    // to the two-lane `dual` layout, matching SketchyBar's `has_t` gate which
+    // drops the tertiary row when it carries no usedPercent.
+    if !has_tertiary && matches!(mode, "mono3" | "sextant3") {
+        "dual".to_string()
+    } else {
+        mode.to_string()
     }
 }
 

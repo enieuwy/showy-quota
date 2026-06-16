@@ -397,6 +397,7 @@ seed_sketchybar_live_items() {
         : > "${cache}/sb-state/showy_quota.${pid}.tertiary"
         : > "${cache}/sb-state/showy_quota.${pid}.secondary_marker"
         : > "${cache}/sb-state/showy_quota.${pid}.tertiary_marker"
+        : > "${cache}/sb-state/showy_quota.${pid}.primary_marker"
         : > "${cache}/sb-state/showy_quota.${pid}.slot"
         : > "${cache}/sb-state/showy_quota.${pid}.label"
     done
@@ -550,37 +551,37 @@ assert_equals "scale helper matches legacy 0.55 green" "14683a" "${out}"
 out=$(run_common_eval 'showy_quota_scale_hex "#25be6a" 0.55' SHOWY_QUOTA_NO_CONFIG=1)
 assert_equals "scale helper accepts leading hash" "14683a" "${out}"
 
-out=$(run_common_eval 'showy_quota_role_palette primary good' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_PALETTE_PRIMARY_GOOD="#25BE6A")
-assert_equals "role palette normalizes leading hash" "25be6a" "${out}"
+out=$(run_common_eval 'showy_quota_primary_palette good' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_PALETTE_PRIMARY_GOOD="#25BE6A")
+assert_equals "primary palette normalizes leading hash" "25be6a" "${out}"
 
-out=$(run_common_eval 'showy_quota_role_palette primary good' SHOWY_QUOTA_NO_CONFIG=1)
-assert_equals "primary role palette returns canonical primary color" "25be6a" "${out}"
+out=$(run_common_eval 'showy_quota_primary_palette good' SHOWY_QUOTA_NO_CONFIG=1)
+assert_equals "primary palette returns canonical primary color" "25be6a" "${out}"
 
-out=$(run_common_eval 'showy_quota_role_palette secondary good' SHOWY_QUOTA_NO_CONFIG=1)
-assert_equals "secondary role palette auto-derives from primary" "14683a" "${out}"
+out=$(run_common_eval 'showy_quota_dim_palette good' SHOWY_QUOTA_NO_CONFIG=1)
+assert_equals "dim palette auto-derives from primary scale" "14683a" "${out}"
 
-out=$(run_common_eval 'showy_quota_role_palette secondary good' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_PALETTE_SECONDARY_GOOD=112233)
-assert_equals "secondary role palette honors explicit override" "112233" "${out}"
-
-out=$(run_common_eval 'showy_quota_role_palette tertiary good' SHOWY_QUOTA_NO_CONFIG=1)
-assert_equals "tertiary role palette auto-derives from primary" "14683a" "${out}"
-
-out=$(run_common_eval 'showy_quota_role_palette tertiary good' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_PALETTE_TERTIARY_GOOD=445566)
-assert_equals "tertiary role palette honors explicit override" "445566" "${out}"
+out=$(run_common_eval 'showy_quota_dim_palette good' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_PALETTE_DIM_GOOD=112233)
+assert_equals "dim palette honors explicit override" "112233" "${out}"
 
 # shellcheck disable=SC2016
-out=$(run_common_eval 'printf "%s|%s|%s" "$(showy_quota_role_color primary 50)" "$(showy_quota_role_color secondary 50)" "$(showy_quota_role_color tertiary 50)"' SHOWY_QUOTA_NO_CONFIG=1)
-assert_equals "role color helper dispatches by role" "25be6a|14683a|14683a" "${out}"
+out=$(run_common_eval 'printf "%s|%s" "$(showy_quota_window_color 50 0)" "$(showy_quota_window_color 50 1)"' SHOWY_QUOTA_NO_CONFIG=1)
+assert_equals "window color dims long-horizon windows only" "25be6a|14683a" "${out}"
+
+out=$(run_common_eval 'showy_quota_dim_palette good' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_PALETTE_DIM_SCALE=0.75)
+assert_equals "dim scale knob recomputes derived palette" "1b8e4f" "${out}"
 
 # shellcheck disable=SC2016
-out=$(run_common_eval 'printf "%s|%s" "$(showy_quota_role_palette secondary good)" "$(showy_quota_role_palette tertiary good)"' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_PALETTE_SECONDARY_SCALE=0.75 SHOWY_QUOTA_PALETTE_TERTIARY_SCALE=0.25)
-assert_equals "role scale knobs recompute derived palettes" "1b8e4f|092f1a" "${out}"
+out=$(run_common_eval 'printf "%s|%s|%s|%s|%s" "$(showy_quota_is_long_window 300)" "$(showy_quota_is_long_window 1440)" "$(showy_quota_is_long_window 10080)" "$(showy_quota_is_long_window 43200)" "$(showy_quota_is_long_window "")"' SHOWY_QUOTA_NO_CONFIG=1)
+assert_equals "is_long_window flags weekly and monthly horizons" "0|0|1|1|0" "${out}"
 
-out=$(run_common_eval 'showy_quota_role_palette primary good' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_THEME=catppuccin-mocha-blue)
+out=$(run_common_eval 'showy_quota_is_long_window 1440' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_DIM_WINDOW_MINUTES=1440)
+assert_equals "dim window minutes threshold is configurable" "1" "${out}"
+
+out=$(run_common_eval 'showy_quota_primary_palette good' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_THEME=catppuccin-mocha-blue)
 assert_equals "built-in Catppuccin Mocha Blue theme overrides the primary palette" "89b4fa" "${out}"
 
 # shellcheck disable=SC2016
-out=$(run_common_eval 'printf "%s|%s|%s|%s|%s|%s|%s" "$(showy_quota_role_palette primary good)" "$(showy_quota_role_palette primary warn)" "$(showy_quota_palette bg)" "$(showy_quota_palette icon_text)" "$(showy_quota_palette countdown)" "$(showy_quota_palette countdown_warn)" "$(showy_quota_palette elapsed)"' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_THEME=default)
+out=$(run_common_eval 'printf "%s|%s|%s|%s|%s|%s|%s" "$(showy_quota_primary_palette good)" "$(showy_quota_primary_palette warn)" "$(showy_quota_palette bg)" "$(showy_quota_palette icon_text)" "$(showy_quota_palette countdown)" "$(showy_quota_palette countdown_warn)" "$(showy_quota_palette elapsed)"' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_THEME=default)
 assert_equals "built-in default theme exposes original palette" "25be6a|f0af00|161616|f2f4f8|7b8496|ee5396|be95ff" "${out}"
 
 out=$(run_strip_eval 'showy_quota_elapsed_marker_boundary "2099-01-01T01:40:00Z" 100 8' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_NOW_EPOCH=4070914800)
@@ -609,7 +610,7 @@ printf '%s\n' \
     'SHOWY_QUOTA_PALETTE_COUNTDOWN=030405' \
     'SHOWY_QUOTA_PALETTE_COUNTDOWN_WARN=040506' \
     > "${theme_xdg}/showy-quota/config.env"
-out=$(run_common_eval 'showy_quota_role_palette primary good' SHOWY_QUOTA_NO_CONFIG= XDG_CONFIG_HOME="${theme_xdg}")
+out=$(run_common_eval 'showy_quota_primary_palette good' SHOWY_QUOTA_NO_CONFIG= XDG_CONFIG_HOME="${theme_xdg}")
 assert_equals "config env overrides themed primary palette" "010203" "${out}"
 
 # shellcheck disable=SC2016
@@ -916,6 +917,29 @@ out=$(run_renderer showy-quota-zellij-bar "${mono_fixture}" SHOWY_QUOTA_MONO3_PR
 assert_contains "zellij mono3 provider exclude forces dual" "▀" "${out}"
 assert_not_contains "zellij mono3 provider exclude suppresses separator" "│" "${out}"
 
+out=$(run_renderer showy-quota-zellij-bar codexbar-no-tertiary.json SHOWY_QUOTA_TERMINAL_BAR_MODE=mono3 SHOWY_QUOTA_ZELLIJ_BAR_WIDTH=8 SHOWY_QUOTA_REFRESH_SECONDS=9999999999 SHOWY_QUOTA_NOW_EPOCH=4070908800 NO_COLOR=1 SHOWY_QUOTA_FORCE_COLOR=0)
+assert_contains "zellij mono3 collapses to dual when tertiary absent" "AG▕▀▀▀▀▀▀▀▀▏" "${out}"
+assert_not_contains "zellij mono3 collapse omits sextant cells" "🬂" "${out}"
+assert_not_contains "zellij mono3 collapse omits shared separator" "│" "${out}"
+
+out=$(run_renderer showy-quota-zellij-bar codexbar-no-tertiary.json SHOWY_QUOTA_TERMINAL_BAR_MODE=sextant3 SHOWY_QUOTA_ZELLIJ_BAR_WIDTH=8 SHOWY_QUOTA_REFRESH_SECONDS=9999999999 SHOWY_QUOTA_NOW_EPOCH=4070908800 NO_COLOR=1 SHOWY_QUOTA_FORCE_COLOR=0)
+assert_contains "zellij sextant3 collapses to dual when tertiary absent" "AG▕▀▀▀▀▀▀▀▀▏" "${out}"
+assert_not_contains "zellij sextant3 collapse omits sextant cells" "🬎" "${out}"
+
+# Horizon model: in a time-tiered provider the short (5h) window stays bright
+# and the long (weekly) window dims, and BOTH rows show a pacing marker.
+out=$(run_renderer showy-quota-zellij-bar codexbar-mixed.json SHOWY_QUOTA_PROVIDERS=claude SHOWY_QUOTA_ZELLIJ_BAR_WIDTH=8 SHOWY_QUOTA_REFRESH_SECONDS=9999999999 SHOWY_QUOTA_NOW_EPOCH=4070919600 SHOWY_QUOTA_FORCE_COLOR=1)
+assert_contains "zellij dual keeps short (5h) window bright" "38;2;37;190;106" "${out}"
+assert_contains "zellij dual dims long (weekly) window" "48;2;20;104;58" "${out}"
+assert_contains "zellij dual paces the primary row" "38;2;190;149;255" "${out}"
+assert_contains "zellij dual paces the secondary row" "48;2;190;149;255" "${out}"
+
+# Horizon model: a weekly-only provider (Antigravity pools) dims its filled
+# window and never uses a bright primary-good fill for a weekly window.
+out=$(run_renderer showy-quota-zellij-bar codexbar-no-tertiary.json SHOWY_QUOTA_ZELLIJ_BAR_WIDTH=8 SHOWY_QUOTA_REFRESH_SECONDS=9999999999 SHOWY_QUOTA_NOW_EPOCH=4070908800 SHOWY_QUOTA_FORCE_COLOR=1)
+assert_contains "zellij dual dims weekly-only secondary fill" "48;2;132;96;0" "${out}"
+assert_not_contains "zellij dual weekly window is not bright-good fill" "48;2;37;190;106" "${out}"
+
 
 out=$(run_renderer showy-quota-zellij-bar codexbar-empty.json)
 assert_contains "empty fixture renders 'AI idle'"      "AI idle" "${out}"
@@ -1000,7 +1024,7 @@ out=$(run_renderer showy-quota-tmux-bar "${sextant_fixture}" SHOWY_QUOTA_TERMINA
 visible=$(strip_tmux_markup "${out}")
 assert_contains "tmux sextant3 renders three stacked row geometry" "CL▕██🬎🬎🬂🬂  ▏" "${visible}"
 assert_not_contains "tmux sextant3 omits half-block cells" "▀" "${visible}"
-assert_contains "tmux sextant3 colors all-row cells by bottom role" "fg=#846000,bg=#2a2a2a]█" "${out}"
+assert_contains "tmux sextant3 colors all-row cells by bottom window horizon" "fg=#f0af00,bg=#2a2a2a]█" "${out}"
 assert_not_contains "tmux sextant3 omits elapsed markers" "be95ff" "${out}"
 
 out=$(run_renderer showy-quota-tmux-bar "${mono_fixture}" SHOWY_QUOTA_TMUX_BAR_WIDTH=8 SHOWY_QUOTA_REFRESH_SECONDS=9999999999 SHOWY_QUOTA_NOW_EPOCH=4070912400)
@@ -1021,6 +1045,12 @@ out=$(run_renderer showy-quota-tmux-bar "${mono_claude_fixture}" SHOWY_QUOTA_MON
 visible=$(strip_tmux_markup "${out}")
 assert_contains "tmux provider mono3 override uses mono marker path" "CL▕██🬎│🬂🬂  ▏" "${visible}"
 assert_contains "tmux provider mono3 override colors separator with elapsed palette" "fg=#be95ff,bg=#2a2a2a]│" "${out}"
+
+out=$(run_renderer showy-quota-tmux-bar codexbar-no-tertiary.json SHOWY_QUOTA_TERMINAL_BAR_MODE=mono3 SHOWY_QUOTA_TMUX_BAR_WIDTH=8 SHOWY_QUOTA_REFRESH_SECONDS=9999999999 SHOWY_QUOTA_NOW_EPOCH=4070908800)
+visible=$(strip_tmux_markup "${out}")
+assert_contains "tmux mono3 collapses to dual when tertiary absent" "AG▕▀▀▀▀▀▀▀▀▏" "${visible}"
+assert_not_contains "tmux mono3 collapse omits sextant cells" "🬂" "${visible}"
+assert_not_contains "tmux mono3 collapse omits shared separator" "│" "${visible}"
 
 
 out=$(run_renderer showy-quota-tmux-bar codexbar-empty.json)
@@ -1200,7 +1230,7 @@ run_sketchybar_items codexbar-mixed.json "${cache}" "${log}" SHOWY_QUOTA_PROVIDE
 item_log="$(< "${log}")"
 assert_contains "bootstrap removes stale legacy bar item when desired set is empty" "--remove showy_quota.gemini.bar" "${item_log}"
 assert_contains "bootstrap removes stale native provider items when desired set is empty" "--remove showy_quota.gemini.primary --remove showy_quota.gemini.secondary --remove showy_quota.gemini.tertiary" "${item_log}"
-assert_contains "bootstrap removes stale native marker items when desired set is empty" "--remove showy_quota.gemini.secondary_marker --remove showy_quota.gemini.tertiary_marker --remove showy_quota.gemini.slot --remove showy_quota.gemini.label" "${item_log}"
+assert_contains "bootstrap removes stale native marker items when desired set is empty" "--remove showy_quota.gemini.secondary_marker --remove showy_quota.gemini.tertiary_marker --remove showy_quota.gemini.primary_marker --remove showy_quota.gemini.slot --remove showy_quota.gemini.label" "${item_log}"
 assert_contains "bootstrap removes stale bracket when desired set is empty" "--remove showy_quota_bracket" "${item_log}"
 
 cache=$(mk_cache)
@@ -1249,13 +1279,13 @@ assert_contains "plugin hides missing tertiary row" "--set showy_quota.claude.te
 assert_contains "plugin pins countdown label width" "label.width=32 label.align=left" "${plugin_log}"
 assert_contains "plugin updates native tertiary row when present" "--set showy_quota.gemini.tertiary drawing=on slider.percentage=100" "${plugin_log}"
 assert_contains "plugin uses derived secondary row color" "showy_quota.claude.secondary drawing=on slider.percentage=81 slider.highlight_color=0xff14683a" "${plugin_log}"
-assert_contains "plugin uses derived tertiary row color" "showy_quota.gemini.tertiary drawing=on slider.percentage=100 slider.highlight_color=0xff14683a" "${plugin_log}"
+assert_contains "plugin uses derived tertiary row color" "showy_quota.gemini.tertiary drawing=on slider.percentage=100 slider.highlight_color=0xff25be6a" "${plugin_log}"
 assert_contains "plugin uses native track color" "slider.background.color=0xff3a3a4a" "${plugin_log}"
 assert_contains "plugin draws elapsed marker overlay" "--set showy_quota.claude.secondary_marker drawing=on slider.percentage=100" "${plugin_log}"
 assert_contains "plugin uses elapsed marker color" "slider.knob.background.color=0xffbe95ff" "${plugin_log}"
 assert_contains "plugin positions two-row primary above center" "showy_quota.claude.primary drawing=on slider.percentage=83 slider.highlight_color=0xff25be6a slider.background.color=0xff3a3a4a slider.background.height=6 slider.background.corner_radius=3 slider.knob.drawing=off background.color=0x00000000 background.height=0 padding_left=0 padding_right=0 width=0 y_offset=4" "${plugin_log}"
 assert_contains "plugin positions two-row secondary below center" "showy_quota.claude.secondary drawing=on slider.percentage=81 slider.highlight_color=0xff14683a slider.background.color=0xff3a3a4a slider.background.height=6 slider.background.corner_radius=3 slider.knob.drawing=off background.color=0x00000000 background.height=0 padding_left=0 padding_right=0 width=0 y_offset=-4" "${plugin_log}"
-assert_contains "plugin positions tertiary below three-row stack" "showy_quota.gemini.tertiary drawing=on slider.percentage=100 slider.highlight_color=0xff14683a slider.background.color=0xff3a3a4a slider.background.height=6 slider.background.corner_radius=3 slider.knob.drawing=off background.color=0x00000000 background.height=0 padding_left=0 padding_right=0 width=0 y_offset=-7" "${plugin_log}"
+assert_contains "plugin positions tertiary below three-row stack" "showy_quota.gemini.tertiary drawing=on slider.percentage=100 slider.highlight_color=0xff25be6a slider.background.color=0xff3a3a4a slider.background.height=6 slider.background.corner_radius=3 slider.knob.drawing=off background.color=0x00000000 background.height=0 padding_left=0 padding_right=0 width=0 y_offset=-7" "${plugin_log}"
 assert_contains "plugin click reset keeps slider rows stable" "sketchybar --set 'showy_quota.claude.primary' slider.percentage=83" "${plugin_log}"
 assert_not_contains "plugin no longer logs provider bar PNGs" "bar-claude.png" "${plugin_log}"
 if compgen -G "${cache}/sb/bar-*.png" >/dev/null; then
@@ -1460,7 +1490,7 @@ else
     fail "plugin re-adds declared providers ahead of new providers in sort order" \
         "codex line=${add_codex_before_gemini} gemini line=${add_gemini_label}"
 fi
-assert_contains "plugin rebuilds bracket with added native provider" "showy_quota.gemini.icon showy_quota.gemini.primary showy_quota.gemini.secondary showy_quota.gemini.tertiary showy_quota.gemini.secondary_marker showy_quota.gemini.tertiary_marker showy_quota.gemini.slot showy_quota.gemini.label showy_quota.stale showy_quota.degraded --set showy_quota_bracket" "${plugin_log}"
+assert_contains "plugin rebuilds bracket with added native provider" "showy_quota.gemini.icon showy_quota.gemini.primary showy_quota.gemini.secondary showy_quota.gemini.tertiary showy_quota.gemini.secondary_marker showy_quota.gemini.tertiary_marker showy_quota.gemini.primary_marker showy_quota.gemini.slot showy_quota.gemini.label showy_quota.stale showy_quota.degraded --set showy_quota_bracket" "${plugin_log}"
 assert_contains "plugin triggers provider-change event" "--trigger showy_quota_provider_change SHOWY_QUOTA_PROVIDER_COUNT=3 SHOWY_QUOTA_PROVIDERS=codex,claude,gemini" "${plugin_log}"
 
 cache=$(mk_cache)
@@ -1480,7 +1510,7 @@ run_sketchybar_plugin "${drop_fixture}" "${cache}" "${log}"
 plugin_log="$(< "${log}")"
 assert_contains "plugin removes dropped provider legacy bar" "--remove showy_quota.gemini.icon --remove showy_quota.gemini.bar" "${plugin_log}"
 assert_contains "plugin removes dropped provider native rows" "--remove showy_quota.gemini.primary --remove showy_quota.gemini.secondary --remove showy_quota.gemini.tertiary" "${plugin_log}"
-assert_contains "plugin removes dropped provider native markers" "--remove showy_quota.gemini.secondary_marker --remove showy_quota.gemini.tertiary_marker --remove showy_quota.gemini.slot --remove showy_quota.gemini.label" "${plugin_log}"
+assert_contains "plugin removes dropped provider native markers" "--remove showy_quota.gemini.secondary_marker --remove showy_quota.gemini.tertiary_marker --remove showy_quota.gemini.primary_marker --remove showy_quota.gemini.slot --remove showy_quota.gemini.label" "${plugin_log}"
 
 cache=$(mk_cache)
 seed_sketchybar_state "${cache}" codex claude gemini
@@ -3148,9 +3178,14 @@ assert_contains "zellij greys stale countdown" "${stale_countdown_escape}" "${ou
 assert_not_contains "zellij does not dim stale cache" "${ansi_dim}" "${out}"
 assert_contains "zellij stale cache preserves valid countdown text" "12m" "${out}"
 
+# Forced sextant3 needs a provider with all three windows; mixed-fixture
+# providers without a tertiary window now collapse to dual.
+sextant_stale_cache=$(mk_cache)
+cp "${mono_fixture}" "${sextant_stale_cache}/usage.json"
+touch -t 198801010000 "${sextant_stale_cache}/usage.json"
 out=$(
     SHOWY_QUOTA_NO_CONFIG=1 \
-    SHOWY_QUOTA_CACHE_DIR="${cache}" \
+    SHOWY_QUOTA_CACHE_DIR="${sextant_stale_cache}" \
     SHOWY_QUOTA_CODEXBAR_BIN="${TMP}/no-such-codexbar" \
     SHOWY_QUOTA_CODEXBAR_SERVE_URL='' \
     SHOWY_QUOTA_FORCE_COLOR=1 \
@@ -3180,7 +3215,7 @@ assert_not_contains "tmux stale cache has no weekly hint" "]w" "${out}"
 
 out=$(
     SHOWY_QUOTA_NO_CONFIG=1 \
-    SHOWY_QUOTA_CACHE_DIR="${cache}" \
+    SHOWY_QUOTA_CACHE_DIR="${sextant_stale_cache}" \
     SHOWY_QUOTA_CODEXBAR_BIN="${TMP}/no-such-codexbar" \
     SHOWY_QUOTA_CODEXBAR_SERVE_URL='' \
     SHOWY_QUOTA_NOW_EPOCH=4070928480 \

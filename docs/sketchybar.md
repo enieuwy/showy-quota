@@ -10,8 +10,8 @@ localhost `codexbar serve` or visibly degraded CLI fallback, after
   mapped, CodexBar SVG/PNG fallback otherwise)
 - `showy_quota.<provider>.primary` / `.secondary` / `.tertiary` — native slider
   usage rows
-- `showy_quota.<provider>.secondary_marker` / `.tertiary_marker` — pacing
-  markers
+- `showy_quota.<provider>.primary_marker` / `.secondary_marker` / `.tertiary_marker`
+  — per-window pacing markers (every present window is paced)
 - `showy_quota.<provider>.slot` — transparent click/spacing item
 - `showy_quota.<provider>.label` — countdown label
 
@@ -121,10 +121,13 @@ Tertiary is hidden when the provider does not expose that window.
 ## Customizing colors
 
 Set `SHOWY_QUOTA_PALETTE_PRIMARY_*` in `~/.config/showy-quota/config.env` for
-the minimal palette surface. Secondary and tertiary rows auto-derive from the
-primary palette at `0.55` by default, so the 7d/monthly rows keep the original
-dimmed ai-quota look unless you override `SHOWY_QUOTA_PALETTE_SECONDARY_*` or
-`SHOWY_QUOTA_PALETTE_TERTIARY_*` directly. `SHOWY_QUOTA_PALETTE_TRACK`,
+the minimal palette surface. Each usage row is colored by its remaining-quota
+severity against the primary palette, then dimmed when its window is a
+long-horizon cap — `windowMinutes` at or beyond `SHOWY_QUOTA_DIM_WINDOW_MINUTES`
+(default `10080`, i.e. weekly/monthly). The dim color is the primary palette
+scaled by `SHOWY_QUOTA_PALETTE_DIM_SCALE` (default `0.55`) unless you set an
+explicit `SHOWY_QUOTA_PALETTE_DIM_*` override, so weekly/monthly rows keep the
+dimmed ai-quota look while 5h/daily rows stay bright. `SHOWY_QUOTA_PALETTE_TRACK`,
 `SHOWY_QUOTA_PALETTE_ICON_TEXT`, `SHOWY_QUOTA_PALETTE_COUNTDOWN`,
 `SHOWY_QUOTA_PALETTE_COUNTDOWN_WARN`, `SHOWY_QUOTA_PALETTE_STALE`, and
 `SHOWY_QUOTA_PALETTE_ELAPSED` stay global across rows. Countdown labels use

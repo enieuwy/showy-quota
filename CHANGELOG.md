@@ -11,6 +11,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   reset times (e.g. Gemini's `23:59` lost its last digit). The pinned
   `SHOWY_QUOTA_SKETCHYBAR_LABEL_WIDTH` default is now `32` (was `27`), which
   fits the longest countdown form; shorter strings stay jitter-free as before.
+- The Zellij/tmux `mono3` and `sextant3` bodies now collapse to the two-lane
+  `dual` body for providers without a tertiary window, matching the SketchyBar
+  renderer which already drops the absent tertiary row. Antigravity's new
+  two-pool shape (Gemini weekly in `usage.primary`, Claude+GPT weekly in
+  `usage.secondary`, `usage.tertiary: null`) previously rendered as a three-lane
+  bar with an empty bottom row; it now shows two bars in every renderer.
 
 ### Changed
 - The SketchyBar bar slot default (`SHOWY_QUOTA_SKETCHYBAR_BAR_WIDTH`) is now
@@ -18,6 +24,29 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   each provider's bars and its countdown. This offsets the wider countdown
   label above so per-provider width stays effectively unchanged; the 80px bars
   are untouched.
+- Bar dimming and pacing are now driven by each usage window's **horizon**
+  instead of its row position. A window is dimmed only when its `windowMinutes`
+  is at or beyond `SHOWY_QUOTA_DIM_WINDOW_MINUTES` (default `10080`, i.e.
+  weekly/monthly), so a 5h live tier stays bright while its weekly/monthly cap
+  dims — regardless of which slot it occupies. Time-tiered providers (Codex,
+  Claude) keep a bright 5h row over a dimmed weekly row; uniform-weekly
+  model pools (Antigravity) dim every row; uniform-daily pools (Gemini) dim
+  none. The `dual` body now draws a pacing marker on **both** rows, and the
+  SketchyBar plugin gained a `primary_marker` so every pool is paced (was
+  secondary/tertiary only).
+
+### Added
+- `SHOWY_QUOTA_PALETTE_DIM_SCALE` / `palette_dim_scale` (default `0.55`) and
+  `SHOWY_QUOTA_PALETTE_DIM_{GOOD,WARN,BAD,UNKNOWN}` / `palette_dim_*` set the
+  color of dimmed (long-horizon) windows, plus `SHOWY_QUOTA_DIM_WINDOW_MINUTES`
+  / `dim_window_minutes` (default `10080`) sets the weekly/monthly dim threshold.
+
+### Removed
+- The row-position palette knobs `SHOWY_QUOTA_PALETTE_SECONDARY_*`,
+  `SHOWY_QUOTA_PALETTE_TERTIARY_*`, `SHOWY_QUOTA_PALETTE_SECONDARY_SCALE`, and
+  `SHOWY_QUOTA_PALETTE_TERTIARY_SCALE` (and their KDL equivalents). Dimming is
+  now horizon-based via `SHOWY_QUOTA_PALETTE_DIM_*` / `SHOWY_QUOTA_PALETTE_DIM_SCALE`;
+  move any secondary/tertiary color or scale overrides to the `DIM` keys.
 
 ## [0.2.5] — 2026-06-12
 

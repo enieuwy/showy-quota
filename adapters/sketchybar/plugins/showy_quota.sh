@@ -150,6 +150,7 @@ remove_provider_items() {
         --remove "showy_quota.${pid}.tertiary" \
         --remove "showy_quota.${pid}.secondary_marker" \
         --remove "showy_quota.${pid}.tertiary_marker" \
+        --remove "showy_quota.${pid}.primary_marker" \
         --remove "showy_quota.${pid}.slot" \
         --remove "showy_quota.${pid}.label" >/dev/null 2>&1 || true
 }
@@ -284,6 +285,7 @@ declare_provider_items() {
                    click_script="${CLICK}" >/dev/null 2>&1 || true
 
     declare_marker_item "${pid}" secondary
+    declare_marker_item "${pid}" primary
     declare_marker_item "${pid}" tertiary
 
     sketchybar --add item "showy_quota.${pid}.slot" left \
@@ -321,6 +323,7 @@ provider_items_declared() {
         && sketchybar_item_exists "showy_quota.${pid}.tertiary" \
         && sketchybar_item_exists "showy_quota.${pid}.secondary_marker" \
         && sketchybar_item_exists "showy_quota.${pid}.tertiary_marker" \
+        && sketchybar_item_exists "showy_quota.${pid}.primary_marker" \
         && sketchybar_item_exists "showy_quota.${pid}.slot" \
         && sketchybar_item_exists "showy_quota.${pid}.label"
 }
@@ -355,6 +358,7 @@ recreate_bracket() {
             "showy_quota.${pid}.tertiary"
             "showy_quota.${pid}.secondary_marker"
             "showy_quota.${pid}.tertiary_marker"
+            "showy_quota.${pid}.primary_marker"
             "showy_quota.${pid}.slot"
             "showy_quota.${pid}.label"
         )
@@ -427,9 +431,9 @@ argb_from_hex() { printf '0xff%s' "$1"; }
 # 6-char hex → '#RRGGBB' for ImageMagick.
 mhex() { printf '#%s' "$1"; }
 
-PRIMARY_WARN_HEX="$(showy_quota_role_palette primary warn)"
-PRIMARY_BAD_HEX="$(showy_quota_role_palette primary bad)"
-PRIMARY_UNKNOWN_HEX="$(showy_quota_role_palette primary unknown)"
+PRIMARY_WARN_HEX="$(showy_quota_primary_palette warn)"
+PRIMARY_BAD_HEX="$(showy_quota_primary_palette bad)"
+PRIMARY_UNKNOWN_HEX="$(showy_quota_primary_palette unknown)"
 TRACK_HEX="$(showy_quota_palette track)"
 TRACK_ARGB="$(argb_from_hex "${TRACK_HEX}")"
 ICON_TEXT_HEX="$(showy_quota_palette icon_text)"
@@ -741,6 +745,7 @@ rows=$(printf '%s' "${filtered}" | jq -r '
         .provider,
         (if $p then (100 - pct($p.usedPercent)) else "" end),
         ($p.resetsAt // $p.resetDescription // ""),
+        ($p.windowMinutes // ""),
         (if $s then (100 - pct($s.usedPercent)) else "" end),
         ($s.resetsAt // $s.resetDescription // ""),
         ($s.windowMinutes // ""),
@@ -751,7 +756,7 @@ rows=$(printf '%s' "${filtered}" | jq -r '
         (.status.url // "")
     ] | map(tostring) | join("\u001f")')
 
-while IFS=$'\x1f' read -r pid rem_p p_reset rem_s s_reset s_window rem_t t_reset t_window status status_url; do
+while IFS=$'\x1f' read -r pid rem_p p_reset p_window rem_s s_reset s_window rem_t t_reset t_window status status_url; do
     [[ -n "${pid}" ]] || continue
 
     icon=""
@@ -762,12 +767,14 @@ while IFS=$'\x1f' read -r pid rem_p p_reset rem_s s_reset s_window rem_t t_reset
     else
         icon=$(provider_icon_png "${pid}" "${status}" || true)
     fi
+    marker_p=$(elapsed_marker_x "${p_reset}" "${p_window}" || true)
     marker_s=$(elapsed_marker_x "${s_reset}" "${s_window}" || true)
     marker_t=$(elapsed_marker_x "${t_reset}" "${t_window}" || true)
 
     rem_p_pct=$(clamp_slider_percentage "${rem_p}")
     rem_s_pct=$(clamp_slider_percentage "${rem_s}")
     rem_t_pct=$(clamp_slider_percentage "${rem_t}")
+    marker_p_pct=$(marker_percentage_from_x "${marker_p}" || true)
     marker_s_pct=$(marker_percentage_from_x "${marker_s}" || true)
     marker_t_pct=$(marker_percentage_from_x "${marker_t}" || true)
 
@@ -802,14 +809,18 @@ while IFS=$'\x1f' read -r pid rem_p p_reset rem_s s_reset s_window rem_t t_reset
         label='idle'
     fi
     [[ -n "${color}" ]] || color="${COUNTDOWN_ARGB}"
-    primary_highlight="$(argb_from_hex "$(showy_quota_role_color primary "${rem_p_pct}")")"
-    secondary_highlight="$(argb_from_hex "$(showy_quota_role_color secondary "${rem_s_pct}")")"
-    tertiary_highlight="$(argb_from_hex "$(showy_quota_role_color tertiary "${rem_t_pct}")")"
+    p_long=$(showy_quota_is_long_window "${p_window}")
+    s_long=$(showy_quota_is_long_window "${s_window}")
+    t_long=$(showy_quota_is_long_window "${t_window}")
+    primary_highlight="$(argb_from_hex "$(showy_quota_window_color "${rem_p_pct}" "${p_long}")")"
+    secondary_highlight="$(argb_from_hex "$(showy_quota_window_color "${rem_s_pct}" "${s_long}")")"
+    tertiary_highlight="$(argb_from_hex "$(showy_quota_window_color "${rem_t_pct}" "${t_long}")")"
     if (( stale )); then
         color="${STALE_ARGB}"
         primary_highlight="${STALE_ARGB}"
         secondary_highlight="${STALE_ARGB}"
         tertiary_highlight="${STALE_ARGB}"
+        marker_p_pct=""
         marker_s_pct=""
         marker_t_pct=""
     fi
@@ -819,12 +830,14 @@ while IFS=$'\x1f' read -r pid rem_p p_reset rem_s s_reset s_window rem_t t_reset
     tertiary_item="showy_quota.${pid}.tertiary"
     secondary_marker_item="showy_quota.${pid}.secondary_marker"
     tertiary_marker_item="showy_quota.${pid}.tertiary_marker"
+    primary_marker_item="showy_quota.${pid}.primary_marker"
 
     primary_click=$(slider_click_script "${primary_item}" "${rem_p_pct}")
     secondary_click=$(slider_click_script "${secondary_item}" "${rem_s_pct}")
     tertiary_click=$(slider_click_script "${tertiary_item}" "${rem_t_pct}")
     secondary_marker_click=$(slider_click_script "${secondary_marker_item}" "${marker_s_pct:-0}")
     tertiary_marker_click=$(slider_click_script "${tertiary_marker_item}" "${marker_t_pct:-0}")
+    primary_marker_click=$(slider_click_script "${primary_marker_item}" "${marker_p_pct:-0}")
 
     args=(
         --set "showy_quota.${pid}.label" drawing=on label="${label}" label.color="${color}" label.width="${SHOWY_QUOTA_SKETCHYBAR_LABEL_WIDTH}" label.align=left background.color=0x00000000 background.height=0
@@ -846,6 +859,12 @@ while IFS=$'\x1f' read -r pid rem_p p_reset rem_s s_reset s_window rem_t t_reset
         args+=( --set "${tertiary_item}" drawing=on slider.percentage="${rem_t_pct}" slider.highlight_color="${tertiary_highlight}" slider.background.color="${TRACK_ARGB}" slider.background.height="${NATIVE_ROW_HEIGHT}" slider.background.corner_radius="${NATIVE_ROW_RADIUS}" slider.knob.drawing=off background.color=0x00000000 background.height=0 padding_left=0 padding_right=0 width=0 y_offset="${tertiary_y}" click_script="${tertiary_click}" )
     else
         args+=( --set "${tertiary_item}" drawing=off slider.percentage=0 background.color=0x00000000 background.height=0 padding_left=0 padding_right=0 width=0 y_offset="${tertiary_y}" click_script="${tertiary_click}" )
+    fi
+
+    if [[ -n "${marker_p_pct}" ]]; then
+        args+=( --set "${primary_marker_item}" drawing=on slider.percentage="${marker_p_pct}" slider.highlight_color=0x00000000 slider.background.color=0x00000000 slider.background.height="${NATIVE_ROW_HEIGHT}" slider.background.corner_radius=0 slider.knob.drawing=on slider.knob.color=0x00000000 slider.knob.width=1 slider.knob.padding_left=0 slider.knob.padding_right=0 slider.knob.background.drawing=on slider.knob.background.color="${ELAPSED_ARGB}" slider.knob.background.height="${NATIVE_ROW_HEIGHT}" slider.knob.background.corner_radius=0 background.color=0x00000000 background.height=0 padding_left=0 padding_right=0 width=0 y_offset="${primary_y}" click_script="${primary_marker_click}" )
+    else
+        args+=( --set "${primary_marker_item}" drawing=off slider.percentage=0 y_offset="${primary_y}" click_script="${primary_marker_click}" )
     fi
 
     if [[ -n "${marker_s_pct}" ]]; then

@@ -76,8 +76,8 @@ showy_quota_load_config
 : "${SHOWY_QUOTA_PALETTE_PRIMARY_WARN:=f0af00}"
 : "${SHOWY_QUOTA_PALETTE_PRIMARY_BAD:=ee5396}"
 : "${SHOWY_QUOTA_PALETTE_PRIMARY_UNKNOWN:=6c7086}"
-: "${SHOWY_QUOTA_PALETTE_SECONDARY_SCALE:=0.55}"
-: "${SHOWY_QUOTA_PALETTE_TERTIARY_SCALE:=0.55}"
+: "${SHOWY_QUOTA_PALETTE_DIM_SCALE:=0.55}"
+: "${SHOWY_QUOTA_DIM_WINDOW_MINUTES:=10080}"
 : "${SHOWY_QUOTA_PALETTE_BG:=161616}"
 : "${SHOWY_QUOTA_PALETTE_SURFACE:=2a2a2a}"
 : "${SHOWY_QUOTA_PALETTE_TRACK:=3a3a4a}"
@@ -405,62 +405,71 @@ showy_quota_palette() {
     showy_quota_normalize_hex "${value}"
 }
 
-# Hex color (no '#') for a role + severity pair.
-showy_quota_role_palette() {
-    local role="$1"
-    local severity="$2"
-    local cache_key="${role}:${severity}"
-    local role_upper severity_upper result var_name scale_name primary_var
-
+# Hex color (no '#') for the primary palette at a severity.
+showy_quota_primary_palette() {
+    local severity="$1"
+    local cache_key="primary:${severity}" severity_upper var_name result
     if [[ -n "${SHOWY_QUOTA_ROLE_PALETTE_CACHE[${cache_key}]+x}" ]]; then
         printf '%s' "${SHOWY_QUOTA_ROLE_PALETTE_CACHE[${cache_key}]}"
         return 0
     fi
-
-    case "${role}" in
-        primary)
-            role_upper="PRIMARY"
-            ;;
-        secondary)
-            role_upper="SECONDARY"
-            ;;
-        tertiary)
-            role_upper="TERTIARY"
-            ;;
-        *)
-            showy_quota_die "unknown palette role: ${role}"
-            ;;
-    esac
-
     case "${severity}" in
-        good|warn|bad|unknown)
-            severity_upper="${severity^^}"
-            ;;
-        *)
-            showy_quota_die "unknown palette severity: ${severity}"
-            ;;
+        good|warn|bad|unknown) severity_upper="${severity^^}" ;;
+        *) showy_quota_die "unknown palette severity: ${severity}" ;;
     esac
+    var_name="SHOWY_QUOTA_PALETTE_PRIMARY_${severity_upper}"
+    result="$(showy_quota_normalize_hex "${!var_name}")"
+    SHOWY_QUOTA_ROLE_PALETTE_CACHE["${cache_key}"]="${result}"
+    printf '%s' "${result}"
+}
 
-    var_name="SHOWY_QUOTA_PALETTE_${role_upper}_${severity_upper}"
-    if [[ "${role}" == "primary" ]]; then
-        result="${!var_name}"
-    elif [[ -n "${!var_name:-}" ]]; then
-        result="${!var_name}"
+# Hex color (no '#') for the dimmed long-horizon (weekly/monthly cap) palette at
+# a severity: explicit SHOWY_QUOTA_PALETTE_DIM_<SEV> override, otherwise the
+# primary palette scaled by SHOWY_QUOTA_PALETTE_DIM_SCALE.
+showy_quota_dim_palette() {
+    local severity="$1"
+    local cache_key="dim:${severity}" severity_upper override_var primary_var result
+    if [[ -n "${SHOWY_QUOTA_ROLE_PALETTE_CACHE[${cache_key}]+x}" ]]; then
+        printf '%s' "${SHOWY_QUOTA_ROLE_PALETTE_CACHE[${cache_key}]}"
+        return 0
+    fi
+    case "${severity}" in
+        good|warn|bad|unknown) severity_upper="${severity^^}" ;;
+        *) showy_quota_die "unknown palette severity: ${severity}" ;;
+    esac
+    override_var="SHOWY_QUOTA_PALETTE_DIM_${severity_upper}"
+    if [[ -n "${!override_var:-}" ]]; then
+        result="${!override_var}"
     else
         primary_var="SHOWY_QUOTA_PALETTE_PRIMARY_${severity_upper}"
-        scale_name="SHOWY_QUOTA_PALETTE_${role_upper}_SCALE"
-        result="$(showy_quota_scale_hex "${!primary_var}" "${!scale_name}")"
+        result="$(showy_quota_scale_hex "${!primary_var}" "${SHOWY_QUOTA_PALETTE_DIM_SCALE}")"
     fi
-
     result="$(showy_quota_normalize_hex "${result}")"
     SHOWY_QUOTA_ROLE_PALETTE_CACHE["${cache_key}"]="${result}"
     printf '%s' "${result}"
 }
 
-showy_quota_role_color() {
-    local role="$1"
-    local remaining="$2"
-    showy_quota_role_palette "${role}" "$(showy_quota_color_key "${remaining}")"
+# Is a window a long-horizon cap (weekly/monthly)? Args: $1 = windowMinutes.
+# A window dims only when its horizon is at or beyond SHOWY_QUOTA_DIM_WINDOW_MINUTES.
+showy_quota_is_long_window() {
+    local window_minutes="$1"
+    if [[ "${window_minutes}" =~ ^[0-9]+$ ]] && (( window_minutes >= SHOWY_QUOTA_DIM_WINDOW_MINUTES )); then
+        printf '1'
+    else
+        printf '0'
+    fi
+}
+
+# Hex color for a usage window: severity palette of its remaining percent,
+# dimmed when the window is a long-horizon cap. Args: $1 = remaining, $2 = is_long.
+showy_quota_window_color() {
+    local remaining="$1" is_long="${2:-0}" severity
+    severity="$(showy_quota_color_key "${remaining}")"
+    if [[ "${is_long}" == "1" ]]; then
+        showy_quota_dim_palette "${severity}"
+    else
+        showy_quota_primary_palette "${severity}"
+    fi
 }
 
 # Validate that codexbar JSON looks like an array of provider objects.

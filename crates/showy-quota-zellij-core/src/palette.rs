@@ -1,13 +1,6 @@
 use crate::config::RenderConfig;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Role {
-    Primary,
-    Secondary,
-    Tertiary,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Severity {
     Good,
     Warn,
@@ -26,31 +19,14 @@ impl RenderConfig {
         }
     }
 
-    pub fn role_color(&self, role: Role, remaining: i32) -> String {
-        self.role_palette(role, self.color_key(remaining))
-    }
-
-    pub fn role_palette(&self, role: Role, severity: Severity) -> String {
-        match role {
-            Role::Primary => self.primary_palette(severity),
-            Role::Secondary => self
-                .secondary_override(severity)
-                .cloned()
-                .unwrap_or_else(|| {
-                    scale_hex(
-                        &self.primary_palette(severity),
-                        &self.palette_secondary_scale,
-                    )
-                }),
-            Role::Tertiary => self
-                .tertiary_override(severity)
-                .cloned()
-                .unwrap_or_else(|| {
-                    scale_hex(
-                        &self.primary_palette(severity),
-                        &self.palette_tertiary_scale,
-                    )
-                }),
+    /// Color for a usage window: the severity palette, dimmed when the window
+    /// is a long-horizon (weekly/monthly) cap rather than a live short tier.
+    pub fn window_color(&self, remaining: i32, is_long: bool) -> String {
+        let severity = self.color_key(remaining);
+        if is_long {
+            self.dim_palette(severity)
+        } else {
+            self.primary_palette(severity)
         }
     }
 
@@ -63,21 +39,20 @@ impl RenderConfig {
         }
     }
 
-    fn secondary_override(&self, severity: Severity) -> Option<&String> {
-        match severity {
-            Severity::Good => self.palette_secondary_good.as_ref(),
-            Severity::Warn => self.palette_secondary_warn.as_ref(),
-            Severity::Bad => self.palette_secondary_bad.as_ref(),
-            Severity::Unknown => self.palette_secondary_unknown.as_ref(),
-        }
+    /// Dimmed palette for long-horizon windows: explicit override when set,
+    /// otherwise the primary palette scaled down by `palette_dim_scale`.
+    pub fn dim_palette(&self, severity: Severity) -> String {
+        self.dim_override(severity).cloned().unwrap_or_else(|| {
+            scale_hex(&self.primary_palette(severity), &self.palette_dim_scale)
+        })
     }
 
-    fn tertiary_override(&self, severity: Severity) -> Option<&String> {
+    fn dim_override(&self, severity: Severity) -> Option<&String> {
         match severity {
-            Severity::Good => self.palette_tertiary_good.as_ref(),
-            Severity::Warn => self.palette_tertiary_warn.as_ref(),
-            Severity::Bad => self.palette_tertiary_bad.as_ref(),
-            Severity::Unknown => self.palette_tertiary_unknown.as_ref(),
+            Severity::Good => self.palette_dim_good.as_ref(),
+            Severity::Warn => self.palette_dim_warn.as_ref(),
+            Severity::Bad => self.palette_dim_bad.as_ref(),
+            Severity::Unknown => self.palette_dim_unknown.as_ref(),
         }
     }
 }
@@ -134,7 +109,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_secondary_scale_matches_shell_integer_math() {
+    fn default_dim_scale_matches_shell_integer_math() {
         assert_eq!(scale_hex("25be6a", "0.55"), "14683a");
         assert_eq!(scale_hex("f0af00", "0.55"), "846000");
         assert_eq!(scale_hex("ee5396", "0.55"), "822d52");

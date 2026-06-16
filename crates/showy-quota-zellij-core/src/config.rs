@@ -11,16 +11,11 @@ pub struct RenderConfig {
     pub palette_primary_warn: String,
     pub palette_primary_bad: String,
     pub palette_primary_unknown: String,
-    pub palette_secondary_good: Option<String>,
-    pub palette_secondary_warn: Option<String>,
-    pub palette_secondary_bad: Option<String>,
-    pub palette_secondary_unknown: Option<String>,
-    pub palette_tertiary_good: Option<String>,
-    pub palette_tertiary_warn: Option<String>,
-    pub palette_tertiary_bad: Option<String>,
-    pub palette_tertiary_unknown: Option<String>,
-    pub palette_secondary_scale: String,
-    pub palette_tertiary_scale: String,
+    pub palette_dim_good: Option<String>,
+    pub palette_dim_warn: Option<String>,
+    pub palette_dim_bad: Option<String>,
+    pub palette_dim_unknown: Option<String>,
+    pub palette_dim_scale: String,
     pub palette_bg: String,
     pub palette_surface: String,
     pub palette_track: String,
@@ -36,6 +31,7 @@ pub struct RenderConfig {
     pub good_min_remaining: i32,
     pub warn_min_remaining: i32,
     pub time_warn_minutes: i64,
+    pub dim_window_minutes: i64,
 
     pub zellij_bar_width: usize,
     pub terminal_bar_mode: String,
@@ -59,16 +55,11 @@ impl Default for RenderConfig {
             palette_primary_warn: "f0af00".into(),
             palette_primary_bad: "ee5396".into(),
             palette_primary_unknown: "6c7086".into(),
-            palette_secondary_good: None,
-            palette_secondary_warn: None,
-            palette_secondary_bad: None,
-            palette_secondary_unknown: None,
-            palette_tertiary_good: None,
-            palette_tertiary_warn: None,
-            palette_tertiary_bad: None,
-            palette_tertiary_unknown: None,
-            palette_secondary_scale: "0.55".into(),
-            palette_tertiary_scale: "0.55".into(),
+            palette_dim_good: None,
+            palette_dim_warn: None,
+            palette_dim_bad: None,
+            palette_dim_unknown: None,
+            palette_dim_scale: "0.55".into(),
             palette_bg: "161616".into(),
             palette_surface: "2a2a2a".into(),
             palette_track: "3a3a4a".into(),
@@ -83,6 +74,7 @@ impl Default for RenderConfig {
             good_min_remaining: 40,
             warn_min_remaining: 15,
             time_warn_minutes: 30,
+            dim_window_minutes: 10080,
             zellij_bar_width: 12,
             terminal_bar_mode: "auto".into(),
             mono3_providers: csv("gemini,antigravity"),
@@ -145,53 +137,28 @@ impl RenderConfig {
         );
         assign_option(
             &get,
-            "SHOWY_QUOTA_PALETTE_SECONDARY_GOOD",
-            &mut self.palette_secondary_good,
+            "SHOWY_QUOTA_PALETTE_DIM_GOOD",
+            &mut self.palette_dim_good,
         );
         assign_option(
             &get,
-            "SHOWY_QUOTA_PALETTE_SECONDARY_WARN",
-            &mut self.palette_secondary_warn,
+            "SHOWY_QUOTA_PALETTE_DIM_WARN",
+            &mut self.palette_dim_warn,
         );
         assign_option(
             &get,
-            "SHOWY_QUOTA_PALETTE_SECONDARY_BAD",
-            &mut self.palette_secondary_bad,
+            "SHOWY_QUOTA_PALETTE_DIM_BAD",
+            &mut self.palette_dim_bad,
         );
         assign_option(
             &get,
-            "SHOWY_QUOTA_PALETTE_SECONDARY_UNKNOWN",
-            &mut self.palette_secondary_unknown,
-        );
-        assign_option(
-            &get,
-            "SHOWY_QUOTA_PALETTE_TERTIARY_GOOD",
-            &mut self.palette_tertiary_good,
-        );
-        assign_option(
-            &get,
-            "SHOWY_QUOTA_PALETTE_TERTIARY_WARN",
-            &mut self.palette_tertiary_warn,
-        );
-        assign_option(
-            &get,
-            "SHOWY_QUOTA_PALETTE_TERTIARY_BAD",
-            &mut self.palette_tertiary_bad,
-        );
-        assign_option(
-            &get,
-            "SHOWY_QUOTA_PALETTE_TERTIARY_UNKNOWN",
-            &mut self.palette_tertiary_unknown,
+            "SHOWY_QUOTA_PALETTE_DIM_UNKNOWN",
+            &mut self.palette_dim_unknown,
         );
         assign_string(
             &get,
-            "SHOWY_QUOTA_PALETTE_SECONDARY_SCALE",
-            &mut self.palette_secondary_scale,
-        );
-        assign_string(
-            &get,
-            "SHOWY_QUOTA_PALETTE_TERTIARY_SCALE",
-            &mut self.palette_tertiary_scale,
+            "SHOWY_QUOTA_PALETTE_DIM_SCALE",
+            &mut self.palette_dim_scale,
         );
         assign_string(&get, "SHOWY_QUOTA_PALETTE_BG", &mut self.palette_bg);
         assign_string(
@@ -252,6 +219,11 @@ impl RenderConfig {
             &get,
             "SHOWY_QUOTA_TIME_WARN_MINUTES",
             self.time_warn_minutes,
+        );
+        self.dim_window_minutes = get_i64(
+            &get,
+            "SHOWY_QUOTA_DIM_WINDOW_MINUTES",
+            self.dim_window_minutes,
         );
 
         self.zellij_bar_width =

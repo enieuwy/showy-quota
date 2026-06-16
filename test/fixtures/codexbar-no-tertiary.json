@@ -1,0 +1,10 @@
+[
+  {
+    "provider": "antigravity",
+    "usage": {
+      "primary": { "usedPercent": 100, "windowMinutes": 10080, "resetsAt": "2099-01-03T00:00:00Z" },
+      "secondary": { "usedPercent": 82, "windowMinutes": 10080, "resetsAt": "2099-01-02T00:00:00Z" },
+      "tertiary": null
+    }
+  }
+]

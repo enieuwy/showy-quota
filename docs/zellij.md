@@ -146,7 +146,7 @@ The plugin renders the same styled terminal strip geometry as `bin/showy-quota-z
 | Segment | Meaning |
 |---|---|
 | **SIGIL** | 2-letter provider abbreviation (`CL`, `CX`, `GE`, …). |
-| **bar** | In default `auto` mode, time-tier providers render as `dual` half-block geometry (`▀`) for primary/5h over secondary/7d quota. Providers listed in `mono3_providers` (`gemini,antigravity` by default) render as `mono3`: primary, secondary, and tertiary are packed into top/middle/bottom sextant rows, plus one provider-level `│` pacing separator. Color roles configure the standalone plugin, shell renderer, and advanced zjstatus output. |
+| **bar** | In default `auto` mode, most providers render as `dual` half-block geometry (`▀`): the primary window on the upper half over the secondary on the lower half, each colored by its remaining-quota severity and dimmed when it is a weekly/monthly cap, with a pacing marker on **both** rows. Providers listed in `mono3_providers` (`gemini,antigravity` by default) render as `mono3`: primary, secondary, and tertiary packed into top/middle/bottom sextant rows with one provider-level color and one `│` pacing separator. Dimming is horizon-based (`SHOWY_QUOTA_DIM_WINDOW_MINUTES`, default weekly), not row-based. |
 | **countdown** | Compact like `12m`, `4h`, `4:31`, `2d`, `5w`, or `?` if the provider does not expose a primary reset time. |
 
 Stale snapshots keep the last-known-good data, hide elapsed markers, grey data-bearing colors, and append the stale glyph (`⚠` by default). CLI fallback appends `⚠cli`; stale and degraded can appear together.
@@ -187,6 +187,8 @@ plugin location="file:~/.config/zellij/plugins/showy-quota-zellij.wasm" {
 ```
 
 Palette keys mirror the shell env names without `SHOWY_QUOTA_`, lowercased (`palette_primary_good`, `palette_countdown_warn`, `stale_glyph`, etc.).
+
+`mono3` and `sextant3` need a tertiary window to fill all three lanes. When a provider has no tertiary slot (two pools at most, e.g. Antigravity's Gemini weekly + Claude+GPT weekly), both modes collapse to the two-lane `dual` body so the bar shows two bars instead of a three-lane bar with an empty bottom row, matching the SketchyBar renderer.
 
 ## Font requirements
 

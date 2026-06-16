@@ -154,9 +154,11 @@ stock macOS install.
 Terminal strips default to an `auto` mode that picks a body layout per
 provider:
 
-- **`dual`** (default for time-tier providers like 5h/7d): a
-  primary-over-secondary half-block layout. The pacing marker tints one
-  cell's background with the `elapsed` color; body width is 12 cells.
+- **`dual`** (default for most providers): a primary-over-secondary
+  half-block layout. Each window is colored by its remaining-quota severity
+  and dimmed when it is a weekly/monthly cap; both rows show a pacing marker
+  (the `elapsed` color tints the upper half for the primary window and the
+  lower half for the secondary). Body width is 12 cells.
 - **`mono3`** (default for `gemini`, `antigravity`): packs primary,
   secondary, and tertiary into a single sextant cell per column with
   top/middle/bottom rows. Uses a single provider-level foreground color

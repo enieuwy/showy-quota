@@ -112,6 +112,30 @@ fn rust_renderer_matches_shell_zellij_renderer() {
             },
         },
         Case {
+            name: "no tertiary mono collapses to dual color",
+            fixture: "codexbar-no-tertiary.json",
+            color: true,
+            now_epoch: 4_070_908_800,
+            stale: false,
+            degraded_cli: false,
+            configure: |config| {
+                config.terminal_bar_mode = "mono3".into();
+                config.zellij_bar_width = 8;
+            },
+        },
+        Case {
+            name: "no tertiary sextant collapses to dual no color",
+            fixture: "codexbar-no-tertiary.json",
+            color: false,
+            now_epoch: 4_070_908_800,
+            stale: false,
+            degraded_cli: false,
+            configure: |config| {
+                config.terminal_bar_mode = "sextant3".into();
+                config.zellij_bar_width = 8;
+            },
+        },
+        Case {
             name: "stale mixed color",
             fixture: "codexbar-mixed.json",
             color: true,

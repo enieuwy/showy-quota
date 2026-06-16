@@ -302,24 +302,37 @@ showy_quota_min_remaining() {
     printf '%s\n' "${lowest:-0}"
 }
 
+# 1 when every present window is a long-horizon cap (so the single-color mono3
+# chunk dims), 0 otherwise. Args: p_used p_window s_used s_window t_used t_window.
+showy_quota_mono3_all_long() {
+    local any=0 all=1 pair u w
+    for pair in "${1}:${2}" "${3}:${4}" "${5}:${6}"; do
+        u="${pair%%:*}"
+        w="${pair#*:}"
+        if [[ "${u}" =~ ^[0-9]+$ ]]; then
+            any=1
+            [[ "$(showy_quota_is_long_window "${w}")" == "1" ]] || all=0
+        fi
+    done
+    if (( any && all )); then printf '1'; else printf '0'; fi
+}
+
 showy_quota_mono3_color() {
     local p_remaining="$1" s_remaining="$2" t_remaining="$3"
     local p_used="$4" s_used="$5" t_used="$6"
+    local dim="${7:-0}"
     local remaining
 
     case "${SHOWY_QUOTA_MONO3_COLOR_MODE:-lowest}" in
         primary)
             remaining="${p_remaining}"
             ;;
-        lowest|"")
-            remaining=$(showy_quota_min_remaining "${p_remaining}" "${s_remaining}" "${t_remaining}" "${p_used}" "${s_used}" "${t_used}")
-            ;;
         *)
             remaining=$(showy_quota_min_remaining "${p_remaining}" "${s_remaining}" "${t_remaining}" "${p_used}" "${s_used}" "${t_used}")
             ;;
     esac
 
-    showy_quota_role_palette primary "$(showy_quota_color_key "${remaining}")"
+    showy_quota_window_color "${remaining}" "${dim}"
 }
 
 showy_quota_csv_contains() {
@@ -339,30 +352,46 @@ showy_quota_csv_contains() {
 
 showy_quota_terminal_mode_for_provider() {
     local provider="$1"
+    # Tertiary usedPercent (-1 when absent) is the 8th positional arg, passed
+    # by the bar renderers; default to absent for callers without window data.
+    local t_used="${8:--1}"
 
+    local mode
     case "${SHOWY_QUOTA_TERMINAL_BAR_MODE:-auto}" in
         dual)
-            printf 'dual\n'
+            mode=dual
             ;;
         sextant3)
-            printf 'sextant3\n'
+            mode=sextant3
             ;;
         mono3)
-            printf 'mono3\n'
+            mode=mono3
             ;;
         auto|"")
             if showy_quota_csv_contains "${SHOWY_QUOTA_MONO3_PROVIDERS_EXCLUDE:-}" "${provider}"; then
-                printf 'dual\n'
+                mode=dual
             elif showy_quota_csv_contains "${SHOWY_QUOTA_MONO3_PROVIDERS:-}" "${provider}"; then
-                printf 'mono3\n'
+                mode=mono3
             else
-                printf 'dual\n'
+                mode=dual
             fi
             ;;
         *)
-            printf 'dual\n'
+            mode=dual
             ;;
     esac
+
+    # A provider with no tertiary window has only two pools; the fixed
+    # three-lane modes would draw the absent lane as an empty bar. Collapse to
+    # the two-lane `dual` layout, matching SketchyBar's `has_t` gate which drops
+    # the tertiary row when it carries no usedPercent.
+    local has_tertiary=0
+    [[ "${t_used}" =~ ^[0-9]+$ ]] && has_tertiary=1
+    if (( ! has_tertiary )) && [[ "${mode}" == "mono3" || "${mode}" == "sextant3" ]]; then
+        mode=dual
+    fi
+
+    printf '%s\n' "${mode}"
 }
 
 # Choose the dominant color for a provider record (uses the lowest of all
