@@ -86,6 +86,7 @@ showy_quota_load_config
 : "${SHOWY_QUOTA_PALETTE_COUNTDOWN_WARN:=${SHOWY_QUOTA_PALETTE_PRIMARY_BAD}}"
 : "${SHOWY_QUOTA_PALETTE_STALE:=${SHOWY_QUOTA_PALETTE_PRIMARY_UNKNOWN}}"
 : "${SHOWY_QUOTA_PALETTE_ELAPSED:=be95ff}"
+: "${SHOWY_QUOTA_PALETTE_ELAPSED_LONG:=3ddbd9}"
 : "${SHOWY_QUOTA_STALE_GLYPH:=⚠}"
 : "${SHOWY_QUOTA_DEGRADED_CLI_GLYPH:=⚠cli}"
 
@@ -118,11 +119,9 @@ showy_quota_load_config
 : "${SHOWY_QUOTA_ZELLIJ_PIPE_TIMEOUT_TENTHS:=20}"
 : "${SHOWY_QUOTA_ZELLIJ_BAR_WIDTH:=12}"
 : "${SHOWY_QUOTA_TERMINAL_BAR_MODE:=auto}"
-: "${SHOWY_QUOTA_MONO3_PROVIDERS:=gemini,antigravity}"
-: "${SHOWY_QUOTA_MONO3_PROVIDERS_EXCLUDE:=}"
-: "${SHOWY_QUOTA_MONO3_COLOR_MODE:=lowest}"
-: "${SHOWY_QUOTA_MONO3_MARKER_SOURCE:=primary}"
-: "${SHOWY_QUOTA_MONO3_MARKER_STYLE:=replace}"
+: "${SHOWY_QUOTA_PROVIDER_MODES:=gemini=mono3,antigravity=mono3}"
+: "${SHOWY_QUOTA_MONO_COLOR_MODE:=lowest}"
+: "${SHOWY_QUOTA_MONO_MARKERS:=primary}"
 : "${SHOWY_QUOTA_ZELLIJ_BIN:=zellij}"
 : "${SHOWY_QUOTA_ZELLIJ_PLUGIN:=}"
 : "${SHOWY_QUOTA_USAGE_FILE:=${SHOWY_QUOTA_CACHE_DIR}/usage.json}"
@@ -400,6 +399,7 @@ showy_quota_palette() {
         countdown_warn) value="${SHOWY_QUOTA_PALETTE_COUNTDOWN_WARN}" ;;
         stale)          value="${SHOWY_QUOTA_PALETTE_STALE}" ;;
         elapsed)        value="${SHOWY_QUOTA_PALETTE_ELAPSED}" ;;
+        elapsed_long)   value="${SHOWY_QUOTA_PALETTE_ELAPSED_LONG}" ;;
         *)       showy_quota_die "unknown global palette token: $1" ;;
     esac
     showy_quota_normalize_hex "${value}"

@@ -162,17 +162,21 @@ provider:
 - **`mono3`** (default for `gemini`, `antigravity`): packs primary,
   secondary, and tertiary into a single sextant cell per column with
   top/middle/bottom rows. Uses a single provider-level foreground color
-  and inserts a light `│` pacing separator between cells (body width is
-  13 when the marker is interior).
+  and `mono_markers` pacing separators.
+- **`mono4`** (opt-in): packs four per-pool windows (e.g. Antigravity's
+  Gemini and Claude+GPT session/weekly pools, from `extraRateWindows`) into
+  a single octant cell per column. Like `mono3` but four lanes — requires an
+  octant-capable terminal (Ghostty, kitty, WezTerm); run
+  `python3 docs/scripts/preview-quad-octants.py` to test yours.
 
 <p>
   <img src="docs/images/mono3-terminal.png" alt="mono3 terminal rendering layout" width="420">
 </p>
 
-Customize terminal layout with `SHOWY_QUOTA_TERMINAL_BAR_MODE=dual|mono3|sextant3`.
-For `mono3` auto-mode selection and marker behavior, use
-`SHOWY_QUOTA_MONO3_PROVIDERS`, `SHOWY_QUOTA_MONO3_PROVIDERS_EXCLUDE`, and
-`SHOWY_QUOTA_MONO3_MARKER_SOURCE`.
+Customize terminal layout with `SHOWY_QUOTA_TERMINAL_BAR_MODE=dual|mono3|mono4`.
+For per-provider auto-mode selection and marker behavior, use
+`SHOWY_QUOTA_PROVIDER_MODES` (e.g. `antigravity=mono4`),
+`SHOWY_QUOTA_MONO_COLOR_MODE`, and `SHOWY_QUOTA_MONO_MARKERS`.
 
 Stuck? `bin/showy-quota --diagnose` (or `make diagnose`) prints exactly the
 state a bug report needs; `bin/showy-quota --diagnose --json` emits the same

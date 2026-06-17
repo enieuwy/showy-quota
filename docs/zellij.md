@@ -146,7 +146,7 @@ The plugin renders the same styled terminal strip geometry as `bin/showy-quota-z
 | Segment | Meaning |
 |---|---|
 | **SIGIL** | 2-letter provider abbreviation (`CL`, `CX`, `GE`, …). |
-| **bar** | In default `auto` mode, most providers render as `dual` half-block geometry (`▀`): the primary window on the upper half over the secondary on the lower half, each colored by its remaining-quota severity and dimmed when it is a weekly/monthly cap, with a pacing marker on **both** rows. Providers listed in `mono3_providers` (`gemini,antigravity` by default) render as `mono3`: primary, secondary, and tertiary packed into top/middle/bottom sextant rows with one provider-level color and one `│` pacing separator. Dimming is horizon-based (`SHOWY_QUOTA_DIM_WINDOW_MINUTES`, default weekly), not row-based. |
+| **bar** | In default `auto` mode, most providers render as `dual` half-block geometry (`▀`): the primary window on the upper half over the secondary on the lower half, each colored by its remaining-quota severity and dimmed when it is a weekly/monthly cap, with a pacing marker on **both** rows. Providers in `provider_modes` (default `gemini=mono3,antigravity=mono3`) render their mapped body: `mono3` packs three windows into one sextant cell-row, `mono4` packs four into one octant cell-row — each with one provider-level color and `mono_markers` pacing separators. `mono4` needs an octant-capable terminal (Ghostty/kitty/WezTerm). Dimming is horizon-based (`SHOWY_QUOTA_DIM_WINDOW_MINUTES`, default weekly), not row-based. |
 | **countdown** | Compact like `12m`, `4h`, `4:31`, `2d`, `5w`, or `?` if the provider does not expose a primary reset time. |
 
 Stale snapshots keep the last-known-good data, hide elapsed markers, grey data-bearing colors, and append the stale glyph (`⚠` by default). CLI fallback appends `⚠cli`; stale and degraded can appear together.
@@ -179,22 +179,22 @@ plugin location="file:~/.config/zellij/plugins/showy-quota-zellij.wasm" {
     providers_exclude ""       // comma-separated deny-list
     provider_order "codex,claude,copilot,opencode,gemini"
     bar_width 12
-    terminal_bar_mode "auto"   // auto, dual, mono3, sextant3
-    mono3_providers "gemini,antigravity"
-    mono3_marker_source "primary"
-    mono3_marker_style "replace"
+    terminal_bar_mode "auto"   // auto, dual, mono3, mono4
+    provider_modes "gemini=mono3,antigravity=mono3"
+    mono_color_mode "lowest"   // lowest or primary
+    mono_markers "primary"     // comma list of slots; "none" disables
 }
 ```
 
 Palette keys mirror the shell env names without `SHOWY_QUOTA_`, lowercased (`palette_primary_good`, `palette_countdown_warn`, `stale_glyph`, etc.).
 
-`mono3` and `sextant3` need a tertiary window to fill all three lanes. When a provider has no tertiary slot (two pools at most, e.g. Antigravity's Gemini weekly + Claude+GPT weekly), both modes collapse to the two-lane `dual` body so the bar shows two bars instead of a three-lane bar with an empty bottom row, matching the SketchyBar renderer.
+`mono3`/`mono4` need enough windows to fill their lanes: `mono4` falls back to `mono3` (3 windows) then `dual` (<3), and `mono3` collapses to `dual` without a tertiary window — so Antigravity's two weekly pools render `dual` until its session windows are also reported. `mono4` additionally needs an octant-capable terminal; run `python3 docs/scripts/preview-quad-octants.py` to test yours before enabling it.
 
 ## Font requirements
 
 Each provider chunk is wrapped in Powerline-Extra end caps: U+E0B6 (`cap_left`, default ``) and U+E0B4 (`cap_right`, default ``). Any Nerd Font ships these. With a non-Nerd font, configure terminal fallback for Powerline Extra or set both caps to empty strings.
 
-The `dual` body uses Unicode Block Elements (`▀`, `▕`, `▏`). The `mono3` and `sextant3` bodies require Unicode Symbols for Legacy Computing U+1FB00–U+1FB3B.
+The `dual` body uses Unicode Block Elements (`▀`, `▕`, `▏`). `mono3` requires Unicode Symbols for Legacy Computing sextants (U+1FB00–U+1FB3B; drawn by most terminals incl. Alacritty/iTerm2). `mono4` requires Unicode 16 octants (U+1CD00–U+1CDE5; drawn only by Ghostty, kitty, WezTerm, and libvte-based terminals).
 
 ## Detail pane
 

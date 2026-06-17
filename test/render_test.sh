@@ -584,23 +584,6 @@ assert_equals "built-in Catppuccin Mocha Blue theme overrides the primary palett
 out=$(run_common_eval 'printf "%s|%s|%s|%s|%s|%s|%s" "$(showy_quota_primary_palette good)" "$(showy_quota_primary_palette warn)" "$(showy_quota_palette bg)" "$(showy_quota_palette icon_text)" "$(showy_quota_palette countdown)" "$(showy_quota_palette countdown_warn)" "$(showy_quota_palette elapsed)"' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_THEME=default)
 assert_equals "built-in default theme exposes original palette" "25be6a|f0af00|161616|f2f4f8|7b8496|ee5396|be95ff" "${out}"
 
-out=$(run_strip_eval 'showy_quota_elapsed_marker_boundary "2099-01-01T01:40:00Z" 100 8' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_NOW_EPOCH=4070914800)
-assert_equals "elapsed boundary clamps reset-now to left edge" "0" "${out}"
-
-out=$(run_strip_eval 'showy_quota_elapsed_marker_boundary "2099-01-01T01:40:00Z" 100 8' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_NOW_EPOCH=4070908800)
-assert_equals "elapsed boundary keeps just-started window at right edge" "8" "${out}"
-
-out=$(run_strip_eval 'showy_quota_shared_window_marker_boundary 8 25 "2099-01-01T01:40:00Z" 100 50 "2099-01-01T01:40:00Z" 100 75 "2099-01-01T01:40:00Z" 100' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_NOW_EPOCH=4070912400)
-assert_equals "shared-window marker returns between-cell boundary" "3" "${out}"
-
-out=$(run_strip_eval 'if showy_quota_shared_window_marker_boundary 8 25 "2099-01-01T01:40:00Z" 100 50 "2099-01-01T01:40:00Z" 300 75 "2099-01-01T01:40:00Z" 100; then printf marker; else printf none; fi' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_NOW_EPOCH=4070912400)
-assert_equals "shared-window marker rejects disagreeing windows" "none" "${out}"
-
-out=$(run_strip_eval 'if showy_quota_shared_window_marker_boundary 8 25 "2099-01-01T01:40:00Z" 100 50 "2099-01-01T02:00:00Z" 100 75 "2099-01-01T01:40:00Z" 100; then printf marker; else printf none; fi' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_NOW_EPOCH=4070912400)
-assert_equals "shared-window marker rejects disagreeing reset epochs" "none" "${out}"
-
-
-
 theme_xdg="${TMP}/xdg-theme"
 mkdir -p "${theme_xdg}/showy-quota"
 printf '%s\n' \
@@ -879,11 +862,11 @@ assert_contains "zellij degraded CLI marker is visible" "⚠cli" "${out}"
 
 out=$(run_renderer showy-quota-zellij-bar "${sextant_fixture}" SHOWY_QUOTA_ZELLIJ_BAR_WIDTH=8 NO_COLOR=1 SHOWY_QUOTA_FORCE_COLOR=0)
 assert_contains "zellij default terminal mode keeps half-block cells" "▀" "${out}"
-assert_not_contains "zellij default terminal mode is not sextant3" "🬎" "${out}"
+assert_not_contains "zellij default terminal mode is not a stacked sextant body" "🬎" "${out}"
 
-out=$(run_renderer showy-quota-zellij-bar "${sextant_fixture}" SHOWY_QUOTA_TERMINAL_BAR_MODE=sextant3 SHOWY_QUOTA_ZELLIJ_BAR_WIDTH=8 NO_COLOR=1 SHOWY_QUOTA_FORCE_COLOR=0)
-assert_contains "zellij sextant3 renders three stacked row geometry" "CL▕██🬎🬎🬂🬂  ▏" "${out}"
-assert_not_contains "zellij sextant3 omits half-block cells" "▀" "${out}"
+out=$(run_renderer showy-quota-zellij-bar "${sextant_fixture}" SHOWY_QUOTA_TERMINAL_BAR_MODE=mono3 SHOWY_QUOTA_ZELLIJ_BAR_WIDTH=8 NO_COLOR=1 SHOWY_QUOTA_FORCE_COLOR=0)
+assert_contains "zellij forced mono3 renders three stacked row geometry" "CL▕██🬎🬎🬂🬂  ▏" "${out}"
+assert_not_contains "zellij forced mono3 omits half-block cells" "▀" "${out}"
 
 out=$(run_renderer showy-quota-zellij-bar "${mono_fixture}" SHOWY_QUOTA_ZELLIJ_BAR_WIDTH=8 SHOWY_QUOTA_REFRESH_SECONDS=9999999999 SHOWY_QUOTA_NOW_EPOCH=4070912400 NO_COLOR=1 SHOWY_QUOTA_FORCE_COLOR=0)
 assert_contains "zellij auto mono3 uses primary marker by default" "GE▕██🬎│🬂🬂  ▏" "${out}"
@@ -892,39 +875,43 @@ assert_not_contains "zellij auto mono3 omits half-block cells" "▀" "${out}"
 out=$(run_renderer showy-quota-zellij-bar "${mono_antigravity_fixture}" SHOWY_QUOTA_ZELLIJ_BAR_WIDTH=8 SHOWY_QUOTA_REFRESH_SECONDS=9999999999 SHOWY_QUOTA_NOW_EPOCH=4070912400 NO_COLOR=1 SHOWY_QUOTA_FORCE_COLOR=0)
 assert_contains "zellij auto mono3 includes antigravity by default" "AG▕██🬎│🬂🬂  ▏" "${out}"
 
-out=$(run_renderer showy-quota-zellij-bar "${mono_fixture}" SHOWY_QUOTA_MONO3_MARKER_STYLE=insert SHOWY_QUOTA_ZELLIJ_BAR_WIDTH=8 SHOWY_QUOTA_REFRESH_SECONDS=9999999999 SHOWY_QUOTA_NOW_EPOCH=4070912400 NO_COLOR=1 SHOWY_QUOTA_FORCE_COLOR=0)
-assert_contains "zellij auto mono3 insert style preserves characters" "GE▕██🬎│🬎🬂🬂  ▏" "${out}"
-
 out=$(run_renderer showy-quota-zellij-bar "${mono_fixture}" SHOWY_QUOTA_ZELLIJ_BAR_WIDTH=8 SHOWY_QUOTA_REFRESH_SECONDS=9999999999 SHOWY_QUOTA_NOW_EPOCH=4070914800 NO_COLOR=1 SHOWY_QUOTA_FORCE_COLOR=0)
 assert_contains "zellij auto mono3 primary boundary zero starts after left separator" "GE▕│█🬎🬎🬂🬂  ▏" "${out}"
 
 out=$(run_renderer showy-quota-zellij-bar "${mono_fixture}" SHOWY_QUOTA_ZELLIJ_BAR_WIDTH=8 SHOWY_QUOTA_REFRESH_SECONDS=9999999999 SHOWY_QUOTA_NOW_EPOCH=4070908800 NO_COLOR=1 SHOWY_QUOTA_FORCE_COLOR=0)
 assert_contains "zellij auto mono3 primary boundary width replaces last cell" "GE▕██🬎🬎🬂🬂 │▏" "${out}"
 
-out=$(run_renderer showy-quota-zellij-bar "${mono_fixture}" SHOWY_QUOTA_MONO3_MARKER_SOURCE=secondary SHOWY_QUOTA_ZELLIJ_BAR_WIDTH=8 SHOWY_QUOTA_REFRESH_SECONDS=9999999999 SHOWY_QUOTA_NOW_EPOCH=4070912400 NO_COLOR=1 SHOWY_QUOTA_FORCE_COLOR=0)
+out=$(run_renderer showy-quota-zellij-bar "${mono_fixture}" SHOWY_QUOTA_MONO_MARKERS=secondary SHOWY_QUOTA_ZELLIJ_BAR_WIDTH=8 SHOWY_QUOTA_REFRESH_SECONDS=9999999999 SHOWY_QUOTA_NOW_EPOCH=4070912400 NO_COLOR=1 SHOWY_QUOTA_FORCE_COLOR=0)
 assert_contains "zellij auto mono3 marker source can use secondary" "GE▕██🬎🬎🬂│  ▏" "${out}"
 
-out=$(run_renderer showy-quota-zellij-bar "${mono_fixture}" SHOWY_QUOTA_MONO3_MARKER_SOURCE=none SHOWY_QUOTA_ZELLIJ_BAR_WIDTH=8 SHOWY_QUOTA_REFRESH_SECONDS=9999999999 SHOWY_QUOTA_NOW_EPOCH=4070912400 NO_COLOR=1 SHOWY_QUOTA_FORCE_COLOR=0)
+out=$(run_renderer showy-quota-zellij-bar "${mono_fixture}" SHOWY_QUOTA_MONO_MARKERS=none SHOWY_QUOTA_ZELLIJ_BAR_WIDTH=8 SHOWY_QUOTA_REFRESH_SECONDS=9999999999 SHOWY_QUOTA_NOW_EPOCH=4070912400 NO_COLOR=1 SHOWY_QUOTA_FORCE_COLOR=0)
 assert_contains "zellij auto mono3 marker source can be disabled" "GE▕██🬎🬎🬂🬂  ▏" "${out}"
 assert_not_contains "zellij auto mono3 disabled marker omits separator" "│" "${out}"
 
 
-out=$(run_renderer showy-quota-zellij-bar "${mono_claude_fixture}" SHOWY_QUOTA_MONO3_PROVIDERS=claude SHOWY_QUOTA_ZELLIJ_BAR_WIDTH=8 SHOWY_QUOTA_REFRESH_SECONDS=9999999999 SHOWY_QUOTA_NOW_EPOCH=4070912400 NO_COLOR=1 SHOWY_QUOTA_FORCE_COLOR=0)
+out=$(run_renderer showy-quota-zellij-bar "${mono_claude_fixture}" SHOWY_QUOTA_PROVIDER_MODES=claude=mono3 SHOWY_QUOTA_ZELLIJ_BAR_WIDTH=8 SHOWY_QUOTA_REFRESH_SECONDS=9999999999 SHOWY_QUOTA_NOW_EPOCH=4070912400 NO_COLOR=1 SHOWY_QUOTA_FORCE_COLOR=0)
 assert_contains "zellij provider mono3 override uses mono marker path" "CL▕██🬎│🬂🬂  ▏" "${out}"
 assert_not_contains "zellij provider mono3 override omits half-block cells" "▀" "${out}"
 
-out=$(run_renderer showy-quota-zellij-bar "${mono_fixture}" SHOWY_QUOTA_MONO3_PROVIDERS_EXCLUDE=gemini SHOWY_QUOTA_ZELLIJ_BAR_WIDTH=8 SHOWY_QUOTA_REFRESH_SECONDS=9999999999 SHOWY_QUOTA_NOW_EPOCH=4070912400 NO_COLOR=1 SHOWY_QUOTA_FORCE_COLOR=0)
-assert_contains "zellij mono3 provider exclude forces dual" "▀" "${out}"
-assert_not_contains "zellij mono3 provider exclude suppresses separator" "│" "${out}"
+out=$(run_renderer showy-quota-zellij-bar "${mono_fixture}" SHOWY_QUOTA_PROVIDER_MODES=gemini=dual SHOWY_QUOTA_ZELLIJ_BAR_WIDTH=8 SHOWY_QUOTA_REFRESH_SECONDS=9999999999 SHOWY_QUOTA_NOW_EPOCH=4070912400 NO_COLOR=1 SHOWY_QUOTA_FORCE_COLOR=0)
+assert_contains "zellij provider dual override forces dual" "▀" "${out}"
+assert_not_contains "zellij provider dual override suppresses separator" "│" "${out}"
 
 out=$(run_renderer showy-quota-zellij-bar codexbar-no-tertiary.json SHOWY_QUOTA_TERMINAL_BAR_MODE=mono3 SHOWY_QUOTA_ZELLIJ_BAR_WIDTH=8 SHOWY_QUOTA_REFRESH_SECONDS=9999999999 SHOWY_QUOTA_NOW_EPOCH=4070908800 NO_COLOR=1 SHOWY_QUOTA_FORCE_COLOR=0)
 assert_contains "zellij mono3 collapses to dual when tertiary absent" "AG▕▀▀▀▀▀▀▀▀▏" "${out}"
 assert_not_contains "zellij mono3 collapse omits sextant cells" "🬂" "${out}"
 assert_not_contains "zellij mono3 collapse omits shared separator" "│" "${out}"
 
-out=$(run_renderer showy-quota-zellij-bar codexbar-no-tertiary.json SHOWY_QUOTA_TERMINAL_BAR_MODE=sextant3 SHOWY_QUOTA_ZELLIJ_BAR_WIDTH=8 SHOWY_QUOTA_REFRESH_SECONDS=9999999999 SHOWY_QUOTA_NOW_EPOCH=4070908800 NO_COLOR=1 SHOWY_QUOTA_FORCE_COLOR=0)
-assert_contains "zellij sextant3 collapses to dual when tertiary absent" "AG▕▀▀▀▀▀▀▀▀▏" "${out}"
-assert_not_contains "zellij sextant3 collapse omits sextant cells" "🬎" "${out}"
+# mono4: four per-pool windows packed into one octant row (model-pooled provider).
+out=$(run_renderer showy-quota-zellij-bar codexbar-antigravity-quad.json SHOWY_QUOTA_PROVIDER_MODES=antigravity=mono4 SHOWY_QUOTA_ZELLIJ_BAR_WIDTH=12 SHOWY_QUOTA_REFRESH_SECONDS=9999999999 SHOWY_QUOTA_NOW_EPOCH=4070908800 NO_COLOR=1 SHOWY_QUOTA_FORCE_COLOR=0)
+assert_contains "zellij mono4 packs four windows into octant row" "AG▕▆▆▄│▄▄▄▂▂▂  ▏" "${out}"
+assert_not_contains "zellij mono4 omits half-block dual cells" "▀" "${out}"
+
+out=$(run_renderer showy-quota-zellij-bar codexbar-antigravity-quad.json SHOWY_QUOTA_PROVIDER_MODES=antigravity=mono4 SHOWY_QUOTA_MONO_MARKERS=primary,tertiary SHOWY_QUOTA_ZELLIJ_BAR_WIDTH=12 SHOWY_QUOTA_REFRESH_SECONDS=9999999999 SHOWY_QUOTA_NOW_EPOCH=4070908800 NO_COLOR=1 SHOWY_QUOTA_FORCE_COLOR=0)
+assert_contains "zellij mono4 draws two configured pacing markers" "AG▕▆▆▄│▄▄▄│▂▂  ▏" "${out}"
+
+out=$(run_renderer showy-quota-zellij-bar codexbar-no-tertiary.json SHOWY_QUOTA_PROVIDER_MODES=antigravity=mono4 SHOWY_QUOTA_ZELLIJ_BAR_WIDTH=8 SHOWY_QUOTA_REFRESH_SECONDS=9999999999 SHOWY_QUOTA_NOW_EPOCH=4070908800 NO_COLOR=1 SHOWY_QUOTA_FORCE_COLOR=0)
+assert_contains "zellij mono4 collapses to dual without four windows" "AG▕▀▀▀▀▀▀▀▀▏" "${out}"
 
 # Horizon model: in a time-tiered provider the short (5h) window stays bright
 # and the long (weekly) window dims, and BOTH rows show a pacing marker.
@@ -1020,12 +1007,12 @@ out=$(run_renderer showy-quota-tmux-bar codexbar-mixed.json SHOWY_QUOTA_DEGRADED
 visible=$(strip_tmux_markup "${out}")
 assert_contains "tmux degraded CLI marker is visible" "⚠cli" "${visible}"
 
-out=$(run_renderer showy-quota-tmux-bar "${sextant_fixture}" SHOWY_QUOTA_TERMINAL_BAR_MODE=sextant3 SHOWY_QUOTA_TMUX_BAR_WIDTH=8)
+out=$(run_renderer showy-quota-tmux-bar "${sextant_fixture}" SHOWY_QUOTA_TERMINAL_BAR_MODE=mono3 SHOWY_QUOTA_TMUX_BAR_WIDTH=8)
 visible=$(strip_tmux_markup "${out}")
-assert_contains "tmux sextant3 renders three stacked row geometry" "CL▕██🬎🬎🬂🬂  ▏" "${visible}"
-assert_not_contains "tmux sextant3 omits half-block cells" "▀" "${visible}"
-assert_contains "tmux sextant3 colors all-row cells by bottom window horizon" "fg=#f0af00,bg=#2a2a2a]█" "${out}"
-assert_not_contains "tmux sextant3 omits elapsed markers" "be95ff" "${out}"
+assert_contains "tmux forced mono3 renders three stacked row geometry" "CL▕██🬎🬎🬂🬂  ▏" "${visible}"
+assert_not_contains "tmux forced mono3 omits half-block cells" "▀" "${visible}"
+assert_contains "tmux forced mono3 colors cells with single chunk color" "fg=#f0af00,bg=#2a2a2a]█" "${out}"
+assert_not_contains "tmux forced mono3 omits elapsed markers" "be95ff" "${out}"
 
 out=$(run_renderer showy-quota-tmux-bar "${mono_fixture}" SHOWY_QUOTA_TMUX_BAR_WIDTH=8 SHOWY_QUOTA_REFRESH_SECONDS=9999999999 SHOWY_QUOTA_NOW_EPOCH=4070912400)
 visible=$(strip_tmux_markup "${out}")
@@ -1041,7 +1028,7 @@ visible=$(strip_tmux_markup "${out}")
 assert_contains "tmux auto mono3 primary boundary width replaces last cell" "GE▕██🬎🬎🬂🬂 │▏" "${visible}"
 
 
-out=$(run_renderer showy-quota-tmux-bar "${mono_claude_fixture}" SHOWY_QUOTA_MONO3_PROVIDERS=claude SHOWY_QUOTA_TMUX_BAR_WIDTH=8 SHOWY_QUOTA_REFRESH_SECONDS=9999999999 SHOWY_QUOTA_NOW_EPOCH=4070912400)
+out=$(run_renderer showy-quota-tmux-bar "${mono_claude_fixture}" SHOWY_QUOTA_PROVIDER_MODES=claude=mono3 SHOWY_QUOTA_TMUX_BAR_WIDTH=8 SHOWY_QUOTA_REFRESH_SECONDS=9999999999 SHOWY_QUOTA_NOW_EPOCH=4070912400)
 visible=$(strip_tmux_markup "${out}")
 assert_contains "tmux provider mono3 override uses mono marker path" "CL▕██🬎│🬂🬂  ▏" "${visible}"
 assert_contains "tmux provider mono3 override colors separator with elapsed palette" "fg=#be95ff,bg=#2a2a2a]│" "${out}"
@@ -3178,8 +3165,8 @@ assert_contains "zellij greys stale countdown" "${stale_countdown_escape}" "${ou
 assert_not_contains "zellij does not dim stale cache" "${ansi_dim}" "${out}"
 assert_contains "zellij stale cache preserves valid countdown text" "12m" "${out}"
 
-# Forced sextant3 needs a provider with all three windows; mixed-fixture
-# providers without a tertiary window now collapse to dual.
+# Forced mono3 needs a provider with all three windows; a provider without a
+# tertiary window collapses to dual.
 sextant_stale_cache=$(mk_cache)
 cp "${mono_fixture}" "${sextant_stale_cache}/usage.json"
 touch -t 198801010000 "${sextant_stale_cache}/usage.json"
@@ -3190,14 +3177,14 @@ out=$(
     SHOWY_QUOTA_CODEXBAR_SERVE_URL='' \
     SHOWY_QUOTA_FORCE_COLOR=1 \
     SHOWY_QUOTA_NOW_EPOCH=4070928480 \
-    SHOWY_QUOTA_TERMINAL_BAR_MODE=sextant3 \
+    SHOWY_QUOTA_TERMINAL_BAR_MODE=mono3 \
     "${REPO_ROOT}/bin/showy-quota-zellij-bar"
 )
-assert_contains "zellij sextant3 stale shows trailing stale indicator" "${trailing_stale_escape}" "${out}"
-assert_contains "zellij sextant3 greys stale sextant cells" "${stale_sextant_escape}" "${out}"
-assert_contains "zellij sextant3 keeps separator on stale background" "${stale_separator_escape}" "${out}"
-assert_not_contains "zellij sextant3 stale omits half-block cells" "▀" "${out}"
-assert_not_contains "zellij sextant3 stale has no elapsed marker" "190;149;255" "${out}"
+assert_contains "zellij mono3 stale shows trailing stale indicator" "${trailing_stale_escape}" "${out}"
+assert_contains "zellij mono3 greys stale sextant cells" "${stale_sextant_escape}" "${out}"
+assert_contains "zellij mono3 keeps separator on stale background" "${stale_separator_escape}" "${out}"
+assert_not_contains "zellij mono3 stale omits half-block cells" "▀" "${out}"
+assert_not_contains "zellij mono3 stale has no elapsed marker" "190;149;255" "${out}"
 
 out=$(
     SHOWY_QUOTA_NO_CONFIG=1 \
@@ -3219,14 +3206,14 @@ out=$(
     SHOWY_QUOTA_CODEXBAR_BIN="${TMP}/no-such-codexbar" \
     SHOWY_QUOTA_CODEXBAR_SERVE_URL='' \
     SHOWY_QUOTA_NOW_EPOCH=4070928480 \
-    SHOWY_QUOTA_TERMINAL_BAR_MODE=sextant3 \
+    SHOWY_QUOTA_TERMINAL_BAR_MODE=mono3 \
     "${REPO_ROOT}/bin/showy-quota-tmux-bar"
 )
-assert_contains "tmux sextant3 stale shows trailing stale indicator" "#[fg=#161616,bg=#161616] #[default]#[fg=#ee5396,bg=#161616,bold]⚠" "${out}"
-assert_contains "tmux sextant3 greys stale sextant cells" "#[fg=#6c7086,bg=#2a2a2a]🬎" "${out}"
-assert_contains "tmux sextant3 keeps separator on stale background" "#[fg=#161616,bg=#6c7086]▕" "${out}"
-assert_not_contains "tmux sextant3 stale omits half-block cells" "▀" "${out}"
-assert_not_contains "tmux sextant3 stale has no elapsed marker" "be95ff" "${out}"
+assert_contains "tmux mono3 stale shows trailing stale indicator" "#[fg=#161616,bg=#161616] #[default]#[fg=#ee5396,bg=#161616,bold]⚠" "${out}"
+assert_contains "tmux mono3 greys stale sextant cells" "#[fg=#6c7086,bg=#2a2a2a]🬎" "${out}"
+assert_contains "tmux mono3 keeps separator on stale background" "#[fg=#161616,bg=#6c7086]▕" "${out}"
+assert_not_contains "tmux mono3 stale omits half-block cells" "▀" "${out}"
+assert_not_contains "tmux mono3 stale has no elapsed marker" "be95ff" "${out}"
 
 mono_stale_cache=$(mk_cache)
 cp "${mono_fixture}" "${mono_stale_cache}/usage.json"

@@ -17,6 +17,8 @@ pub struct Usage {
     pub secondary: Option<UsageWindow>,
     #[serde(default)]
     pub tertiary: Option<UsageWindow>,
+    #[serde(rename = "extraRateWindows", default)]
+    pub extra_rate_windows: Vec<NamedWindow>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -29,6 +31,22 @@ pub struct UsageWindow {
     pub reset_description: Option<String>,
     #[serde(rename = "windowMinutes", default)]
     pub window_minutes: Option<i64>,
+}
+
+/// An additional named rate window CodexBar carries losslessly in
+/// `usage.extraRateWindows` (per-model / per-horizon pools). `usage_known ==
+/// Some(false)` marks a window whose `usedPercent` is a placeholder, not a real
+/// measurement, and must not be rendered as live quota.
+#[derive(Debug, Clone, Deserialize)]
+pub struct NamedWindow {
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub window: Option<UsageWindow>,
+    #[serde(rename = "usageKnown", default)]
+    pub usage_known: Option<bool>,
 }
 
 impl UsageWindow {
@@ -63,8 +81,57 @@ impl Usage {
         .flatten()
         .any(|window| window.used_percent.is_some())
     }
-}
 
+    /// Up to `max` distinct windows for the multi-lane bodies: the positional
+    /// slots (primary/secondary/tertiary) first, then extra rate windows with
+    /// known usage, deduped by `(windowMinutes, resetsAt)`. Provider-agnostic:
+    /// a model-pooled provider whose extras carry its per-pool windows (e.g.
+    /// Antigravity's session/weekly pools) yields all of them; a plain
+    /// time-tiered provider yields just its slots.
+    pub fn render_windows(&self, max: usize) -> Vec<&UsageWindow> {
+        let mut out: Vec<&UsageWindow> = Vec::new();
+        let mut seen: Vec<(Option<i64>, Option<&str>)> = Vec::new();
+        for window in [
+            self.primary.as_ref(),
+            self.secondary.as_ref(),
+            self.tertiary.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if window.used_percent.is_none() {
+                continue;
+            }
+            let key = (window.window_minutes(), window.resets_at.as_deref());
+            if seen.contains(&key) {
+                continue;
+            }
+            seen.push(key);
+            out.push(window);
+            if out.len() >= max {
+                return out;
+            }
+        }
+        for named in &self.extra_rate_windows {
+            let Some(window) = named.window.as_ref() else {
+                continue;
+            };
+            if window.used_percent.is_none() || named.usage_known == Some(false) {
+                continue;
+            }
+            let key = (window.window_minutes(), window.resets_at.as_deref());
+            if seen.contains(&key) {
+                continue;
+            }
+            seen.push(key);
+            out.push(window);
+            if out.len() >= max {
+                return out;
+            }
+        }
+        out
+    }
+}
 
 pub fn parse_usage_payload(payload: &[u8]) -> Result<Vec<ProviderRecord>, serde_json::Error> {
     let records: Vec<ProviderRecord> = serde_json::from_slice(payload)?;
@@ -308,13 +375,7 @@ mod tests {
         // being backfilled by later windows.
         let usage = records[0].usage.as_ref().unwrap();
         assert!(usage.primary.is_none());
-        assert_eq!(
-            usage.secondary.as_ref().unwrap().used_percent,
-            Some(0.0)
-        );
-        assert_eq!(
-            usage.tertiary.as_ref().unwrap().used_percent,
-            Some(25.0)
-        );
+        assert_eq!(usage.secondary.as_ref().unwrap().used_percent, Some(0.0));
+        assert_eq!(usage.tertiary.as_ref().unwrap().used_percent, Some(25.0));
     }
 }

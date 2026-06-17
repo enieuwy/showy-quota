@@ -72,17 +72,39 @@ The Rust renderer intentionally duplicates only the terminal strip logic. Golden
 
 ## Terminal rendering modes
 
-`SHOWY_QUOTA_TERMINAL_BAR_MODE` in shell, and `terminal_bar_mode` in plugin KDL, affect the Zellij/tmux bar body. The default `auto` renderer selects per provider from configuration: providers in `SHOWY_QUOTA_MONO3_PROVIDERS` / `mono3_providers` (default `gemini,antigravity`) render as `mono3` unless excluded; every other provider uses `dual` primary/secondary half-block geometry.
+`SHOWY_QUOTA_TERMINAL_BAR_MODE` (shell) / `terminal_bar_mode` (plugin KDL) sets the Zellij/tmux bar body: `auto` (default), `dual`, `mono3`, or `mono4`. In `auto`, each provider's body comes from the `SHOWY_QUOTA_PROVIDER_MODES` / `provider_modes` map (default `gemini=mono3,antigravity=mono3`); providers without an entry render `dual`. `mono4` is opt-in only — `auto` never selects it, because octant terminal support cannot be detected.
 
-`mono3` reads the tertiary window, packs primary/secondary/tertiary into one U+1FBxx sextant row, and uses one provider-level foreground color. Because the terminal body can draw only one pacing separator, mono3 bases it on `SHOWY_QUOTA_MONO3_MARKER_SOURCE` / `mono3_marker_source` (`primary` by default; `secondary`, `tertiary`, `shared`, and `none` are supported). Stale snapshots hide pacing separators.
+`mono3` packs primary/secondary/tertiary into one U+1FB00 sextant row; `mono4` packs up to four windows into one U+1CD00 octant row. Both use a single provider-level foreground color (`SHOWY_QUOTA_MONO_COLOR_MODE` / `mono_color_mode`: `lowest` (default) or `primary`), dimmed only when every present window is a long-horizon cap. Pacing markers are the `SHOWY_QUOTA_MONO_MARKERS` / `mono_markers` list of window slots (`primary`, `secondary`, `tertiary`, `quaternary`; default `primary`; `none` disables); the first marker uses `palette_elapsed`, the rest `palette_elapsed_long`. More than two markers crowd an 8–12 cell bar. Stale snapshots hide markers.
 
-Forced `sextant3` packs the three windows into one sextant row (each cell colored by its dominant filled window) and draws no elapsed markers; forced `dual` and `mono3` apply those bodies to every provider.
+`mono4`'s windows are assembled generically from `usage.primary/secondary/tertiary` plus `usage.extraRateWindows` (distinct windows, slots first, deduped) — e.g. Antigravity's Gemini and Claude+GPT session/weekly pools. It requires an octant-capable terminal:
+
+| body | glyphs | renders in |
+|---|---|---|
+| `dual` | half-blocks (U+2580) | every terminal |
+| `mono3` | sextants (U+1FB00) | most, incl. Alacritty, iTerm2 |
+| `mono4` | octants (U+1CD00, Unicode 16) | Ghostty, kitty, WezTerm, libvte only |
+
+Run `python3 docs/scripts/preview-quad-octants.py` to test a terminal and preview `mono4` before enabling it; octants render as tofu where unsupported.
 
 Window slots are semantic in every mode: a provider is renderable when any of its primary/secondary/tertiary windows reports a numeric `usedPercent`, and each window only ever renders in its own row, marker, and color role. A missing window leaves its row empty rather than shifting later windows up; a missing primary additionally renders an `idle` countdown label because there is no primary reset to count down (a provider may report `usage.primary: null` with live secondary/tertiary windows).
 
-Color and pacing follow each window's **horizon**, not its row position. A window is dimmed — its severity color scaled by `SHOWY_QUOTA_PALETTE_DIM_SCALE` / `palette_dim_scale` (default `0.55`), or an explicit `SHOWY_QUOTA_PALETTE_DIM_*` override — when its `windowMinutes` is at or beyond `SHOWY_QUOTA_DIM_WINDOW_MINUTES` / `dim_window_minutes` (default `10080`, i.e. weekly or monthly). Shorter live tiers (5h, daily) stay at full brightness, and windows without a known `windowMinutes` are treated as bright. So a time-tiered provider (Codex/Claude: 5h + weekly) shows a bright 5h row over a dimmed weekly row; a model-pooled provider with uniform weekly pools (Antigravity) dims both; uniform daily pools (Gemini) dim none. The `dual` body draws a pacing marker on **both** rows (the primary window's elapsed marker tints the upper half-block, the secondary's the lower half) so every pool is paced. The single-cell `mono3`/`sextant3` bodies carry one color and, for `mono3`, one configurable pacing separator (`SHOWY_QUOTA_MONO3_MARKER_SOURCE`); `mono3` dims its whole chunk only when every present window is a long-horizon cap.
+Color and pacing follow each window's **horizon**, not its row position. A window is dimmed — its severity color scaled by `SHOWY_QUOTA_PALETTE_DIM_SCALE` / `palette_dim_scale` (default `0.55`), or an explicit `SHOWY_QUOTA_PALETTE_DIM_*` override — when its `windowMinutes` is at or beyond `SHOWY_QUOTA_DIM_WINDOW_MINUTES` / `dim_window_minutes` (default `10080`, i.e. weekly or monthly). Shorter live tiers (5h, daily) stay at full brightness, and windows without a known `windowMinutes` are treated as bright. So a time-tiered provider (Codex/Claude: 5h + weekly) shows a bright 5h row over a dimmed weekly row; a model-pooled provider with uniform weekly pools (Antigravity) dims both; uniform daily pools (Gemini) dim none. The `dual` body draws a pacing marker on **both** rows (the primary window's elapsed marker tints the upper half-block, the secondary's the lower half) so every pool is paced. The single-cell `mono3`/`mono4` bodies carry one color and only the `mono_markers` separators (not per-lane pacing); they dim the whole chunk only when every present window is a long-horizon cap.
 
-The fixed three-lane modes (`mono3` and `sextant3`) only apply when the provider has a tertiary window. A provider with no tertiary slot has two pools at most, so those modes collapse to the two-lane `dual` body, matching SketchyBar dropping the absent tertiary row. This keeps two-pool providers — such as Antigravity, which now reports a Gemini weekly pool in `usage.primary` and a Claude+GPT weekly pool in `usage.secondary` with `usage.tertiary: null` — rendering two bars instead of a three-lane bar with an empty bottom row.
+The stacked modes collapse to the densest body the data supports: `mono4` needs four assembled windows (else it falls back to `mono3`, then `dual`); `mono3` needs a tertiary slot (else `dual`). So Antigravity's two weekly pools render `dual` until its session windows are also reported, matching SketchyBar dropping an absent row.
+
+### Bar configuration reference
+
+| Env (shell) / KDL key | Default | Meaning |
+|---|---|---|
+| `SHOWY_QUOTA_TERMINAL_BAR_MODE` / `terminal_bar_mode` | `auto` | `auto`, `dual`, `mono3`, `mono4` |
+| `SHOWY_QUOTA_PROVIDER_MODES` / `provider_modes` | `gemini=mono3,antigravity=mono3` | per-provider body in `auto`; `provider=mode,…` |
+| `SHOWY_QUOTA_MONO_COLOR_MODE` / `mono_color_mode` | `lowest` | mono3/mono4 chunk color: `lowest` or `primary` |
+| `SHOWY_QUOTA_MONO_MARKERS` / `mono_markers` | `primary` | comma list of paced slots; `none` disables |
+| `SHOWY_QUOTA_PALETTE_ELAPSED` / `palette_elapsed` | `be95ff` | first pacing marker color |
+| `SHOWY_QUOTA_PALETTE_ELAPSED_LONG` / `palette_elapsed_long` | `3ddbd9` | second+ pacing marker color |
+| `SHOWY_QUOTA_DIM_WINDOW_MINUTES` / `dim_window_minutes` | `10080` | windowMinutes at/above which a window dims (weekly) |
+| `SHOWY_QUOTA_PALETTE_DIM_SCALE` / `palette_dim_scale` | `0.55` | brightness scale for dimmed (long-horizon) windows |
+| `SHOWY_QUOTA_ZELLIJ_BAR_WIDTH` / `bar_width` | `12` | bar cell width (min 8) |
 
 ## Failure semantics
 

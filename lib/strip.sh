@@ -148,6 +148,149 @@ showy_quota_sextant_mask_char() {
     esac
 }
 
+# Unicode 16 octant mosaic glyphs for one cell split into four stacked rows:
+# lane1(top)=1, lane2=2, lane3=4, lane4(bottom)=8. Masks absent from the octant
+# block fall back to quarter/half/full block elements.
+showy_quota_octant_mask_char() {
+    case "$1" in
+        0)  printf ' ' ;;
+        1)  printf '\U0001FB82' ;; # UPPER ONE QUARTER BLOCK
+        2)  printf '\U0001CD06' ;; # BLOCK OCTANT-34
+        3)  printf '\U00002580' ;; # UPPER HALF BLOCK
+        4)  printf '\U0001CD27' ;; # BLOCK OCTANT-56
+        5)  printf '\U0001CD2A' ;; # BLOCK OCTANT-1256
+        6)  printf '\U0001CD33' ;; # BLOCK OCTANT-3456
+        7)  printf '\U0001FB85' ;; # UPPER THREE QUARTERS BLOCK
+        8)  printf '\U00002582' ;; # LOWER ONE QUARTER BLOCK
+        9)  printf '\U0001CDAE' ;; # BLOCK OCTANT-1278
+        10) printf '\U0001CDB7' ;; # BLOCK OCTANT-3478
+        11) printf '\U0001CDBA' ;; # BLOCK OCTANT-123478
+        12) printf '\U00002584' ;; # LOWER HALF BLOCK
+        13) printf '\U0001CDDD' ;; # BLOCK OCTANT-125678
+        14) printf '\U00002586' ;; # LOWER THREE QUARTERS BLOCK
+        15) printf '\U00002588' ;; # FULL BLOCK
+        *)  printf ' ' ;;
+    esac
+}
+
+# Single chunk color for mono3/mono4. Lanes passed as \x1f-joined parallel
+# lists. Mirrors the core: representative remaining (lowest present, or primary
+# slot when MONO_COLOR_MODE=primary), dimmed only when every present lane is a
+# long-horizon cap. Args: remaining_list window_list present_list.
+showy_quota_mono_chunk_color() {
+    local rem_s="$1" win_s="$2" present_s="$3"
+    local -a rem win present
+    local IFS=$'\x1f'
+    read -r -a rem <<< "${rem_s}"
+    read -r -a win <<< "${win_s}"
+    read -r -a present <<< "${present_s}"
+    IFS=$' \t\n'
+
+    local n="${#rem[@]}" i rep="" any=0 all=1
+    if [[ "${SHOWY_QUOTA_MONO_COLOR_MODE:-lowest}" == "primary" ]]; then
+        rep="${rem[0]:-0}"
+    else
+        for (( i=0; i<n; i++ )); do
+            [[ "${present[i]:-0}" == "1" ]] || continue
+            if [[ -z "${rep}" || "${rem[i]}" -lt "${rep}" ]]; then
+                rep="${rem[i]}"
+            fi
+        done
+        [[ -n "${rep}" ]] || rep=0
+    fi
+    for (( i=0; i<n; i++ )); do
+        [[ "${present[i]:-0}" == "1" ]] || continue
+        any=1
+        [[ "$(showy_quota_is_long_window "${win[i]}")" == "1" ]] || all=0
+    done
+    local dim=0
+    (( any && all )) && dim=1
+    showy_quota_window_color "${rep}" "${dim}"
+}
+
+# Render the single-color stacked body via the given styler fn (style_text for
+# Zellij ANSI, tmux_style_text for tmux markup); 3 lanes -> sextants, 4 -> octants.
+# Each SHOWY_QUOTA_MONO_MARKERS slot replaces its column with a colored separator
+# (first marker = palette elapsed, the rest = palette elapsed_long).
+# Args: styler width mono_color remaining_list reset_list window_list present_list.
+showy_quota_mono_lane_bar() {
+    local styler="$1" width="$2" mono_color="$3"
+    local rem_s="$4" reset_s="$5" win_s="$6" present_s="$7"
+    [[ "${width}" =~ ^[0-9]+$ ]] || width=12
+    (( width < 8 )) && width=8
+    local surface bg
+    surface="$(showy_quota_palette surface)"
+    bg="$(showy_quota_palette bg)"
+
+    local -a rem reset win present fill
+    local IFS=$'\x1f'
+    read -r -a rem <<< "${rem_s}"
+    read -r -a reset <<< "${reset_s}"
+    read -r -a win <<< "${win_s}"
+    read -r -a present <<< "${present_s}"
+    IFS=$' \t\n'
+
+    local n="${#rem[@]}" i
+    for (( i=0; i<n; i++ )); do
+        fill[i]="$(showy_quota_filled_cells "${rem[i]:-0}" "${width}")"
+    done
+
+    local -A marker_at=()
+    local rank=0 name idx col color
+    local IFS_save="$IFS"
+    IFS=,
+    for name in ${SHOWY_QUOTA_MONO_MARKERS:-}; do
+        name="${name#"${name%%[![:space:]]*}"}"
+        name="${name%"${name##*[![:space:]]}"}"
+        case "${name}" in
+            primary) idx=0 ;;
+            secondary) idx=1 ;;
+            tertiary) idx=2 ;;
+            quaternary) idx=3 ;;
+            *) idx=-1 ;;
+        esac
+        if (( idx >= 0 && idx < n )) && [[ "${present[idx]:-0}" == "1" ]]; then
+            col="$(showy_quota_elapsed_marker_cell "${reset[idx]}" "${win[idx]}" "${width}" || true)"
+            if [[ "${col}" =~ ^[0-9]+$ && -z "${marker_at[${col}]+x}" ]]; then
+                if (( rank == 0 )); then
+                    color="$(showy_quota_palette elapsed)"
+                else
+                    color="$(showy_quota_palette elapsed_long)"
+                fi
+                marker_at[${col}]="${color}"
+            fi
+        fi
+        rank=$((rank + 1))
+    done
+    IFS="${IFS_save}"
+
+    local octant=0
+    (( n >= 4 )) && octant=1
+    local mask glyph cell_color l
+    for (( i=0; i<width; i++ )); do
+        if [[ -n "${marker_at[${i}]+x}" ]]; then
+            "${styler}" '│' "${marker_at[${i}]}" "${surface}"
+            continue
+        fi
+        mask=0
+        for (( l=0; l<n; l++ )); do
+            (( i < ${fill[l]:-0} )) && mask=$((mask | (1 << l)))
+        done
+        if (( octant )); then
+            glyph="$(showy_quota_octant_mask_char "${mask}")"
+        else
+            glyph="$(showy_quota_sextant_mask_char "${mask}")"
+        fi
+        if (( mask == 0 )); then
+            cell_color="${surface}"
+        else
+            cell_color="${mono_color}"
+        fi
+        "${styler}" "${glyph}" "${cell_color}" "${surface}"
+    done
+    "${styler}" '▏' "${bg}" "${surface}"
+}
+
 # Pacing marker cell for a reset window. Returns non-zero when no marker
 # can be computed.
 # Args: $1 = reset timestamp/description, $2 = window minutes, $3 = width.
@@ -170,225 +313,48 @@ showy_quota_elapsed_marker_cell() {
     printf '%s\n' "${marker}"
 }
 
-# Pacing marker boundary for a reset window. Returns non-zero when no marker
-# can be computed. Unlike showy_quota_elapsed_marker_cell, this prints a boundary
-# index in 0..width so renderers can insert a separator between cells.
-# Args: $1 = reset timestamp/description, $2 = window minutes, $3 = width.
-showy_quota_elapsed_marker_boundary() {
-    local reset_at="$1" window_minutes="$2" width="$3"
-    [[ -n "${reset_at}" && "${window_minutes}" =~ ^[0-9]+$ && "${width}" =~ ^[0-9]+$ ]] || return 1
-    (( window_minutes > 0 && width > 0 )) || return 1
-
-    local reset_epoch duration start_epoch now elapsed boundary
-    reset_epoch=$(showy_quota_reset_epoch "${reset_at}") || return 1
-    duration=$((window_minutes * 60))
-    start_epoch=$((reset_epoch - duration))
-    now=$(showy_quota_now_epoch)
-    elapsed=$((now - start_epoch))
-    (( elapsed < 0 )) && elapsed=0
-    (( elapsed > duration )) && elapsed="${duration}"
-    boundary=$(( (duration - elapsed) * width / duration ))
-    (( boundary < 0 )) && boundary=0
-    (( boundary > width )) && boundary="${width}"
-    printf '%s\n' "${boundary}"
-}
-
-showy_quota_shared_window_marker_boundary() {
-    local width="$1"
-    local p_used="$2" p_reset="$3" p_window="$4"
-    local s_used="$5" s_reset="$6" s_window="$7"
-    local t_used="$8" t_reset="$9" t_window="${10}"
-    local count=0 ref_reset="" ref_window="" ref_epoch="" epoch
-
-    if [[ "${p_used}" =~ ^[0-9]+$ && -n "${p_reset}" && "${p_window}" =~ ^[0-9]+$ ]] && (( p_window > 0 )); then
-        epoch=$(showy_quota_reset_epoch "${p_reset}") || epoch=""
-        if [[ -n "${epoch}" ]]; then
-            ref_reset="${p_reset}"
-            ref_window="${p_window}"
-            ref_epoch="${epoch}"
-            count=1
-        fi
-    fi
-
-    if [[ "${s_used}" =~ ^[0-9]+$ && -n "${s_reset}" && "${s_window}" =~ ^[0-9]+$ ]] && (( s_window > 0 )); then
-        epoch=$(showy_quota_reset_epoch "${s_reset}") || epoch=""
-        if [[ -n "${epoch}" ]]; then
-            if (( count == 0 )); then
-                ref_reset="${s_reset}"
-                ref_window="${s_window}"
-                ref_epoch="${epoch}"
-                count=1
-            elif [[ "${s_window}" == "${ref_window}" && "${epoch}" == "${ref_epoch}" ]]; then
-                count=$((count + 1))
-            else
-                return 1
-            fi
-        fi
-    fi
-
-    if [[ "${t_used}" =~ ^[0-9]+$ && -n "${t_reset}" && "${t_window}" =~ ^[0-9]+$ ]] && (( t_window > 0 )); then
-        epoch=$(showy_quota_reset_epoch "${t_reset}") || epoch=""
-        if [[ -n "${epoch}" ]]; then
-            if (( count == 0 )); then
-                ref_reset="${t_reset}"
-                ref_window="${t_window}"
-                ref_epoch="${epoch}"
-                count=1
-            elif [[ "${t_window}" == "${ref_window}" && "${epoch}" == "${ref_epoch}" ]]; then
-                count=$((count + 1))
-            else
-                return 1
-            fi
-        fi
-    fi
-
-    (( count >= 2 )) || return 1
-    showy_quota_elapsed_marker_boundary "${ref_reset}" "${ref_window}" "${width}"
-}
-
-showy_quota_row_marker_boundary() {
-    local width="$1" used="$2" reset_at="$3" window_minutes="$4"
-    [[ "${used}" =~ ^[0-9]+$ ]] || return 1
-    showy_quota_elapsed_marker_boundary "${reset_at}" "${window_minutes}" "${width}"
-}
-
-showy_quota_mono3_marker_boundary() {
-    local width="$1"
-    local p_used="$2" p_reset="$3" p_window="$4"
-    local s_used="$5" s_reset="$6" s_window="$7"
-    local t_used="$8" t_reset="$9" t_window="${10}"
-
-    case "${SHOWY_QUOTA_MONO3_MARKER_SOURCE:-primary}" in
-        primary|"")
-            showy_quota_row_marker_boundary "${width}" "${p_used}" "${p_reset}" "${p_window}"
-            ;;
-        secondary)
-            showy_quota_row_marker_boundary "${width}" "${s_used}" "${s_reset}" "${s_window}"
-            ;;
-        tertiary)
-            showy_quota_row_marker_boundary "${width}" "${t_used}" "${t_reset}" "${t_window}"
-            ;;
-        shared)
-            showy_quota_shared_window_marker_boundary "${width}" \
-                "${p_used}" "${p_reset}" "${p_window}" \
-                "${s_used}" "${s_reset}" "${s_window}" \
-                "${t_used}" "${t_reset}" "${t_window}"
-            ;;
-        none)
-            return 1
-            ;;
-        *)
-            showy_quota_row_marker_boundary "${width}" "${p_used}" "${p_reset}" "${p_window}"
-            ;;
-    esac
-}
-
-
-showy_quota_min_remaining() {
-    local p_remaining="$1" s_remaining="$2" t_remaining="$3"
-    local p_used="$4" s_used="$5" t_used="$6"
-    local lowest=""
-
-    if [[ "${p_used}" =~ ^[0-9]+$ && "${p_remaining}" =~ ^-?[0-9]+$ ]]; then
-        lowest="${p_remaining}"
-    fi
-    if [[ "${s_used}" =~ ^[0-9]+$ && "${s_remaining}" =~ ^-?[0-9]+$ ]] && [[ -z "${lowest}" || "${s_remaining}" -lt "${lowest}" ]]; then
-        lowest="${s_remaining}"
-    fi
-    if [[ "${t_used}" =~ ^[0-9]+$ && "${t_remaining}" =~ ^-?[0-9]+$ ]] && [[ -z "${lowest}" || "${t_remaining}" -lt "${lowest}" ]]; then
-        lowest="${t_remaining}"
-    fi
-
-    printf '%s\n' "${lowest:-0}"
-}
-
-# 1 when every present window is a long-horizon cap (so the single-color mono3
-# chunk dims), 0 otherwise. Args: p_used p_window s_used s_window t_used t_window.
-showy_quota_mono3_all_long() {
-    local any=0 all=1 pair u w
-    for pair in "${1}:${2}" "${3}:${4}" "${5}:${6}"; do
-        u="${pair%%:*}"
-        w="${pair#*:}"
-        if [[ "${u}" =~ ^[0-9]+$ ]]; then
-            any=1
-            [[ "$(showy_quota_is_long_window "${w}")" == "1" ]] || all=0
-        fi
-    done
-    if (( any && all )); then printf '1'; else printf '0'; fi
-}
-
-showy_quota_mono3_color() {
-    local p_remaining="$1" s_remaining="$2" t_remaining="$3"
-    local p_used="$4" s_used="$5" t_used="$6"
-    local dim="${7:-0}"
-    local remaining
-
-    case "${SHOWY_QUOTA_MONO3_COLOR_MODE:-lowest}" in
-        primary)
-            remaining="${p_remaining}"
-            ;;
-        *)
-            remaining=$(showy_quota_min_remaining "${p_remaining}" "${s_remaining}" "${t_remaining}" "${p_used}" "${s_used}" "${t_used}")
-            ;;
-    esac
-
-    showy_quota_window_color "${remaining}" "${dim}"
-}
-
-showy_quota_csv_contains() {
-    local list="${1:-}" needle="$2" item
-    local -a items=()
-
-    [[ -n "${needle}" ]] || return 1
+# Explicit per-provider mode from SHOWY_QUOTA_PROVIDER_MODES ("p=mode,..."), or
+# empty when the provider has no override.
+showy_quota_mode_for_provider() {
+    local provider="$1" entry k v
     local IFS=,
-    read -r -a items <<< "${list}"
-    for item in "${items[@]}"; do
-        item="${item#"${item%%[![:space:]]*}"}"
-        item="${item%"${item##*[![:space:]]}"}"
-        [[ "${item}" == "${needle}" ]] && return 0
+    for entry in ${SHOWY_QUOTA_PROVIDER_MODES:-}; do
+        [[ "${entry}" == *"="* ]] || continue
+        k="${entry%%=*}"
+        v="${entry#*=}"
+        k="${k#"${k%%[![:space:]]*}"}"; k="${k%"${k##*[![:space:]]}"}"
+        v="${v#"${v%%[![:space:]]*}"}"; v="${v%"${v##*[![:space:]]}"}"
+        if [[ "${k}" == "${provider}" && -n "${v}" ]]; then
+            printf '%s' "${v}"
+            return 0
+        fi
     done
-    return 1
+    return 0
 }
 
+# Resolve a provider's terminal body. Args: provider, window_count (distinct
+# render windows, 0..4), has_tertiary (1/0). Collapses to the densest body the
+# data supports: mono4 needs four windows, mono3 needs a tertiary slot.
 showy_quota_terminal_mode_for_provider() {
-    local provider="$1"
-    # Tertiary usedPercent (-1 when absent) is the 8th positional arg, passed
-    # by the bar renderers; default to absent for callers without window data.
-    local t_used="${8:--1}"
-
-    local mode
+    local provider="$1" window_count="${2:-0}" has_tertiary="${3:-0}"
+    local requested
     case "${SHOWY_QUOTA_TERMINAL_BAR_MODE:-auto}" in
-        dual)
-            mode=dual
-            ;;
-        sextant3)
-            mode=sextant3
-            ;;
-        mono3)
-            mode=mono3
-            ;;
-        auto|"")
-            if showy_quota_csv_contains "${SHOWY_QUOTA_MONO3_PROVIDERS_EXCLUDE:-}" "${provider}"; then
-                mode=dual
-            elif showy_quota_csv_contains "${SHOWY_QUOTA_MONO3_PROVIDERS:-}" "${provider}"; then
-                mode=mono3
-            else
-                mode=dual
-            fi
-            ;;
+        dual) requested=dual ;;
+        mono3) requested=mono3 ;;
+        mono4) requested=mono4 ;;
         *)
-            mode=dual
+            requested="$(showy_quota_mode_for_provider "${provider}")"
+            [[ -n "${requested}" ]] || requested=dual
             ;;
     esac
 
-    # A provider with no tertiary window has only two pools; the fixed
-    # three-lane modes would draw the absent lane as an empty bar. Collapse to
-    # the two-lane `dual` layout, matching SketchyBar's `has_t` gate which drops
-    # the tertiary row when it carries no usedPercent.
-    local has_tertiary=0
-    [[ "${t_used}" =~ ^[0-9]+$ ]] && has_tertiary=1
-    if (( ! has_tertiary )) && [[ "${mode}" == "mono3" || "${mode}" == "sextant3" ]]; then
-        mode=dual
+    local mode=dual
+    if [[ "${requested}" == "mono4" ]] && (( window_count >= 4 )); then
+        mode=mono4
+    elif [[ "${requested}" == "mono4" && "${has_tertiary}" == "1" ]]; then
+        mode=mono3
+    elif [[ "${requested}" == "mono3" && "${has_tertiary}" == "1" ]]; then
+        mode=mono3
     fi
 
     printf '%s\n' "${mode}"

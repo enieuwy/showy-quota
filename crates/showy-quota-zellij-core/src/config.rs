@@ -24,6 +24,7 @@ pub struct RenderConfig {
     pub palette_countdown_warn: String,
     pub palette_stale: String,
     pub palette_elapsed: String,
+    pub palette_elapsed_long: String,
     pub stale_glyph: String,
     pub degraded_cli_glyph: String,
 
@@ -35,11 +36,9 @@ pub struct RenderConfig {
 
     pub zellij_bar_width: usize,
     pub terminal_bar_mode: String,
-    pub mono3_providers: Vec<String>,
-    pub mono3_providers_exclude: Vec<String>,
-    pub mono3_color_mode: String,
-    pub mono3_marker_source: String,
-    pub mono3_marker_style: String,
+    pub provider_modes: Vec<(String, String)>,
+    pub mono_color_mode: String,
+    pub mono_markers: Vec<String>,
     pub cap_left: String,
     pub cap_right: String,
 }
@@ -68,6 +67,7 @@ impl Default for RenderConfig {
             palette_countdown_warn: "ee5396".into(),
             palette_stale: "6c7086".into(),
             palette_elapsed: "be95ff".into(),
+            palette_elapsed_long: "3ddbd9".into(),
             stale_glyph: "⚠".into(),
             degraded_cli_glyph: "⚠cli".into(),
             reset_description_timezone_offset_minutes: None,
@@ -77,11 +77,12 @@ impl Default for RenderConfig {
             dim_window_minutes: 10080,
             zellij_bar_width: 12,
             terminal_bar_mode: "auto".into(),
-            mono3_providers: csv("gemini,antigravity"),
-            mono3_providers_exclude: Vec::new(),
-            mono3_color_mode: "lowest".into(),
-            mono3_marker_source: "primary".into(),
-            mono3_marker_style: "replace".into(),
+            provider_modes: vec![
+                ("gemini".into(), "mono3".into()),
+                ("antigravity".into(), "mono3".into()),
+            ],
+            mono_color_mode: "lowest".into(),
+            mono_markers: vec!["primary".into()],
             cap_left: "".into(),
             cap_right: "".into(),
         }
@@ -193,6 +194,11 @@ impl RenderConfig {
             "SHOWY_QUOTA_PALETTE_ELAPSED",
             &mut self.palette_elapsed,
         );
+        assign_string(
+            &get,
+            "SHOWY_QUOTA_PALETTE_ELAPSED_LONG",
+            &mut self.palette_elapsed_long,
+        );
         assign_string(&get, "SHOWY_QUOTA_STALE_GLYPH", &mut self.stale_glyph);
         assign_string(
             &get,
@@ -233,29 +239,24 @@ impl RenderConfig {
             "SHOWY_QUOTA_TERMINAL_BAR_MODE",
             &mut self.terminal_bar_mode,
         );
-        self.mono3_providers = get_csv(&get, "SHOWY_QUOTA_MONO3_PROVIDERS", &self.mono3_providers);
-        self.mono3_providers_exclude = get_csv(
-            &get,
-            "SHOWY_QUOTA_MONO3_PROVIDERS_EXCLUDE",
-            &self.mono3_providers_exclude,
-        );
+        self.provider_modes =
+            get_provider_modes(&get, "SHOWY_QUOTA_PROVIDER_MODES", &self.provider_modes);
         assign_string(
             &get,
-            "SHOWY_QUOTA_MONO3_COLOR_MODE",
-            &mut self.mono3_color_mode,
+            "SHOWY_QUOTA_MONO_COLOR_MODE",
+            &mut self.mono_color_mode,
         );
-        assign_string(
-            &get,
-            "SHOWY_QUOTA_MONO3_MARKER_SOURCE",
-            &mut self.mono3_marker_source,
-        );
-        assign_string(
-            &get,
-            "SHOWY_QUOTA_MONO3_MARKER_STYLE",
-            &mut self.mono3_marker_style,
-        );
+        self.mono_markers = get_csv(&get, "SHOWY_QUOTA_MONO_MARKERS", &self.mono_markers);
         assign_string(&get, "SHOWY_QUOTA_CAP_LEFT", &mut self.cap_left);
         assign_string(&get, "SHOWY_QUOTA_CAP_RIGHT", &mut self.cap_right);
+    }
+
+    /// Explicit per-provider terminal body override, if any.
+    pub fn mode_for(&self, provider: &str) -> Option<&str> {
+        self.provider_modes
+            .iter()
+            .find(|(name, _)| name == provider)
+            .map(|(_, mode)| mode.as_str())
     }
 }
 
@@ -310,6 +311,28 @@ where
     F: Fn(&str) -> Option<String>,
 {
     get(name).map_or_else(|| current.to_vec(), |value| csv(&value))
+}
+
+fn get_provider_modes<F>(get: &F, name: &str, current: &[(String, String)]) -> Vec<(String, String)>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    match get(name) {
+        None => current.to_vec(),
+        Some(value) => value
+            .split(',')
+            .filter_map(|entry| {
+                let (provider, mode) = entry.split_once('=')?;
+                let provider = provider.trim();
+                let mode = mode.trim();
+                if provider.is_empty() || mode.is_empty() {
+                    None
+                } else {
+                    Some((provider.to_string(), mode.to_string()))
+                }
+            })
+            .collect(),
+    }
 }
 
 fn get_bool<F>(get: &F, name: &str, default: bool) -> bool

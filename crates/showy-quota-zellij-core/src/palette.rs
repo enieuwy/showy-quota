@@ -42,9 +42,9 @@ impl RenderConfig {
     /// Dimmed palette for long-horizon windows: explicit override when set,
     /// otherwise the primary palette scaled down by `palette_dim_scale`.
     pub fn dim_palette(&self, severity: Severity) -> String {
-        self.dim_override(severity).cloned().unwrap_or_else(|| {
-            scale_hex(&self.primary_palette(severity), &self.palette_dim_scale)
-        })
+        self.dim_override(severity)
+            .cloned()
+            .unwrap_or_else(|| scale_hex(&self.primary_palette(severity), &self.palette_dim_scale))
     }
 
     fn dim_override(&self, severity: Severity) -> Option<&String> {

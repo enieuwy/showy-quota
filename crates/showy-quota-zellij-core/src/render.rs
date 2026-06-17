@@ -139,10 +139,8 @@ fn render_provider(
 
     let p_used = primary.map_or(-1, UsageWindow::used_pct_floor);
     let s_used = secondary.map_or(-1, UsageWindow::used_pct_floor);
-    let t_used = tertiary.map_or(-1, UsageWindow::used_pct_floor);
     let p_remaining = if p_used >= 0 { 100 - p_used } else { 0 };
     let s_remaining = if s_used >= 0 { 100 - s_used } else { 0 };
-    let t_remaining = if t_used >= 0 { 100 - t_used } else { 0 };
 
     let p_reset = primary.and_then(UsageWindow::reset_value);
     let minutes = p_reset.and_then(|reset| {
@@ -185,40 +183,36 @@ fn render_provider(
     let surface_color = &config.palette_surface;
     let p_long = is_long_window(primary, config.dim_window_minutes);
     let s_long = is_long_window(secondary, config.dim_window_minutes);
-    let t_long = is_long_window(tertiary, config.dim_window_minutes);
+    let render4 = usage.render_windows(4);
+    let bar_mode =
+        terminal_mode_for_provider(config, &record.provider, tertiary.is_some(), render4.len());
     let mut primary_color = config.window_color(p_remaining, p_long);
     let mut secondary_color = config.window_color(s_remaining, s_long);
-    let mut tertiary_color = config.window_color(t_remaining, t_long);
-    let bar_mode = terminal_mode_for_provider(config, &record.provider, tertiary.is_some());
-    let mut mono_color = String::new();
-    if bar_mode == "mono3" {
-        // mono3 has one color for the whole chunk, so dimming is all-or-nothing:
-        // dim only when every present window is a long-horizon cap (e.g.
-        // all-monthly), bright when any live short tier is present.
-        let mut any = false;
-        let mut all_long = true;
-        for (used, long) in [(p_used, p_long), (s_used, s_long), (t_used, t_long)] {
-            if used >= 0 {
-                any = true;
-                all_long &= long;
-            }
-        }
-        let remaining = mono3_remaining(
-            config,
-            p_remaining,
-            s_remaining,
-            t_remaining,
-            p_used,
-            s_used,
-            t_used,
-        );
-        mono_color = config.window_color(remaining, any && all_long);
-        primary_color.clone_from(&mono_color);
-    }
+
+    // Lanes for the single-color stacked bodies. mono3 uses the three positional
+    // slots (absent slots stay empty and never shift up); mono4 uses the
+    // assembled per-pool windows.
+    let mono_lanes: Vec<Lane> = match bar_mode.as_str() {
+        "mono4" => render4
+            .iter()
+            .map(|window| Lane::from_window(window, config, options.stale))
+            .collect(),
+        "mono3" => [primary, secondary, tertiary]
+            .into_iter()
+            .map(|slot| Lane::from_slot(slot, config, options.stale))
+            .collect(),
+        _ => Vec::new(),
+    };
+    let mut mono_color = if mono_lanes.is_empty() {
+        String::new()
+    } else {
+        let color = mono_chunk_color(config, &mono_lanes);
+        primary_color.clone_from(&color);
+        color
+    };
     if options.stale {
         primary_color = stale_color.to_string();
         secondary_color = stale_color.to_string();
-        tertiary_color = stale_color.to_string();
         mono_color = stale_color.to_string();
     }
 
@@ -265,51 +259,12 @@ fn render_provider(
     } else {
         secondary.and_then(UsageWindow::window_minutes)
     };
-    let marker_tertiary_reset = if options.stale {
-        None
-    } else {
-        tertiary.and_then(UsageWindow::reset_value)
-    };
-    let marker_tertiary_window = if options.stale {
-        None
-    } else {
-        tertiary.and_then(UsageWindow::window_minutes)
-    };
-
     match bar_mode.as_str() {
-        "sextant3" => tri_metric_bar(
-            out,
-            config,
-            options,
-            TriArgs {
-                p_remaining,
-                s_remaining,
-                t_remaining,
-                primary_color: &primary_color,
-                secondary_color: &secondary_color,
-                tertiary_color: &tertiary_color,
-            },
-        ),
-        "mono3" => tri_metric_bar_mono(
-            out,
-            config,
-            options,
-            MonoArgs {
-                p_remaining,
-                s_remaining,
-                t_remaining,
-                p_used,
-                s_used,
-                t_used,
-                p_reset: marker_primary_reset,
-                s_reset: marker_secondary_reset,
-                t_reset: marker_tertiary_reset,
-                p_window: marker_primary_window,
-                s_window: marker_secondary_window,
-                t_window: marker_tertiary_window,
-                mono_color: &mono_color,
-            },
-        ),
+        "mono3" | "mono4" => {
+            let width = config.zellij_bar_width.max(8);
+            let markers = mono_marker_cells(config, &mono_lanes, width, options.now_epoch);
+            mono_lane_bar(out, config, options, &mono_lanes, &mono_color, &markers);
+        }
         _ => dual_metric_bar(
             out,
             config,
@@ -348,7 +303,9 @@ fn render_provider(
 /// A usage slot is present only when that exact window reports a numeric
 /// usedPercent; renderers never shift later windows into earlier slots.
 fn semantic_slot(window: &Option<UsageWindow>) -> Option<&UsageWindow> {
-    window.as_ref().filter(|window| window.used_percent.is_some())
+    window
+        .as_ref()
+        .filter(|window| window.used_percent.is_some())
 }
 
 /// A window is "long-horizon" (a weekly/monthly cap, rendered dimmed) when it
@@ -434,145 +391,150 @@ fn dual_metric_bar(
     );
 }
 
-struct TriArgs<'a> {
-    p_remaining: i32,
-    s_remaining: i32,
-    t_remaining: i32,
-    primary_color: &'a str,
-    secondary_color: &'a str,
-    tertiary_color: &'a str,
+struct Lane<'a> {
+    remaining: i32,
+    reset: Option<&'a str>,
+    window: Option<i64>,
+    is_long: bool,
+    present: bool,
 }
 
-fn tri_metric_bar(
-    out: &mut String,
-    config: &RenderConfig,
-    options: RenderOptions,
-    args: TriArgs<'_>,
-) {
-    let width = config.zellij_bar_width.max(8);
-    let surface_color = &config.palette_surface;
-    let p_fill = filled_cells(args.p_remaining, width);
-    let s_fill = filled_cells(args.s_remaining, width);
-    let t_fill = filled_cells(args.t_remaining, width);
+impl<'a> Lane<'a> {
+    fn from_window(window: &'a UsageWindow, config: &RenderConfig, stale: bool) -> Lane<'a> {
+        Lane {
+            remaining: 100 - window.used_pct_floor(),
+            reset: if stale { None } else { window.reset_value() },
+            window: if stale { None } else { window.window_minutes() },
+            is_long: window
+                .window_minutes()
+                .is_some_and(|minutes| minutes >= config.dim_window_minutes),
+            present: true,
+        }
+    }
 
-    for i in 0..width {
-        let mut mask = 0;
-        if i < p_fill {
-            mask |= 1;
+    fn from_slot(slot: Option<&'a UsageWindow>, config: &RenderConfig, stale: bool) -> Lane<'a> {
+        match slot {
+            Some(window) => Lane::from_window(window, config, stale),
+            None => Lane {
+                remaining: 0,
+                reset: None,
+                window: None,
+                is_long: false,
+                present: false,
+            },
         }
-        if i < s_fill {
-            mask |= 2;
-        }
-        if i < t_fill {
-            mask |= 4;
-        }
-        let cell_color = if mask & 4 != 0 {
-            args.tertiary_color
-        } else if mask & 2 != 0 {
-            args.secondary_color
-        } else if mask & 1 != 0 {
-            args.primary_color
-        } else {
-            surface_color
+    }
+}
+
+/// One color for the whole stacked chunk (mono3/mono4): the representative
+/// window's severity, dimmed only when every present lane is a long-horizon cap.
+fn mono_chunk_color(config: &RenderConfig, lanes: &[Lane<'_>]) -> String {
+    let remaining = if config.mono_color_mode == "primary" {
+        lanes.first().map_or(0, |lane| lane.remaining)
+    } else {
+        lanes
+            .iter()
+            .filter(|lane| lane.present)
+            .map(|lane| lane.remaining)
+            .min()
+            .unwrap_or(0)
+    };
+    let mut any = false;
+    let mut all_long = true;
+    for lane in lanes.iter().filter(|lane| lane.present) {
+        any = true;
+        all_long &= lane.is_long;
+    }
+    config.window_color(remaining, any && all_long)
+}
+
+/// Resolve the configured marker slots to (column, color) pairs. The first
+/// marker uses `palette_elapsed`, the rest `palette_elapsed_long`; markers whose
+/// window has no parseable reset (or are stale) are dropped.
+fn mono_marker_cells<'a>(
+    config: &'a RenderConfig,
+    lanes: &[Lane<'_>],
+    width: usize,
+    now_epoch: i64,
+) -> Vec<(usize, &'a str)> {
+    let colors = [
+        config.palette_elapsed.as_str(),
+        config.palette_elapsed_long.as_str(),
+    ];
+    let mut cells = Vec::new();
+    for (rank, name) in config.mono_markers.iter().enumerate() {
+        let index = match name.as_str() {
+            "primary" => 0,
+            "secondary" => 1,
+            "tertiary" => 2,
+            "quaternary" => 3,
+            _ => continue,
         };
-        style_text(
-            out,
-            sextant_mask_char(mask),
-            Some(cell_color),
-            Some(surface_color),
-            Weight::Normal,
-            options.color,
-        );
+        let Some(lane) = lanes.get(index) else {
+            continue;
+        };
+        if !lane.present {
+            continue;
+        }
+        let Some(col) = elapsed_marker_cell(
+            lane.reset,
+            lane.window,
+            width,
+            now_epoch,
+            config.reset_description_timezone_offset_minutes,
+        ) else {
+            continue;
+        };
+        cells.push((col, colors[rank.min(colors.len() - 1)]));
     }
-    style_text(
-        out,
-        "▏",
-        Some(&config.palette_bg),
-        Some(surface_color),
-        Weight::Normal,
-        options.color,
-    );
+    cells
 }
 
-struct MonoArgs<'a> {
-    p_remaining: i32,
-    s_remaining: i32,
-    t_remaining: i32,
-    p_used: i32,
-    s_used: i32,
-    t_used: i32,
-    p_reset: Option<&'a str>,
-    s_reset: Option<&'a str>,
-    t_reset: Option<&'a str>,
-    p_window: Option<i64>,
-    s_window: Option<i64>,
-    t_window: Option<i64>,
-    mono_color: &'a str,
-}
-
-fn tri_metric_bar_mono(
+/// Render the single-color stacked body: three lanes pack into sextants, four
+/// into octants. Each configured marker replaces its column with a colored `│`.
+fn mono_lane_bar(
     out: &mut String,
     config: &RenderConfig,
     options: RenderOptions,
-    args: MonoArgs<'_>,
+    lanes: &[Lane<'_>],
+    mono_color: &str,
+    markers: &[(usize, &str)],
 ) {
     let width = config.zellij_bar_width.max(8);
     let surface_color = &config.palette_surface;
-    let elapsed_color = &config.palette_elapsed;
-    let p_fill = filled_cells(args.p_remaining, width);
-    let s_fill = filled_cells(args.s_remaining, width);
-    let t_fill = filled_cells(args.t_remaining, width);
-    let mut marker = mono3_marker_boundary(config, &args, width, options.now_epoch);
-
-    if config.mono3_marker_style == "replace" && marker == Some(width) {
-        marker = Some(width - 1);
-    }
-
+    let fills: Vec<usize> = lanes
+        .iter()
+        .map(|lane| filled_cells(lane.remaining, width))
+        .collect();
+    let octant = lanes.len() >= 4;
     for i in 0..width {
-        if marker == Some(i) {
+        if let Some((_, color)) = markers.iter().find(|(col, _)| *col == i) {
             style_text(
                 out,
                 "│",
-                Some(elapsed_color),
+                Some(color),
                 Some(surface_color),
                 Weight::Normal,
                 options.color,
             );
-            if config.mono3_marker_style == "replace" {
-                continue;
+            continue;
+        }
+        let mut mask = 0i32;
+        for (index, &fill) in fills.iter().enumerate() {
+            if i < fill {
+                mask |= 1 << index;
             }
         }
-
-        let mut mask = 0;
-        if i < p_fill {
-            mask |= 1;
-        }
-        if i < s_fill {
-            mask |= 2;
-        }
-        if i < t_fill {
-            mask |= 4;
-        }
-        let cell_color = if mask == 0 {
-            surface_color
+        let glyph = if octant {
+            octant_mask_char(mask)
         } else {
-            args.mono_color
+            sextant_mask_char(mask)
         };
+        let cell_color = if mask == 0 { surface_color } else { mono_color };
         style_text(
             out,
-            sextant_mask_char(mask),
+            glyph,
             Some(cell_color),
-            Some(surface_color),
-            Weight::Normal,
-            options.color,
-        );
-    }
-
-    if config.mono3_marker_style != "replace" && marker == Some(width) {
-        style_text(
-            out,
-            "│",
-            Some(elapsed_color),
             Some(surface_color),
             Weight::Normal,
             options.color,
@@ -586,6 +548,30 @@ fn tri_metric_bar_mono(
         Weight::Normal,
         options.color,
     );
+}
+
+/// 4-lane (2x4) octant glyph for a full-width row mask: bit0 = top lane ...
+/// bit3 = bottom lane. Combinations absent from the Unicode 16 octant block fall
+/// back to the matching quarter/half/full block element.
+fn octant_mask_char(mask: i32) -> &'static str {
+    match mask & 0b1111 {
+        0b0000 => " ",
+        0b0001 => "\u{1FB82}",
+        0b0010 => "\u{1CD06}",
+        0b0011 => "\u{2580}",
+        0b0100 => "\u{1CD27}",
+        0b0101 => "\u{1CD2A}",
+        0b0110 => "\u{1CD33}",
+        0b0111 => "\u{1FB85}",
+        0b1000 => "\u{2582}",
+        0b1001 => "\u{1CDAE}",
+        0b1010 => "\u{1CDB7}",
+        0b1011 => "\u{1CDBA}",
+        0b1100 => "\u{2584}",
+        0b1101 => "\u{1CDDD}",
+        0b1110 => "\u{2586}",
+        _ => "\u{2588}",
+    }
 }
 
 fn filled_cells(remaining: i32, width: usize) -> usize {
@@ -633,244 +619,28 @@ fn elapsed_marker_cell(
     Some(marker)
 }
 
-fn elapsed_marker_boundary(
-    reset_at: Option<&str>,
-    window_minutes: Option<i64>,
-    width: usize,
-    now_epoch: i64,
-    reset_description_offset_minutes: Option<i16>,
-) -> Option<usize> {
-    let window_minutes = window_minutes?;
-    if window_minutes <= 0 || width == 0 {
-        return None;
-    }
-    let reset_epoch = reset_epoch(reset_at?, now_epoch, reset_description_offset_minutes)?;
-    let duration = window_minutes.checked_mul(60)?;
-    let start_epoch = reset_epoch.checked_sub(duration)?;
-    let elapsed = (now_epoch - start_epoch).clamp(0, duration);
-    let boundary = ((duration - elapsed) as usize).saturating_mul(width) / duration as usize;
-    Some(boundary.min(width))
-}
-
-fn mono3_marker_boundary(
+fn terminal_mode_for_provider(
     config: &RenderConfig,
-    args: &MonoArgs<'_>,
-    width: usize,
-    now_epoch: i64,
-) -> Option<usize> {
-    match config.mono3_marker_source.as_str() {
-        "primary" | "" => row_marker_boundary(
-            args.p_used,
-            args.p_reset,
-            args.p_window,
-            width,
-            now_epoch,
-            config.reset_description_timezone_offset_minutes,
-        ),
-        "secondary" => row_marker_boundary(
-            args.s_used,
-            args.s_reset,
-            args.s_window,
-            width,
-            now_epoch,
-            config.reset_description_timezone_offset_minutes,
-        ),
-        "tertiary" => row_marker_boundary(
-            args.t_used,
-            args.t_reset,
-            args.t_window,
-            width,
-            now_epoch,
-            config.reset_description_timezone_offset_minutes,
-        ),
-        "shared" => shared_window_marker_boundary(args, width, now_epoch, config),
-        "none" => None,
-        _ => row_marker_boundary(
-            args.p_used,
-            args.p_reset,
-            args.p_window,
-            width,
-            now_epoch,
-            config.reset_description_timezone_offset_minutes,
-        ),
-    }
-}
-
-fn row_marker_boundary(
-    used: i32,
-    reset: Option<&str>,
-    window: Option<i64>,
-    width: usize,
-    now_epoch: i64,
-    reset_description_offset_minutes: Option<i16>,
-) -> Option<usize> {
-    if used < 0 {
-        return None;
-    }
-    elapsed_marker_boundary(
-        reset,
-        window,
-        width,
-        now_epoch,
-        reset_description_offset_minutes,
-    )
-}
-
-fn shared_window_marker_boundary(
-    args: &MonoArgs<'_>,
-    width: usize,
-    now_epoch: i64,
-    config: &RenderConfig,
-) -> Option<usize> {
-    let mut count = 0;
-    let mut ref_epoch = None;
-    let mut ref_window = None;
-    for (used, reset, window) in [
-        (args.p_used, args.p_reset, args.p_window),
-        (args.s_used, args.s_reset, args.s_window),
-        (args.t_used, args.t_reset, args.t_window),
-    ] {
-        if used < 0 || window.unwrap_or(0) <= 0 {
-            continue;
-        }
-        let epoch = reset.and_then(|reset| {
-            reset_epoch(
-                reset,
-                now_epoch,
-                config.reset_description_timezone_offset_minutes,
-            )
-        });
-        if let (Some(epoch), Some(window)) = (epoch, window) {
-            match (ref_epoch, ref_window) {
-                (None, None) => {
-                    ref_epoch = Some(epoch);
-                    ref_window = Some(window);
-                    count = 1;
-                }
-                (Some(prev_epoch), Some(prev_window))
-                    if prev_epoch == epoch && prev_window == window =>
-                {
-                    count += 1;
-                }
-                _ => return None,
-            }
-        }
-    }
-    if count >= 2 {
-        if let (Some(ref_epoch_val), Some(ref_window_val)) = (ref_epoch, ref_window) {
-            // Find which row established the shared window and use its reset string.
-            let matched_reset = [
-                (args.p_reset, args.p_window, ref_epoch_val, ref_window_val),
-                (args.s_reset, args.s_window, ref_epoch_val, ref_window_val),
-                (args.t_reset, args.t_window, ref_epoch_val, ref_window_val),
-            ]
-            .iter()
-            .filter_map(|&(reset, opt_window, re, rw)| {
-                let epoch = reset.and_then(|r| {
-                    reset_epoch(
-                        r,
-                        now_epoch,
-                        config.reset_description_timezone_offset_minutes,
-                    )
-                });
-                if epoch == Some(re) && opt_window == Some(rw) {
-                    reset
-                } else {
-                    None
-                }
-            })
-            .next();
-            elapsed_marker_boundary(
-                matched_reset,
-                Some(ref_window_val),
-                width,
-                now_epoch,
-                config.reset_description_timezone_offset_minutes,
-            )
-        } else {
-            None
-        }
-    } else {
-        None
-    }
-}
-
-fn mono3_remaining(
-    config: &RenderConfig,
-    p_remaining: i32,
-    s_remaining: i32,
-    t_remaining: i32,
-    p_used: i32,
-    s_used: i32,
-    t_used: i32,
-) -> i32 {
-    match config.mono3_color_mode.as_str() {
-        "primary" => p_remaining,
-        "lowest" | "" => min_remaining(
-            p_remaining,
-            s_remaining,
-            t_remaining,
-            p_used,
-            s_used,
-            t_used,
-        ),
-        _ => min_remaining(
-            p_remaining,
-            s_remaining,
-            t_remaining,
-            p_used,
-            s_used,
-            t_used,
-        ),
-    }
-}
-
-fn min_remaining(
-    p_remaining: i32,
-    s_remaining: i32,
-    t_remaining: i32,
-    p_used: i32,
-    s_used: i32,
-    t_used: i32,
-) -> i32 {
-    let mut lowest = None;
-    for (remaining, used) in [
-        (p_remaining, p_used),
-        (s_remaining, s_used),
-        (t_remaining, t_used),
-    ] {
-        if used >= 0 {
-            lowest = Some(lowest.map_or(remaining, |current: i32| current.min(remaining)));
-        }
-    }
-    lowest.unwrap_or(0)
-}
-
-fn terminal_mode_for_provider(config: &RenderConfig, provider: &str, has_tertiary: bool) -> String {
-    let mode = match config.terminal_bar_mode.as_str() {
+    provider: &str,
+    has_tertiary: bool,
+    window_count: usize,
+) -> String {
+    let requested = match config.terminal_bar_mode.as_str() {
         "dual" => "dual",
-        "sextant3" => "sextant3",
         "mono3" => "mono3",
-        "auto" | "" => {
-            if contains(&config.mono3_providers_exclude, provider) {
-                "dual"
-            } else if contains(&config.mono3_providers, provider) {
-                "mono3"
-            } else {
-                "dual"
-            }
-        }
+        "mono4" => "mono4",
+        // `auto`: per-provider override (PROVIDER_MODES), otherwise dual.
+        _ => config.mode_for(provider).unwrap_or("dual"),
+    };
+    // Collapse to the densest body the data supports: mono4 needs four assembled
+    // windows; mono3 needs its third positional slot; otherwise dual.
+    let mode = match requested {
+        "mono4" if window_count >= 4 => "mono4",
+        "mono4" if has_tertiary => "mono3",
+        "mono3" if has_tertiary => "mono3",
         _ => "dual",
     };
-    // A provider with no tertiary window has only two pools; the fixed
-    // three-lane modes would draw the absent lane as an empty bar. Collapse
-    // to the two-lane `dual` layout, matching SketchyBar's `has_t` gate which
-    // drops the tertiary row when it carries no usedPercent.
-    if !has_tertiary && matches!(mode, "mono3" | "sextant3") {
-        "dual".to_string()
-    } else {
-        mode.to_string()
-    }
+    mode.to_string()
 }
 
 fn provider_sigil(provider: &str) -> String {

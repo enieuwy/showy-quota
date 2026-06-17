@@ -11,7 +11,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   reset times (e.g. Gemini's `23:59` lost its last digit). The pinned
   `SHOWY_QUOTA_SKETCHYBAR_LABEL_WIDTH` default is now `32` (was `27`), which
   fits the longest countdown form; shorter strings stay jitter-free as before.
-- The Zellij/tmux `mono3` and `sextant3` bodies now collapse to the two-lane
+- The Zellij/tmux `mono3` body now collapses to the two-lane
   `dual` body for providers without a tertiary window, matching the SketchyBar
   renderer which already drops the absent tertiary row. Antigravity's new
   two-pool shape (Gemini weekly in `usage.primary`, Claude+GPT weekly in
@@ -34,12 +34,29 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   none. The `dual` body now draws a pacing marker on **both** rows, and the
   SketchyBar plugin gained a `primary_marker` so every pool is paced (was
   secondary/tertiary only).
+- The Zellij/tmux marker is now a configurable list: `SHOWY_QUOTA_MONO_MARKERS`
+  (default `primary`) names which window slots get a pacing separator (`none`
+  disables), replacing the single `SHOWY_QUOTA_MONO3_MARKER_SOURCE`. The first
+  marker uses `palette_elapsed`, the rest a distinct `palette_elapsed_long`.
+- `auto` mode now reads the per-provider `SHOWY_QUOTA_PROVIDER_MODES` map
+  (default `gemini=mono3,antigravity=mono3`) instead of the `mono3_providers`
+  allow/deny lists; providers without an entry render `dual`. `mono4` is opt-in
+  via this map and is never chosen automatically.
 
 ### Added
 - `SHOWY_QUOTA_PALETTE_DIM_SCALE` / `palette_dim_scale` (default `0.55`) and
   `SHOWY_QUOTA_PALETTE_DIM_{GOOD,WARN,BAD,UNKNOWN}` / `palette_dim_*` set the
   color of dimmed (long-horizon) windows, plus `SHOWY_QUOTA_DIM_WINDOW_MINUTES`
   / `dim_window_minutes` (default `10080`) sets the weekly/monthly dim threshold.
+- New `mono4` terminal body: four per-pool windows packed into one Unicode 16
+  octant cell (`U+1CD00`), the 4-lane sibling of `mono3`'s sextants. mono4's
+  windows are assembled from `usage.extraRateWindows` (e.g. Antigravity's Gemini
+  and Claude+GPT session/weekly pools) and collapse to `mono3`/`dual` when fewer
+  than four are available. Requires an octant-capable terminal (Ghostty, kitty,
+  WezTerm); `docs/scripts/preview-quad-octants.py` tests a terminal and previews it.
+- `SHOWY_QUOTA_PALETTE_ELAPSED_LONG` (default `3ddbd9`) colors the second and
+  later pacing markers; `SHOWY_QUOTA_MONO_MARKERS` (list) and
+  `SHOWY_QUOTA_PROVIDER_MODES` (map) configure markers and per-provider bodies.
 
 ### Removed
 - The row-position palette knobs `SHOWY_QUOTA_PALETTE_SECONDARY_*`,
@@ -47,6 +64,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `SHOWY_QUOTA_PALETTE_TERTIARY_SCALE` (and their KDL equivalents). Dimming is
   now horizon-based via `SHOWY_QUOTA_PALETTE_DIM_*` / `SHOWY_QUOTA_PALETTE_DIM_SCALE`;
   move any secondary/tertiary color or scale overrides to the `DIM` keys.
+- The `sextant3` terminal mode (its per-column-color variant of `mono3` was a
+  forced-only niche `auto` never selected). Use `mono3` (or `mono4`).
+- `SHOWY_QUOTA_MONO3_PROVIDERS` / `_EXCLUDE` (use `SHOWY_QUOTA_PROVIDER_MODES`),
+  `SHOWY_QUOTA_MONO3_MARKER_SOURCE` (use `SHOWY_QUOTA_MONO_MARKERS`),
+  `SHOWY_QUOTA_MONO3_COLOR_MODE` (renamed `SHOWY_QUOTA_MONO_COLOR_MODE`), and
+  `SHOWY_QUOTA_MONO3_MARKER_STYLE` (markers now always replace a cell; the
+  `insert` style and the `shared` marker source are gone).
 
 ## [0.2.5] — 2026-06-12
 

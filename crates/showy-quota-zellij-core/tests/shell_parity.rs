@@ -27,15 +27,15 @@ fn rust_renderer_matches_shell_zellij_renderer() {
             configure: |_| {},
         },
         Case {
-            name: "forced sextant no color",
-            fixture: "codexbar-sextant.json",
-            color: false,
+            name: "antigravity quad mono4 color",
+            fixture: "codexbar-antigravity-quad.json",
+            color: true,
             now_epoch: 4_070_908_800,
             stale: false,
             degraded_cli: false,
             configure: |config| {
-                config.terminal_bar_mode = "sextant3".into();
-                config.zellij_bar_width = 8;
+                config.terminal_bar_mode = "mono4".into();
+                config.zellij_bar_width = 12;
             },
         },
         Case {
@@ -50,15 +50,16 @@ fn rust_renderer_matches_shell_zellij_renderer() {
             },
         },
         Case {
-            name: "mono insert marker no color",
-            fixture: "codexbar-mono.json",
+            name: "antigravity quad mono4 two markers no color",
+            fixture: "codexbar-antigravity-quad.json",
             color: false,
-            now_epoch: 4_070_912_400,
+            now_epoch: 4_070_908_800,
             stale: false,
             degraded_cli: false,
             configure: |config| {
-                config.zellij_bar_width = 8;
-                config.mono3_marker_style = "insert".into();
+                config.terminal_bar_mode = "mono4".into();
+                config.zellij_bar_width = 12;
+                config.mono_markers = vec!["primary".into(), "tertiary".into()];
             },
         },
         Case {
@@ -124,15 +125,15 @@ fn rust_renderer_matches_shell_zellij_renderer() {
             },
         },
         Case {
-            name: "no tertiary sextant collapses to dual no color",
-            fixture: "codexbar-no-tertiary.json",
-            color: false,
+            name: "antigravity quad mono4 stale color",
+            fixture: "codexbar-antigravity-quad.json",
+            color: true,
             now_epoch: 4_070_908_800,
-            stale: false,
+            stale: true,
             degraded_cli: false,
             configure: |config| {
-                config.terminal_bar_mode = "sextant3".into();
-                config.zellij_bar_width = 8;
+                config.terminal_bar_mode = "mono4".into();
+                config.zellij_bar_width = 12;
             },
         },
         Case {
@@ -274,17 +275,39 @@ fn base_shell_command(root: &Path, case: Case<'_>) -> Command {
 fn apply_case_env(cmd: &mut Command, case: Case<'_>) {
     let mut config = RenderConfig::default();
     (case.configure)(&mut config);
-    if config.terminal_bar_mode != RenderConfig::default().terminal_bar_mode {
+    let def = RenderConfig::default();
+    if config.terminal_bar_mode != def.terminal_bar_mode {
         cmd.env("SHOWY_QUOTA_TERMINAL_BAR_MODE", &config.terminal_bar_mode);
     }
-    if config.zellij_bar_width != RenderConfig::default().zellij_bar_width {
+    if config.zellij_bar_width != def.zellij_bar_width {
         cmd.env(
             "SHOWY_QUOTA_ZELLIJ_BAR_WIDTH",
             config.zellij_bar_width.to_string(),
         );
     }
-    if config.mono3_marker_style != RenderConfig::default().mono3_marker_style {
-        cmd.env("SHOWY_QUOTA_MONO3_MARKER_STYLE", &config.mono3_marker_style);
+    if config.provider_modes != def.provider_modes {
+        let modes = config
+            .provider_modes
+            .iter()
+            .map(|(provider, mode)| format!("{provider}={mode}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        cmd.env("SHOWY_QUOTA_PROVIDER_MODES", modes);
+    }
+    if config.mono_color_mode != def.mono_color_mode {
+        cmd.env("SHOWY_QUOTA_MONO_COLOR_MODE", &config.mono_color_mode);
+    }
+    if config.mono_markers != def.mono_markers {
+        cmd.env("SHOWY_QUOTA_MONO_MARKERS", config.mono_markers.join(","));
+    }
+    if config.palette_elapsed_long != def.palette_elapsed_long {
+        cmd.env("SHOWY_QUOTA_PALETTE_ELAPSED_LONG", &config.palette_elapsed_long);
+    }
+    if config.dim_window_minutes != def.dim_window_minutes {
+        cmd.env(
+            "SHOWY_QUOTA_DIM_WINDOW_MINUTES",
+            config.dim_window_minutes.to_string(),
+        );
     }
     if !config.providers.is_empty() {
         cmd.env("SHOWY_QUOTA_PROVIDERS", config.providers.join(","));

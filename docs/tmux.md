@@ -15,29 +15,27 @@ its configured terminal body. Most providers use `dual`: upper-half blocks
 each colored by its remaining-quota severity and dimmed when it is a
 weekly/monthly cap, with a pacing marker on both rows in
 `SHOWY_QUOTA_PALETTE_ELAPSED`. Providers listed in
-`SHOWY_QUOTA_MONO3_PROVIDERS` (`gemini,antigravity` by default) use `mono3`:
-primary, secondary, and tertiary are top/middle/bottom sextant rows with one
-provider-level foreground color and one fixed light `│` pacing separator. The
-separator is based on the primary row by default, so the bar body is one
-terminal cell wider only when that selected row has a parseable reset/window.
+`SHOWY_QUOTA_PROVIDER_MODES` (default `gemini=mono3,antigravity=mono3`) render
+their mapped body: `mono3` packs three windows into one sextant cell-row;
+`mono4` packs four into one octant cell-row. Both use one provider-level
+foreground color and the `SHOWY_QUOTA_MONO_MARKERS` pacing separators.
 
 Colors are emitted as tmux `#[fg=#RRGGBB,bg=#RRGGBB]` markup; the markup is
 longer than the visible strip but does not consume status-line columns.
-`SHOWY_QUOTA_MONO3_PROVIDERS` opts providers into `mono3` in `auto` mode;
-`SHOWY_QUOTA_MONO3_PROVIDERS_EXCLUDE` wins and forces listed providers back to
-`dual`. `SHOWY_QUOTA_MONO3_COLOR_MODE=lowest` colors `mono3` by the lowest
-remaining visible row using the primary palette; set it to `primary` to key off
-primary only. `SHOWY_QUOTA_MONO3_MARKER_SOURCE` selects the one mono3 pacing
-separator: `primary` (default), `secondary`, `tertiary`, `shared` (only when at
-least two rows share one parseable reset/window), or `none`. Stale snapshots
-hide mono3 pacing separators. `SHOWY_QUOTA_MONO3_MARKER_STYLE` toggles the separator
-between `replace` (fixed width, default) and `insert`. Set `SHOWY_QUOTA_TERMINAL_BAR_MODE=dual`, `sextant3`,
-or `mono3` to force one body mode for every provider. Forced `sextant3` uses
-the same top/middle/bottom geometry as `mono3`, but keeps the bottom-most filled
-row as the cell color and omits elapsed markers. Both `mono3` and `sextant3`
-collapse to the two-lane `dual` body for any provider without a tertiary window
-(two pools at most, e.g. Antigravity's Gemini weekly + Claude+GPT weekly), so it
-renders two bars instead of a three-lane bar with an empty bottom row.
+`SHOWY_QUOTA_PROVIDER_MODES` maps providers to a body in `auto` mode
+(`provider=mode,…`; unmapped providers render `dual`).
+`SHOWY_QUOTA_MONO_COLOR_MODE=lowest` (default) colors mono3/mono4 by the lowest
+remaining present window using the primary palette; set it to `primary` to key
+off the primary window. `SHOWY_QUOTA_MONO_MARKERS` is a comma list of paced
+window slots (`primary`, `secondary`, `tertiary`, `quaternary`; default
+`primary`; `none` disables); the first marker uses `SHOWY_QUOTA_PALETTE_ELAPSED`,
+the rest `SHOWY_QUOTA_PALETTE_ELAPSED_LONG`. Stale snapshots hide pacing
+separators. Set `SHOWY_QUOTA_TERMINAL_BAR_MODE=dual`, `mono3`, or `mono4` to
+force one body for every provider; `mono4` needs an octant-capable terminal
+(Ghostty/kitty/WezTerm). `mono4` collapses to `mono3` (3 windows) then `dual`
+(<3), and `mono3` collapses to `dual` without a tertiary window — so
+Antigravity's two weekly pools render two bars rather than a three-lane bar with
+an empty bottom row.
 
 When the cache is older than `2 × SHOWY_QUOTA_REFRESH_SECONDS`, tmux gets one
 trailing `SHOWY_QUOTA_STALE_GLYPH` (default `⚠`) after the last provider. The
@@ -61,12 +59,12 @@ Each provider chunk is wrapped in Powerline-Extra end caps: U+E0B6
 the U+E0A0–U+E0D4 range, or set either `SHOWY_QUOTA_CAP_*` env var to an empty
 string for a flat edge.
 
-The `dual` body uses common Unicode Block Elements (`▀`, `▕`, `▏`). `auto`
-renders providers in `SHOWY_QUOTA_MONO3_PROVIDERS` as `mono3`, and forced
-`sextant3`/`mono3` bodies require Unicode Symbols for Legacy Computing
-U+1FB00–U+1FB3B. If your tmux font cannot render those sextants, use a font with
-that range, remove the provider from `SHOWY_QUOTA_MONO3_PROVIDERS`, or force
-`SHOWY_QUOTA_TERMINAL_BAR_MODE=dual`.
+The `dual` body uses common Unicode Block Elements (`▀`, `▕`, `▏`). `mono3`
+requires Unicode Symbols for Legacy Computing sextants (U+1FB00–U+1FB3B; drawn
+by most terminals). `mono4` requires Unicode 16 octants (U+1CD00–U+1CDE5; drawn
+only by Ghostty, kitty, WezTerm, and libvte-based terminals). If your tmux
+terminal cannot render a body's glyphs, map the provider to a different body via
+`SHOWY_QUOTA_PROVIDER_MODES` or force `SHOWY_QUOTA_TERMINAL_BAR_MODE=dual`.
 
 
 ## TPM plugin
