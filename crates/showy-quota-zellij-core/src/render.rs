@@ -4,7 +4,7 @@ use time::format_description::well_known::Rfc3339;
 use time::macros::format_description;
 use time::{Duration, OffsetDateTime, PrimitiveDateTime, Time, UtcOffset};
 
-use crate::codexbar::{is_renderable, parse_usage_payload, ProviderRecord, UsageWindow};
+use crate::codexbar::{is_renderable, parse_usage_payload, NamedWindow, ProviderRecord, UsageWindow};
 use crate::config::RenderConfig;
 use crate::palette::hex_to_rgb;
 
@@ -259,11 +259,19 @@ fn render_provider(
     } else {
         secondary.and_then(UsageWindow::window_minutes)
     };
+    let families = if bar_mode == "dual2" {
+        dual2_families(&usage.extra_rate_windows, config, options.stale)
+    } else {
+        Vec::new()
+    };
     match bar_mode.as_str() {
         "mono3" | "mono4" => {
             let width = config.zellij_bar_width.max(8);
             let markers = mono_marker_cells(config, &mono_lanes, width, options.now_epoch);
             mono_lane_bar(out, config, options, &mono_lanes, &mono_color, &markers);
+        }
+        "dual2" if !families.is_empty() => {
+            dual2_metric_bar(out, config, options, &families, config.zellij_bar_width.max(8));
         }
         _ => dual_metric_bar(
             out,
@@ -424,6 +432,21 @@ impl<'a> Lane<'a> {
             },
         }
     }
+
+    fn from_named(named: &'a NamedWindow, config: &RenderConfig, stale: bool) -> Lane<'a> {
+        match named.window.as_ref() {
+            Some(window) if named.usage_known != Some(false) => {
+                Lane::from_window(window, config, stale)
+            }
+            _ => Lane {
+                remaining: 0,
+                reset: None,
+                window: None,
+                is_long: false,
+                present: false,
+            },
+        }
+    }
 }
 
 /// One color for the whole stacked chunk (mono3/mono4): the representative
@@ -574,6 +597,150 @@ fn octant_mask_char(mask: i32) -> &'static str {
     }
 }
 
+struct Family<'a> {
+    label: char,
+    top: Lane<'a>,
+    bottom: Lane<'a>,
+}
+
+/// Group a model-pooled provider's extra rate windows into per-family duals by
+/// pairing present windows two-at-a-time, matching CodexBar's per-family
+/// session+weekly emission order. The first window of each pair is the top
+/// (live) row, the second the bottom (cap) row; `usageKnown:false` windows
+/// render empty.
+fn dual2_families<'a>(
+    extras: &'a [NamedWindow],
+    config: &RenderConfig,
+    stale: bool,
+) -> Vec<Family<'a>> {
+    let present: Vec<&NamedWindow> = extras
+        .iter()
+        .filter(|named| {
+            named
+                .window
+                .as_ref()
+                .is_some_and(|window| window.used_percent.is_some())
+        })
+        .collect();
+    present
+        .chunks(2)
+        .take(2)
+        .map(|pair| Family {
+            label: pair[0]
+                .title
+                .as_deref()
+                .and_then(|title| title.chars().find(|c| c.is_alphanumeric()))
+                .map(|c| c.to_ascii_uppercase())
+                .unwrap_or('?'),
+            top: Lane::from_named(pair[0], config, stale),
+            bottom: pair.get(1).map_or(
+                Lane {
+                    remaining: 0,
+                    reset: None,
+                    window: None,
+                    is_long: false,
+                    present: false,
+                },
+                |named| Lane::from_named(named, config, stale),
+            ),
+        })
+        .collect()
+}
+
+/// Render a model-pooled provider as adjacent per-family dual sub-bars (top =
+/// live/short window, bottom = cap/long), each tagged with a family letter.
+/// Half-blocks only, so it renders in every terminal.
+fn dual2_metric_bar(
+    out: &mut String,
+    config: &RenderConfig,
+    options: RenderOptions,
+    families: &[Family<'_>],
+    total_width: usize,
+) {
+    let surface_color = &config.palette_surface;
+    let elapsed_color = config.palette_elapsed.as_str();
+    let per = (total_width / families.len().max(1)).max(4);
+    for (index, family) in families.iter().enumerate() {
+        if index > 0 {
+            style_text(
+                out,
+                " ",
+                Some(&config.palette_bg),
+                Some(&config.palette_bg),
+                Weight::Normal,
+                options.color,
+            );
+        }
+        let mut tag = [0u8; 4];
+        style_text(
+            out,
+            family.label.encode_utf8(&mut tag),
+            Some(&config.palette_icon_text),
+            Some(&config.palette_bg),
+            Weight::Normal,
+            options.color,
+        );
+        let top = &family.top;
+        let bottom = &family.bottom;
+        let top_fill = if top.present {
+            filled_cells(top.remaining, per)
+        } else {
+            0
+        };
+        let bottom_fill = if bottom.present {
+            filled_cells(bottom.remaining, per)
+        } else {
+            0
+        };
+        let top_color = if top.present {
+            config.window_color(top.remaining, top.is_long)
+        } else {
+            surface_color.clone()
+        };
+        let bottom_color = if bottom.present {
+            config.window_color(bottom.remaining, bottom.is_long)
+        } else {
+            surface_color.clone()
+        };
+        let tz = config.reset_description_timezone_offset_minutes;
+        let top_marker = elapsed_marker_cell(top.reset, top.window, per, options.now_epoch, tz);
+        let bottom_marker =
+            elapsed_marker_cell(bottom.reset, bottom.window, per, options.now_epoch, tz);
+        for i in 0..per {
+            let top_cell = if Some(i) == top_marker {
+                elapsed_color
+            } else if i < top_fill {
+                top_color.as_str()
+            } else {
+                surface_color.as_str()
+            };
+            let bottom_cell = if Some(i) == bottom_marker {
+                elapsed_color
+            } else if i < bottom_fill {
+                bottom_color.as_str()
+            } else {
+                surface_color.as_str()
+            };
+            style_text(
+                out,
+                "▀",
+                Some(top_cell),
+                Some(bottom_cell),
+                Weight::Normal,
+                options.color,
+            );
+        }
+    }
+    style_text(
+        out,
+        "▏",
+        Some(&config.palette_bg),
+        Some(surface_color),
+        Weight::Normal,
+        options.color,
+    );
+}
+
 fn filled_cells(remaining: i32, width: usize) -> usize {
     let remaining = remaining.clamp(0, 100) as usize;
     let mut filled = remaining * width / 100;
@@ -627,17 +794,20 @@ fn terminal_mode_for_provider(
 ) -> String {
     let requested = match config.terminal_bar_mode.as_str() {
         "dual" => "dual",
+        "dual2" => "dual2",
         "mono3" => "mono3",
         "mono4" => "mono4",
         // `auto`: per-provider override (PROVIDER_MODES), otherwise dual.
         _ => config.mode_for(provider).unwrap_or("dual"),
     };
     // Collapse to the densest body the data supports: mono4 needs four assembled
-    // windows; mono3 needs its third positional slot; otherwise dual.
+    // windows; mono3 needs its third positional slot; dual2 needs paired extra
+    // windows (render_provider falls back to dual when there are none).
     let mode = match requested {
         "mono4" if window_count >= 4 => "mono4",
         "mono4" if has_tertiary => "mono3",
         "mono3" if has_tertiary => "mono3",
+        "dual2" => "dual2",
         _ => "dual",
     };
     mode.to_string()

@@ -135,6 +135,9 @@ rows=$(printf '%s' "${filtered}" | jq -r '
         | map(select(.window != null and (.window.usedPercent | type == "number") and (.usageKnown != false)) | .window)) as $extras
     | (reduce ($slots + $extras)[] as $w ([];
         if (length >= 4) then . elif (any(.[]; wkey(.) == wkey($w))) then . else . + [$w] end)) as $rw
+    | ((.usage.extraRateWindows // [])
+        | map(select(.window != null and (.window.usedPercent | type == "number")))) as $ex
+    | ([range(0; ([($ex | length), 4] | min); 2)] | map({t: $ex[.], b: $ex[(. + 1)]})) as $fams
     | [
         .provider,
         pct($p.usedPercent), ($p.resetsAt // $p.resetDescription // ""), ($p.windowMinutes // ""),
@@ -144,7 +147,18 @@ rows=$(printf '%s' "${filtered}" | jq -r '
         pct($rw[0].usedPercent), ($rw[0] | rval), ($rw[0].windowMinutes // ""),
         pct($rw[1].usedPercent), ($rw[1] | rval), ($rw[1].windowMinutes // ""),
         pct($rw[2].usedPercent), ($rw[2] | rval), ($rw[2].windowMinutes // ""),
-        pct($rw[3].usedPercent), ($rw[3] | rval), ($rw[3].windowMinutes // "")
+        pct($rw[3].usedPercent), ($rw[3] | rval), ($rw[3].windowMinutes // ""),
+        ($fams | length),
+        (($fams[0].t.title // "") | [scan("[A-Za-z0-9]")] | (.[0] // "?") | ascii_upcase),
+        (if ($fams[0].t.usageKnown == false) then -1 else pct($fams[0].t.window.usedPercent) end),
+        ($fams[0].t.window | rval), ($fams[0].t.window.windowMinutes // ""),
+        (if ($fams[0].b.usageKnown == false) then -1 else pct($fams[0].b.window.usedPercent) end),
+        ($fams[0].b.window | rval), ($fams[0].b.window.windowMinutes // ""),
+        (($fams[1].t.title // "") | [scan("[A-Za-z0-9]")] | (.[0] // "?") | ascii_upcase),
+        (if ($fams[1].t.usageKnown == false) then -1 else pct($fams[1].t.window.usedPercent) end),
+        ($fams[1].t.window | rval), ($fams[1].t.window.windowMinutes // ""),
+        (if ($fams[1].b.usageKnown == false) then -1 else pct($fams[1].b.window.usedPercent) end),
+        ($fams[1].b.window | rval), ($fams[1].b.window.windowMinutes // "")
     ] | map(tostring) | join("\u001f")')
 
 first_chunk=1
@@ -154,7 +168,10 @@ countdown_warn=$(showy_quota_palette countdown_warn)
 while IFS=$'\x1f' read -r provider p_used p_reset p_window s_used s_reset s_window t_used t_reset t_window \
     rw_count \
     rw1_used rw1_reset rw1_window rw2_used rw2_reset rw2_window \
-    rw3_used rw3_reset rw3_window rw4_used rw4_reset rw4_window; do
+    rw3_used rw3_reset rw3_window rw4_used rw4_reset rw4_window \
+    d2_count \
+    f1_label f1t_used f1t_reset f1t_window f1b_used f1b_reset f1b_window \
+    f2_label f2t_used f2t_reset f2t_window f2b_used f2b_reset f2b_window; do
     [[ -n "${provider}" ]] || continue
 
     p_remaining=0
@@ -259,6 +276,29 @@ while IFS=$'\x1f' read -r provider p_used p_reset p_window s_used s_reset s_wind
     case "${bar_mode}" in
         mono3|mono4)
             showy_quota_mono_lane_bar tmux_style_text "${SHOWY_QUOTA_TMUX_BAR_WIDTH:-${SHOWY_QUOTA_ZELLIJ_BAR_WIDTH:-12}}" "${mono_color}" "${mono_rem}" "${mono_reset}" "${mono_win}" "${mono_present}"
+            ;;
+        dual2)
+            f1tp=0; [[ "${f1t_used}" =~ ^[0-9]+$ ]] && f1tp=1
+            f1bp=0; [[ "${f1b_used}" =~ ^[0-9]+$ ]] && f1bp=1
+            f1tr=0; (( f1tp )) && f1tr=$((100 - f1t_used))
+            f1br=0; (( f1bp )) && f1br=$((100 - f1b_used))
+            f1tx="${f1t_reset}"; f1tw="${f1t_window}"; f1bx="${f1b_reset}"; f1bw="${f1b_window}"
+            (( stale )) && { f1tx=""; f1tw=""; f1bx=""; f1bw=""; }
+            fam1=$(printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s' "${f1_label}" "${f1tr}" "${f1tx}" "${f1tw}" "${f1tp}" "${f1br}" "${f1bx}" "${f1bw}" "${f1bp}")
+            if (( ${d2_count:-0} >= 2 )); then
+                f2tp=0; [[ "${f2t_used}" =~ ^[0-9]+$ ]] && f2tp=1
+                f2bp=0; [[ "${f2b_used}" =~ ^[0-9]+$ ]] && f2bp=1
+                f2tr=0; (( f2tp )) && f2tr=$((100 - f2t_used))
+                f2br=0; (( f2bp )) && f2br=$((100 - f2b_used))
+                f2tx="${f2t_reset}"; f2tw="${f2t_window}"; f2bx="${f2b_reset}"; f2bw="${f2b_window}"
+                (( stale )) && { f2tx=""; f2tw=""; f2bx=""; f2bw=""; }
+                fam2=$(printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s' "${f2_label}" "${f2tr}" "${f2tx}" "${f2tw}" "${f2tp}" "${f2br}" "${f2bx}" "${f2bw}" "${f2bp}")
+                showy_quota_dual2_bar tmux_style_text "${SHOWY_QUOTA_TMUX_BAR_WIDTH:-${SHOWY_QUOTA_ZELLIJ_BAR_WIDTH:-12}}" "${fam1}" "${fam2}"
+            elif (( ${d2_count:-0} >= 1 )); then
+                showy_quota_dual2_bar tmux_style_text "${SHOWY_QUOTA_TMUX_BAR_WIDTH:-${SHOWY_QUOTA_ZELLIJ_BAR_WIDTH:-12}}" "${fam1}"
+            else
+                tmux_dual_metric_bar "${p_remaining}" "${s_remaining}" "${marker_p_reset}" "${marker_p_window}" "${marker_s_reset}" "${marker_s_window}" "${primary_color}" "${secondary_color}"
+            fi
             ;;
         *)
             tmux_dual_metric_bar "${p_remaining}" "${s_remaining}" "${marker_p_reset}" "${marker_p_window}" "${marker_s_reset}" "${marker_s_window}" "${primary_color}" "${secondary_color}"

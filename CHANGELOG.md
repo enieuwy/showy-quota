@@ -57,6 +57,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `SHOWY_QUOTA_PALETTE_ELAPSED_LONG` (default `3ddbd9`) colors the second and
   later pacing markers; `SHOWY_QUOTA_MONO_MARKERS` (list) and
   `SHOWY_QUOTA_PROVIDER_MODES` (map) configure markers and per-provider bodies.
+- New `dual2` terminal body: renders a model-pooled provider as two adjacent
+  per-family dual sub-bars (`AGᴳ▕5h/wk▏ ᶜ▕5h/wk▏`) by pairing
+  `usage.extraRateWindows` two-at-a-time, each family tagged with a letter.
+  Half-blocks only, so it renders in every terminal (Alacritty included),
+  unlike `mono4`. Opt in via `SHOWY_QUOTA_PROVIDER_MODES=<provider>=dual2`;
+  falls back to `dual` without paired extra windows.
 
 ### Removed
 - The row-position palette knobs `SHOWY_QUOTA_PALETTE_SECONDARY_*`,

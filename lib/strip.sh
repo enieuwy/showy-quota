@@ -291,6 +291,55 @@ showy_quota_mono_lane_bar() {
     "${styler}" '▏' "${bg}" "${surface}"
 }
 
+# Render a model-pooled provider as adjacent per-family dual sub-bars via the
+# given styler (top = live/short window, bottom = cap/long), each tagged with a
+# family letter. Half-blocks only, so it renders everywhere. Args: styler
+# total_width, then one packed family per arg:
+# "label<US>trem<US>treset<US>twin<US>tpres<US>brem<US>breset<US>bwin<US>bpres".
+showy_quota_dual2_bar() {
+    local styler="$1" total_width="$2"
+    shift 2
+    local surface bg elapsed tag
+    surface="$(showy_quota_palette surface)"
+    bg="$(showy_quota_palette bg)"
+    elapsed="$(showy_quota_palette elapsed)"
+    tag="$(showy_quota_palette icon_text)"
+    local n=$#
+    (( n < 1 )) && n=1
+    local per=$(( total_width / n ))
+    (( per < 4 )) && per=4
+    local idx=0 fam
+    for fam in "$@"; do
+        (( idx > 0 )) && "${styler}" ' ' "${bg}" "${bg}"
+        local label trem treset twin tpres brem breset bwin bpres
+        IFS=$'\x1f' read -r label trem treset twin tpres brem breset bwin bpres <<< "${fam}"
+        "${styler}" "${label}" "${tag}" "${bg}"
+        local tfill=0 bfill=0 tcol="${surface}" bcol="${surface}" tmark="" bmark=""
+        if [[ "${tpres}" == "1" ]]; then
+            tfill="$(showy_quota_filled_cells "${trem}" "${per}")"
+            tcol="$(showy_quota_window_color "${trem}" "$(showy_quota_is_long_window "${twin}")")"
+            tmark="$(showy_quota_elapsed_marker_cell "${treset}" "${twin}" "${per}" || true)"
+        fi
+        if [[ "${bpres}" == "1" ]]; then
+            bfill="$(showy_quota_filled_cells "${brem}" "${per}")"
+            bcol="$(showy_quota_window_color "${brem}" "$(showy_quota_is_long_window "${bwin}")")"
+            bmark="$(showy_quota_elapsed_marker_cell "${breset}" "${bwin}" "${per}" || true)"
+        fi
+        local i top bottom
+        for (( i=0; i<per; i++ )); do
+            if [[ "${tmark}" =~ ^[0-9]+$ && "${i}" == "${tmark}" ]]; then top="${elapsed}"
+            elif (( i < tfill )); then top="${tcol}"
+            else top="${surface}"; fi
+            if [[ "${bmark}" =~ ^[0-9]+$ && "${i}" == "${bmark}" ]]; then bottom="${elapsed}"
+            elif (( i < bfill )); then bottom="${bcol}"
+            else bottom="${surface}"; fi
+            "${styler}" '▀' "${top}" "${bottom}"
+        done
+        idx=$((idx + 1))
+    done
+    "${styler}" '▏' "${bg}" "${surface}"
+}
+
 # Pacing marker cell for a reset window. Returns non-zero when no marker
 # can be computed.
 # Args: $1 = reset timestamp/description, $2 = window minutes, $3 = width.
@@ -340,6 +389,7 @@ showy_quota_terminal_mode_for_provider() {
     local requested
     case "${SHOWY_QUOTA_TERMINAL_BAR_MODE:-auto}" in
         dual) requested=dual ;;
+        dual2) requested=dual2 ;;
         mono3) requested=mono3 ;;
         mono4) requested=mono4 ;;
         *)
@@ -355,6 +405,8 @@ showy_quota_terminal_mode_for_provider() {
         mode=mono3
     elif [[ "${requested}" == "mono3" && "${has_tertiary}" == "1" ]]; then
         mode=mono3
+    elif [[ "${requested}" == "dual2" ]]; then
+        mode=dual2
     fi
 
     printf '%s\n' "${mode}"

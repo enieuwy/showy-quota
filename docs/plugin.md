@@ -226,7 +226,7 @@ Common options:
 |`providers_exclude`|empty|Comma-separated deny-list. Excluded providers are dropped from the per-provider fallback work list before any CLI call.|
 |`provider_order`|`codex,claude,copilot,opencode,gemini`|Render order when `providers` is empty. Display order only — not a provider inventory.|
 |`bar_width`|`12`|Cells in each provider bar body. Minimum is 8.|
-|`terminal_bar_mode`|`auto`|`auto`, `dual`, `mono3`, or `mono4`. `mono4` needs an octant-capable terminal (Ghostty/kitty/WezTerm).|
+|`terminal_bar_mode`|`auto`|`auto`, `dual`, `dual2`, `mono3`, or `mono4`. `mono4` needs an octant-capable terminal (Ghostty/kitty/WezTerm); `dual2` renders a model-pooled provider as two per-family dual sub-bars (works everywhere).|
 |`provider_modes`|`gemini=mono3,antigravity=mono3`|Per-provider body in `auto` mode, `provider=mode,…`. Providers without an entry render `dual`.|
 |`mono_color_mode`|`lowest`|mono3/mono4 chunk color: `lowest` or `primary`.|
 |`mono_markers`|`primary`|Comma list of paced window slots (`primary`,`secondary`,`tertiary`,`quaternary`); `none` disables. First marker uses `palette_elapsed`, the rest `palette_elapsed_long`.|

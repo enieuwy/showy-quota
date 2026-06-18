@@ -39,6 +39,30 @@ fn rust_renderer_matches_shell_zellij_renderer() {
             },
         },
         Case {
+            name: "antigravity quad dual2 color",
+            fixture: "codexbar-antigravity-quad.json",
+            color: true,
+            now_epoch: 4_070_908_800,
+            stale: false,
+            degraded_cli: false,
+            configure: |config| {
+                config.terminal_bar_mode = "dual2".into();
+                config.zellij_bar_width = 12;
+            },
+        },
+        Case {
+            name: "antigravity quad dual2 no color",
+            fixture: "codexbar-antigravity-quad.json",
+            color: false,
+            now_epoch: 4_070_908_800,
+            stale: false,
+            degraded_cli: false,
+            configure: |config| {
+                config.terminal_bar_mode = "dual2".into();
+                config.zellij_bar_width = 12;
+            },
+        },
+        Case {
             name: "auto mono no color",
             fixture: "codexbar-mono.json",
             color: false,

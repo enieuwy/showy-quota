@@ -168,12 +168,17 @@ provider:
   a single octant cell per column. Like `mono3` but four lanes — requires an
   octant-capable terminal (Ghostty, kitty, WezTerm); run
   `python3 docs/scripts/preview-quad-octants.py` to test yours.
+- **`dual2`** (opt-in): renders a model-pooled provider as two adjacent
+  per-family dual sub-bars (`AGᴳ▕5h/wk▏ ᶜ▕5h/wk▏`), pairing `extraRateWindows`
+  by family. Half-blocks only, so it renders in every terminal (unlike
+  `mono4`), at roughly twice the width. Opt in via
+  `SHOWY_QUOTA_PROVIDER_MODES=antigravity=dual2`.
 
 <p>
   <img src="docs/images/mono3-terminal.png" alt="mono3 terminal rendering layout" width="420">
 </p>
 
-Customize terminal layout with `SHOWY_QUOTA_TERMINAL_BAR_MODE=dual|mono3|mono4`.
+Customize terminal layout with `SHOWY_QUOTA_TERMINAL_BAR_MODE=dual|dual2|mono3|mono4`.
 For per-provider auto-mode selection and marker behavior, use
 `SHOWY_QUOTA_PROVIDER_MODES` (e.g. `antigravity=mono4`),
 `SHOWY_QUOTA_MONO_COLOR_MODE`, and `SHOWY_QUOTA_MONO_MARKERS`.

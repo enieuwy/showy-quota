@@ -72,7 +72,7 @@ The Rust renderer intentionally duplicates only the terminal strip logic. Golden
 
 ## Terminal rendering modes
 
-`SHOWY_QUOTA_TERMINAL_BAR_MODE` (shell) / `terminal_bar_mode` (plugin KDL) sets the Zellij/tmux bar body: `auto` (default), `dual`, `mono3`, or `mono4`. In `auto`, each provider's body comes from the `SHOWY_QUOTA_PROVIDER_MODES` / `provider_modes` map (default `gemini=mono3,antigravity=mono3`); providers without an entry render `dual`. `mono4` is opt-in only — `auto` never selects it, because octant terminal support cannot be detected.
+`SHOWY_QUOTA_TERMINAL_BAR_MODE` (shell) / `terminal_bar_mode` (plugin KDL) sets the Zellij/tmux bar body: `auto` (default), `dual`, `dual2`, `mono3`, or `mono4`. In `auto`, each provider's body comes from the `SHOWY_QUOTA_PROVIDER_MODES` / `provider_modes` map (default `gemini=mono3,antigravity=mono3`); providers without an entry render `dual`. `mono4` and `dual2` are opt-in only.
 
 `mono3` packs primary/secondary/tertiary into one U+1FB00 sextant row; `mono4` packs up to four windows into one U+1CD00 octant row. Both use a single provider-level foreground color (`SHOWY_QUOTA_MONO_COLOR_MODE` / `mono_color_mode`: `lowest` (default) or `primary`), dimmed only when every present window is a long-horizon cap. Pacing markers are the `SHOWY_QUOTA_MONO_MARKERS` / `mono_markers` list of window slots (`primary`, `secondary`, `tertiary`, `quaternary`; default `primary`; `none` disables); the first marker uses `palette_elapsed`, the rest `palette_elapsed_long`. More than two markers crowd an 8–12 cell bar. Stale snapshots hide markers.
 
@@ -83,8 +83,11 @@ The Rust renderer intentionally duplicates only the terminal strip logic. Golden
 | `dual` | half-blocks (U+2580) | every terminal |
 | `mono3` | sextants (U+1FB00) | most, incl. Alacritty, iTerm2 |
 | `mono4` | octants (U+1CD00, Unicode 16) | Ghostty, kitty, WezTerm, libvte only |
+| `dual2` | half-blocks (U+2580) | every terminal |
 
 Run `python3 docs/scripts/preview-quad-octants.py` to test a terminal and preview `mono4` before enabling it; octants render as tofu where unsupported.
+
+`dual2` renders a model-pooled provider as two adjacent per-family dual sub-bars (`AGᴳ▕5h/wk▏ ᶜ▕5h/wk▏`): it pairs `usage.extraRateWindows` two-at-a-time (CodexBar's per-family session+weekly emission order), drawing each family as a half-block dual (live tier over cap) tagged with a family letter, up to two families. Unlike `mono4` it renders in every terminal (Alacritty included), at roughly twice the width; it falls back to `dual` when a provider has no paired extra windows. Opt in via `PROVIDER_MODES=<provider>=dual2`.
 
 Window slots are semantic in every mode: a provider is renderable when any of its primary/secondary/tertiary windows reports a numeric `usedPercent`, and each window only ever renders in its own row, marker, and color role. A missing window leaves its row empty rather than shifting later windows up; a missing primary additionally renders an `idle` countdown label because there is no primary reset to count down (a provider may report `usage.primary: null` with live secondary/tertiary windows).
 
@@ -96,7 +99,7 @@ The stacked modes collapse to the densest body the data supports: `mono4` needs 
 
 | Env (shell) / KDL key | Default | Meaning |
 |---|---|---|
-| `SHOWY_QUOTA_TERMINAL_BAR_MODE` / `terminal_bar_mode` | `auto` | `auto`, `dual`, `mono3`, `mono4` |
+| `SHOWY_QUOTA_TERMINAL_BAR_MODE` / `terminal_bar_mode` | `auto` | `auto`, `dual`, `dual2`, `mono3`, `mono4` |
 | `SHOWY_QUOTA_PROVIDER_MODES` / `provider_modes` | `gemini=mono3,antigravity=mono3` | per-provider body in `auto`; `provider=mode,…` |
 | `SHOWY_QUOTA_MONO_COLOR_MODE` / `mono_color_mode` | `lowest` | mono3/mono4 chunk color: `lowest` or `primary` |
 | `SHOWY_QUOTA_MONO_MARKERS` / `mono_markers` | `primary` | comma list of paced slots; `none` disables |

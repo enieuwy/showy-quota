@@ -30,9 +30,11 @@ off the primary window. `SHOWY_QUOTA_MONO_MARKERS` is a comma list of paced
 window slots (`primary`, `secondary`, `tertiary`, `quaternary`; default
 `primary`; `none` disables); the first marker uses `SHOWY_QUOTA_PALETTE_ELAPSED`,
 the rest `SHOWY_QUOTA_PALETTE_ELAPSED_LONG`. Stale snapshots hide pacing
-separators. Set `SHOWY_QUOTA_TERMINAL_BAR_MODE=dual`, `mono3`, or `mono4` to
-force one body for every provider; `mono4` needs an octant-capable terminal
-(Ghostty/kitty/WezTerm). `mono4` collapses to `mono3` (3 windows) then `dual`
+separators. Set `SHOWY_QUOTA_TERMINAL_BAR_MODE=dual`, `dual2`, `mono3`, or
+`mono4` to force one body for every provider; `mono4` needs an octant-capable
+terminal (Ghostty/kitty/WezTerm), while `dual2` (two per-family dual sub-bars
+for model-pooled providers) renders everywhere. `mono4` collapses to `mono3`
+(3 windows) then `dual`
 (<3), and `mono3` collapses to `dual` without a tertiary window — so
 Antigravity's two weekly pools render two bars rather than a three-lane bar with
 an empty bottom row.

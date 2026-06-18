@@ -179,7 +179,7 @@ plugin location="file:~/.config/zellij/plugins/showy-quota-zellij.wasm" {
     providers_exclude ""       // comma-separated deny-list
     provider_order "codex,claude,copilot,opencode,gemini"
     bar_width 12
-    terminal_bar_mode "auto"   // auto, dual, mono3, mono4
+    terminal_bar_mode "auto"   // auto, dual, dual2, mono3, mono4
     provider_modes "gemini=mono3,antigravity=mono3"
     mono_color_mode "lowest"   // lowest or primary
     mono_markers "primary"     // comma list of slots; "none" disables
