@@ -103,6 +103,13 @@ re-prompt means the grant is missing for that path. On macOS the grant lives in
 a cache file that the OS can purge under disk pressure, which is the usual cause
 of an "occasional" prompt.
 
+`make install-plugin` pre-grants this for the installed path, so a fresh install
+is prompt-free on first launch. The grant is best-effort and never fails the
+install. It only covers first launch: a later macOS cache purge still drops the
+grant and re-prompts, so re-run `make grant-zellij-permissions` (idempotent) if
+the prompt returns. This is an upstream limitation — Zellij stores grants in its
+OS cache dir with no relocation override ([zellij#5071](https://github.com/zellij-org/zellij/issues/5071)).
+
 You do not need this repo to silence the prompt. Standalone, pick one:
 
 1. **Accept once.** Reveal floating panes, focus the pending permission pane,

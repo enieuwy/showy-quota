@@ -19,6 +19,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   bar with an empty bottom row; it now shows two bars in every renderer.
 
 ### Changed
+- `make install-plugin` now pre-grants the standalone Zellij plugin's
+  permissions for the installed path, so a fresh install is prompt-free on
+  first launch (previously it only printed a reminder to run
+  `make grant-zellij-permissions`). The grant is best-effort and never fails
+  the install. It covers first launch only: a later macOS cache purge still
+  drops the grant, so re-run `make grant-zellij-permissions` if the prompt
+  returns — an upstream Zellij limitation, not a regression.
 - The SketchyBar bar slot default (`SHOWY_QUOTA_SKETCHYBAR_BAR_WIDTH`) is now
   `SHOWY_QUOTA_PNG_BAR_W + 3` (was `+ 4`), trimming 1px of dead space between
   each provider's bars and its countdown. This offsets the wider countdown

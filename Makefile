@@ -100,7 +100,7 @@ plugin: ## Build the standalone Zellij WASM plugin.
 	@RUSTC="$(RUSTC)" $(CARGO) build --release --target wasm32-wasip1 -p $(PLUGIN_CRATE)
 	@printf 'built %s\n' "$(PLUGIN_WASM)"
 
-install-plugin: plugin ## Install the standalone Zellij WASM plugin.
+install-plugin: plugin ## Install the standalone Zellij WASM plugin (pre-grants Zellij permissions).
 	@mkdir -p "$(ZELLIJ_PLUGINS)"
 	@if [ -e "$(PLUGIN_TARGET)" ] && ! cmp -s "$(PLUGIN_WASM)" "$(PLUGIN_TARGET)"; then \
 		if [ "$(FORCE)" != "1" ]; then \
@@ -110,7 +110,7 @@ install-plugin: plugin ## Install the standalone Zellij WASM plugin.
 	fi
 	@cp -f "$(PLUGIN_WASM)" "$(PLUGIN_TARGET)"
 	@printf 'installed %s\n' "$(PLUGIN_TARGET)"
-	@printf 'optional: run `make grant-zellij-permissions` to pre-grant Zellij permissions and avoid the first-launch prompt\n'
+	@ZELLIJ_PLUGINS="$(ZELLIJ_PLUGINS)" "$(REPO)/bin/showy-quota" --grant-zellij "$(PLUGIN_TARGET)" || printf 'warning: could not pre-grant Zellij permissions; run `make grant-zellij-permissions` to retry\n' >&2
 
 grant-zellij-permissions: ## Pre-grant Zellij plugin permissions (override path with PLUGIN=/abs/plugin.wasm).
 	@ZELLIJ_PLUGINS="$(ZELLIJ_PLUGINS)" "$(REPO)/bin/showy-quota" --grant-zellij $(PLUGIN)
