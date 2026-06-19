@@ -148,8 +148,10 @@ remove_provider_items() {
         --remove "showy_quota.${pid}.primary" \
         --remove "showy_quota.${pid}.secondary" \
         --remove "showy_quota.${pid}.tertiary" \
+        --remove "showy_quota.${pid}.quaternary" \
         --remove "showy_quota.${pid}.secondary_marker" \
         --remove "showy_quota.${pid}.tertiary_marker" \
+        --remove "showy_quota.${pid}.quaternary_marker" \
         --remove "showy_quota.${pid}.primary_marker" \
         --remove "showy_quota.${pid}.slot" \
         --remove "showy_quota.${pid}.label" >/dev/null 2>&1 || true
@@ -284,9 +286,28 @@ declare_provider_items() {
                    width=0 \
                    click_script="${CLICK}" >/dev/null 2>&1 || true
 
+    sketchybar --add slider "showy_quota.${pid}.quaternary" left "${SHOWY_QUOTA_PNG_BAR_W}" \
+               --set "showy_quota.${pid}.quaternary" \
+                   drawing=off \
+                   slider.percentage=0 \
+                   slider.highlight_color=0x00000000 \
+                   slider.background.color="${TRACK_ARGB}" \
+                   slider.background.height="${NATIVE_ROW_HEIGHT}" \
+                   slider.background.corner_radius="${NATIVE_ROW_RADIUS}" \
+                   slider.knob.drawing=off \
+                   icon.drawing=off \
+                   label.drawing=off \
+                   background.color=0x00000000 \
+                   background.height=0 \
+                   padding_left=0 \
+                   padding_right=0 \
+                   width=0 \
+                   click_script="${CLICK}" >/dev/null 2>&1 || true
+
     declare_marker_item "${pid}" secondary
     declare_marker_item "${pid}" primary
     declare_marker_item "${pid}" tertiary
+    declare_marker_item "${pid}" quaternary
 
     sketchybar --add item "showy_quota.${pid}.slot" left \
                --set "showy_quota.${pid}.slot" \
@@ -321,8 +342,10 @@ provider_items_declared() {
         && sketchybar_item_exists "showy_quota.${pid}.primary" \
         && sketchybar_item_exists "showy_quota.${pid}.secondary" \
         && sketchybar_item_exists "showy_quota.${pid}.tertiary" \
+        && sketchybar_item_exists "showy_quota.${pid}.quaternary" \
         && sketchybar_item_exists "showy_quota.${pid}.secondary_marker" \
         && sketchybar_item_exists "showy_quota.${pid}.tertiary_marker" \
+        && sketchybar_item_exists "showy_quota.${pid}.quaternary_marker" \
         && sketchybar_item_exists "showy_quota.${pid}.primary_marker" \
         && sketchybar_item_exists "showy_quota.${pid}.slot" \
         && sketchybar_item_exists "showy_quota.${pid}.label"
@@ -356,8 +379,10 @@ recreate_bracket() {
             "showy_quota.${pid}.primary"
             "showy_quota.${pid}.secondary"
             "showy_quota.${pid}.tertiary"
+            "showy_quota.${pid}.quaternary"
             "showy_quota.${pid}.secondary_marker"
             "showy_quota.${pid}.tertiary_marker"
+            "showy_quota.${pid}.quaternary_marker"
             "showy_quota.${pid}.primary_marker"
             "showy_quota.${pid}.slot"
             "showy_quota.${pid}.label"
@@ -737,26 +762,33 @@ fi
 rows=$(printf '%s' "${filtered}" | jq -r '
     def pct(x): if x == null then 0 else ([0, ([100, (x|tonumber|floor)] | min)] | max) end;
     def slot(w): if (w != null and (w.usedPercent | type == "number")) then w else null end;
+    def wmin(w): (w.windowMinutes // null) | (if (type == "number" and . >= 0) then . else null end);
+    def rval: (.resetsAt // .resetDescription // "");
+    def row(w): (if w == null then {rem:"",reset:"",win:""} else {rem:(100 - pct(w.usedPercent)), reset:(w | rval), win:(w.windowMinutes // "")} end);
     .[]
     | (slot(.usage.primary)) as $p
     | (slot(.usage.secondary)) as $s
     | (slot(.usage.tertiary)) as $t
+    | ([ $p, $s, $t ] | map(select(. != null))) as $slots
+    | ((.usage.extraRateWindows // []) | map(select(.window != null and (.window.usedPercent | type == "number")))) as $ex
+    | ([ $ex[] | [ wmin(.window), (.window.resetsAt // null) ] ]) as $exkeys
+    | ([ $slots[] | select( [wmin(.), (.resetsAt // null)] as $k | (any($exkeys[]; . == $k) | not) ) ]) as $unmatched
+    | (($ex | length) > 0 and ($unmatched | length) == 0) as $pooled
+    | (if $pooled
+         then [ $ex[] | (if .usageKnown == false then {rem:"",reset:"",win:""} else row(.window) end) ]
+         else [ row($p), row($s), row($t) ]
+       end) as $rows
     | [
         .provider,
-        (if $p then (100 - pct($p.usedPercent)) else "" end),
-        ($p.resetsAt // $p.resetDescription // ""),
-        ($p.windowMinutes // ""),
-        (if $s then (100 - pct($s.usedPercent)) else "" end),
-        ($s.resetsAt // $s.resetDescription // ""),
-        ($s.windowMinutes // ""),
-        (if $t then (100 - pct($t.usedPercent)) else "" end),
-        ($t.resetsAt // $t.resetDescription // ""),
-        ($t.windowMinutes // ""),
+        ($rows[0].rem // ""), ($rows[0].reset // ""), ($rows[0].win // ""),
+        ($rows[1].rem // ""), ($rows[1].reset // ""), ($rows[1].win // ""),
+        ($rows[2].rem // ""), ($rows[2].reset // ""), ($rows[2].win // ""),
+        ($rows[3].rem // ""), ($rows[3].reset // ""), ($rows[3].win // ""),
         (.status.indicator // "none"),
         (.status.url // "")
     ] | map(tostring) | join("\u001f")')
 
-while IFS=$'\x1f' read -r pid rem_p p_reset p_window rem_s s_reset s_window rem_t t_reset t_window status status_url; do
+while IFS=$'\x1f' read -r pid rem_p p_reset p_window rem_s s_reset s_window rem_t t_reset t_window rem_q q_reset q_window status status_url; do
     [[ -n "${pid}" ]] || continue
 
     icon=""
@@ -770,24 +802,36 @@ while IFS=$'\x1f' read -r pid rem_p p_reset p_window rem_s s_reset s_window rem_
     marker_p=$(elapsed_marker_x "${p_reset}" "${p_window}" || true)
     marker_s=$(elapsed_marker_x "${s_reset}" "${s_window}" || true)
     marker_t=$(elapsed_marker_x "${t_reset}" "${t_window}" || true)
+    marker_q=$(elapsed_marker_x "${q_reset}" "${q_window}" || true)
 
     rem_p_pct=$(clamp_slider_percentage "${rem_p}")
     rem_s_pct=$(clamp_slider_percentage "${rem_s}")
     rem_t_pct=$(clamp_slider_percentage "${rem_t}")
+    rem_q_pct=$(clamp_slider_percentage "${rem_q}")
     marker_p_pct=$(marker_percentage_from_x "${marker_p}" || true)
     marker_s_pct=$(marker_percentage_from_x "${marker_s}" || true)
     marker_t_pct=$(marker_percentage_from_x "${marker_t}" || true)
+    marker_q_pct=$(marker_percentage_from_x "${marker_q}" || true)
 
     has_t=0
     [[ -n "${rem_t}" ]] && has_t=1
-    if (( has_t )); then
+    has_q=0
+    [[ -n "${rem_q}" ]] && has_q=1
+    if (( has_q )); then
+        primary_y=9
+        secondary_y=3
+        tertiary_y=-3
+        quaternary_y=-9
+    elif (( has_t )); then
         primary_y=7
         secondary_y=0
         tertiary_y=-7
+        quaternary_y=-7
     else
         primary_y=4
         secondary_y=-4
         tertiary_y=-4
+        quaternary_y=-4
     fi
 
     minutes=""
@@ -809,34 +853,57 @@ while IFS=$'\x1f' read -r pid rem_p p_reset p_window rem_s s_reset s_window rem_
         label='idle'
     fi
     [[ -n "${color}" ]] || color="${COUNTDOWN_ARGB}"
+    p_present=0; [[ -n "${rem_p}" ]] && p_present=1
+    s_present=0; [[ -n "${rem_s}" ]] && s_present=1
+    t_present=0; [[ -n "${rem_t}" ]] && t_present=1
+    shared_cycle=0
+    if showy_quota_shared_cycle \
+        "${p_present}" "${p_reset}" "${p_window}" \
+        "${s_present}" "${s_reset}" "${s_window}" \
+        "${t_present}" "${t_reset}" "${t_window}"; then
+        # Parallel pools on one billing cycle (e.g. Cursor Total/Auto/API):
+        # keep only the primary pacing marker and undim every row.
+        shared_cycle=1
+        marker_s_pct=""
+        marker_t_pct=""
+    fi
     p_long=$(showy_quota_is_long_window "${p_window}")
     s_long=$(showy_quota_is_long_window "${s_window}")
     t_long=$(showy_quota_is_long_window "${t_window}")
+    q_long=$(showy_quota_is_long_window "${q_window}")
+    if (( shared_cycle )); then p_long=0; s_long=0; t_long=0; q_long=0; fi
     primary_highlight="$(argb_from_hex "$(showy_quota_window_color "${rem_p_pct}" "${p_long}")")"
     secondary_highlight="$(argb_from_hex "$(showy_quota_window_color "${rem_s_pct}" "${s_long}")")"
     tertiary_highlight="$(argb_from_hex "$(showy_quota_window_color "${rem_t_pct}" "${t_long}")")"
+    quaternary_highlight="$(argb_from_hex "$(showy_quota_window_color "${rem_q_pct}" "${q_long}")")"
     if (( stale )); then
         color="${STALE_ARGB}"
         primary_highlight="${STALE_ARGB}"
         secondary_highlight="${STALE_ARGB}"
         tertiary_highlight="${STALE_ARGB}"
+        quaternary_highlight="${STALE_ARGB}"
         marker_p_pct=""
         marker_s_pct=""
         marker_t_pct=""
+        marker_q_pct=""
     fi
 
     primary_item="showy_quota.${pid}.primary"
     secondary_item="showy_quota.${pid}.secondary"
     tertiary_item="showy_quota.${pid}.tertiary"
+    quaternary_item="showy_quota.${pid}.quaternary"
     secondary_marker_item="showy_quota.${pid}.secondary_marker"
     tertiary_marker_item="showy_quota.${pid}.tertiary_marker"
+    quaternary_marker_item="showy_quota.${pid}.quaternary_marker"
     primary_marker_item="showy_quota.${pid}.primary_marker"
 
     primary_click=$(slider_click_script "${primary_item}" "${rem_p_pct}")
     secondary_click=$(slider_click_script "${secondary_item}" "${rem_s_pct}")
     tertiary_click=$(slider_click_script "${tertiary_item}" "${rem_t_pct}")
+    quaternary_click=$(slider_click_script "${quaternary_item}" "${rem_q_pct}")
     secondary_marker_click=$(slider_click_script "${secondary_marker_item}" "${marker_s_pct:-0}")
     tertiary_marker_click=$(slider_click_script "${tertiary_marker_item}" "${marker_t_pct:-0}")
+    quaternary_marker_click=$(slider_click_script "${quaternary_marker_item}" "${marker_q_pct:-0}")
     primary_marker_click=$(slider_click_script "${primary_marker_item}" "${marker_p_pct:-0}")
 
     args=(
@@ -861,6 +928,12 @@ while IFS=$'\x1f' read -r pid rem_p p_reset p_window rem_s s_reset s_window rem_
         args+=( --set "${tertiary_item}" drawing=off slider.percentage=0 background.color=0x00000000 background.height=0 padding_left=0 padding_right=0 width=0 y_offset="${tertiary_y}" click_script="${tertiary_click}" )
     fi
 
+    if (( has_q )); then
+        args+=( --set "${quaternary_item}" drawing=on slider.percentage="${rem_q_pct}" slider.highlight_color="${quaternary_highlight}" slider.background.color="${TRACK_ARGB}" slider.background.height="${NATIVE_ROW_HEIGHT}" slider.background.corner_radius="${NATIVE_ROW_RADIUS}" slider.knob.drawing=off background.color=0x00000000 background.height=0 padding_left=0 padding_right=0 width=0 y_offset="${quaternary_y}" click_script="${quaternary_click}" )
+    else
+        args+=( --set "${quaternary_item}" drawing=off slider.percentage=0 background.color=0x00000000 background.height=0 padding_left=0 padding_right=0 width=0 y_offset="${quaternary_y}" click_script="${quaternary_click}" )
+    fi
+
     if [[ -n "${marker_p_pct}" ]]; then
         args+=( --set "${primary_marker_item}" drawing=on slider.percentage="${marker_p_pct}" slider.highlight_color=0x00000000 slider.background.color=0x00000000 slider.background.height="${NATIVE_ROW_HEIGHT}" slider.background.corner_radius=0 slider.knob.drawing=on slider.knob.color=0x00000000 slider.knob.width=1 slider.knob.padding_left=0 slider.knob.padding_right=0 slider.knob.background.drawing=on slider.knob.background.color="${ELAPSED_ARGB}" slider.knob.background.height="${NATIVE_ROW_HEIGHT}" slider.knob.background.corner_radius=0 background.color=0x00000000 background.height=0 padding_left=0 padding_right=0 width=0 y_offset="${primary_y}" click_script="${primary_marker_click}" )
     else
@@ -877,6 +950,12 @@ while IFS=$'\x1f' read -r pid rem_p p_reset p_window rem_s s_reset s_window rem_
         args+=( --set "${tertiary_marker_item}" drawing=on slider.percentage="${marker_t_pct}" slider.highlight_color=0x00000000 slider.background.color=0x00000000 slider.background.height="${NATIVE_ROW_HEIGHT}" slider.background.corner_radius=0 slider.knob.drawing=on slider.knob.color=0x00000000 slider.knob.width=1 slider.knob.padding_left=0 slider.knob.padding_right=0 slider.knob.background.drawing=on slider.knob.background.color="${ELAPSED_ARGB}" slider.knob.background.height="${NATIVE_ROW_HEIGHT}" slider.knob.background.corner_radius=0 background.color=0x00000000 background.height=0 padding_left=0 padding_right=0 width=0 y_offset="${tertiary_y}" click_script="${tertiary_marker_click}" )
     else
         args+=( --set "${tertiary_marker_item}" drawing=off slider.percentage=0 y_offset="${tertiary_y}" click_script="${tertiary_marker_click}" )
+    fi
+
+    if (( has_q )) && [[ -n "${marker_q_pct}" ]]; then
+        args+=( --set "${quaternary_marker_item}" drawing=on slider.percentage="${marker_q_pct}" slider.highlight_color=0x00000000 slider.background.color=0x00000000 slider.background.height="${NATIVE_ROW_HEIGHT}" slider.background.corner_radius=0 slider.knob.drawing=on slider.knob.color=0x00000000 slider.knob.width=1 slider.knob.padding_left=0 slider.knob.padding_right=0 slider.knob.background.drawing=on slider.knob.background.color="${ELAPSED_ARGB}" slider.knob.background.height="${NATIVE_ROW_HEIGHT}" slider.knob.background.corner_radius=0 background.color=0x00000000 background.height=0 padding_left=0 padding_right=0 width=0 y_offset="${quaternary_y}" click_script="${quaternary_marker_click}" )
+    else
+        args+=( --set "${quaternary_marker_item}" drawing=off slider.percentage=0 y_offset="${quaternary_y}" click_script="${quaternary_marker_click}" )
     fi
 
     args+=( --set "showy_quota.${pid}.slot" drawing=on icon.drawing=off label.drawing=off background.color=0x00000000 background.height=0 padding_left=0 padding_right=0 width="${SHOWY_QUOTA_SKETCHYBAR_BAR_WIDTH}" click_script="${CLICK}" )

@@ -1,0 +1,10 @@
+[
+  {"provider":"antigravity","usage":{
+    "primary":{"usedPercent":15,"windowMinutes":300,"resetsAt":"2099-01-01T05:00:00Z"},
+    "secondary":{"usedPercent":40,"windowMinutes":10080,"resetsAt":"2099-01-08T00:00:00Z"},
+    "tertiary":null,
+    "extraRateWindows":[
+      {"id":"antigravity-quota-summary-gemini-5h","title":"Gemini Session","window":{"usedPercent":15,"windowMinutes":300,"resetsAt":"2099-01-01T05:00:00Z"}},
+      {"id":"antigravity-quota-summary-gemini-weekly","title":"Gemini Weekly","window":{"usedPercent":40,"windowMinutes":10080,"resetsAt":"2099-01-08T00:00:00Z"}}
+    ]}}
+]

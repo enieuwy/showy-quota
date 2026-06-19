@@ -194,8 +194,8 @@ rows=$(printf '%s' "${filtered}" | jq -r '
     def pct(x): if x == null then -1 else ([0, ([100, (x|tonumber|floor)] | min)] | max) end;
     def slot(w): if (w != null and (w.usedPercent | type == "number")) then w else null end;
     def wmin(w): (w.windowMinutes // null) | (if (type == "number" and . >= 0) then . else null end);
-    def wkey(w): [ wmin(w), (w.resetsAt // null) ];
     def rval: (.resetsAt // .resetDescription // "");
+    def flabel(t): ((t // "") | [scan("[A-Za-z0-9]")] | (.[0] // "?") | ascii_upcase);
     .[]
     | (slot(.usage.primary)) as $p
     | (slot(.usage.secondary)) as $s
@@ -204,81 +204,70 @@ rows=$(printf '%s' "${filtered}" | jq -r '
         and ($p != null or $s != null or $t != null))
     | ([ $p, $s, $t ] | map(select(. != null))) as $slots
     | ((.usage.extraRateWindows // [])
-        | map(select(.window != null and (.window.usedPercent | type == "number") and (.usageKnown != false)) | .window)) as $extras
-    | (reduce ($slots + $extras)[] as $w ([];
-        if (length >= 4) then . elif (any(.[]; wkey(.) == wkey($w))) then . else . + [$w] end)) as $rw
-    | ((.usage.extraRateWindows // [])
         | map(select(.window != null and (.window.usedPercent | type == "number")))) as $ex
-    | ([range(0; ([($ex | length), 4] | min); 2)] | map({t: $ex[.], b: $ex[(. + 1)]})) as $fams
+    | ([ $ex[] | [ wmin(.window), (.window.resetsAt // null) ] ]) as $exkeys
+    | ([ $slots[] | select( [wmin(.), (.resetsAt // null)] as $k | (any($exkeys[]; . == $k) | not) ) ]) as $unmatched
+    | (($ex | length) > 0 and ($unmatched | length) == 0) as $pooled
+    | ($unmatched | sort_by(wmin(.) // 1.0e18)) as $um
+    | (if ($um | length) > 0 then
+         [ { lbl: flabel(.provider),
+             tu: pct($um[0].usedPercent), tr: ($um[0] | rval), tw: ($um[0].windowMinutes // ""),
+             bu: (if ($um|length) > 1 then pct($um[-1].usedPercent) else -1 end),
+             br: (if ($um|length) > 1 then ($um[-1] | rval) else "" end),
+             bw: (if ($um|length) > 1 then ($um[-1].windowMinutes // "") else "" end) } ]
+       else [] end) as $mainfam
+    | ([range(0; ($ex | length); 2)]
+       | map( . as $i | $ex[$i] as $tn | (if ($i + 1) < ($ex|length) then $ex[$i+1] else null end) as $bn
+            | { lbl: flabel($tn.title),
+                tu: (if ($tn.usageKnown == false) then -1 else pct($tn.window.usedPercent) end),
+                tr: (if ($tn.usageKnown == false) then "" else ($tn.window | rval) end),
+                tw: (if ($tn.usageKnown == false) then "" else ($tn.window.windowMinutes // "") end),
+                bu: (if ($bn == null or $bn.usageKnown == false) then -1 else pct($bn.window.usedPercent) end),
+                br: (if ($bn == null or $bn.usageKnown == false) then "" else ($bn.window | rval) end),
+                bw: (if ($bn == null or $bn.usageKnown == false) then "" else ($bn.window.windowMinutes // "") end) } )) as $exfams
+    | ($mainfam + $exfams) as $fams
     | [
         .provider,
         pct($p.usedPercent), ($p.resetsAt // $p.resetDescription // ""), ($p.windowMinutes // ""),
         pct($s.usedPercent), ($s.resetsAt // $s.resetDescription // ""), ($s.windowMinutes // ""),
         pct($t.usedPercent), ($t.resetsAt // $t.resetDescription // ""), ($t.windowMinutes // ""),
-        ($rw | length),
-        pct($rw[0].usedPercent), ($rw[0] | rval), ($rw[0].windowMinutes // ""),
-        pct($rw[1].usedPercent), ($rw[1] | rval), ($rw[1].windowMinutes // ""),
-        pct($rw[2].usedPercent), ($rw[2] | rval), ($rw[2].windowMinutes // ""),
-        pct($rw[3].usedPercent), ($rw[3] | rval), ($rw[3].windowMinutes // ""),
+        (if $pooled then 1 else 0 end),
         ($fams | length),
-        (($fams[0].t.title // "") | [scan("[A-Za-z0-9]")] | (.[0] // "?") | ascii_upcase),
-        (if ($fams[0].t.usageKnown == false) then -1 else pct($fams[0].t.window.usedPercent) end),
-        ($fams[0].t.window | rval), ($fams[0].t.window.windowMinutes // ""),
-        (if ($fams[0].b.usageKnown == false) then -1 else pct($fams[0].b.window.usedPercent) end),
-        ($fams[0].b.window | rval), ($fams[0].b.window.windowMinutes // ""),
-        (($fams[1].t.title // "") | [scan("[A-Za-z0-9]")] | (.[0] // "?") | ascii_upcase),
-        (if ($fams[1].t.usageKnown == false) then -1 else pct($fams[1].t.window.usedPercent) end),
-        ($fams[1].t.window | rval), ($fams[1].t.window.windowMinutes // ""),
-        (if ($fams[1].b.usageKnown == false) then -1 else pct($fams[1].b.window.usedPercent) end),
-        ($fams[1].b.window | rval), ($fams[1].b.window.windowMinutes // "")
+        ($fams[0].lbl // "?"), ($fams[0].tu // -1), ($fams[0].tr // ""), ($fams[0].tw // ""), ($fams[0].bu // -1), ($fams[0].br // ""), ($fams[0].bw // ""),
+        ($fams[1].lbl // "?"), ($fams[1].tu // -1), ($fams[1].tr // ""), ($fams[1].tw // ""), ($fams[1].bu // -1), ($fams[1].br // ""), ($fams[1].bw // "")
     ] | map(tostring) | join("\u001f")')
 
 first_chunk=1
 chunk_bg=$(showy_quota_palette bg)
 stale_color=$(showy_quota_palette stale)
 countdown_warn=$(showy_quota_palette countdown_warn)
-while IFS=$'\x1f' read -r provider p_used p_reset p_window s_used s_reset s_window t_used t_reset t_window \
-    rw_count \
-    rw1_used rw1_reset rw1_window rw2_used rw2_reset rw2_window \
-    rw3_used rw3_reset rw3_window rw4_used rw4_reset rw4_window \
-    d2_count \
-    f1_label f1t_used f1t_reset f1t_window f1b_used f1b_reset f1b_window \
-    f2_label f2t_used f2t_reset f2t_window f2b_used f2b_reset f2b_window; do
-    [[ -n "${provider}" ]] || continue
 
-    p_remaining=0
-    if (( p_used >= 0 )); then
-        p_remaining=$((100 - p_used))
-    fi
-    s_remaining=0
-    if (( s_used >= 0 )); then
-        s_remaining=$((100 - s_used))
-    fi
-    t_remaining=0
-    if (( t_used >= 0 )); then
-        t_remaining=$((100 - t_used))
-    fi
+# Render one provider widget (sigil + dual/mono body + countdown) from the
+# current row globals. Reused for normal providers and for each synthetic
+# per-family dual when a model-pooled provider is split.
+emit_chunk() {
+    local p_remaining=0 s_remaining=0 t_remaining=0
+    if (( p_used >= 0 )); then p_remaining=$((100 - p_used)); fi
+    if (( s_used >= 0 )); then s_remaining=$((100 - s_used)); fi
+    if (( t_used >= 0 )); then t_remaining=$((100 - t_used)); fi
 
-    sigil=$(showy_quota_provider_sigil "${provider}")
-
-    minutes=""
+    local minutes=""
     if [[ -n "${p_reset}" ]]; then
         minutes=$(showy_quota_minutes_until "${p_reset}" || true)
         if (( stale )) && [[ "${minutes}" == "0" ]]; then
-            reset_epoch=$(showy_quota_reset_epoch "${p_reset}" || true)
-            now_epoch=$(showy_quota_now_epoch)
-            if [[ -n "${reset_epoch}" ]] && (( reset_epoch <= now_epoch )); then
-                minutes=""
-            fi
+            local r_epoch n_epoch
+            r_epoch=$(showy_quota_reset_epoch "${p_reset}" || true)
+            n_epoch=$(showy_quota_now_epoch)
+            if [[ -n "${r_epoch}" ]] && (( r_epoch <= n_epoch )); then minutes=""; fi
         fi
     fi
+    local countdown
     if (( p_used >= 0 )); then
         countdown=$(showy_quota_primary_label "${minutes}" "${p_remaining}" "${p_reset}")
     else
-        # No primary window at all: nothing consumed, nothing to count down.
         countdown='idle'
     fi
-
+    local time_color
     time_color=$(showy_quota_palette countdown)
     if (( stale )); then
         time_color="${stale_color}"
@@ -286,98 +275,110 @@ while IFS=$'\x1f' read -r provider p_used p_reset p_window s_used s_reset s_wind
         time_color=$(showy_quota_palette countdown_warn)
     fi
 
-    if (( first_chunk )); then first_chunk=0
-    else printf ' '; fi
-
-    marker_p_reset="${p_reset}"; marker_p_window="${p_window}"
-    marker_s_reset="${s_reset}"; marker_s_window="${s_window}"
-    marker_t_reset="${t_reset}"; marker_t_window="${t_window}"
+    local marker_p_reset="${p_reset}" marker_p_window="${p_window}"
+    local marker_s_reset="${s_reset}" marker_s_window="${s_window}"
+    local marker_t_reset="${t_reset}" marker_t_window="${t_window}"
     if (( stale )); then
         marker_p_reset=""; marker_p_window=""
         marker_s_reset=""; marker_s_window=""
         marker_t_reset=""; marker_t_window=""
     fi
-    surface_color=$(showy_quota_palette surface)
+    local surface_color; surface_color=$(showy_quota_palette surface)
+    local p_present=0 s_present=0 t_present=0
+    [[ "${p_used}" =~ ^[0-9]+$ ]] && p_present=1
+    [[ "${s_used}" =~ ^[0-9]+$ ]] && s_present=1
+    [[ "${t_used}" =~ ^[0-9]+$ ]] && t_present=1
+    local shared_cycle=0
+    if showy_quota_shared_cycle \
+        "${p_present}" "${p_reset}" "${p_window}" \
+        "${s_present}" "${s_reset}" "${s_window}" \
+        "${t_present}" "${t_reset}" "${t_window}"; then
+        shared_cycle=1
+        marker_s_reset=""; marker_s_window=""
+    fi
+    local p_long s_long
     p_long=$(showy_quota_is_long_window "${p_window}")
     s_long=$(showy_quota_is_long_window "${s_window}")
+    if (( shared_cycle )); then p_long=0; s_long=0; fi
+    local primary_color secondary_color
     primary_color=$(showy_quota_window_color "${p_remaining}" "${p_long}")
     secondary_color=$(showy_quota_window_color "${s_remaining}" "${s_long}")
 
-    has_tertiary=0
+    local has_tertiary=0
     [[ "${t_used}" =~ ^[0-9]+$ ]] && has_tertiary=1
-    bar_mode=$(showy_quota_terminal_mode_for_provider "${provider}" "${rw_count:-0}" "${has_tertiary}")
+    local bar_mode
+    bar_mode=$(showy_quota_terminal_mode_for_provider "${provider}" "${has_tertiary}" "${pooled:-0}")
 
-    mono_color=""; mono_rem=""; mono_reset=""; mono_win=""; mono_present=""
-    if [[ "${bar_mode}" == "mono4" ]]; then
-        r1=0; [[ "${rw1_used}" =~ ^[0-9]+$ ]] && r1=$((100 - rw1_used))
-        r2=0; [[ "${rw2_used}" =~ ^[0-9]+$ ]] && r2=$((100 - rw2_used))
-        r3=0; [[ "${rw3_used}" =~ ^[0-9]+$ ]] && r3=$((100 - rw3_used))
-        r4=0; [[ "${rw4_used}" =~ ^[0-9]+$ ]] && r4=$((100 - rw4_used))
-        x1="${rw1_reset}"; w1="${rw1_window}"; x2="${rw2_reset}"; w2="${rw2_window}"
-        x3="${rw3_reset}"; w3="${rw3_window}"; x4="${rw4_reset}"; w4="${rw4_window}"
-        if (( stale )); then x1=""; w1=""; x2=""; w2=""; x3=""; w3=""; x4=""; w4=""; fi
-        p1=0; [[ "${rw1_used}" =~ ^[0-9]+$ ]] && p1=1
-        p2=0; [[ "${rw2_used}" =~ ^[0-9]+$ ]] && p2=1
-        p3=0; [[ "${rw3_used}" =~ ^[0-9]+$ ]] && p3=1
-        p4=0; [[ "${rw4_used}" =~ ^[0-9]+$ ]] && p4=1
-        mono_rem=$(printf '%s\x1f%s\x1f%s\x1f%s' "${r1}" "${r2}" "${r3}" "${r4}")
-        mono_reset=$(printf '%s\x1f%s\x1f%s\x1f%s' "${x1}" "${x2}" "${x3}" "${x4}")
-        mono_win=$(printf '%s\x1f%s\x1f%s\x1f%s' "${w1}" "${w2}" "${w3}" "${w4}")
-        mono_present=$(printf '%s\x1f%s\x1f%s\x1f%s' "${p1}" "${p2}" "${p3}" "${p4}")
+    local mono_color="" mono_rem="" mono_reset="" mono_win="" mono_present=""
+    if [[ "${bar_mode}" == "mono4" ]] && (( ${d2_count:-0} >= 2 )); then
+        local a1=0 pa1=0 a2=0 pa2=0 a3=0 pa3=0 a4=0 pa4=0
+        [[ "${f1t_used}" =~ ^[0-9]+$ ]] && { a1=$((100 - f1t_used)); pa1=1; }
+        [[ "${f1b_used}" =~ ^[0-9]+$ ]] && { a2=$((100 - f1b_used)); pa2=1; }
+        [[ "${f2t_used}" =~ ^[0-9]+$ ]] && { a3=$((100 - f2t_used)); pa3=1; }
+        [[ "${f2b_used}" =~ ^[0-9]+$ ]] && { a4=$((100 - f2b_used)); pa4=1; }
+        local bx1="${f1t_reset}" bw1="${f1t_window}" bx2="${f1b_reset}" bw2="${f1b_window}"
+        local bx3="${f2t_reset}" bw3="${f2t_window}" bx4="${f2b_reset}" bw4="${f2b_window}"
+        (( stale )) && { bx1=""; bw1=""; bx2=""; bw2=""; bx3=""; bw3=""; bx4=""; bw4=""; }
+        mono_rem=$(printf '%s\x1f%s\x1f%s\x1f%s' "${a1}" "${a2}" "${a3}" "${a4}")
+        mono_reset=$(printf '%s\x1f%s\x1f%s\x1f%s' "${bx1}" "${bx2}" "${bx3}" "${bx4}")
+        mono_win=$(printf '%s\x1f%s\x1f%s\x1f%s' "${bw1}" "${bw2}" "${bw3}" "${bw4}")
+        mono_present=$(printf '%s\x1f%s\x1f%s\x1f%s' "${pa1}" "${pa2}" "${pa3}" "${pa4}")
     elif [[ "${bar_mode}" == "mono3" ]]; then
-        p1=0; [[ "${p_used}" =~ ^[0-9]+$ ]] && p1=1
-        p2=0; [[ "${s_used}" =~ ^[0-9]+$ ]] && p2=1
-        p3=0; [[ "${t_used}" =~ ^[0-9]+$ ]] && p3=1
+        local p1=0 p2=0 p3=0
+        [[ "${p_used}" =~ ^[0-9]+$ ]] && p1=1
+        [[ "${s_used}" =~ ^[0-9]+$ ]] && p2=1
+        [[ "${t_used}" =~ ^[0-9]+$ ]] && p3=1
         mono_rem=$(printf '%s\x1f%s\x1f%s' "${p_remaining}" "${s_remaining}" "${t_remaining}")
         mono_reset=$(printf '%s\x1f%s\x1f%s' "${marker_p_reset}" "${marker_s_reset}" "${marker_t_reset}")
         mono_win=$(printf '%s\x1f%s\x1f%s' "${marker_p_window}" "${marker_s_window}" "${marker_t_window}")
         mono_present=$(printf '%s\x1f%s\x1f%s' "${p1}" "${p2}" "${p3}")
     fi
     if [[ -n "${mono_rem}" ]]; then
-        mono_color=$(showy_quota_mono_chunk_color "${mono_rem}" "${mono_win}" "${mono_present}")
+        mono_color=$(showy_quota_mono_chunk_color "${mono_rem}" "${mono_win}" "${mono_present}" "${shared_cycle}")
         primary_color="${mono_color}"
     fi
     if (( stale )); then
         primary_color="${stale_color}"; secondary_color="${stale_color}"; mono_color="${stale_color}"
     fi
-    separator_fg="${chunk_bg}"
-    separator_bg="${primary_color}"
     style_text "${CAP_LEFT}" "${primary_color}" "${chunk_bg}"
     style_text "${sigil}" "${chunk_bg}" "${primary_color}" bold
-    style_text '▕' "${separator_fg}" "${separator_bg}"
-    case "${bar_mode}" in
-        mono3|mono4)
-            showy_quota_mono_lane_bar style_text "${SHOWY_QUOTA_ZELLIJ_BAR_WIDTH:-12}" "${mono_color}" "${mono_rem}" "${mono_reset}" "${mono_win}" "${mono_present}"
-            ;;
-        dual2)
-            f1tp=0; [[ "${f1t_used}" =~ ^[0-9]+$ ]] && f1tp=1
-            f1bp=0; [[ "${f1b_used}" =~ ^[0-9]+$ ]] && f1bp=1
-            f1tr=0; (( f1tp )) && f1tr=$((100 - f1t_used))
-            f1br=0; (( f1bp )) && f1br=$((100 - f1b_used))
-            f1tx="${f1t_reset}"; f1tw="${f1t_window}"; f1bx="${f1b_reset}"; f1bw="${f1b_window}"
-            (( stale )) && { f1tx=""; f1tw=""; f1bx=""; f1bw=""; }
-            fam1=$(printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s' "${f1_label}" "${f1tr}" "${f1tx}" "${f1tw}" "${f1tp}" "${f1br}" "${f1bx}" "${f1bw}" "${f1bp}")
-            if (( ${d2_count:-0} >= 2 )); then
-                f2tp=0; [[ "${f2t_used}" =~ ^[0-9]+$ ]] && f2tp=1
-                f2bp=0; [[ "${f2b_used}" =~ ^[0-9]+$ ]] && f2bp=1
-                f2tr=0; (( f2tp )) && f2tr=$((100 - f2t_used))
-                f2br=0; (( f2bp )) && f2br=$((100 - f2b_used))
-                f2tx="${f2t_reset}"; f2tw="${f2t_window}"; f2bx="${f2b_reset}"; f2bw="${f2b_window}"
-                (( stale )) && { f2tx=""; f2tw=""; f2bx=""; f2bw=""; }
-                fam2=$(printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s' "${f2_label}" "${f2tr}" "${f2tx}" "${f2tw}" "${f2tp}" "${f2br}" "${f2bx}" "${f2bw}" "${f2bp}")
-                showy_quota_dual2_bar style_text "${SHOWY_QUOTA_ZELLIJ_BAR_WIDTH:-12}" "${fam1}" "${fam2}"
-            elif (( ${d2_count:-0} >= 1 )); then
-                showy_quota_dual2_bar style_text "${SHOWY_QUOTA_ZELLIJ_BAR_WIDTH:-12}" "${fam1}"
-            else
-                dual_metric_bar "${p_remaining}" "${s_remaining}" "${marker_p_reset}" "${marker_p_window}" "${marker_s_reset}" "${marker_s_window}" "${primary_color}" "${secondary_color}"
-            fi
-            ;;
-        *)
-            dual_metric_bar "${p_remaining}" "${s_remaining}" "${marker_p_reset}" "${marker_p_window}" "${marker_s_reset}" "${marker_s_window}" "${primary_color}" "${secondary_color}"
-            ;;
-    esac
+    style_text '▕' "${chunk_bg}" "${primary_color}"
+    if [[ -n "${mono_rem}" ]]; then
+        showy_quota_mono_lane_bar style_text "${SHOWY_QUOTA_ZELLIJ_BAR_WIDTH:-12}" "${mono_color}" "${mono_rem}" "${mono_reset}" "${mono_win}" "${mono_present}"
+    else
+        dual_metric_bar "${p_remaining}" "${s_remaining}" "${marker_p_reset}" "${marker_p_window}" "${marker_s_reset}" "${marker_s_window}" "${primary_color}" "${secondary_color}"
+    fi
     style_text "${countdown}" "${time_color}" "${surface_color}" bold
     style_text "${CAP_RIGHT}" "${surface_color}" "${chunk_bg}"
+}
+
+space_chunk() { if (( first_chunk )); then first_chunk=0; else printf ' '; fi; }
+
+while IFS=$'\x1f' read -r provider p_used p_reset p_window s_used s_reset s_window t_used t_reset t_window \
+    pooled d2_count \
+    f1_label f1t_used f1t_reset f1t_window f1b_used f1b_reset f1b_window \
+    f2_label f2t_used f2t_reset f2t_window f2b_used f2b_reset f2b_window; do
+    [[ -n "${provider}" ]] || continue
+    row_has_tertiary=0
+    [[ "${t_used}" =~ ^[0-9]+$ ]] && row_has_tertiary=1
+    row_mode=$(showy_quota_terminal_mode_for_provider "${provider}" "${row_has_tertiary}" "${pooled:-0}")
+    if [[ "${row_mode}" == "dual2" ]] && (( ${d2_count:-0} >= 2 )); then
+        # Split a model-pooled provider into one standalone dual per family.
+        base_sigil=$(showy_quota_provider_sigil "${provider}")
+        sigil="${base_sigil}$(showy_quota_superscript "${f1_label}")"
+        p_used="${f1t_used}"; p_reset="${f1t_reset}"; p_window="${f1t_window}"
+        s_used="${f1b_used}"; s_reset="${f1b_reset}"; s_window="${f1b_window}"
+        t_used="-1"; t_reset=""; t_window=""; pooled=0; d2_count=0
+        space_chunk; emit_chunk
+        sigil="${base_sigil}$(showy_quota_superscript "${f2_label}")"
+        p_used="${f2t_used}"; p_reset="${f2t_reset}"; p_window="${f2t_window}"
+        s_used="${f2b_used}"; s_reset="${f2b_reset}"; s_window="${f2b_window}"
+        t_used="-1"; t_reset=""; t_window=""; pooled=0; d2_count=0
+        space_chunk; emit_chunk
+    else
+        sigil=$(showy_quota_provider_sigil "${provider}")
+        space_chunk; emit_chunk
+    fi
 done <<< "${rows}"
 if (( stale )); then
     printf ' '

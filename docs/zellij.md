@@ -146,7 +146,7 @@ The plugin renders the same styled terminal strip geometry as `bin/showy-quota-z
 | Segment | Meaning |
 |---|---|
 | **SIGIL** | 2-letter provider abbreviation (`CL`, `CX`, `GE`, …). |
-| **bar** | In default `auto` mode, most providers render as `dual` half-block geometry (`▀`): the primary window on the upper half over the secondary on the lower half, each colored by its remaining-quota severity and dimmed when it is a weekly/monthly cap, with a pacing marker on **both** rows. Providers in `provider_modes` (default `gemini=mono3,antigravity=mono3`) render their mapped body: `mono3` packs three windows into one sextant cell-row, `mono4` packs four into one octant cell-row — each with one provider-level color and `mono_markers` pacing separators. `mono4` needs an octant-capable terminal (Ghostty/kitty/WezTerm). Dimming is horizon-based (`SHOWY_QUOTA_DIM_WINDOW_MINUTES`, default weekly), not row-based. |
+| **bar** | In default `auto` mode, most providers render as `dual` half-block geometry (`▀`): the primary window on the upper half over the secondary on the lower half, each colored by its remaining-quota severity and dimmed when it is a weekly/monthly cap, with a pacing marker on **both** rows. Providers in `provider_modes` (default `gemini=mono3,cursor=mono3`) render their mapped body, and model pools auto-detect: a provider whose extras carry all its positional slots splits into one standalone `dual` per pool (`AGᴳ` + `AGᶜ` for Antigravity); a single pool stays one plain `dual`. `mono3` packs three windows into one sextant cell-row, `mono4` packs four into one octant cell-row; both use one provider-level color and `mono_markers` pacing separators. `mono4` needs an octant-capable terminal. |
 | **countdown** | Compact like `12m`, `4h`, `4:31`, `2d`, `5w`, or `?` if the provider does not expose a primary reset time. |
 
 Stale snapshots keep the last-known-good data, hide elapsed markers, grey data-bearing colors, and append the stale glyph (`⚠` by default). CLI fallback appends `⚠cli`; stale and degraded can appear together.
@@ -180,7 +180,7 @@ plugin location="file:~/.config/zellij/plugins/showy-quota-zellij.wasm" {
     provider_order "codex,claude,copilot,opencode,gemini"
     bar_width 12
     terminal_bar_mode "auto"   // auto, dual, dual2, mono3, mono4
-    provider_modes "gemini=mono3,antigravity=mono3"
+    provider_modes "gemini=mono3,cursor=mono3"
     mono_color_mode "lowest"   // lowest or primary
     mono_markers "primary"     // comma list of slots; "none" disables
 }
@@ -188,7 +188,7 @@ plugin location="file:~/.config/zellij/plugins/showy-quota-zellij.wasm" {
 
 Palette keys mirror the shell env names without `SHOWY_QUOTA_`, lowercased (`palette_primary_good`, `palette_countdown_warn`, `stale_glyph`, etc.).
 
-`mono3`/`mono4` need enough windows to fill their lanes: `mono4` falls back to `mono3` (3 windows) then `dual` (<3), and `mono3` collapses to `dual` without a tertiary window — so Antigravity's two weekly pools render `dual` until its session windows are also reported. `mono4` additionally needs an octant-capable terminal; run `python3 docs/scripts/preview-quad-octants.py` to test yours before enabling it.
+`mono3`/`mono4` need enough windows to fill their lanes: `mono4` falls back to `mono3` (3 windows) then `dual` (<3), and `mono3` collapses to `dual` without a tertiary window. Model pools auto-detect their body from the data: Antigravity reports Gemini and Claude+GPT session+weekly pools and splits into standalone `AGᴳ` + `AGᶜ` dual widgets; a single pool stays one plain `dual` (e.g. OAuth reports Gemini only). `mono4` additionally needs an octant-capable terminal; run `python3 docs/scripts/preview-quad-octants.py` to test yours before enabling it.
 
 ## Font requirements
 

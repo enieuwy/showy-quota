@@ -79,7 +79,7 @@ impl Default for RenderConfig {
             terminal_bar_mode: "auto".into(),
             provider_modes: vec![
                 ("gemini".into(), "mono3".into()),
-                ("antigravity".into(), "mono3".into()),
+                ("cursor".into(), "mono3".into()),
             ],
             mono_color_mode: "lowest".into(),
             mono_markers: vec!["primary".into()],

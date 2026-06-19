@@ -8,10 +8,11 @@ localhost `codexbar serve` or visibly degraded CLI fallback, after
 
 - `showy_quota.<provider>.icon` — provider icon (`sketchybar-app-font` when
   mapped, CodexBar SVG/PNG fallback otherwise)
-- `showy_quota.<provider>.primary` / `.secondary` / `.tertiary` — native slider
-  usage rows
-- `showy_quota.<provider>.primary_marker` / `.secondary_marker` / `.tertiary_marker`
-  — per-window pacing markers (every present window is paced)
+- `showy_quota.<provider>.primary` / `.secondary` / `.tertiary` / `.quaternary` —
+  native slider usage rows (2–4, adaptive)
+- `showy_quota.<provider>.primary_marker` / `.secondary_marker` / `.tertiary_marker` / `.quaternary_marker`
+  — per-window pacing markers (every present window is paced, except pools
+  sharing one billing cycle, which show only the primary marker)
 - `showy_quota.<provider>.slot` — transparent click/spacing item
 - `showy_quota.<provider>.label` — countdown label
 
@@ -107,16 +108,22 @@ Examples:
 
 ```
 +-------------------------------- 80 px ---------------------------+
-|                          primary (5h)                            |   ← row 1
+|                          row 1                                   |   ← primary
 +------------------------------------------------------------------+
-|                          secondary (7d)                          |   ← row 2
+|                          row 2                                   |   ← secondary
 +------------------------------------------------------------------+
-|                          tertiary (varies)                       |   ← row 3 (only when present)
+|                          row 3                                   |   ← tertiary (when present)
++------------------------------------------------------------------+
+|                          row 4                                   |   ← quaternary (model pools)
 +------------------------------------------------------------------+
 ```
 
-Rows are native SketchyBar sliders using `SHOWY_QUOTA_PNG_BAR_W` for width.
-Tertiary is hidden when the provider does not expose that window.
+Rows are native SketchyBar sliders using `SHOWY_QUOTA_PNG_BAR_W` for width, and
+the stack adapts from 2 to 4 rows. A time-tiered provider shows its
+primary/secondary/tertiary windows (5h, weekly, …), tertiary hidden when absent.
+A model-pooled provider whose `extraRateWindows` carry every positional slot
+(e.g. Antigravity) shows its pool windows instead, family-grouped — Antigravity
+renders four: Gemini 5h/weekly then Claude+GPT 5h/weekly.
 
 ## Customizing colors
 
@@ -127,7 +134,10 @@ long-horizon cap — `windowMinutes` at or beyond `SHOWY_QUOTA_DIM_WINDOW_MINUTE
 (default `10080`, i.e. weekly/monthly). The dim color is the primary palette
 scaled by `SHOWY_QUOTA_PALETTE_DIM_SCALE` (default `0.55`) unless you set an
 explicit `SHOWY_QUOTA_PALETTE_DIM_*` override, so weekly/monthly rows keep the
-dimmed ai-quota look while 5h/daily rows stay bright. `SHOWY_QUOTA_PALETTE_TRACK`,
+dimmed ai-quota look while 5h/daily rows stay bright. Pools that share one
+billing cycle (identical reset and `windowMinutes`, e.g. Cursor's Total/Auto/API)
+are an exception: every row stays bright and only the primary pacing marker is
+drawn, since the others would land on the same column. `SHOWY_QUOTA_PALETTE_TRACK`,
 `SHOWY_QUOTA_PALETTE_ICON_TEXT`, `SHOWY_QUOTA_PALETTE_COUNTDOWN`,
 `SHOWY_QUOTA_PALETTE_COUNTDOWN_WARN`, `SHOWY_QUOTA_PALETTE_STALE`, and
 `SHOWY_QUOTA_PALETTE_ELAPSED` stay global across rows. Countdown labels use

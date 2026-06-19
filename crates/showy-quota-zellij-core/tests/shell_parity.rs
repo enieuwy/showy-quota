@@ -87,6 +87,76 @@ fn rust_renderer_matches_shell_zellij_renderer() {
             },
         },
         Case {
+            name: "antigravity oauth one pool dual color",
+            fixture: "codexbar-antigravity-oauth.json",
+            color: true,
+            now_epoch: 4_070_908_800,
+            stale: false,
+            degraded_cli: false,
+            configure: |config| {
+                config.zellij_bar_width = 12;
+            },
+        },
+        Case {
+            name: "antigravity oauth one pool dual no color",
+            fixture: "codexbar-antigravity-oauth.json",
+            color: false,
+            now_epoch: 4_070_908_800,
+            stale: false,
+            degraded_cli: false,
+            configure: |config| {
+                config.zellij_bar_width = 12;
+            },
+        },
+        Case {
+            name: "codex manual pool dual2 color",
+            fixture: "codexbar-codex-spark.json",
+            color: true,
+            now_epoch: 4_070_908_800,
+            stale: false,
+            degraded_cli: false,
+            configure: |config| {
+                config.provider_modes = vec![("codex".into(), "dual2".into())];
+                config.providers = vec!["codex".into()];
+                config.zellij_bar_width = 12;
+            },
+        },
+        Case {
+            name: "codex manual pool dual2 no color",
+            fixture: "codexbar-codex-spark.json",
+            color: false,
+            now_epoch: 4_070_908_800,
+            stale: false,
+            degraded_cli: false,
+            configure: |config| {
+                config.provider_modes = vec![("codex".into(), "dual2".into())];
+                config.providers = vec!["codex".into()];
+                config.zellij_bar_width = 12;
+            },
+        },
+        Case {
+            name: "antigravity dual2 stale dims weekly lanes",
+            fixture: "codexbar-antigravity-quad.json",
+            color: true,
+            now_epoch: 4_070_908_800,
+            stale: true,
+            degraded_cli: false,
+            configure: |config| {
+                config.zellij_bar_width = 12;
+            },
+        },
+        Case {
+            name: "antigravity three pools caps at two color",
+            fixture: "codexbar-antigravity-tri.json",
+            color: true,
+            now_epoch: 4_070_908_800,
+            stale: false,
+            degraded_cli: false,
+            configure: |config| {
+                config.zellij_bar_width = 12;
+            },
+        },
+        Case {
             name: "provider allow filter",
             fixture: "codexbar-mixed.json",
             color: false,
@@ -147,6 +217,36 @@ fn rust_renderer_matches_shell_zellij_renderer() {
                 config.terminal_bar_mode = "mono3".into();
                 config.zellij_bar_width = 8;
             },
+        },
+        Case {
+            name: "cursor shared-cycle mono3 color",
+            fixture: "codexbar-cursor.json",
+            color: true,
+            now_epoch: 4_070_908_800,
+            stale: false,
+            degraded_cli: false,
+            configure: |_| {},
+        },
+        Case {
+            name: "cursor shared-cycle forced dual color",
+            fixture: "codexbar-cursor.json",
+            color: true,
+            now_epoch: 4_070_908_800,
+            stale: false,
+            degraded_cli: false,
+            configure: |config| {
+                config.terminal_bar_mode = "dual".into();
+                config.zellij_bar_width = 8;
+            },
+        },
+        Case {
+            name: "cursor shared-cycle stale color",
+            fixture: "codexbar-cursor.json",
+            color: true,
+            now_epoch: 4_070_908_800,
+            stale: true,
+            degraded_cli: false,
+            configure: |_| {},
         },
         Case {
             name: "antigravity quad mono4 stale color",

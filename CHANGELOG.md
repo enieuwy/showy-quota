@@ -13,12 +13,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   fits the longest countdown form; shorter strings stay jitter-free as before.
 - The Zellij/tmux `mono3` body now collapses to the two-lane
   `dual` body for providers without a tertiary window, matching the SketchyBar
-  renderer which already drops the absent tertiary row. Antigravity's new
-  two-pool shape (Gemini weekly in `usage.primary`, Claude+GPT weekly in
-  `usage.secondary`, `usage.tertiary: null`) previously rendered as a three-lane
-  bar with an empty bottom row; it now shows two bars in every renderer.
+  renderer which already drops the absent tertiary row, so a provider whose
+  third positional slot is empty no longer shows a blank bottom lane.
 
 ### Changed
+- Model-pooled providers now adapt to the data with no configuration: in `auto`
+  mode a provider whose `usage.extraRateWindows` carry every present positional
+  slot is auto-detected and **split into one standalone `dual` provider per
+  pool** — `AGᴳ` (Gemini), `AGᶜ` (Claude+GPT) — each a normal dual widget
+  (semantic-colored sigil, full-width bar, pacing marker). A single pool stays
+  one plain `dual`. This fixes Antigravity, whose pools depend on CodexBar's
+  auth method: OAuth reports only Gemini (one pool → `AG`); the Antigravity IDE
+  reports Gemini plus Claude+GPT (two pools → `AGᴳ` + `AGᶜ`). The split reuses the
+  existing `dual` renderer on every surface — no combined-widget code.
+  `SHOWY_QUOTA_PROVIDER_MODES` / `provider_modes` force it per provider
+  (`provider=dual2`), unioning a positional pool with extra pools (e.g. Codex +
+  Spark → `CXᶜ` + `CXˢ`), or select the opt-in octant body (`provider=mono4`,
+  terminal support required). The SketchyBar plugin shows a pooled provider's
+  windows as adaptive 2–4 native slider rows.
 - `make install-plugin` now pre-grants the standalone Zellij plugin's
   permissions for the installed path, so a fresh install is prompt-free on
   first launch (previously it only printed a reminder to run
@@ -36,8 +48,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   is at or beyond `SHOWY_QUOTA_DIM_WINDOW_MINUTES` (default `10080`, i.e.
   weekly/monthly), so a 5h live tier stays bright while its weekly/monthly cap
   dims — regardless of which slot it occupies. Time-tiered providers (Codex,
-  Claude) keep a bright 5h row over a dimmed weekly row; uniform-weekly
-  model pools (Antigravity) dim every row; uniform-daily pools (Gemini) dim
+  Claude) keep a bright 5h row over a dimmed weekly row; model-pooled providers
+  (Antigravity) keep each pool's bright 5h row over its dimmed weekly; Gemini's uniform-daily pools dim
   none. The `dual` body now draws a pacing marker on **both** rows, and the
   SketchyBar plugin gained a `primary_marker` so every pool is paced (was
   secondary/tertiary only).
@@ -46,9 +58,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   disables), replacing the single `SHOWY_QUOTA_MONO3_MARKER_SOURCE`. The first
   marker uses `palette_elapsed`, the rest a distinct `palette_elapsed_long`.
 - `auto` mode now reads the per-provider `SHOWY_QUOTA_PROVIDER_MODES` map
-  (default `gemini=mono3,antigravity=mono3`) instead of the `mono3_providers`
-  allow/deny lists; providers without an entry render `dual`. `mono4` is opt-in
-  via this map and is never chosen automatically.
+  (default `gemini=mono3,cursor=mono3`) instead of the `mono3_providers`
+  allow/deny lists; providers without an entry render `dual`, except
+  auto-detected model pools (see above). `mono4` is opt-in via this map and is
+  never chosen automatically.
+- Pools that share one billing cycle — identical `resetsAt` and `windowMinutes`
+  across at least two present windows — now render at full brightness and draw a
+  single pacing marker in every renderer (Zellij, tmux, SketchyBar). These are
+  parallel usage *categories* within one budget (e.g. Cursor's Total/Auto/API on
+  one 30-day cycle), not a live tier over a longer cap, so the horizon-based
+  dimming and per-row markers that suit Codex/Claude are suppressed for them.
+  `cursor` now ships as `mono3` by default so all three pools are visible (the
+  `dual` body dropped the API pool); the SketchyBar rows and tmux/Zellij bodies
+  stop showing redundant dimming and duplicate markers for it.
 
 ### Added
 - `SHOWY_QUOTA_PALETTE_DIM_SCALE` / `palette_dim_scale` (default `0.55`) and
@@ -64,12 +86,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `SHOWY_QUOTA_PALETTE_ELAPSED_LONG` (default `3ddbd9`) colors the second and
   later pacing markers; `SHOWY_QUOTA_MONO_MARKERS` (list) and
   `SHOWY_QUOTA_PROVIDER_MODES` (map) configure markers and per-provider bodies.
-- New `dual2` terminal body: renders a model-pooled provider as two adjacent
-  per-family dual sub-bars (`AGᴳ▕5h/wk▏ ᶜ▕5h/wk▏`) by pairing
-  `usage.extraRateWindows` two-at-a-time, each family tagged with a letter.
-  Half-blocks only, so it renders in every terminal (Alacritty included),
-  unlike `mono4`. Opt in via `SHOWY_QUOTA_PROVIDER_MODES=<provider>=dual2`;
-  falls back to `dual` without paired extra windows.
+- New `dual2` terminal body: splits a model-pooled provider into one standalone
+  `dual` per pool (`AGᴳ` Gemini, `AGᶜ` Claude+GPT) from `usage.extraRateWindows`,
+  each rendered by the normal half-block `dual` path (every terminal, unlike
+  `mono4`). Auto-detected in `auto` when a provider's extras carry all its
+  positional slots; force per provider via
+  `SHOWY_QUOTA_PROVIDER_MODES=<provider>=dual2`; a single pool stays one plain
+  `dual`.
 
 ### Removed
 - The row-position palette knobs `SHOWY_QUOTA_PALETTE_SECONDARY_*`,

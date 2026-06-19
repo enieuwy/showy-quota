@@ -81,56 +81,6 @@ impl Usage {
         .flatten()
         .any(|window| window.used_percent.is_some())
     }
-
-    /// Up to `max` distinct windows for the multi-lane bodies: the positional
-    /// slots (primary/secondary/tertiary) first, then extra rate windows with
-    /// known usage, deduped by `(windowMinutes, resetsAt)`. Provider-agnostic:
-    /// a model-pooled provider whose extras carry its per-pool windows (e.g.
-    /// Antigravity's session/weekly pools) yields all of them; a plain
-    /// time-tiered provider yields just its slots.
-    pub fn render_windows(&self, max: usize) -> Vec<&UsageWindow> {
-        let mut out: Vec<&UsageWindow> = Vec::new();
-        let mut seen: Vec<(Option<i64>, Option<&str>)> = Vec::new();
-        for window in [
-            self.primary.as_ref(),
-            self.secondary.as_ref(),
-            self.tertiary.as_ref(),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            if window.used_percent.is_none() {
-                continue;
-            }
-            let key = (window.window_minutes(), window.resets_at.as_deref());
-            if seen.contains(&key) {
-                continue;
-            }
-            seen.push(key);
-            out.push(window);
-            if out.len() >= max {
-                return out;
-            }
-        }
-        for named in &self.extra_rate_windows {
-            let Some(window) = named.window.as_ref() else {
-                continue;
-            };
-            if window.used_percent.is_none() || named.usage_known == Some(false) {
-                continue;
-            }
-            let key = (window.window_minutes(), window.resets_at.as_deref());
-            if seen.contains(&key) {
-                continue;
-            }
-            seen.push(key);
-            out.push(window);
-            if out.len() >= max {
-                return out;
-            }
-        }
-        out
-    }
 }
 
 pub fn parse_usage_payload(payload: &[u8]) -> Result<Vec<ProviderRecord>, serde_json::Error> {

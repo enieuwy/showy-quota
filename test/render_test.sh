@@ -395,8 +395,10 @@ seed_sketchybar_live_items() {
         : > "${cache}/sb-state/showy_quota.${pid}.primary"
         : > "${cache}/sb-state/showy_quota.${pid}.secondary"
         : > "${cache}/sb-state/showy_quota.${pid}.tertiary"
+        : > "${cache}/sb-state/showy_quota.${pid}.quaternary"
         : > "${cache}/sb-state/showy_quota.${pid}.secondary_marker"
         : > "${cache}/sb-state/showy_quota.${pid}.tertiary_marker"
+        : > "${cache}/sb-state/showy_quota.${pid}.quaternary_marker"
         : > "${cache}/sb-state/showy_quota.${pid}.primary_marker"
         : > "${cache}/sb-state/showy_quota.${pid}.slot"
         : > "${cache}/sb-state/showy_quota.${pid}.label"
@@ -832,12 +834,6 @@ printf '%s\n' \
     '{"provider":"gemini","usage":{"primary":{"usedPercent":25,"windowMinutes":100,"resetsAt":"2099-01-01T01:40:00Z"},"secondary":{"usedPercent":50,"windowMinutes":200,"resetsAt":"2099-01-01T03:20:00Z"},"tertiary":{"usedPercent":75,"windowMinutes":300,"resetsAt":"2099-01-01T05:00:00Z"}}}' \
     ']' > "${mono_fixture}"
 
-mono_antigravity_fixture="${TMP}/codexbar-mono-antigravity.json"
-printf '%s\n' \
-    '[' \
-    '{"provider":"antigravity","usage":{"primary":{"usedPercent":25,"windowMinutes":100,"resetsAt":"2099-01-01T01:40:00Z"},"secondary":{"usedPercent":50,"windowMinutes":200,"resetsAt":"2099-01-01T03:20:00Z"},"tertiary":{"usedPercent":75,"windowMinutes":300,"resetsAt":"2099-01-01T05:00:00Z"}}}' \
-    ']' > "${mono_antigravity_fixture}"
-
 mono_claude_fixture="${TMP}/codexbar-mono-claude.json"
 printf '%s\n' \
     '[' \
@@ -872,8 +868,16 @@ out=$(run_renderer showy-quota-zellij-bar "${mono_fixture}" SHOWY_QUOTA_ZELLIJ_B
 assert_contains "zellij auto mono3 uses primary marker by default" "GE▕██🬎│🬂🬂  ▏" "${out}"
 assert_not_contains "zellij auto mono3 omits half-block cells" "▀" "${out}"
 
-out=$(run_renderer showy-quota-zellij-bar "${mono_antigravity_fixture}" SHOWY_QUOTA_ZELLIJ_BAR_WIDTH=8 SHOWY_QUOTA_REFRESH_SECONDS=9999999999 SHOWY_QUOTA_NOW_EPOCH=4070912400 NO_COLOR=1 SHOWY_QUOTA_FORCE_COLOR=0)
-assert_contains "zellij auto mono3 includes antigravity by default" "AG▕██🬎│🬂🬂  ▏" "${out}"
+out=$(run_renderer showy-quota-zellij-bar codexbar-antigravity-quad.json SHOWY_QUOTA_ZELLIJ_BAR_WIDTH=12 SHOWY_QUOTA_REFRESH_SECONDS=9999999999 SHOWY_QUOTA_NOW_EPOCH=4070908800 NO_COLOR=1 SHOWY_QUOTA_FORCE_COLOR=0)
+assert_contains "zellij antigravity auto-detect splits into AGᴳ" "AGᴳ▕▀▀▀▀▀▀▀▀▀▀▀▀▏" "${out}"
+assert_contains "zellij antigravity auto-detect splits into AGᶜ" "AGᶜ▕▀▀▀▀▀▀▀▀▀▀▀▀▏" "${out}"
+
+# Antigravity via OAuth reports only the Gemini pool (one family); the bar
+# auto-detects the pool and adapts to a single plain dual (no family tag),
+# where AGY's two pools render as dual2 above — same detection, different shape.
+out=$(run_renderer showy-quota-zellij-bar codexbar-antigravity-oauth.json SHOWY_QUOTA_ZELLIJ_BAR_WIDTH=12 SHOWY_QUOTA_REFRESH_SECONDS=9999999999 SHOWY_QUOTA_NOW_EPOCH=4070908800 NO_COLOR=1 SHOWY_QUOTA_FORCE_COLOR=0)
+assert_contains "zellij antigravity one pool renders plain dual" "AG▕▀▀▀▀▀▀▀▀▀▀▀▀▏" "${out}"
+assert_not_contains "zellij antigravity one pool omits family tag" "G▀" "${out}"
 
 out=$(run_renderer showy-quota-zellij-bar "${mono_fixture}" SHOWY_QUOTA_ZELLIJ_BAR_WIDTH=8 SHOWY_QUOTA_REFRESH_SECONDS=9999999999 SHOWY_QUOTA_NOW_EPOCH=4070914800 NO_COLOR=1 SHOWY_QUOTA_FORCE_COLOR=0)
 assert_contains "zellij auto mono3 primary boundary zero starts after left separator" "GE▕│█🬎🬎🬂🬂  ▏" "${out}"
@@ -902,25 +906,60 @@ assert_contains "zellij mono3 collapses to dual when tertiary absent" "AG▕▀�
 assert_not_contains "zellij mono3 collapse omits sextant cells" "🬂" "${out}"
 assert_not_contains "zellij mono3 collapse omits shared separator" "│" "${out}"
 
+# ── Cursor shared-cycle pools ───────────────────────────────────────
+# Cursor reports Total/Auto/API as parallel pools sharing one billing cycle
+# (identical resetsAt + 30-day window): categories within one monthly budget,
+# not a live tier over a longer cap. Every row stays bright (no long-horizon
+# dimming) and only the primary pacing marker is drawn. The default
+# provider_modes map renders cursor as mono3.
+out=$(run_renderer showy-quota-zellij-bar codexbar-cursor.json SHOWY_QUOTA_ZELLIJ_BAR_WIDTH=8 SHOWY_QUOTA_REFRESH_SECONDS=9999999999 SHOWY_QUOTA_NOW_EPOCH=4070908800 NO_COLOR=1 SHOWY_QUOTA_FORCE_COLOR=0)
+assert_contains "zellij cursor defaults to mono3 with one marker" "CR▕███│██🬰🬭▏2w" "${out}"
+
+out=$(run_renderer showy-quota-zellij-bar codexbar-cursor.json SHOWY_QUOTA_ZELLIJ_BAR_WIDTH=8 SHOWY_QUOTA_REFRESH_SECONDS=9999999999 SHOWY_QUOTA_NOW_EPOCH=4070908800)
+assert_contains "zellij cursor shared-cycle stays bright" "38;2;37;190;106" "${out}"
+assert_not_contains "zellij cursor shared-cycle not dimmed" "38;2;20;104;58" "${out}"
+
+# Forced dual: both rows bright, only the primary pacing marker (foreground);
+# the redundant secondary marker (same column, background) is suppressed.
+out=$(run_renderer showy-quota-zellij-bar codexbar-cursor.json SHOWY_QUOTA_TERMINAL_BAR_MODE=dual SHOWY_QUOTA_ZELLIJ_BAR_WIDTH=8 SHOWY_QUOTA_REFRESH_SECONDS=9999999999 SHOWY_QUOTA_NOW_EPOCH=4070908800)
+assert_contains "zellij cursor dual draws primary pacing marker" "38;2;190;149;255" "${out}"
+assert_not_contains "zellij cursor dual drops redundant secondary marker" "48;2;190;149;255" "${out}"
+
+# tmux mirror: bright fills, single marker, no dimmed cap color (#14683a).
+out=$(run_renderer showy-quota-tmux-bar codexbar-cursor.json SHOWY_QUOTA_ZELLIJ_BAR_WIDTH=8 SHOWY_QUOTA_REFRESH_SECONDS=9999999999 SHOWY_QUOTA_NOW_EPOCH=4070908800)
+assert_contains "tmux cursor shared-cycle stays bright" "fg=#25be6a" "${out}"
+assert_not_contains "tmux cursor shared-cycle not dimmed" "#14683a" "${out}"
+assert_contains "tmux cursor single pacing marker" "fg=#be95ff" "${out}"
+
 # mono4: four per-pool windows packed into one octant row (model-pooled provider).
 out=$(run_renderer showy-quota-zellij-bar codexbar-antigravity-quad.json SHOWY_QUOTA_PROVIDER_MODES=antigravity=mono4 SHOWY_QUOTA_ZELLIJ_BAR_WIDTH=12 SHOWY_QUOTA_REFRESH_SECONDS=9999999999 SHOWY_QUOTA_NOW_EPOCH=4070908800 NO_COLOR=1 SHOWY_QUOTA_FORCE_COLOR=0)
-assert_contains "zellij mono4 packs four windows into octant row" "AG▕▆▆▄│▄▄▄▂▂▂  ▏" "${out}"
+assert_contains "zellij mono4 packs four windows into octant row" "AG▕𜷝𜷝𜴪𜴪𜴪𜴪𜴪│𜴧𜴧  ▏" "${out}"
 assert_not_contains "zellij mono4 omits half-block dual cells" "▀" "${out}"
 
 out=$(run_renderer showy-quota-zellij-bar codexbar-antigravity-quad.json SHOWY_QUOTA_PROVIDER_MODES=antigravity=mono4 SHOWY_QUOTA_MONO_MARKERS=primary,tertiary SHOWY_QUOTA_ZELLIJ_BAR_WIDTH=12 SHOWY_QUOTA_REFRESH_SECONDS=9999999999 SHOWY_QUOTA_NOW_EPOCH=4070908800 NO_COLOR=1 SHOWY_QUOTA_FORCE_COLOR=0)
-assert_contains "zellij mono4 draws two configured pacing markers" "AG▕▆▆▄│▄▄▄│▂▂  ▏" "${out}"
+assert_contains "zellij mono4 draws two configured pacing markers" "AG▕𜷝𜷝𜴪𜴪𜴪𜴪𜴪│𜴧│  ▏" "${out}"
 
 out=$(run_renderer showy-quota-zellij-bar codexbar-no-tertiary.json SHOWY_QUOTA_PROVIDER_MODES=antigravity=mono4 SHOWY_QUOTA_ZELLIJ_BAR_WIDTH=8 SHOWY_QUOTA_REFRESH_SECONDS=9999999999 SHOWY_QUOTA_NOW_EPOCH=4070908800 NO_COLOR=1 SHOWY_QUOTA_FORCE_COLOR=0)
 assert_contains "zellij mono4 collapses to dual without four windows" "AG▕▀▀▀▀▀▀▀▀▏" "${out}"
 
-# dual2: model-pooled provider rendered as two per-family dual sub-bars
-# (half-blocks, renders everywhere), each tagged with a family letter.
+# dual2: a model-pooled provider splits into one standalone per-family dual each
+# (AGᴳ, AGᶜ), rendered through the normal dual path — half-blocks, every terminal.
 out=$(run_renderer showy-quota-zellij-bar codexbar-antigravity-quad.json SHOWY_QUOTA_PROVIDER_MODES=antigravity=dual2 SHOWY_QUOTA_ZELLIJ_BAR_WIDTH=12 SHOWY_QUOTA_REFRESH_SECONDS=9999999999 SHOWY_QUOTA_NOW_EPOCH=4070908800 NO_COLOR=1 SHOWY_QUOTA_FORCE_COLOR=0)
-assert_contains "zellij dual2 renders two per-family dual sub-bars" "AG▕G▀▀▀▀▀▀ C▀▀▀▀▀▀▏" "${out}"
+assert_contains "zellij dual2 splits into AGᴳ dual" "AGᴳ▕▀▀▀▀▀▀▀▀▀▀▀▀▏" "${out}"
+assert_contains "zellij dual2 splits into AGᶜ dual" "AGᶜ▕▀▀▀▀▀▀▀▀▀▀▀▀▏" "${out}"
 assert_not_contains "zellij dual2 uses only half-blocks" "🬂" "${out}"
 
 out=$(run_renderer showy-quota-zellij-bar codexbar-no-tertiary.json SHOWY_QUOTA_PROVIDER_MODES=antigravity=dual2 SHOWY_QUOTA_ZELLIJ_BAR_WIDTH=8 SHOWY_QUOTA_REFRESH_SECONDS=9999999999 SHOWY_QUOTA_NOW_EPOCH=4070908800 NO_COLOR=1 SHOWY_QUOTA_FORCE_COLOR=0)
 assert_contains "zellij dual2 falls back to dual without family windows" "AG▕▀▀▀▀▀▀▀▀▏" "${out}"
+
+# Q4: a non-pooled provider can be manually pooled. Codex's main pool lives in
+# the positional slots and its Spark pool in the extras; auto-detection leaves
+# it a plain dual, but an explicit dual2 unions both into per-family sub-bars.
+out=$(run_renderer showy-quota-zellij-bar codexbar-codex-spark.json SHOWY_QUOTA_PROVIDERS=codex SHOWY_QUOTA_ZELLIJ_BAR_WIDTH=12 SHOWY_QUOTA_REFRESH_SECONDS=9999999999 SHOWY_QUOTA_NOW_EPOCH=4070908800 NO_COLOR=1 SHOWY_QUOTA_FORCE_COLOR=0)
+assert_contains "zellij codex auto stays positional dual (extras are a separate pool)" "CX▕▀▀▀▀▀▀▀▀▀▀▀▀▏" "${out}"
+out=$(run_renderer showy-quota-zellij-bar codexbar-codex-spark.json SHOWY_QUOTA_PROVIDER_MODES=codex=dual2 SHOWY_QUOTA_PROVIDERS=codex SHOWY_QUOTA_ZELLIJ_BAR_WIDTH=12 SHOWY_QUOTA_REFRESH_SECONDS=9999999999 SHOWY_QUOTA_NOW_EPOCH=4070908800 NO_COLOR=1 SHOWY_QUOTA_FORCE_COLOR=0)
+assert_contains "zellij codex manual dual2 splits main into CXᶜ" "CXᶜ▕▀▀▀▀▀▀▀▀▀▀▀▀▏" "${out}"
+assert_contains "zellij codex manual dual2 splits spark into CXˢ" "CXˢ▕▀▀▀▀▀▀▀▀▀▀▀▀▏" "${out}"
 
 # Horizon model: in a time-tiered provider the short (5h) window stays bright
 # and the long (weekly) window dims, and BOTH rows show a pacing marker.
@@ -1226,7 +1265,7 @@ run_sketchybar_items codexbar-mixed.json "${cache}" "${log}" SHOWY_QUOTA_PROVIDE
 item_log="$(< "${log}")"
 assert_contains "bootstrap removes stale legacy bar item when desired set is empty" "--remove showy_quota.gemini.bar" "${item_log}"
 assert_contains "bootstrap removes stale native provider items when desired set is empty" "--remove showy_quota.gemini.primary --remove showy_quota.gemini.secondary --remove showy_quota.gemini.tertiary" "${item_log}"
-assert_contains "bootstrap removes stale native marker items when desired set is empty" "--remove showy_quota.gemini.secondary_marker --remove showy_quota.gemini.tertiary_marker --remove showy_quota.gemini.primary_marker --remove showy_quota.gemini.slot --remove showy_quota.gemini.label" "${item_log}"
+assert_contains "bootstrap removes stale native marker items when desired set is empty" "--remove showy_quota.gemini.secondary_marker --remove showy_quota.gemini.tertiary_marker --remove showy_quota.gemini.quaternary_marker --remove showy_quota.gemini.primary_marker --remove showy_quota.gemini.slot --remove showy_quota.gemini.label" "${item_log}"
 assert_contains "bootstrap removes stale bracket when desired set is empty" "--remove showy_quota_bracket" "${item_log}"
 
 cache=$(mk_cache)
@@ -1303,6 +1342,18 @@ assert_contains "plugin keeps missing primary slot as empty top row" "--set show
 assert_contains "plugin keeps secondary window in semantic middle row" "--set showy_quota.antigravity.secondary drawing=on slider.percentage=100" "${plugin_log}"
 assert_contains "plugin keeps tertiary window in semantic bottom row" "--set showy_quota.antigravity.tertiary drawing=on slider.percentage=75" "${plugin_log}"
 assert_contains "plugin labels missing-primary provider idle" "showy_quota.antigravity.label drawing=on label=idle" "${plugin_log}"
+
+# Model-pooled provider (Antigravity): SketchyBar auto-detects the pools (extras
+# carry every positional slot) and shows all four windows as family-grouped rows
+# (Gemini 5h/weekly, Claude+GPT 5h/weekly), not the cross-family positional slots.
+cache=$(mk_cache)
+log="${TMP}/sb-pooled.log"
+run_sketchybar_plugin codexbar-antigravity-quad.json "${cache}" "${log}" SHOWY_QUOTA_NOW_EPOCH=4070908800
+plugin_log="$(< "${log}")"
+assert_contains "plugin pooled provider draws gemini session row" "--set showy_quota.antigravity.primary drawing=on slider.percentage=65" "${plugin_log}"
+assert_contains "plugin pooled provider draws gemini weekly row" "--set showy_quota.antigravity.secondary drawing=on slider.percentage=0" "${plugin_log}"
+assert_contains "plugin pooled provider draws claude session row" "--set showy_quota.antigravity.tertiary drawing=on slider.percentage=90" "${plugin_log}"
+assert_contains "plugin pooled provider draws claude weekly row in fourth lane" "--set showy_quota.antigravity.quaternary drawing=on slider.percentage=18" "${plugin_log}"
 
 cache=$(mk_cache)
 log="${TMP}/sb-degraded.log"
@@ -1486,7 +1537,7 @@ else
     fail "plugin re-adds declared providers ahead of new providers in sort order" \
         "codex line=${add_codex_before_gemini} gemini line=${add_gemini_label}"
 fi
-assert_contains "plugin rebuilds bracket with added native provider" "showy_quota.gemini.icon showy_quota.gemini.primary showy_quota.gemini.secondary showy_quota.gemini.tertiary showy_quota.gemini.secondary_marker showy_quota.gemini.tertiary_marker showy_quota.gemini.primary_marker showy_quota.gemini.slot showy_quota.gemini.label showy_quota.stale showy_quota.degraded --set showy_quota_bracket" "${plugin_log}"
+assert_contains "plugin rebuilds bracket with added native provider" "showy_quota.gemini.icon showy_quota.gemini.primary showy_quota.gemini.secondary showy_quota.gemini.tertiary showy_quota.gemini.quaternary showy_quota.gemini.secondary_marker showy_quota.gemini.tertiary_marker showy_quota.gemini.quaternary_marker showy_quota.gemini.primary_marker showy_quota.gemini.slot showy_quota.gemini.label showy_quota.stale showy_quota.degraded --set showy_quota_bracket" "${plugin_log}"
 assert_contains "plugin triggers provider-change event" "--trigger showy_quota_provider_change SHOWY_QUOTA_PROVIDER_COUNT=3 SHOWY_QUOTA_PROVIDERS=codex,claude,gemini" "${plugin_log}"
 
 cache=$(mk_cache)
@@ -1506,7 +1557,7 @@ run_sketchybar_plugin "${drop_fixture}" "${cache}" "${log}"
 plugin_log="$(< "${log}")"
 assert_contains "plugin removes dropped provider legacy bar" "--remove showy_quota.gemini.icon --remove showy_quota.gemini.bar" "${plugin_log}"
 assert_contains "plugin removes dropped provider native rows" "--remove showy_quota.gemini.primary --remove showy_quota.gemini.secondary --remove showy_quota.gemini.tertiary" "${plugin_log}"
-assert_contains "plugin removes dropped provider native markers" "--remove showy_quota.gemini.secondary_marker --remove showy_quota.gemini.tertiary_marker --remove showy_quota.gemini.primary_marker --remove showy_quota.gemini.slot --remove showy_quota.gemini.label" "${plugin_log}"
+assert_contains "plugin removes dropped provider native markers" "--remove showy_quota.gemini.secondary_marker --remove showy_quota.gemini.tertiary_marker --remove showy_quota.gemini.quaternary_marker --remove showy_quota.gemini.primary_marker --remove showy_quota.gemini.slot --remove showy_quota.gemini.label" "${plugin_log}"
 
 cache=$(mk_cache)
 seed_sketchybar_state "${cache}" codex claude gemini
@@ -1596,14 +1647,14 @@ printf '%s\n' \
     '[' \
     '{"provider":"antigravity","usage":{"primary":null,"secondary":{"usedPercent":0},"tertiary":{"usedPercent":25}}}' \
     ']' > "${secondary_only_fixture}"
-out=$(run_renderer showy-quota-zellij-bar "${secondary_only_fixture}" SHOWY_QUOTA_ZELLIJ_BAR_WIDTH=8 SHOWY_QUOTA_REFRESH_SECONDS=9999999999 NO_COLOR=1 SHOWY_QUOTA_FORCE_COLOR=0)
+out=$(run_renderer showy-quota-zellij-bar "${secondary_only_fixture}" SHOWY_QUOTA_PROVIDER_MODES=antigravity=mono3 SHOWY_QUOTA_ZELLIJ_BAR_WIDTH=8 SHOWY_QUOTA_REFRESH_SECONDS=9999999999 NO_COLOR=1 SHOWY_QUOTA_FORCE_COLOR=0)
 assert_contains "secondary-only provider renders in zellij" "AG" "${out}"
 assert_contains "secondary-only provider shows idle label" "idle" "${out}"
 assert_contains "secondary-only provider keeps semantic middle/bottom rows" "AG▕🬹🬹🬹🬹🬹🬹🬋🬋▏" "${out}"
 for top_lit in '🬂' '🬎' '🬰' '█'; do
     assert_not_contains "secondary-only provider keeps top row empty (${top_lit})" "${top_lit}" "${out}"
 done
-out=$(run_renderer showy-quota-tmux-bar "${secondary_only_fixture}" SHOWY_QUOTA_TMUX_BAR_WIDTH=8 SHOWY_QUOTA_REFRESH_SECONDS=9999999999)
+out=$(run_renderer showy-quota-tmux-bar "${secondary_only_fixture}" SHOWY_QUOTA_PROVIDER_MODES=antigravity=mono3 SHOWY_QUOTA_TMUX_BAR_WIDTH=8 SHOWY_QUOTA_REFRESH_SECONDS=9999999999)
 visible=$(strip_tmux_markup "${out}")
 assert_contains "secondary-only provider renders in tmux" "AG" "${visible}"
 assert_contains "secondary-only provider keeps semantic rows in tmux" "AG▕🬹🬹🬹🬹🬹🬹🬋🬋▏" "${visible}"

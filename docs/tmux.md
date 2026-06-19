@@ -15,7 +15,7 @@ its configured terminal body. Most providers use `dual`: upper-half blocks
 each colored by its remaining-quota severity and dimmed when it is a
 weekly/monthly cap, with a pacing marker on both rows in
 `SHOWY_QUOTA_PALETTE_ELAPSED`. Providers listed in
-`SHOWY_QUOTA_PROVIDER_MODES` (default `gemini=mono3,antigravity=mono3`) render
+`SHOWY_QUOTA_PROVIDER_MODES` (default `gemini=mono3,cursor=mono3`) render
 their mapped body: `mono3` packs three windows into one sextant cell-row;
 `mono4` packs four into one octant cell-row. Both use one provider-level
 foreground color and the `SHOWY_QUOTA_MONO_MARKERS` pacing separators.
@@ -31,13 +31,16 @@ window slots (`primary`, `secondary`, `tertiary`, `quaternary`; default
 `primary`; `none` disables); the first marker uses `SHOWY_QUOTA_PALETTE_ELAPSED`,
 the rest `SHOWY_QUOTA_PALETTE_ELAPSED_LONG`. Stale snapshots hide pacing
 separators. Set `SHOWY_QUOTA_TERMINAL_BAR_MODE=dual`, `dual2`, `mono3`, or
-`mono4` to force one body for every provider; `mono4` needs an octant-capable
-terminal (Ghostty/kitty/WezTerm), while `dual2` (two per-family dual sub-bars
-for model-pooled providers) renders everywhere. `mono4` collapses to `mono3`
-(3 windows) then `dual`
-(<3), and `mono3` collapses to `dual` without a tertiary window — so
-Antigravity's two weekly pools render two bars rather than a three-lane bar with
-an empty bottom row.
+`mono4` to force a terminal body mode; `mono4` needs an octant-capable
+terminal (Ghostty/kitty/WezTerm), while `dual2` splits model-pooled providers
+into standalone per-pool `dual` widgets (`AGᴳ` + `AGᶜ`) and renders everywhere.
+`mono4` collapses to `mono3` (3 windows) then `dual` (<3), and `mono3`
+collapses to `dual` without a tertiary window. (Antigravity is auto-split into
+`AGᴳ` + `AGᶜ` by pool detection, independent of those collapse rules.)
+Providers whose slots share one billing cycle (identical
+reset and `windowMinutes`, e.g. Cursor's Total/Auto/API) stay at full brightness
+and draw a single pacing marker instead of dimming every row and repeating the
+identical one.
 
 When the cache is older than `2 × SHOWY_QUOTA_REFRESH_SECONDS`, tmux gets one
 trailing `SHOWY_QUOTA_STALE_GLYPH` (default `⚠`) after the last provider. The

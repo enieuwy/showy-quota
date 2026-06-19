@@ -1,0 +1,10 @@
+[
+  {
+    "provider": "cursor",
+    "usage": {
+      "primary": { "usedPercent": 12.84, "windowMinutes": 43200, "resetsAt": "2099-01-15T00:00:00Z" },
+      "secondary": { "usedPercent": 25.69, "windowMinutes": 43200, "resetsAt": "2099-01-15T00:00:00Z" },
+      "tertiary": { "usedPercent": 0, "windowMinutes": 43200, "resetsAt": "2099-01-15T00:00:00Z" }
+    }
+  }
+]

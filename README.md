@@ -159,20 +159,25 @@ provider:
   and dimmed when it is a weekly/monthly cap; both rows show a pacing marker
   (the `elapsed` color tints the upper half for the primary window and the
   lower half for the secondary). Body width is 12 cells.
-- **`mono3`** (default for `gemini`, `antigravity`): packs primary,
+- **`mono3`** (default for `gemini`, `cursor`): packs primary,
   secondary, and tertiary into a single sextant cell per column with
   top/middle/bottom rows. Uses a single provider-level foreground color
-  and `mono_markers` pacing separators.
+  and `mono_markers` pacing separators. Providers whose windows share one
+  billing cycle (same reset and window length, e.g. Cursor's Total/Auto/API)
+  stay at full brightness and show a single pacing marker.
 - **`mono4`** (opt-in): packs four per-pool windows (e.g. Antigravity's
   Gemini and Claude+GPT session/weekly pools, from `extraRateWindows`) into
   a single octant cell per column. Like `mono3` but four lanes — requires an
   octant-capable terminal (Ghostty, kitty, WezTerm); run
   `python3 docs/scripts/preview-quad-octants.py` to test yours.
-- **`dual2`** (opt-in): renders a model-pooled provider as two adjacent
-  per-family dual sub-bars (`AGᴳ▕5h/wk▏ ᶜ▕5h/wk▏`), pairing `extraRateWindows`
-  by family. Half-blocks only, so it renders in every terminal (unlike
-  `mono4`), at roughly twice the width. Opt in via
-  `SHOWY_QUOTA_PROVIDER_MODES=antigravity=dual2`.
+- **`dual2`** (auto-detected for model-pooled providers like `antigravity`):
+  splits the provider into one standalone `dual` per pool (`AGᴳ` for Gemini,
+  `AGᶜ` for Claude+GPT), each from `extraRateWindows` and rendered by the
+  normal half-block `dual` path. Half-blocks render in every terminal (unlike
+  `mono4`). `auto` engages the split when a provider's extras carry all its
+  positional slots; a single pool stays one plain `dual` (Antigravity via OAuth
+  reports only Gemini). Force the split per provider with
+  `SHOWY_QUOTA_PROVIDER_MODES=<provider>=dual2`.
 
 <p>
   <img src="docs/images/mono3-terminal.png" alt="mono3 terminal rendering layout" width="420">

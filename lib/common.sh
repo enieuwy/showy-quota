@@ -119,7 +119,7 @@ showy_quota_load_config
 : "${SHOWY_QUOTA_ZELLIJ_PIPE_TIMEOUT_TENTHS:=20}"
 : "${SHOWY_QUOTA_ZELLIJ_BAR_WIDTH:=12}"
 : "${SHOWY_QUOTA_TERMINAL_BAR_MODE:=auto}"
-: "${SHOWY_QUOTA_PROVIDER_MODES:=gemini=mono3,antigravity=mono3}"
+: "${SHOWY_QUOTA_PROVIDER_MODES:=gemini=mono3,cursor=mono3}"
 : "${SHOWY_QUOTA_MONO_COLOR_MODE:=lowest}"
 : "${SHOWY_QUOTA_MONO_MARKERS:=primary}"
 : "${SHOWY_QUOTA_ZELLIJ_BIN:=zellij}"
@@ -470,6 +470,32 @@ showy_quota_window_color() {
     else
         showy_quota_primary_palette "${severity}"
     fi
+}
+
+# True (exit 0) when at least two present positional windows share one billing
+# cycle: identical non-empty resetsAt/resetDescription AND windowMinutes. Such
+# pools (e.g. Cursor's Total/Auto/API) are parallel usage categories within a
+# single monthly budget rather than a live tier over a longer cap, so renderers
+# keep them at full brightness and draw a single pacing marker instead of
+# dimming every row and repeating the identical marker. Any present slot missing
+# a reset/window, or differing from the others, disqualifies the set.
+# Args: groups of three per slot — present(1/0) reset window.
+showy_quota_shared_cycle() {
+    local ref_reset="" ref_window="" count=0
+    local present reset window
+    while (( $# >= 3 )); do
+        present="$1"; reset="$2"; window="$3"
+        shift 3
+        [[ "${present}" == "1" ]] || continue
+        [[ -n "${reset}" && -n "${window}" ]] || return 1
+        if (( count == 0 )); then
+            ref_reset="${reset}"; ref_window="${window}"
+        elif [[ "${reset}" != "${ref_reset}" || "${window}" != "${ref_window}" ]]; then
+            return 1
+        fi
+        count=$((count + 1))
+    done
+    (( count >= 2 ))
 }
 
 # Validate that codexbar JSON looks like an array of provider objects.

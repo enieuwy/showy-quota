@@ -176,9 +176,10 @@ showy_quota_octant_mask_char() {
 # Single chunk color for mono3/mono4. Lanes passed as \x1f-joined parallel
 # lists. Mirrors the core: representative remaining (lowest present, or primary
 # slot when MONO_COLOR_MODE=primary), dimmed only when every present lane is a
-# long-horizon cap. Args: remaining_list window_list present_list.
+# long-horizon cap and force_bright is 0. Args: remaining_list window_list
+# present_list [force_bright].
 showy_quota_mono_chunk_color() {
-    local rem_s="$1" win_s="$2" present_s="$3"
+    local rem_s="$1" win_s="$2" present_s="$3" force_bright="${4:-0}"
     local -a rem win present
     local IFS=$'\x1f'
     read -r -a rem <<< "${rem_s}"
@@ -201,10 +202,11 @@ showy_quota_mono_chunk_color() {
     for (( i=0; i<n; i++ )); do
         [[ "${present[i]:-0}" == "1" ]] || continue
         any=1
-        [[ "$(showy_quota_is_long_window "${win[i]}")" == "1" ]] || all=0
+        [[ "$(showy_quota_is_long_window "${win[i]:-}")" == "1" ]] || all=0
     done
     local dim=0
     (( any && all )) && dim=1
+    (( force_bright )) && dim=0
     showy_quota_window_color "${rep}" "${dim}"
 }
 
@@ -291,53 +293,35 @@ showy_quota_mono_lane_bar() {
     "${styler}" '▏' "${bg}" "${surface}"
 }
 
-# Render a model-pooled provider as adjacent per-family dual sub-bars via the
-# given styler (top = live/short window, bottom = cap/long), each tagged with a
-# family letter. Half-blocks only, so it renders everywhere. Args: styler
-# total_width, then one packed family per arg:
-# "label<US>trem<US>treset<US>twin<US>tpres<US>brem<US>breset<US>bwin<US>bpres".
-showy_quota_dual2_bar() {
-    local styler="$1" total_width="$2"
-    shift 2
-    local surface bg elapsed tag
-    surface="$(showy_quota_palette surface)"
-    bg="$(showy_quota_palette bg)"
-    elapsed="$(showy_quota_palette elapsed)"
-    tag="$(showy_quota_palette icon_text)"
-    local n=$#
-    (( n < 1 )) && n=1
-    local per=$(( total_width / n ))
-    (( per < 4 )) && per=4
-    local idx=0 fam
-    for fam in "$@"; do
-        (( idx > 0 )) && "${styler}" ' ' "${bg}" "${bg}"
-        local label trem treset twin tpres brem breset bwin bpres
-        IFS=$'\x1f' read -r label trem treset twin tpres brem breset bwin bpres <<< "${fam}"
-        "${styler}" "${label}" "${tag}" "${bg}"
-        local tfill=0 bfill=0 tcol="${surface}" bcol="${surface}" tmark="" bmark=""
-        if [[ "${tpres}" == "1" ]]; then
-            tfill="$(showy_quota_filled_cells "${trem}" "${per}")"
-            tcol="$(showy_quota_window_color "${trem}" "$(showy_quota_is_long_window "${twin}")")"
-            tmark="$(showy_quota_elapsed_marker_cell "${treset}" "${twin}" "${per}" || true)"
-        fi
-        if [[ "${bpres}" == "1" ]]; then
-            bfill="$(showy_quota_filled_cells "${brem}" "${per}")"
-            bcol="$(showy_quota_window_color "${brem}" "$(showy_quota_is_long_window "${bwin}")")"
-            bmark="$(showy_quota_elapsed_marker_cell "${breset}" "${bwin}" "${per}" || true)"
-        fi
-        local i top bottom
-        for (( i=0; i<per; i++ )); do
-            if [[ "${tmark}" =~ ^[0-9]+$ && "${i}" == "${tmark}" ]]; then top="${elapsed}"
-            elif (( i < tfill )); then top="${tcol}"
-            else top="${surface}"; fi
-            if [[ "${bmark}" =~ ^[0-9]+$ && "${i}" == "${bmark}" ]]; then bottom="${elapsed}"
-            elif (( i < bfill )); then bottom="${bcol}"
-            else bottom="${surface}"; fi
-            "${styler}" '▀' "${top}" "${bottom}"
-        done
-        idx=$((idx + 1))
-    done
-    "${styler}" '▏' "${bg}" "${surface}"
+# Superscript form of a family initial for the split sigil (AG -> AGᴳ), or the
+# plain letter where no modifier-letter glyph exists. Mirrors render.rs.
+showy_quota_superscript() {
+    case "$1" in
+        A|a) printf 'ᴬ' ;;
+        B|b) printf 'ᴮ' ;;
+        C|c) printf 'ᶜ' ;;
+        D|d) printf 'ᴰ' ;;
+        E|e) printf 'ᴱ' ;;
+        F|f) printf 'ᶠ' ;;
+        G|g) printf 'ᴳ' ;;
+        H|h) printf 'ᴴ' ;;
+        I|i) printf 'ᴵ' ;;
+        J|j) printf 'ᴶ' ;;
+        K|k) printf 'ᴷ' ;;
+        L|l) printf 'ᴸ' ;;
+        M|m) printf 'ᴹ' ;;
+        N|n) printf 'ᴺ' ;;
+        O|o) printf 'ᴼ' ;;
+        P|p) printf 'ᴾ' ;;
+        R|r) printf 'ᴿ' ;;
+        S|s) printf 'ˢ' ;;
+        T|t) printf 'ᵀ' ;;
+        U|u) printf 'ᵁ' ;;
+        W|w) printf 'ᵂ' ;;
+        X|x) printf 'ˣ' ;;
+        Z|z) printf 'ᶻ' ;;
+        *) printf '%s' "$1" ;;
+    esac
 }
 
 # Pacing marker cell for a reset window. Returns non-zero when no marker
@@ -381,11 +365,12 @@ showy_quota_mode_for_provider() {
     return 0
 }
 
-# Resolve a provider's terminal body. Args: provider, window_count (distinct
-# render windows, 0..4), has_tertiary (1/0). Collapses to the densest body the
-# data supports: mono4 needs four windows, mono3 needs a tertiary slot.
+# Resolve a provider's terminal body. Args: provider, has_tertiary (1/0),
+# pooled (1/0 — auto-detected model-pooled provider whose extras carry every
+# positional slot). mono3 collapses to dual without a tertiary slot; the family
+# bodies (dual2/mono4) pass through and adapt to the pool count at render.
 showy_quota_terminal_mode_for_provider() {
-    local provider="$1" window_count="${2:-0}" has_tertiary="${3:-0}"
+    local provider="$1" has_tertiary="${2:-0}" pooled="${3:-0}"
     local requested
     case "${SHOWY_QUOTA_TERMINAL_BAR_MODE:-auto}" in
         dual) requested=dual ;;
@@ -394,20 +379,19 @@ showy_quota_terminal_mode_for_provider() {
         mono4) requested=mono4 ;;
         *)
             requested="$(showy_quota_mode_for_provider "${provider}")"
-            [[ -n "${requested}" ]] || requested=dual
+            if [[ -z "${requested}" ]]; then
+                if (( pooled )); then requested=dual2; else requested=dual; fi
+            fi
             ;;
     esac
 
     local mode=dual
-    if [[ "${requested}" == "mono4" ]] && (( window_count >= 4 )); then
-        mode=mono4
-    elif [[ "${requested}" == "mono4" && "${has_tertiary}" == "1" ]]; then
-        mode=mono3
-    elif [[ "${requested}" == "mono3" && "${has_tertiary}" == "1" ]]; then
-        mode=mono3
-    elif [[ "${requested}" == "dual2" ]]; then
-        mode=dual2
-    fi
+    case "${requested}" in
+        mono3) [[ "${has_tertiary}" == "1" ]] && mode=mono3 || mode=dual ;;
+        mono4) if (( ! pooled )) && [[ "${has_tertiary}" == "1" ]]; then mode=mono3; else mode=mono4; fi ;;
+        dual2) mode=dual2 ;;
+        *) mode=dual ;;
+    esac
 
     printf '%s\n' "${mode}"
 }

@@ -1,10 +1,11 @@
+use std::borrow::Cow;
 use std::cmp::Ordering;
 
 use time::format_description::well_known::Rfc3339;
 use time::macros::format_description;
 use time::{Duration, OffsetDateTime, PrimitiveDateTime, Time, UtcOffset};
 
-use crate::codexbar::{is_renderable, parse_usage_payload, NamedWindow, ProviderRecord, UsageWindow};
+use crate::codexbar::{is_renderable, parse_usage_payload, NamedWindow, ProviderRecord, Usage, UsageWindow};
 use crate::config::RenderConfig;
 use crate::palette::hex_to_rgb;
 
@@ -51,11 +52,25 @@ pub fn render_records(
         out.push_str("AI idle");
         reset(&mut out, options.color);
     } else {
-        for (idx, record) in records.into_iter().enumerate() {
+        // Model-pooled providers (auto-detected `dual2`) are split into one
+        // synthetic per-family `dual` provider each (`AGᴳ`, `AGᶜ`); everything
+        // else renders as-is. Each unit then flows through the normal dual path.
+        let mut units: Vec<(Cow<ProviderRecord>, String)> = Vec::new();
+        for record in records {
+            match expand_pooled(record, config) {
+                Some(families) => {
+                    for (sigil, synthetic) in families {
+                        units.push((Cow::Owned(synthetic), sigil));
+                    }
+                }
+                None => units.push((Cow::Borrowed(record), provider_sigil(&record.provider))),
+            }
+        }
+        for (idx, (record, sigil)) in units.iter().enumerate() {
             if idx > 0 {
                 out.push(' ');
             }
-            render_provider(&mut out, record, config, options, chunk_bg, stale_color);
+            render_provider(&mut out, record, sigil, config, options, chunk_bg, stale_color);
         }
     }
 
@@ -120,6 +135,7 @@ fn contains(items: &[String], provider: &str) -> bool {
 fn render_provider(
     out: &mut String,
     record: &ProviderRecord,
+    sigil: &str,
     config: &RenderConfig,
     options: RenderOptions,
     chunk_bg: &str,
@@ -136,6 +152,13 @@ fn render_provider(
     let primary = semantic_slot(&usage.primary);
     let secondary = semantic_slot(&usage.secondary);
     let tertiary = semantic_slot(&usage.tertiary);
+
+    // Cursor-style shared-cycle pools (Total/Auto/API) report one resetsAt and
+    // windowMinutes across their slots: parallel usage categories within a
+    // single monthly budget, not a live tier over a longer cap. Keep them at
+    // full brightness and draw a single pacing marker instead of dimming every
+    // row and repeating the identical marker.
+    let shared = shared_cycle(&[primary, secondary, tertiary]);
 
     let p_used = primary.map_or(-1, UsageWindow::used_pct_floor);
     let s_used = secondary.map_or(-1, UsageWindow::used_pct_floor);
@@ -181,21 +204,38 @@ fn render_provider(
     };
 
     let surface_color = &config.palette_surface;
-    let p_long = is_long_window(primary, config.dim_window_minutes);
-    let s_long = is_long_window(secondary, config.dim_window_minutes);
-    let render4 = usage.render_windows(4);
-    let bar_mode =
-        terminal_mode_for_provider(config, &record.provider, tertiary.is_some(), render4.len());
+    let p_long = !shared && is_long_window(primary, config.dim_window_minutes);
+    let s_long = !shared && is_long_window(secondary, config.dim_window_minutes);
+    let slots = [primary, secondary, tertiary];
+    let bar_mode = terminal_mode_for_provider(
+        config,
+        &record.provider,
+        tertiary.is_some(),
+        pooled_auto(&slots, &usage.extra_rate_windows),
+    );
+    // Only mono4 still assembles per-pool family lanes here; dual2 pooled
+    // providers are pre-expanded into standalone dual records upstream.
+    let families = if bar_mode == "mono4" {
+        pool_families(
+            &slots,
+            &usage.extra_rate_windows,
+            config,
+            options.stale,
+        )
+    } else {
+        Vec::new()
+    };
     let mut primary_color = config.window_color(p_remaining, p_long);
     let mut secondary_color = config.window_color(s_remaining, s_long);
 
     // Lanes for the single-color stacked bodies. mono3 uses the three positional
     // slots (absent slots stay empty and never shift up); mono4 uses the
     // assembled per-pool windows.
-    let mono_lanes: Vec<Lane> = match bar_mode.as_str() {
-        "mono4" => render4
+    let mut mono_lanes: Vec<Lane> = match bar_mode.as_str() {
+        "mono4" if families.len() >= 2 => families
             .iter()
-            .map(|window| Lane::from_window(window, config, options.stale))
+            .take(2)
+            .flat_map(|family| [family.top, family.bottom])
             .collect(),
         "mono3" => [primary, secondary, tertiary]
             .into_iter()
@@ -203,6 +243,11 @@ fn render_provider(
             .collect(),
         _ => Vec::new(),
     };
+    if shared {
+        for lane in &mut mono_lanes {
+            lane.is_long = false;
+        }
+    }
     let mut mono_color = if mono_lanes.is_empty() {
         String::new()
     } else {
@@ -228,7 +273,7 @@ fn render_provider(
     );
     style_text(
         out,
-        &provider_sigil(&record.provider),
+        sigil,
         Some(chunk_bg),
         Some(&primary_color),
         Weight::Bold,
@@ -249,31 +294,22 @@ fn render_provider(
     } else {
         primary.and_then(UsageWindow::window_minutes)
     };
-    let marker_secondary_reset = if options.stale {
+    let marker_secondary_reset = if options.stale || shared {
         None
     } else {
         secondary.and_then(UsageWindow::reset_value)
     };
-    let marker_secondary_window = if options.stale {
+    let marker_secondary_window = if options.stale || shared {
         None
     } else {
         secondary.and_then(UsageWindow::window_minutes)
     };
-    let families = if bar_mode == "dual2" {
-        dual2_families(&usage.extra_rate_windows, config, options.stale)
+    let width = config.zellij_bar_width.max(8);
+    if !mono_lanes.is_empty() {
+        let markers = mono_marker_cells(config, &mono_lanes, width, options.now_epoch);
+        mono_lane_bar(out, config, options, &mono_lanes, &mono_color, &markers);
     } else {
-        Vec::new()
-    };
-    match bar_mode.as_str() {
-        "mono3" | "mono4" => {
-            let width = config.zellij_bar_width.max(8);
-            let markers = mono_marker_cells(config, &mono_lanes, width, options.now_epoch);
-            mono_lane_bar(out, config, options, &mono_lanes, &mono_color, &markers);
-        }
-        "dual2" if !families.is_empty() => {
-            dual2_metric_bar(out, config, options, &families, config.zellij_bar_width.max(8));
-        }
-        _ => dual_metric_bar(
+        dual_metric_bar(
             out,
             config,
             options,
@@ -287,7 +323,7 @@ fn render_provider(
                 primary_color: &primary_color,
                 secondary_color: &secondary_color,
             },
-        ),
+        );
     }
 
     style_text(
@@ -323,6 +359,29 @@ fn is_long_window(window: Option<&UsageWindow>, dim_window_minutes: i64) -> bool
     window
         .and_then(UsageWindow::window_minutes)
         .is_some_and(|minutes| minutes >= dim_window_minutes)
+}
+
+/// True when at least two present positional slots share one billing cycle:
+/// identical non-null resetsAt/resetDescription and windowMinutes. Cursor's
+/// Total/Auto/API pools are parallel usage categories inside a single monthly
+/// budget rather than a live tier over a longer cap, so renderers keep them at
+/// full brightness and draw a single pacing marker. Any present slot missing a
+/// reset/window, or differing from the others, disqualifies the set.
+fn shared_cycle(slots: &[Option<&UsageWindow>]) -> bool {
+    let mut reference: Option<(&str, i64)> = None;
+    let mut count = 0u32;
+    for window in slots.iter().copied().flatten() {
+        let (Some(reset), Some(minutes)) = (window.reset_value(), window.window_minutes()) else {
+            return false;
+        };
+        match reference {
+            None => reference = Some((reset, minutes)),
+            Some(prev) if prev == (reset, minutes) => {}
+            Some(_) => return false,
+        }
+        count += 1;
+    }
+    count >= 2
 }
 
 struct DualArgs<'a> {
@@ -399,6 +458,7 @@ fn dual_metric_bar(
     );
 }
 
+#[derive(Clone, Copy)]
 struct Lane<'a> {
     remaining: i32,
     reset: Option<&'a str>,
@@ -408,6 +468,16 @@ struct Lane<'a> {
 }
 
 impl<'a> Lane<'a> {
+    fn empty() -> Lane<'a> {
+        Lane {
+            remaining: 0,
+            reset: None,
+            window: None,
+            is_long: false,
+            present: false,
+        }
+    }
+
     fn from_window(window: &'a UsageWindow, config: &RenderConfig, stale: bool) -> Lane<'a> {
         Lane {
             remaining: 100 - window.used_pct_floor(),
@@ -598,22 +668,25 @@ fn octant_mask_char(mask: i32) -> &'static str {
 }
 
 struct Family<'a> {
-    label: char,
     top: Lane<'a>,
     bottom: Lane<'a>,
 }
 
-/// Group a model-pooled provider's extra rate windows into per-family duals by
-/// pairing present windows two-at-a-time, matching CodexBar's per-family
-/// session+weekly emission order. The first window of each pair is the top
-/// (live) row, the second the bottom (cap) row; `usageKnown:false` windows
-/// render empty.
-fn dual2_families<'a>(
+/// Group a provider's quota pools into per-family duals (top = short/live
+/// horizon, bottom = long/cap horizon). Present `extraRateWindows` are paired
+/// two-at-a-time in CodexBar's per-family session→weekly emission order;
+/// positional slots not already carried by an extra (matched on the
+/// render-window dedup key) form a leading "main" family. A provider whose
+/// pools live entirely in the extras (e.g. Antigravity) yields one family per
+/// pool; a provider with a secondary extra pool (e.g. Codex + Spark) yields its
+/// main slots plus the extra pool. `usageKnown:false` windows render empty.
+fn pool_families<'a>(
+    slots: &[Option<&'a UsageWindow>; 3],
     extras: &'a [NamedWindow],
     config: &RenderConfig,
     stale: bool,
 ) -> Vec<Family<'a>> {
-    let present: Vec<&NamedWindow> = extras
+    let present_extras: Vec<&'a NamedWindow> = extras
         .iter()
         .filter(|named| {
             named
@@ -622,123 +695,237 @@ fn dual2_families<'a>(
                 .is_some_and(|window| window.used_percent.is_some())
         })
         .collect();
-    present
-        .chunks(2)
-        .take(2)
-        .map(|pair| Family {
-            label: pair[0]
-                .title
-                .as_deref()
-                .and_then(|title| title.chars().find(|c| c.is_alphanumeric()))
-                .map(|c| c.to_ascii_uppercase())
-                .unwrap_or('?'),
+
+    let mut families: Vec<Family<'a>> = Vec::new();
+    let unmatched: Vec<&'a UsageWindow> = slots
+        .iter()
+        .flatten()
+        .copied()
+        .filter(|slot| !extra_contains(&present_extras, slot))
+        .collect();
+    if let Some(main) = main_family(&unmatched, config, stale) {
+        families.push(main);
+    }
+    for pair in present_extras.chunks(2) {
+        families.push(Family {
             top: Lane::from_named(pair[0], config, stale),
-            bottom: pair.get(1).map_or(
-                Lane {
-                    remaining: 0,
-                    reset: None,
-                    window: None,
-                    is_long: false,
-                    present: false,
-                },
-                |named| Lane::from_named(named, config, stale),
-            ),
-        })
-        .collect()
+            bottom: pair
+                .get(1)
+                .map_or_else(Lane::empty, |named| Lane::from_named(named, config, stale)),
+        });
+    }
+    families
 }
 
-/// Render a model-pooled provider as adjacent per-family dual sub-bars (top =
-/// live/short window, bottom = cap/long), each tagged with a family letter.
-/// Half-blocks only, so it renders in every terminal.
-fn dual2_metric_bar(
-    out: &mut String,
+/// True when a positional slot is already carried by a present extra window,
+/// matched on the render-window dedup key (windowMinutes + resetsAt).
+fn extra_contains(extras: &[&NamedWindow], slot: &UsageWindow) -> bool {
+    extras.iter().any(|named| {
+        named.window.as_ref().is_some_and(|window| {
+            window.window_minutes() == slot.window_minutes()
+                && window.resets_at.as_deref() == slot.resets_at.as_deref()
+        })
+    })
+}
+
+/// First alphanumeric of a title, uppercased, as the per-family tag.
+fn family_label(title: Option<&str>) -> char {
+    title
+        .and_then(|title| title.chars().find(|c| c.is_alphanumeric()))
+        .map(|c| c.to_ascii_uppercase())
+        .unwrap_or('?')
+}
+
+/// Build the leading "main" family from positional slots not represented in the
+/// extras: shortest horizon on top (live), longest on the bottom (cap). `None`
+/// when every slot is subsumed.
+fn main_family<'a>(
+    unmatched: &[&'a UsageWindow],
     config: &RenderConfig,
-    options: RenderOptions,
-    families: &[Family<'_>],
-    total_width: usize,
-) {
-    let surface_color = &config.palette_surface;
-    let elapsed_color = config.palette_elapsed.as_str();
-    let per = (total_width / families.len().max(1)).max(4);
-    for (index, family) in families.iter().enumerate() {
-        if index > 0 {
-            style_text(
-                out,
-                " ",
-                Some(&config.palette_bg),
-                Some(&config.palette_bg),
-                Weight::Normal,
-                options.color,
-            );
-        }
-        let mut tag = [0u8; 4];
-        style_text(
-            out,
-            family.label.encode_utf8(&mut tag),
-            Some(&config.palette_icon_text),
-            Some(&config.palette_bg),
-            Weight::Normal,
-            options.color,
-        );
-        let top = &family.top;
-        let bottom = &family.bottom;
-        let top_fill = if top.present {
-            filled_cells(top.remaining, per)
+    stale: bool,
+) -> Option<Family<'a>> {
+    let mut sorted = unmatched.to_vec();
+    sorted.sort_by_key(|window| window.window_minutes().unwrap_or(i64::MAX));
+    let top = *sorted.first()?;
+    let bottom = *sorted.last()?;
+    Some(Family {
+        top: Lane::from_window(top, config, stale),
+        bottom: if std::ptr::eq(top, bottom) {
+            Lane::empty()
         } else {
-            0
-        };
-        let bottom_fill = if bottom.present {
-            filled_cells(bottom.remaining, per)
-        } else {
-            0
-        };
-        let top_color = if top.present {
-            config.window_color(top.remaining, top.is_long)
-        } else {
-            surface_color.clone()
-        };
-        let bottom_color = if bottom.present {
-            config.window_color(bottom.remaining, bottom.is_long)
-        } else {
-            surface_color.clone()
-        };
-        let tz = config.reset_description_timezone_offset_minutes;
-        let top_marker = elapsed_marker_cell(top.reset, top.window, per, options.now_epoch, tz);
-        let bottom_marker =
-            elapsed_marker_cell(bottom.reset, bottom.window, per, options.now_epoch, tz);
-        for i in 0..per {
-            let top_cell = if Some(i) == top_marker {
-                elapsed_color
-            } else if i < top_fill {
-                top_color.as_str()
-            } else {
-                surface_color.as_str()
-            };
-            let bottom_cell = if Some(i) == bottom_marker {
-                elapsed_color
-            } else if i < bottom_fill {
-                bottom_color.as_str()
-            } else {
-                surface_color.as_str()
-            };
-            style_text(
-                out,
-                "▀",
-                Some(top_cell),
-                Some(bottom_cell),
-                Weight::Normal,
-                options.color,
-            );
-        }
+            Lane::from_window(bottom, config, stale)
+        },
+    })
+}
+
+/// A provider is model-pooled in `auto` mode when its `extraRateWindows` carry
+/// every present positional slot (matched on windowMinutes + resetsAt): the
+/// extras are then the canonical, complete dataset, so per-pool families drive
+/// the bar instead of the (possibly cross-family) positional slots.
+fn pooled_auto(slots: &[Option<&UsageWindow>; 3], extras: &[NamedWindow]) -> bool {
+    let present_extras: Vec<&NamedWindow> = extras
+        .iter()
+        .filter(|named| {
+            named
+                .window
+                .as_ref()
+                .is_some_and(|window| window.used_percent.is_some())
+        })
+        .collect();
+    if present_extras.is_empty() {
+        return false;
     }
-    style_text(
-        out,
-        "▏",
-        Some(&config.palette_bg),
-        Some(surface_color),
-        Weight::Normal,
-        options.color,
-    );
+    slots
+        .iter()
+        .flatten()
+        .all(|slot| extra_contains(&present_extras, slot))
+}
+
+/// Owned per-family windows for the split: a model-pooled provider becomes one
+/// synthetic `dual` provider per pool (top = short/live, bottom = long/cap).
+/// Mirrors `pool_families` grouping but yields cloned `UsageWindow`s so each
+/// record flows through the normal `dual` path. `usageKnown:false` placeholders
+/// keep their pairing slot but render empty (used_percent cleared).
+struct FamilyWindows {
+    label: char,
+    primary: UsageWindow,
+    secondary: Option<UsageWindow>,
+}
+
+fn family_windows(
+    provider: &str,
+    slots: &[Option<&UsageWindow>; 3],
+    extras: &[NamedWindow],
+) -> Vec<FamilyWindows> {
+    let present_extras: Vec<&NamedWindow> = extras
+        .iter()
+        .filter(|named| {
+            named
+                .window
+                .as_ref()
+                .is_some_and(|window| window.used_percent.is_some())
+        })
+        .collect();
+
+    let mut families: Vec<FamilyWindows> = Vec::new();
+    let mut unmatched: Vec<&UsageWindow> = slots
+        .iter()
+        .flatten()
+        .copied()
+        .filter(|slot| !extra_contains(&present_extras, slot))
+        .collect();
+    if !unmatched.is_empty() {
+        unmatched.sort_by_key(|window| window.window_minutes().unwrap_or(i64::MAX));
+        let secondary = if unmatched.len() > 1 {
+            Some(unmatched[unmatched.len() - 1].clone())
+        } else {
+            None
+        };
+        families.push(FamilyWindows {
+            label: family_label(Some(provider)),
+            primary: unmatched[0].clone(),
+            secondary,
+        });
+    }
+    for pair in present_extras.chunks(2) {
+        families.push(FamilyWindows {
+            label: family_label(pair[0].title.as_deref()),
+            primary: named_window(pair[0]),
+            secondary: pair.get(1).map(|named| named_window(named)),
+        });
+    }
+    families
+}
+
+/// Clone a named extra's window, clearing `usedPercent` for `usageKnown:false`
+/// placeholders so the lane renders empty rather than as fake live quota.
+fn named_window(named: &NamedWindow) -> UsageWindow {
+    let mut window = named.window.clone().unwrap_or(UsageWindow {
+        used_percent: None,
+        resets_at: None,
+        reset_description: None,
+        window_minutes: None,
+    });
+    if named.usage_known == Some(false) {
+        window.used_percent = None;
+    }
+    window
+}
+
+/// Superscript form of a family initial for the split sigil (`AG` -> `AGᴳ`),
+/// falling back to the plain letter where no modifier-letter glyph exists.
+fn superscript(label: char) -> char {
+    match label.to_ascii_uppercase() {
+        'A' => 'ᴬ',
+        'B' => 'ᴮ',
+        'C' => 'ᶜ',
+        'D' => 'ᴰ',
+        'E' => 'ᴱ',
+        'F' => 'ᶠ',
+        'G' => 'ᴳ',
+        'H' => 'ᴴ',
+        'I' => 'ᴵ',
+        'J' => 'ᴶ',
+        'K' => 'ᴷ',
+        'L' => 'ᴸ',
+        'M' => 'ᴹ',
+        'N' => 'ᴺ',
+        'O' => 'ᴼ',
+        'P' => 'ᴾ',
+        'R' => 'ᴿ',
+        'S' => 'ˢ',
+        'T' => 'ᵀ',
+        'U' => 'ᵁ',
+        'W' => 'ᵂ',
+        'X' => 'ˣ',
+        'Z' => 'ᶻ',
+        other => other,
+    }
+}
+
+/// Expand a model-pooled provider into one synthetic `dual` provider per pool
+/// (`AGᴳ`, `AGᶜ`). `Some` only when the resolved mode is `dual2` with >=2
+/// families; a single pool (or any other mode, e.g. `mono4`) renders normally.
+fn expand_pooled(
+    record: &ProviderRecord,
+    config: &RenderConfig,
+) -> Option<Vec<(String, ProviderRecord)>> {
+    let usage = record.usage.as_ref()?;
+    let slots = [
+        semantic_slot(&usage.primary),
+        semantic_slot(&usage.secondary),
+        semantic_slot(&usage.tertiary),
+    ];
+    let pooled = pooled_auto(&slots, &usage.extra_rate_windows);
+    let mode = terminal_mode_for_provider(config, &record.provider, slots[2].is_some(), pooled);
+    if mode != "dual2" {
+        return None;
+    }
+    let families = family_windows(&record.provider, &slots, &usage.extra_rate_windows);
+    if families.len() < 2 {
+        return None;
+    }
+    let base = provider_sigil(&record.provider);
+    Some(
+        families
+            .into_iter()
+            .take(2)
+            .map(|family| {
+                let sigil = format!("{base}{}", superscript(family.label));
+                let synthetic = ProviderRecord {
+                    provider: record.provider.clone(),
+                    error: None,
+                    usage: Some(Usage {
+                        primary: Some(family.primary),
+                        secondary: family.secondary,
+                        tertiary: None,
+                        extra_rate_windows: Vec::new(),
+                    }),
+                };
+                (sigil, synthetic)
+            })
+            .collect(),
+    )
 }
 
 fn filled_cells(remaining: i32, width: usize) -> usize {
@@ -790,24 +977,30 @@ fn terminal_mode_for_provider(
     config: &RenderConfig,
     provider: &str,
     has_tertiary: bool,
-    window_count: usize,
+    pooled: bool,
 ) -> String {
     let requested = match config.terminal_bar_mode.as_str() {
         "dual" => "dual",
         "dual2" => "dual2",
         "mono3" => "mono3",
         "mono4" => "mono4",
-        // `auto`: per-provider override (PROVIDER_MODES), otherwise dual.
-        _ => config.mode_for(provider).unwrap_or("dual"),
+        // `auto`: explicit per-provider override, else the family body for an
+        // auto-detected model-pooled provider, else the positional dual.
+        _ => config
+            .mode_for(provider)
+            .unwrap_or(if pooled { "dual2" } else { "dual" }),
     };
-    // Collapse to the densest body the data supports: mono4 needs four assembled
-    // windows; mono3 needs its third positional slot; dual2 needs paired extra
-    // windows (render_provider falls back to dual when there are none).
+    // mono3 collapses to dual without its third positional slot; the family
+    // bodies (dual2/mono4) pass through and adapt to the pool count at render.
     let mode = match requested {
-        "mono4" if window_count >= 4 => "mono4",
-        "mono4" if has_tertiary => "mono3",
         "mono3" if has_tertiary => "mono3",
+        "mono3" => "dual",
         "dual2" => "dual2",
+        // mono4 on a non-pooled provider with a third positional slot has no
+        // family to fill four lanes; keep the old collapse to mono3 so all
+        // three windows stay visible instead of dropping to a 2-window dual.
+        "mono4" if !pooled && has_tertiary => "mono3",
+        "mono4" => "mono4",
         _ => "dual",
     };
     mode.to_string()
@@ -1195,6 +1388,12 @@ mod tests {
 
     #[test]
     fn renders_provider_without_primary_window() {
+        // Antigravity now defaults to dual2; force mono3 to exercise the
+        // mono3 null-primary slot mapping (secondary→middle, tertiary→bottom).
+        let config = RenderConfig {
+            terminal_bar_mode: "mono3".into(),
+            ..RenderConfig::default()
+        };
         let output = render_zellij(
             br#"[
                 {
@@ -1206,7 +1405,7 @@ mod tests {
                     }
                 }
             ]"#,
-            &RenderConfig::default(),
+            &config,
             RenderOptions {
                 color: false,
                 stale: false,
@@ -1219,7 +1418,7 @@ mod tests {
         assert!(output.contains("AG"), "{output}");
         // No primary window: nothing to count down.
         assert!(output.contains("idle"), "{output}");
-        // Default config renders antigravity as mono3 (width 12):
+        // Forced mono3 renders the secondary-only shape (width 12):
         // secondary fills the middle row (100 remaining → 12 cells) and
         // tertiary the bottom row (75 remaining → 9 cells), so cells are
         // middle+bottom (mask 6) then middle-only (mask 2).
@@ -1232,5 +1431,74 @@ mod tests {
                 "missing primary must not light the top row: {output}"
             );
         }
+    }
+
+    fn cycle_window(reset: &str, minutes: i64) -> UsageWindow {
+        UsageWindow {
+            used_percent: Some(10.0),
+            resets_at: Some(reset.to_string()),
+            reset_description: None,
+            window_minutes: Some(minutes),
+        }
+    }
+
+    #[test]
+    fn shared_cycle_requires_uniform_reset_and_window() {
+        let a = cycle_window("2099-01-15T00:00:00Z", 43200);
+        let b = cycle_window("2099-01-15T00:00:00Z", 43200);
+        assert!(shared_cycle(&[Some(&a), Some(&b), None]));
+
+        // Different reset disqualifies (independent cycles).
+        let other_reset = cycle_window("2099-01-16T00:00:00Z", 43200);
+        assert!(!shared_cycle(&[Some(&a), Some(&other_reset), None]));
+
+        // Different horizon disqualifies (live tier vs longer cap).
+        let short = cycle_window("2099-01-15T00:00:00Z", 300);
+        assert!(!shared_cycle(&[Some(&a), Some(&short), None]));
+
+        // A single present slot is not a shared cycle.
+        assert!(!shared_cycle(&[Some(&a), None, None]));
+
+        // A present slot missing reset/window disqualifies the set.
+        let bare = UsageWindow {
+            used_percent: Some(5.0),
+            resets_at: None,
+            reset_description: None,
+            window_minutes: None,
+        };
+        assert!(!shared_cycle(&[Some(&a), Some(&bare)]));
+    }
+
+    #[test]
+    fn shared_cycle_pools_render_bright_with_single_marker() {
+        // Cursor's Total/Auto/API share one billing cycle (same resetsAt +
+        // windowMinutes), so a forced dual body keeps both rows at full
+        // brightness (no long-horizon dimming) and draws only the primary
+        // pacing marker rather than the identical secondary one.
+        let config = RenderConfig {
+            terminal_bar_mode: "dual".into(),
+            zellij_bar_width: 8,
+            ..RenderConfig::default()
+        };
+        let output = render_zellij(
+            include_bytes!("../../../test/fixtures/codexbar-cursor.json"),
+            &config,
+            RenderOptions {
+                color: true,
+                stale: false,
+                degraded_cli: false,
+                now_epoch: 4_070_908_800,
+            },
+        )
+        .expect("rendered cursor fixture");
+
+        // Fills are bright "good" (25be6a); without shared-cycle handling the
+        // 30-day horizon (43200 >= dim threshold) would dim this color away.
+        assert!(output.contains("38;2;37;190;106"), "{output}");
+        // Primary pacing marker (be95ff) drawn as a foreground...
+        assert!(output.contains("38;2;190;149;255"), "{output}");
+        // ...but the redundant secondary marker (same column, drawn as a
+        // background) is suppressed.
+        assert!(!output.contains("48;2;190;149;255"), "{output}");
     }
 }
