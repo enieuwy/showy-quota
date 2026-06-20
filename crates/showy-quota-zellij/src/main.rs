@@ -20,6 +20,29 @@ const FALLBACK_PROVIDER_ATTEMPT_KEY: &str = "showy-quota-provider-attempt";
 const SERVE_FAILURES_BEFORE_CLI: u8 = 3;
 const MANAGED_SERVE_RETRY_COOLDOWN_SECONDS: f64 = 30.0;
 const PROVIDER_DISCOVERY_BACKOFF_SECONDS_DEFAULT: f64 = 60.0;
+const PROVIDER_COMMAND_TIMEOUT_SECONDS: u64 = 15;
+const PROVIDER_BACKOFF_MAX_SECONDS: f64 = 1800.0;
+
+/// POSIX-sh watchdog that runs `"$@"` but guarantees the spawned process cannot
+/// outlive `timeout_secs`. Zellij exposes no API to cancel a `run_command`, so a
+/// CLI fallback that wedges on an interactive prompt (e.g. the macOS login
+/// keychain for Claude credentials) would otherwise leak as a zellij-server
+/// child and queue a fresh prompt on every retry. The watchdog reaps it instead.
+fn watchdog_script(timeout_secs: u64) -> String {
+    format!(
+        "\"$@\" & __p=$!; (sleep {t}; kill \"$__p\" 2>/dev/null; sleep 2; kill -9 \"$__p\" 2>/dev/null) & __k=$!; wait \"$__p\"; __r=$?; kill \"$__k\" 2>/dev/null; exit \"$__r\"",
+        t = timeout_secs
+    )
+}
+
+/// Wrap a command in the self-terminating watchdog. `$0` is only a label; the
+/// real command rides in `"$@"`, so provider ids and the configured binary path
+/// are never interpolated into the shell string (injection-safe).
+fn watchdog_argv<'a>(script: &'a str, command: &[&'a str]) -> Vec<&'a str> {
+    let mut argv = vec!["/bin/sh", "-c", script, "showy-quota-watchdog"];
+    argv.extend_from_slice(command);
+    argv
+}
 #[cfg(target_arch = "wasm32")]
 fn shim_set_selectable(selectable: bool) {
     set_selectable(selectable);
@@ -131,6 +154,7 @@ struct ProviderFallbackState {
     last_attempt_seconds: Option<f64>,
     last_failure_seconds: Option<f64>,
     active_attempt_token: Option<String>,
+    consecutive_failures: u32,
 }
 
 #[derive(Debug)]
@@ -681,7 +705,8 @@ impl State {
             "json",
             "--pretty",
         ];
-        shim_run_command(&argv, context);
+        let script = watchdog_script(PROVIDER_COMMAND_TIMEOUT_SECONDS);
+        shim_run_command(&watchdog_argv(&script, &argv), context);
     }
 
     fn handle_discovery_result(&mut self, exit: Option<i32>, stdout: Vec<u8>, attempt: Option<&str>) {
@@ -820,11 +845,27 @@ impl State {
         }
         if let Some(failed_at) = state.last_failure_seconds {
             let elapsed = (now - failed_at).max(0.0);
-            if elapsed < self.provider_failure_backoff_seconds {
+            if elapsed < self.effective_provider_backoff(state) {
                 return true;
             }
         }
         false
+    }
+
+    /// Per-provider failure backoff with exponential escalation. A provider
+    /// whose CLI call keeps wedging (keychain prompt, offline backend) doubles
+    /// its retry window each consecutive failure up to `PROVIDER_BACKOFF_MAX_SECONDS`,
+    /// so a persistently blocking provider is probed rarely instead of every tick.
+    fn effective_provider_backoff(&self, state: &ProviderFallbackState) -> f64 {
+        let base = self.provider_failure_backoff_seconds;
+        let cap = PROVIDER_BACKOFF_MAX_SECONDS.max(base);
+        match state.consecutive_failures {
+            0 | 1 => base,
+            n => {
+                let shift = (n - 1).min(20);
+                (base * 2f64.powi(shift as i32)).min(cap)
+            }
+        }
     }
 
     fn kick_provider_call(&mut self, provider: &str) {
@@ -857,7 +898,8 @@ impl State {
         if include_status {
             argv.push("--status");
         }
-        shim_run_command(&argv, context);
+        let script = watchdog_script(PROVIDER_COMMAND_TIMEOUT_SECONDS);
+        shim_run_command(&watchdog_argv(&script, &argv), context);
     }
 
     fn handle_provider_fallback_result(
@@ -912,6 +954,7 @@ impl State {
         entry.last_record = record;
         entry.last_result_empty = entry.last_record.is_none();
         entry.last_failure_seconds = None;
+        entry.consecutive_failures = 0;
         entry.in_flight = false;
         entry.active_attempt_token = None;
         self.publish_synthesized_cli_payload(now)
@@ -926,6 +969,7 @@ impl State {
         entry.active_attempt_token = None;
         entry.last_result_empty = false;
         entry.last_failure_seconds = Some(now);
+        entry.consecutive_failures = entry.consecutive_failures.saturating_add(1);
     }
 
     fn clear_all_provider_in_flight(&mut self) {
@@ -1022,6 +1066,7 @@ impl State {
             state.in_flight = false;
             state.active_attempt_token = None;
             state.last_failure_seconds = Some(now);
+            state.consecutive_failures = state.consecutive_failures.saturating_add(1);
         }
     }
 
@@ -1938,6 +1983,39 @@ mod tests {
         state.record_provider_failure("codex", now);
         assert!(state.provider_in_flight_or_backoff("codex", now + 30.0));
         assert!(!state.provider_in_flight_or_backoff("codex", now + 61.0));
+    }
+
+    #[test]
+    fn provider_backoff_escalates_on_consecutive_failures() {
+        let mut state = State {
+            provider_failure_backoff_seconds: 60.0,
+            ..State::default()
+        };
+        let now = 1_000.0;
+        // Two consecutive failures double the retry window to 120s.
+        state.record_provider_failure("codex", now);
+        state.record_provider_failure("codex", now);
+        assert!(state.provider_in_flight_or_backoff("codex", now + 90.0));
+        assert!(!state.provider_in_flight_or_backoff("codex", now + 121.0));
+        // A success clears the escalation back to the base window.
+        let entry = state.provider_states.get_mut("codex").unwrap();
+        entry.consecutive_failures = 0;
+        entry.last_failure_seconds = Some(now);
+        assert!(!state.provider_in_flight_or_backoff("codex", now + 61.0));
+    }
+
+    #[test]
+    fn watchdog_argv_wraps_command_without_interpolation() {
+        let script = watchdog_script(15);
+        let argv = watchdog_argv(&script, &["codexbar", "usage", "--provider", "claude"]);
+        assert_eq!(argv[0], "/bin/sh");
+        assert_eq!(argv[1], "-c");
+        assert_eq!(argv[2], script.as_str());
+        assert_eq!(&argv[4..], &["codexbar", "usage", "--provider", "claude"]);
+        assert!(script.contains("sleep 15"));
+        assert!(script.contains("kill -9"));
+        // Provider ids and the binary path ride in "$@", never the shell string.
+        assert!(!script.contains("claude"));
     }
 
     #[test]

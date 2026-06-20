@@ -15,6 +15,30 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `dual` body for providers without a tertiary window, matching the SketchyBar
   renderer which already drops the absent tertiary row, so a provider whose
   third positional slot is empty no longer shows a blank bottom lane.
+- The standalone Zellij plugin no longer floods macOS with keychain prompts
+  (and no longer leaks `codexbar usage --provider …` processes as zellij-server
+  children) when `codexbar serve` cannot reach a provider that blocks on an
+  interactive prompt — e.g. the login-keychain "Claude Code-credentials" dialog.
+  Per-provider CLI fallback and provider discovery now run through a POSIX-sh
+  watchdog that terminates the spawned command after
+  `PROVIDER_COMMAND_TIMEOUT_SECONDS` (15s); Zellij has no command-cancel API, so
+  a wedged command previously survived forever and a fresh prompt queued on
+  every retry. Per-provider failure backoff now escalates exponentially (base
+  doubling per consecutive failure, capped at 30 min), so a persistently
+  blocking provider is probed rarely instead of every tick while its
+  last-known-good slice keeps rendering as degraded.
+- `bin/showy-quota-fetch` no longer restarts the managed `codexbar serve` when
+  `/usage` merely times out (curl exit 28). A serve whose `/health` is OK but
+  whose `/usage` blocks on provider collection (keychain) is alive, not
+  unhealthy; restarting it only spawned a fresh serve that re-triggered the same
+  blocking collection and prompt. It now records a serve failure and falls back
+  without churning serve.
+- Per-provider CLI fallback now carries forward each provider's last-known-good
+  record from the existing cache when its fresh fetch fails or is in backoff, so
+  a transiently blocking provider (claude, cursor) renders stale instead of
+  vanishing from the bars. Carry-forward is gated on at least one fresh success,
+  so a cycle where every provider fails still preserves the prior cache and lets
+  it age to stale rather than republishing it under a fresh timestamp.
 
 ### Changed
 - Model-pooled providers now adapt to the data with no configuration: in `auto`

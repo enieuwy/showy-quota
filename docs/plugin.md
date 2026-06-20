@@ -226,7 +226,7 @@ Common options:
 |`cli_fallback`|`degraded`|`degraded` or `off`. Degraded fallback appends `degraded_cli_glyph`.|
 |`cli_command`|`codexbar`|Command used for provider discovery (`codexbar config providers …`) and per-provider fallback (`codexbar usage --provider <id> …`). Do not point this at `showy-quota-fetch`; the plugin is intentionally self-contained.|
 |`cli_interval_seconds`|`120`|Slow cadence while fallback is active; the plugin still probes serve every tick and switches back when it recovers.|
-|`provider_failure_backoff_seconds`|`cli_interval_seconds`|How long to skip a provider after one of its CLI calls fails.|
+|`provider_failure_backoff_seconds`|`cli_interval_seconds`|Base window to skip a provider after a CLI call fails. The window escalates exponentially per consecutive failure (capped at 30 min), so a provider that keeps wedging is probed rarely.|
 |`reset_description_timezone_offset`|`UTC`|Optional fixed offset (`UTC`, `+HH:MM`, or `-HH:MM`) used only when CodexBar provides local-time `resetDescription` text without an ISO `resetsAt`. The WASM plugin cannot infer the host timezone reliably, so set this explicitly if CodexBar emits local-time descriptions and your local zone is not UTC. Prefer ISO timestamps when available; this fallback cannot model DST transitions.|
 |`provider_discovery_backoff_seconds`|`60`|How long to skip provider discovery after failure, and how long a successful CodexBar provider inventory is reused before refresh.|
 |`providers`|empty|Comma-separated allow-list and render order. When set, it also constrains the per-provider fallback work list.|
@@ -264,7 +264,7 @@ The shell integrations still use `config.env`; the plugin uses KDL so the WASM a
 |Permission denied|Shows `showy-quota: permission denied`.|
 |CodexBar serve unavailable before first success|Starts `codexbar serve`; if startup fails, runs `codexbar config providers` discovery followed by per-provider `codexbar usage --provider <id>` calls. Shows `showy-quota: CodexBar serve unavailable` only when `cli_fallback "off"` is set.|
 |CLI fallback active|Merges successful per-provider records into the in-memory payload, marks output with `⚠cli`, and continues probing serve so it can switch back automatically.|
-|Single provider hangs or errors|That provider's slot keeps its previous record; the per-provider backoff prevents repeated retries within the configured window. Other providers continue to render normally.|
+|Single provider hangs or errors|A POSIX-sh watchdog terminates the spawned `codexbar usage` after 15s (Zellij has no command-cancel API), so a wedged call — e.g. one blocked on the macOS keychain — cannot leak as a zellij-server child or re-prompt every retry. That provider's slot keeps its previous record, and its backoff escalates so repeated hangs retry rarely. Other providers continue to render normally.|
 |Serve fails after a success|Keeps rendering last-known-good output; turns stale at `2 × interval_seconds`; falls back only after repeated failures.|
 |Serve returns invalid JSON|Keeps last-known-good output; before first success tries the per-provider degraded fallback.|
 |No renderable providers and no prior data|Renders `AI idle`. CodexBar reporting zero enabled providers is the same canonical empty state, not an error.|

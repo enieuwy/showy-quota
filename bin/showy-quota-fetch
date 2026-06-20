@@ -814,6 +814,21 @@ run_codexbar_cli_provider() {
     return 0
 }
 
+# Emit the prior cache record(s) for a provider as a one-element JSON array, so a
+# provider whose fresh CLI fetch is skipped (backoff) or fails keeps its
+# last-known-good slice instead of vanishing from the merged payload. Returns 1
+# when the cache is absent/invalid or has no record for the provider.
+carry_forward_provider_record() {
+    local provider="$1" record=""
+    [[ -s "${SHOWY_QUOTA_USAGE_FILE}" ]] || return 1
+    showy_quota_json_valid "${SHOWY_QUOTA_USAGE_FILE}" || return 1
+    record=$(jq -c --arg p "${provider}" \
+        '[.[] | select(type == "object" and .provider == $p)]' \
+        "${SHOWY_QUOTA_USAGE_FILE}" 2>/dev/null) || return 1
+    [[ -n "${record}" && "${record}" != "[]" ]] || return 1
+    printf '%s' "${record}"
+}
+
 # Per-provider CLI fallback: discover providers, run one CLI invocation per
 # provider with isolation, and merge successful records into one publishable
 # array. Returns 0 with merged JSON on stdout when at least one provider
@@ -835,11 +850,14 @@ run_codexbar_cli_per_provider() {
     [[ -n "${providers}" ]] || return 1
 
     local -a accumulated=()
-    local provider provider_rc
+    local provider provider_rc fresh_count=0
     local out=""
     while IFS= read -r provider; do
         [[ -n "${provider}" ]] || continue
         if provider_failure_backoff_active "${provider}"; then
+            if out=$(carry_forward_provider_record "${provider}"); then
+                accumulated+=("${out}")
+            fi
             continue
         fi
         provider_rc=0
@@ -849,13 +867,17 @@ run_codexbar_cli_per_provider() {
         fi
         if (( provider_rc != 0 )); then
             record_provider_failure "${provider}"
+            if out=$(carry_forward_provider_record "${provider}"); then
+                accumulated+=("${out}")
+            fi
             continue
         fi
         clear_provider_failure "${provider}"
         accumulated+=("${out}")
+        fresh_count=$((fresh_count + 1))
     done < <(printf '%s\n' "${providers}")
 
-    (( ${#accumulated[@]} > 0 )) || return 1
+    (( fresh_count > 0 )) || return 1
 
     # Merge per-provider arrays into one publishable array. Validation in
     # `publish_cache_payload` runs again before we publish, so a degenerate
@@ -1165,7 +1187,7 @@ serve_payload_inventory() {
 
 run_codexbar_serve_with_recovery() {
     local check_inventory="${1:-0}"
-    local out attempt threshold max_attempts=1 inventory_check_available=0 inventory_drift=0
+    local out attempt threshold max_attempts=1 inventory_check_available=0 inventory_drift=0 usage_timed_out=0 serve_cmd_rc=0
     threshold=$(serve_failure_restart_threshold)
     if [[ "${SHOWY_QUOTA_MANAGE_SERVE:-1}" == "1" ]] && managed_serve_pid_alive; then
         max_attempts="${threshold}"
@@ -1187,7 +1209,9 @@ run_codexbar_serve_with_recovery() {
         return 2
     fi
     for (( attempt=1; attempt<=max_attempts; attempt++ )); do
-        if out=$(run_codexbar_serve); then
+        serve_cmd_rc=0
+        out=$(run_codexbar_serve) || serve_cmd_rc=$?
+        if (( serve_cmd_rc == 0 )); then
             if serve_payload_is_publishable "${out}"; then
                 if (( inventory_check_available )); then
                     local actual_inventory
@@ -1215,10 +1239,15 @@ run_codexbar_serve_with_recovery() {
                     break
                 fi
             fi
+        elif (( serve_cmd_rc == 28 )); then
+            usage_timed_out=1
+            showy_quota_log "codexbar serve /usage timed out; serve is alive but blocking on collection, not restarting"
+            break
         fi
     done
 
     if [[ "${SHOWY_QUOTA_MANAGE_SERVE:-1}" == "1" ]] \
+        && (( usage_timed_out == 0 )) \
         && managed_serve_pid_alive \
         && serve_health_ok
     then

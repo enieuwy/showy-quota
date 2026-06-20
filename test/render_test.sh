@@ -1998,6 +1998,39 @@ PY
         exit $?
     fi
 
+    if [[ "${SHOWY_QUOTA_TEST_MANAGED_MODE:-healthy}" == "health-ok-usage-hang" ]]; then
+        python3 - "${port}" <<'PY' &
+import http.server
+import sys
+import time
+
+port = int(sys.argv[1])
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/health":
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"{}")
+            return
+        if self.path == "/usage":
+            time.sleep(30)
+            return
+        self.send_response(404)
+        self.end_headers()
+
+    def log_message(self, _format, *args):
+        return
+
+http.server.ThreadingHTTPServer.allow_reuse_address = True
+http.server.ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()
+PY
+        child=$!
+        trap 'kill "${child}" 2>/dev/null || true' EXIT TERM INT
+        wait "${child}"
+        exit $?
+    fi
+
     python3 - "${port}" "${SHOWY_QUOTA_TEST_SERVE_FIXTURE}" <<'PY' &
 import http.server
 import sys
@@ -2145,6 +2178,37 @@ else
     count_value="missing"
     [[ -r "${managed_count_file}" ]] && count_value=$(< "${managed_count_file}")
     fail "fetcher restarts managed serve when health is OK but usage is not publishable" "rc=${rc}; out=${out}; count=${count_value}"
+fi
+
+cache=$(mk_cache)
+managed_port=$(unused_tcp_port)
+managed_url="http://127.0.0.1:${managed_port}"
+managed_count_file="${TMP}/managed-usage-hang-count.log"
+rm -f "${managed_count_file}"
+rc=0
+out=$(
+    PATH="${managed_bin_dir}:${PATH}" \
+    SHOWY_QUOTA_NO_CONFIG=1 \
+    SHOWY_QUOTA_MANAGE_SERVE=1 \
+    SHOWY_QUOTA_CACHE_DIR="${cache}" \
+    SHOWY_QUOTA_CODEXBAR_SERVE_URL="${managed_url}" \
+    SHOWY_QUOTA_CODEXBAR_SERVE_START_WAIT_TENTHS=50 \
+    SHOWY_QUOTA_CODEXBAR_SERVE_TIMEOUT_SECONDS=1 \
+    SHOWY_QUOTA_CODEXBAR_SERVE_FAILURES_BEFORE_RESTART=1 \
+    SHOWY_QUOTA_PROVIDERS=claude \
+    SHOWY_QUOTA_TEST_MANAGED_MODE=health-ok-usage-hang \
+    SHOWY_QUOTA_TEST_MANAGED_COUNT_FILE="${managed_count_file}" \
+    SHOWY_QUOTA_TEST_SERVE_FIXTURE="${FIXTURE_DIR}/codexbar-realistic.json" \
+    SHOWY_QUOTA_TEST_FIXTURE="${FIXTURE_DIR}/codexbar-low.json" \
+    "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
+) || rc=$?
+SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_CACHE_DIR="${cache}" SHOWY_QUOTA_CODEXBAR_BIN="${managed_bin_dir}/codexbar" SHOWY_QUOTA_CODEXBAR_SERVE_URL="${managed_url}" "${REPO_ROOT}/bin/showy-quota-fetch" --stop-serve >/dev/null 2>/dev/null || true
+if [[ "$(< "${managed_count_file}")" == "1" ]] && [[ "$(< "${cache}/source")" == "cli" ]] && printf '%s' "${out}" | jq -e 'type == "array" and any(.provider == "claude")' >/dev/null 2>&1; then
+    ok "fetcher does not restart managed serve when usage times out"
+else
+    count_value="missing"
+    [[ -r "${managed_count_file}" ]] && count_value=$(< "${managed_count_file}")
+    fail "fetcher does not restart managed serve when usage times out" "rc=${rc}; out=${out}; count=${count_value}; source=$(cat "${cache}/source" 2>/dev/null)"
 fi
 
 
