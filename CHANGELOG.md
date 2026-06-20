@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-06-20
+
 ### Fixed
 - The SketchyBar countdown label no longer truncates the widest `HH:MM`
   reset times (e.g. Gemini's `23:59` lost its last digit). The pinned
@@ -330,7 +332,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `bin/showy-quota-fetch`: cache dir and files now persist as `0700`/`0600`
   instead of the user's default umask. CodexBar usage JSON stays user-only.
 
-[Unreleased]: https://github.com/enieuwy/showy-quota/compare/v0.2.5...HEAD
+[Unreleased]: https://github.com/enieuwy/showy-quota/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/enieuwy/showy-quota/compare/v0.2.5...v0.3.0
 [0.2.5]: https://github.com/enieuwy/showy-quota/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/enieuwy/showy-quota/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/enieuwy/showy-quota/compare/v0.2.2...v0.2.3
