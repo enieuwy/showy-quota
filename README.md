@@ -158,18 +158,18 @@ provider:
   half-block layout. Each window is colored by its remaining-quota severity
   and dimmed when it is a weekly/monthly cap; both rows show a pacing marker
   (the `elapsed` color tints the upper half for the primary window and the
-  lower half for the secondary). Body width is 12 cells.
+  lower half for the secondary). Body width is 12 cells. <img src="docs/images/dual-terminal.png" alt="dual terminal rendering layout" width="420">
 - **`mono3`** (default for `gemini`, `cursor`): packs primary,
   secondary, and tertiary into a single sextant cell per column with
   top/middle/bottom rows. Uses a single provider-level foreground color
   and `mono_markers` pacing separators. Providers whose windows share one
   billing cycle (same reset and window length, e.g. Cursor's Total/Auto/API)
-  stay at full brightness and show a single pacing marker.
+  stay at full brightness and show a single pacing marker. <img src="docs/images/mono3-terminal.png" alt="mono3 terminal rendering layout" width="420">
 - **`mono4`** (opt-in): packs four per-pool windows (e.g. Antigravity's
   Gemini and Claude+GPT session/weekly pools, from `extraRateWindows`) into
   a single octant cell per column. Like `mono3` but four lanes — requires an
   octant-capable terminal (Ghostty, kitty, WezTerm); run
-  `python3 docs/scripts/preview-quad-octants.py` to test yours.
+  `python3 docs/scripts/preview-quad-octants.py` to test yours. <img src="docs/images/mono4-terminal.png" alt="mono4 terminal rendering layout" width="190">
 - **`dual2`** (auto-detected for model-pooled providers like `antigravity`):
   splits the provider into one standalone `dual` per pool (`AGᴳ` for Gemini,
   `AGᶜ` for Claude+GPT), each from `extraRateWindows` and rendered by the
@@ -177,11 +177,8 @@ provider:
   `mono4`). `auto` engages the split when a provider's extras carry all its
   positional slots; a single pool stays one plain `dual` (Antigravity via OAuth
   reports only Gemini). Force the split per provider with
-  `SHOWY_QUOTA_PROVIDER_MODES=<provider>=dual2`.
-
-<p>
-  <img src="docs/images/mono3-terminal.png" alt="mono3 terminal rendering layout" width="420">
-</p>
+  `SHOWY_QUOTA_PROVIDER_MODES=<provider>=dual2`. <img src="docs/images/dual2-terminal.png" alt="dual2 terminal rendering layout" width="438">
+  
 
 Customize terminal layout with `SHOWY_QUOTA_TERMINAL_BAR_MODE=dual|dual2|mono3|mono4`.
 For per-provider auto-mode selection and marker behavior, use
@@ -224,26 +221,28 @@ diagnostic surface as stable machine-readable JSON.
 
 ## Configuration
 
-Every script reads optional overrides from `~/.config/showy-quota/config.env`.
-The file is optional; create it only for values you want to override.
+The shell integrations (SketchyBar, tmux, and the Zellij shell renderers) read
+optional overrides from `~/.config/showy-quota/config.env`. The standalone Zellij WASM plugin is configured with
+KDL keys instead (the same names without the `SHOWY_QUOTA_` prefix, lowercased);
+see [`docs/plugin.md`](docs/plugin.md#configuration).
 
-Most users only need these; the full environment surface lives in
-[`share/config.env.example`](share/config.env.example).
+Config is optional; create it only for values you want to override. The full environment surface lives in
+[`share/config.env.example`](share/config.env.example) — most users only need these:
 
-| Variable | Default | Effect |
-|---|---|---|
-| `SHOWY_QUOTA_THEME` | unset (default palette) | Load a named built-in or user palette. |
-| `SHOWY_QUOTA_PROVIDERS` | empty | Ordered provider allow-list; empty renders CodexBar's enabled providers. |
-| `SHOWY_QUOTA_PROVIDERS_EXCLUDE` | empty | Provider deny-list applied after the allow-list. |
-| `SHOWY_QUOTA_PROVIDER_ORDER` | `codex,claude,copilot,opencode,gemini` | Stable render order without filtering. |
-| `SHOWY_QUOTA_REFRESH_SECONDS` | `120` | Slow CLI fallback refresh interval. |
-| `SHOWY_QUOTA_MANAGE_SERVE` | `1` | Start `codexbar serve` automatically before CLI fallback; set `0` to disable. |
-| `SHOWY_QUOTA_CODEXBAR_SERVE_URL` | `http://127.0.0.1:8080` | Local `codexbar serve` base URL; set empty to skip HTTP probing. |
-| `SHOWY_QUOTA_CODEXBAR_SERVE_TIMEOUT_SECONDS` | `10` | Per-request timeout for local `/health` and `/usage` probes. |
-| `SHOWY_QUOTA_CODEXBAR_SERVE_PORT` | `8080` | Port passed to managed `codexbar serve --port`. |
-| `SHOWY_QUOTA_CODEXBAR_SERVE_REFRESH_SECONDS` | `10` | Refresh interval when `codexbar serve` is available. |
-| `SHOWY_QUOTA_TIME_WARN_MINUTES` | `30` | Urgent countdown threshold. |
-| `SHOWY_QUOTA_SKETCHYBAR_CLICK` | `open -b com.steipete.codexbar` | Default SketchyBar click action; degraded icons open provider status URLs. |
+| Variable | Effect |
+|---|---|
+| `SHOWY_QUOTA_THEME` | Load a named built-in or user palette. default=unset (default palette) |
+| `SHOWY_QUOTA_PROVIDERS` | Ordered provider allow-list; empty renders CodexBar's enabled providers. default=empty |
+| `SHOWY_QUOTA_PROVIDERS_EXCLUDE` | Provider deny-list applied after the allow-list. default=empty |
+| `SHOWY_QUOTA_PROVIDER_ORDER` | Stable render order without filtering. default=`codex,claude,copilot,opencode,gemini` |
+| `SHOWY_QUOTA_REFRESH_SECONDS` | Slow CLI fallback refresh interval. default=`120` |
+| `SHOWY_QUOTA_MANAGE_SERVE` | Start `codexbar serve` automatically before CLI fallback; set `0` to disable. default=`1` |
+| `SHOWY_QUOTA_CODEXBAR_SERVE_URL` | Local `codexbar serve` base URL; set empty to skip HTTP probing. default=`http://127.0.0.1:8080` |
+| `SHOWY_QUOTA_CODEXBAR_SERVE_TIMEOUT_SECONDS` | Per-request timeout for local `/health` and `/usage` probes. default=`10` |
+| `SHOWY_QUOTA_CODEXBAR_SERVE_PORT` | Port passed to managed `codexbar serve --port`. default=`8080` |
+| `SHOWY_QUOTA_CODEXBAR_SERVE_REFRESH_SECONDS` | Refresh interval when `codexbar serve` is available. default=`10` |
+| `SHOWY_QUOTA_TIME_WARN_MINUTES` | Urgent countdown threshold. default=`30` |
+| `SHOWY_QUOTA_SKETCHYBAR_CLICK` | Default SketchyBar click action; degraded icons open provider status URLs. default=`open -b com.steipete.codexbar` |
 
 Palette overrides use role-first keys such as `SHOWY_QUOTA_PALETTE_PRIMARY_*`.
 Secondary and tertiary row colors auto-derive from the primary palette at

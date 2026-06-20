@@ -6,6 +6,15 @@
 # terminal grid's top-left cell. Capture is done from a full-screen image and
 # cropped from CoreGraphics window bounds so macOS window borders/shadows do not
 # leak into the final PNGs.
+#
+# Usage:
+#   capture-terminal-themes.sh                 # every theme gallery strip
+#   capture-terminal-themes.sh <theme> ...     # named theme strips
+#   capture-terminal-themes.sh --bars          # dual/mono3/dual2/mono4 mode strips
+#   capture-terminal-themes.sh --bars <mode>   # named mode strips
+#
+# Mode strips auto-trim to content width (fixed row height) and land in
+# docs/images/<mode>-terminal.png for the README "Terminal rendering modes" list.
 
 set -euo pipefail
 
@@ -139,22 +148,24 @@ EOF
     chmod +x "${command_file}"
 }
 
-write_mono3_command_script() {
-    local command_file="$1"
-    cat > "${command_file}" <<EOF
-#!${BASH_BIN}
-set -euo pipefail
-export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:\${PATH:-}"
-cd "${REPO_ROOT}"
-printf '\\033[?25l\\033[2J\\033[H'
-SHOWY_QUOTA_THEME=default \\
-    SHOWY_QUOTA_NO_CONFIG=1 \\
-    SHOWY_QUOTA_FORCE_COLOR=1 \\
-    SHOWY_QUOTA_NOW_EPOCH=4070908800 \\
-    SHOWY_QUOTA_CAP_LEFT=\$'\\ue0b6' \\
-    SHOWY_QUOTA_CAP_RIGHT=\$'\\ue0b4' \\
-    SHOWY_QUOTA_TERMINAL_BAR_MODE=mono3 \\
-    "${REPO_ROOT}/bin/showy-quota-zellij-bar" --json - <<'JSON'
+bar_payload() {
+    case "$1" in
+    dual)
+        cat <<'JSON'
+[
+  {"provider":"codex","usage":{
+    "primary":  {"usedPercent":28,"resetsAt":"2099-01-01T02:43:00Z","windowMinutes":300},
+    "secondary":{"usedPercent":60,"resetsAt":"2099-01-04T00:00:00Z","windowMinutes":10080}
+  }},
+  {"provider":"claude","usage":{
+    "primary":  {"usedPercent":45,"resetsAt":"2099-01-01T01:36:00Z","windowMinutes":300},
+    "secondary":{"usedPercent":72,"resetsAt":"2099-01-05T00:00:00Z","windowMinutes":10080}
+  }}
+]
+JSON
+        ;;
+    mono3)
+        cat <<'JSON'
 [
   {"provider":"gemini","usage":{
     "primary":  {"usedPercent":92,"resetsAt":"2099-01-01T02:30:00Z","windowMinutes":300},
@@ -168,8 +179,55 @@ SHOWY_QUOTA_THEME=default \\
   }}
 ]
 JSON
+        ;;
+    dual2 | mono4)
+        cat <<'JSON'
+[
+  {"provider":"antigravity","usage":{
+    "primary":  {"usedPercent":100,"windowMinutes":10080,"resetsAt":"2099-01-03T00:00:00Z"},
+    "secondary":{"usedPercent":82,"windowMinutes":10080,"resetsAt":"2099-01-02T00:00:00Z"},
+    "tertiary": null,
+    "extraRateWindows":[
+      {"id":"antigravity-quota-summary-gemini-5h","title":"Gemini Session","window":{"usedPercent":35,"windowMinutes":300,"resetsAt":"2099-01-01T03:24:00Z"}},
+      {"id":"antigravity-quota-summary-gemini-weekly","title":"Gemini Weekly","window":{"usedPercent":100,"windowMinutes":10080,"resetsAt":"2099-01-03T00:00:00Z"}},
+      {"id":"antigravity-quota-summary-3p-5h","title":"Claude + GPT Session","window":{"usedPercent":10,"windowMinutes":300,"resetsAt":"2099-01-01T01:52:00Z"}},
+      {"id":"antigravity-quota-summary-3p-weekly","title":"Claude + GPT Weekly","window":{"usedPercent":82,"windowMinutes":10080,"resetsAt":"2099-01-02T00:00:00Z"}}
+    ]
+  }}
+]
+JSON
+        ;;
+    *)
+        printf 'showy-quota: unknown bar payload %s\n' "$1" >&2
+        return 1
+        ;;
+    esac
+}
+
+write_bar_command_script() {
+    local command_file="$1" mode="$2"
+    {
+        cat <<EOF
+#!${BASH_BIN}
+set -euo pipefail
+export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:\${PATH:-}"
+cd "${REPO_ROOT}"
+printf '\\033[?25l\\033[2J\\033[H'
+SHOWY_QUOTA_THEME=default \\
+    SHOWY_QUOTA_NO_CONFIG=1 \\
+    SHOWY_QUOTA_FORCE_COLOR=1 \\
+    SHOWY_QUOTA_NOW_EPOCH=4070908800 \\
+    SHOWY_QUOTA_CAP_LEFT=\$'\\ue0b6' \\
+    SHOWY_QUOTA_CAP_RIGHT=\$'\\ue0b4' \\
+    SHOWY_QUOTA_TERMINAL_BAR_MODE=${mode} \\
+    "${REPO_ROOT}/bin/showy-quota-zellij-bar" --json - <<'JSON'
+EOF
+        bar_payload "${mode}"
+        cat <<EOF
+JSON
 sleep "${HOLD_SECONDS}"
 EOF
+    } > "${command_file}"
     chmod +x "${command_file}"
 }
 
@@ -294,18 +352,28 @@ capture_theme() {
     active_config=""
 }
 
-capture_mono3() {
-    local command_file="${TMP_DIR}/mono3.sh"
-    local config_file="${TMP_DIR}/mono3.ghostty"
-    local screen_file="${TMP_DIR}/mono3-screen.png"
-    local raw_file="${TMP_DIR}/mono3-raw.png"
-    local out_file="${REPO_ROOT}/docs/images/mono3-terminal.png"
-    local mono3_w="${SHOWY_QUOTA_CAPTURE_MONO3_W:-1200}"
-    local bg fg bounds scale geometry
+bar_content_width() {
+    # Right edge (px) of the non-background content on the strip, plus a margin.
+    # Low fuzz keeps the antialiased curve of the rounded right cap (\ue0b4);
+    # a higher fuzz trims it and clips the cap at the image edge.
+    local strip="$1" bbox
+    bbox="$(magick "${strip}" -fuzz 2% -format '%@' info:)"
+    awk -F'[x+]' '{ print $1 + $3 + 16 }' <<< "${bbox}"
+}
+
+capture_bar() {
+    local mode="$1"
+    local command_file="${TMP_DIR}/${mode}.sh"
+    local config_file="${TMP_DIR}/${mode}.ghostty"
+    local screen_file="${TMP_DIR}/${mode}-screen.png"
+    local raw_file="${TMP_DIR}/${mode}-raw.png"
+    local strip_file="${TMP_DIR}/${mode}-strip.png"
+    local out_file="${REPO_ROOT}/docs/images/${mode}-terminal.png"
+    local bg fg bounds scale geometry content_w
 
     bg="$(palette_value default bg)"
     fg="$(palette_value default icon_text)"
-    write_mono3_command_script "${command_file}"
+    write_bar_command_script "${command_file}" "${mode}"
     write_ghostty_config "${bg}" "${fg}" "${command_file}" "${config_file}"
     "${GHOSTTY_BIN}" +validate-config --config-file="${config_file}"
 
@@ -315,7 +383,7 @@ capture_mono3() {
     sleep "${WARMUP_SECONDS}"
 
     if ! bounds="$(window_bounds 900 80)"; then
-        printf 'showy-quota: Ghostty capture window did not appear for mono3\n' >&2
+        printf 'showy-quota: Ghostty capture window did not appear for %s\n' "${mode}" >&2
         return 1
     fi
 
@@ -323,7 +391,9 @@ capture_mono3() {
     geometry="$(window_crop_geometry "${bounds}" "${scale}")"
     screencapture -x "${screen_file}"
     magick "${screen_file}" -crop "${geometry}" +repage "${raw_file}"
-    magick "${raw_file}" -crop "${mono3_w}x${OUTPUT_H}+${OUTPUT_X}+${OUTPUT_Y}" +repage -strip "${out_file}"
+    magick "${raw_file}" -crop "x${OUTPUT_H}+${OUTPUT_X}+${OUTPUT_Y}" +repage "${strip_file}"
+    content_w="$(bar_content_width "${strip_file}")"
+    magick "${strip_file}" -crop "${content_w}x${OUTPUT_H}+0+0" +repage -strip "${out_file}"
     chmod 0644 "${out_file}"
     printf 'captured %s\n' "${out_file}"
 
@@ -333,9 +403,23 @@ capture_mono3() {
 }
 
 main() {
-    local theme
+    local theme mode
+    local bar_modes=(dual mono3 dual2 mono4)
+
+    if [[ "${1:-}" == "--bars" ]]; then
+        shift
+        if (( $# > 0 )); then
+            bar_modes=("$@")
+        fi
+        for mode in "${bar_modes[@]}"; do
+            [[ -n "${mode}" ]] || continue
+            capture_bar "${mode}"
+        done
+        return 0
+    fi
+
     if [[ "${1:-}" == "--mono3" ]]; then
-        capture_mono3
+        capture_bar mono3
         return 0
     fi
 
