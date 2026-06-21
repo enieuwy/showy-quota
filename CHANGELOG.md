@@ -23,6 +23,37 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Palette dim-scaling widens to `u128` before multiplying, so a pathological
   scale factor can no longer overflow (debug panic / release wrap); channels
   clamp to `0xff` as before.
+- Numeric render config (`SHOWY_QUOTA_GOOD_MIN_REMAINING`, `…_WARN_MIN_REMAINING`,
+  `…_TIME_WARN_MINUTES`, `…_REFRESH_SECONDS`, `…_DIM_WINDOW_MINUTES`,
+  `…_LOCK_WAIT_TENTHS`) is validated at load: a non-numeric value — which bash
+  arithmetic silently evaluates to `0` — is replaced by the documented default
+  instead of, e.g., forcing every provider to render "good" or reporting the
+  cache as never stale. `LOCK_WAIT_TENTHS` is also clamped to a ceiling so a
+  pathological value cannot stall the cache wait loop.
+- The standalone Zellij plugin no longer latches in a permanent loading/broken
+  state when `codexbar serve` answers HTTP 200 with a corrupt body (captive
+  portal / proxy page): an unparseable payload now counts as a serve failure and
+  advances toward CLI fallback instead of resetting the failure counter.
+- The standalone Zellij plugin now expires a `/health` or `/usage` web request
+  that hangs without ever producing a result (Zellij reports no request
+  failure) after 30s, so a dropped connection no longer wedges the plugin — it
+  retries and falls back to the CLI exactly as a returned failure would.
+
+### Security
+- All GitHub Actions in `ci.yml` and `release.yml` are pinned to commit SHAs
+  (`actions/checkout`, `dtolnay/rust-toolchain`, `softprops/action-gh-release`)
+  instead of mutable floating tags, so a moved/compromised tag cannot alter the
+  build or the signed WASM release artifact.
+- The standalone Zellij plugin enforces the same loopback-only `serve_url`
+  contract as the shell data plane: a non-loopback URL is dropped (falling back
+  to the CLI) so Zellij's granted WebAccess cannot be turned into an
+  SSRF/exfiltration vector by a shared KDL layout.
+- `bin/showy-quota-tmux-bar` doubles any `#` in the user-configured
+  `SHOWY_QUOTA_CAP_LEFT`/`SHOWY_QUOTA_CAP_RIGHT` so cap text renders literally
+  instead of being parsed as a tmux format/expansion directive.
+- Terminal bar width (`SHOWY_QUOTA_TMUX_BAR_WIDTH` / `SHOWY_QUOTA_ZELLIJ_BAR_WIDTH`)
+  is clamped to `[8, 400]` across the shell renderers and the Rust core so an
+  unbounded value cannot drive a runaway render loop.
 
 ## [0.3.0] — 2026-06-20
 
