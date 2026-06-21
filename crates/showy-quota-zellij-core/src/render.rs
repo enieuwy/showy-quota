@@ -5,7 +5,9 @@ use time::format_description::well_known::Rfc3339;
 use time::macros::format_description;
 use time::{Duration, OffsetDateTime, PrimitiveDateTime, Time, UtcOffset};
 
-use crate::codexbar::{is_renderable, parse_usage_payload, NamedWindow, ProviderRecord, Usage, UsageWindow};
+use crate::codexbar::{
+    is_renderable, parse_usage_payload, NamedWindow, ProviderRecord, Usage, UsageWindow,
+};
 use crate::config::RenderConfig;
 use crate::palette::hex_to_rgb;
 
@@ -70,7 +72,15 @@ fn render_records(
             if idx > 0 {
                 out.push(' ');
             }
-            render_provider(&mut out, record, sigil, config, options, chunk_bg, stale_color);
+            render_provider(
+                &mut out,
+                record,
+                sigil,
+                config,
+                options,
+                chunk_bg,
+                stale_color,
+            );
         }
     }
 
@@ -216,12 +226,7 @@ fn render_provider(
     // Only mono4 still assembles per-pool family lanes here; dual2 pooled
     // providers are pre-expanded into standalone dual records upstream.
     let families = if bar_mode == "mono4" {
-        pool_families(
-            &slots,
-            &usage.extra_rate_windows,
-            config,
-            options.stale,
-        )
+        pool_families(&slots, &usage.extra_rate_windows, config, options.stale)
     } else {
         Vec::new()
     };

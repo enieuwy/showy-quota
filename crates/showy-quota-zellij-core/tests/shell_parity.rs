@@ -425,7 +425,10 @@ fn apply_case_env(cmd: &mut Command, case: Case<'_>) {
         cmd.env("SHOWY_QUOTA_MONO_MARKERS", config.mono_markers.join(","));
     }
     if config.palette_elapsed_long != def.palette_elapsed_long {
-        cmd.env("SHOWY_QUOTA_PALETTE_ELAPSED_LONG", &config.palette_elapsed_long);
+        cmd.env(
+            "SHOWY_QUOTA_PALETTE_ELAPSED_LONG",
+            &config.palette_elapsed_long,
+        );
     }
     if config.dim_window_minutes != def.dim_window_minutes {
         cmd.env(

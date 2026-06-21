@@ -738,7 +738,10 @@ impl State {
     }
 
     fn kick_discovery(&mut self) {
-        if self.cli_fallback == CliFallback::Off || self.discovery_in_flight || !self.permissions_granted {
+        if self.cli_fallback == CliFallback::Off
+            || self.discovery_in_flight
+            || !self.permissions_granted
+        {
             return;
         }
         let attempt_token = format!("{:.6}", now_seconds());
@@ -747,10 +750,7 @@ impl State {
         self.discovery_in_flight = true;
         let mut context = BTreeMap::new();
         context.insert("kind".to_string(), FALLBACK_DISCOVER_KIND.to_string());
-        context.insert(
-            FALLBACK_DISCOVER_ATTEMPT_KEY.to_string(),
-            attempt_token,
-        );
+        context.insert(FALLBACK_DISCOVER_ATTEMPT_KEY.to_string(), attempt_token);
         let argv = [
             self.cli_command.as_str(),
             "config",
@@ -763,7 +763,12 @@ impl State {
         shim_run_command(&watchdog_argv(&script, &argv), context);
     }
 
-    fn handle_discovery_result(&mut self, exit: Option<i32>, stdout: Vec<u8>, attempt: Option<&str>) {
+    fn handle_discovery_result(
+        &mut self,
+        exit: Option<i32>,
+        stdout: Vec<u8>,
+        attempt: Option<&str>,
+    ) {
         if attempt != self.discovery_attempt_token.as_deref() {
             return;
         }
@@ -1205,8 +1210,17 @@ impl State {
             && self.discovered_providers_at.is_some()
         {
             self.serve_inventory_mismatch = false;
-            let payload_providers: std::collections::BTreeSet<&str> = records.iter().map(|r| r.provider.as_str()).filter(|id| valid_provider_id(id)).collect();
-            let discovered_providers: std::collections::BTreeSet<&str> = self.discovered_providers.iter().map(|s| s.as_str()).filter(|id| valid_provider_id(id)).collect();
+            let payload_providers: std::collections::BTreeSet<&str> = records
+                .iter()
+                .map(|r| r.provider.as_str())
+                .filter(|id| valid_provider_id(id))
+                .collect();
+            let discovered_providers: std::collections::BTreeSet<&str> = self
+                .discovered_providers
+                .iter()
+                .map(|s| s.as_str())
+                .filter(|id| valid_provider_id(id))
+                .collect();
             if payload_providers != discovered_providers {
                 self.serve_inventory_mismatch = true;
                 return false;
@@ -1742,7 +1756,9 @@ mod tests {
         assert!(is_loopback_serve_url("http://[::1]:8080"));
         assert!(is_loopback_serve_url("https://127.0.0.1"));
         assert!(!is_loopback_serve_url("http://169.254.169.254/"));
-        assert!(!is_loopback_serve_url("https://internal-service.corp/secret"));
+        assert!(!is_loopback_serve_url(
+            "https://internal-service.corp/secret"
+        ));
         assert!(!is_loopback_serve_url("http://127.0.0.1.evil.com"));
         assert!(!is_loopback_serve_url("ftp://127.0.0.1"));
         assert!(!is_loopback_serve_url(""));
@@ -1824,7 +1840,12 @@ mod tests {
         };
 
         // 1. Exact match is accepted and discovery remains valid.
-        state.discovered_providers = vec!["claude".to_string(), "codex".to_string(), "gemini".to_string(), "cursor".to_string()];
+        state.discovered_providers = vec![
+            "claude".to_string(),
+            "codex".to_string(),
+            "gemini".to_string(),
+            "cursor".to_string(),
+        ];
         state.discovered_providers_at = Some(now_seconds());
         assert!(state.accept_payload(mixed_payload(), Source::Serve));
         assert!(state.discovered_providers_at.is_some());
@@ -1838,7 +1859,13 @@ mod tests {
 
         // 3. Subset is rejected (serve missing expected providers) and
         // discovery remains valid so fallback can query the expected providers.
-        state.discovered_providers = vec!["claude".to_string(), "codex".to_string(), "gemini".to_string(), "cursor".to_string(), "antigravity".to_string()];
+        state.discovered_providers = vec![
+            "claude".to_string(),
+            "codex".to_string(),
+            "gemini".to_string(),
+            "cursor".to_string(),
+            "antigravity".to_string(),
+        ];
         state.discovered_providers_at = Some(now_seconds());
         assert!(!state.accept_payload(mixed_payload(), Source::Serve));
         assert!(state.discovered_providers_at.is_some());
@@ -1928,7 +1955,10 @@ mod tests {
         assert!(state.usage_after_discovery);
         assert!(!state.usage_in_flight);
 
-        let attempt = state.discovery_attempt_token.clone().expect("discovery attempt");
+        let attempt = state
+            .discovery_attempt_token
+            .clone()
+            .expect("discovery attempt");
         state.handle_discovery_result(
             Some(0),
             br#"[{"provider":"claude","enabled":true}]"#.to_vec(),
