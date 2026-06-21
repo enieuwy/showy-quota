@@ -679,6 +679,23 @@ assert_equals "reset_epoch rejects an overlong date string" "reject" "${out}"
 out=$(run_common_eval 'showy_quota_reset_description_epoch "Resets $(printf "x%.0s" {1..100})" >/dev/null && printf accept || printf reject' SHOWY_QUOTA_NO_CONFIG=1)
 assert_equals "reset_description_epoch rejects an overlong fragment" "reject" "${out}"
 
+# SketchyBar string knobs are clamped to a known-good shape.
+# shellcheck disable=SC2016
+out=$(run_common_eval 'printf "%s" "${SHOWY_QUOTA_SKETCHYBAR_PILL_COLOR}"' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_SKETCHYBAR_PILL_COLOR='0xff112233 drawing=on')
+assert_equals "malformed pill color falls back to default" "0xcc24273a" "${out}"
+
+# shellcheck disable=SC2016
+out=$(run_common_eval 'printf "%s" "${SHOWY_QUOTA_SKETCHYBAR_PILL_COLOR}"' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_SKETCHYBAR_PILL_COLOR=0xAA00FF80)
+assert_equals "valid pill color is honored" "0xAA00FF80" "${out}"
+
+# shellcheck disable=SC2016
+out=$(run_common_eval 'printf "%s" "${SHOWY_QUOTA_SKETCHYBAR_PROVIDER_ICON_FONT}"' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_SKETCHYBAR_PROVIDER_ICON_FONT=$'evil\nlabel=x')
+assert_equals "control-char provider icon font falls back to default" "sketchybar-app-font:Regular:14.0" "${out}"
+
+# shellcheck disable=SC2016
+out=$(run_common_eval 'printf "%s" "${SHOWY_QUOTA_SKETCHYBAR_PROVIDER_ICON_FONT}"' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_SKETCHYBAR_PROVIDER_ICON_FONT='SF Pro:Bold:13.0')
+assert_equals "valid provider icon font with spaces is honored" "SF Pro:Bold:13.0" "${out}"
+
 # ── countdown formatting ──────────────────────────────────────────────
 printf '\ncountdown formatting\n'
 

@@ -221,6 +221,14 @@ SHOWY_QUOTA_SKETCHYBAR_BAR_WIDTH=$(showy_quota_uint "${SHOWY_QUOTA_SKETCHYBAR_BA
 # default when it is not a plain decimal so the icon never gets a junk scale.
 [[ "${SHOWY_QUOTA_SKETCHYBAR_ICON_SCALE}" =~ ^[0-9]+([.][0-9]+)?$ ]] || SHOWY_QUOTA_SKETCHYBAR_ICON_SCALE=0.28
 
+# SketchyBar string knobs reach `sketchybar --set` as quoted single arguments
+# (so no extra-arg injection is possible), but a malformed value still yields a
+# broken item — clamp them to a known-good shape. PILL_COLOR must be an 8-digit
+# ARGB literal; the provider icon font is a `family:style:size` spec, so reject
+# only control characters / absurd length back to the default.
+[[ "${SHOWY_QUOTA_SKETCHYBAR_PILL_COLOR}" =~ ^0x[0-9a-fA-F]{8}$ ]] || SHOWY_QUOTA_SKETCHYBAR_PILL_COLOR=0xcc24273a
+[[ "${SHOWY_QUOTA_SKETCHYBAR_PROVIDER_ICON_FONT}" != *[$'\x01'-$'\x1f']* && ${#SHOWY_QUOTA_SKETCHYBAR_PROVIDER_ICON_FONT} -le 128 ]] || SHOWY_QUOTA_SKETCHYBAR_PROVIDER_ICON_FONT='sketchybar-app-font:Regular:14.0'
+
 # ── executable config validation ───────────────────────────────────────
 # The *_BIN knobs are exec'd directly; reject a value that is a shell snippet
 # or a non-runnable path back to its default so a poisoned env/config.env entry

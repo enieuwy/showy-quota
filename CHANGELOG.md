@@ -82,6 +82,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   chars) before it is handed to `date`/`gdate -d` in `showy_quota_reset_epoch`
   and `showy_quota_reset_description_epoch`, so a pathologically long payload
   field cannot stall the date parser.
+- The SketchyBar string knobs `SHOWY_QUOTA_SKETCHYBAR_PILL_COLOR` (must be an
+  8-digit `0xAARRGGBB` ARGB literal) and `SHOWY_QUOTA_SKETCHYBAR_PROVIDER_ICON_FONT`
+  (no control characters, ≤128 chars) are validated back to their defaults when
+  malformed, so a bad value yields the default item style instead of a broken
+  `sketchybar --set`. `share/config.env.example` now also documents that
+  `SHOWY_QUOTA_SKETCHYBAR_CLICK` is run by SketchyBar as a shell command on click.
 
 ## [0.3.0] — 2026-06-20
 
