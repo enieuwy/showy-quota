@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# showy-quota pre-commit hook: keep the Rust workspace rustfmt-clean.
+#
+# Mirrors the CI `cargo fmt --all -- --check` gate so formatting drift never
+# reaches a push. (CI runs fmt early and short-circuits clippy/test/audit/plugin
+# on a fmt failure, so an unformatted commit turns the whole pipeline red.)
+#
+# Install:     make hooks            # sets core.hooksPath to .githooks
+# Bypass once: git commit --no-verify
+set -euo pipefail
+
+cd "$(git rev-parse --show-toplevel)"
+
+# Only run when the commit actually touches Rust; doc/shell-only commits cannot
+# introduce rustfmt drift.
+if ! git diff --cached --name-only --diff-filter=ACM -- '*.rs' | grep -q .; then
+    exit 0
+fi
+
+# Match CI and the Makefile: prefer the rustup stable toolchain when its rustfmt
+# is actually available, else fall back to whatever cargo is on PATH.
+if command -v rustup >/dev/null 2>&1 && rustup run stable rustfmt --version >/dev/null 2>&1; then
+    fmt=(rustup run stable cargo fmt --all -- --check)
+elif command -v cargo >/dev/null 2>&1; then
+    fmt=(cargo fmt --all -- --check)
+else
+    echo "pre-commit: cargo/rustfmt not found; skipping rustfmt check" >&2
+    exit 0
+fi
+
+if ! "${fmt[@]}"; then
+    cat >&2 <<'MSG'
+
+pre-commit: rustfmt check failed (see diff above).
+  fix:         cargo fmt --all   (then stage the files and re-commit)
+  bypass once: git commit --no-verify
+MSG
+    exit 1
+fi
