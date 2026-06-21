@@ -446,7 +446,7 @@ showy_quota_have magick && HAVE_MAGICK=1
 NATIVE_ROW_HEIGHT=6
 # Default 3 == NATIVE_ROW_HEIGHT/2 → fully rounded ends. Set to 0 for a
 # squared track; intermediate values yield partial rounding.
-NATIVE_ROW_RADIUS="${SHOWY_QUOTA_SKETCHYBAR_ROW_RADIUS:-3}"
+NATIVE_ROW_RADIUS=$(showy_quota_uint "${SHOWY_QUOTA_SKETCHYBAR_ROW_RADIUS:-3}" 3 4096)
 
 # ── ARGB helpers ─────────────────────────────────────────────────────
 

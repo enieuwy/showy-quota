@@ -553,6 +553,14 @@ assert_equals "scale helper matches legacy 0.55 green" "14683a" "${out}"
 out=$(run_common_eval 'showy_quota_scale_hex "#25be6a" 0.55' SHOWY_QUOTA_NO_CONFIG=1)
 assert_equals "scale helper accepts leading hash" "14683a" "${out}"
 
+rc=0
+out=$(run_common_eval 'showy_quota_scale_hex 123 0.55' SHOWY_QUOTA_NO_CONFIG=1 2>&1) || rc=$?
+assert_equals "scale helper rejects malformed hex" "1" "${rc}"
+
+rc=0
+out=$(run_common_eval 'showy_quota_scale_hex 25be6a abc' SHOWY_QUOTA_NO_CONFIG=1 2>&1) || rc=$?
+assert_equals "scale helper rejects non-numeric scale" "1" "${rc}"
+
 out=$(run_common_eval 'showy_quota_primary_palette good' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_PALETTE_PRIMARY_GOOD="#25BE6A")
 assert_equals "primary palette normalizes leading hash" "25be6a" "${out}"
 
@@ -578,6 +586,24 @@ assert_equals "is_long_window flags weekly and monthly horizons" "0|0|1|1|0" "${
 
 out=$(run_common_eval 'showy_quota_is_long_window 1440' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_DIM_WINDOW_MINUTES=1440)
 assert_equals "dim window minutes threshold is configurable" "1" "${out}"
+
+# ── numeric config validation ─────────────────────────────────────────
+printf '\nnumeric config validation\n'
+
+# shellcheck disable=SC2016
+out=$(run_common_eval 'printf "%s|%s|%s" "$(showy_quota_color_key 10)" "$(showy_quota_color_key 20)" "$(showy_quota_color_key 50)"' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_GOOD_MIN_REMAINING='evil; rm -rf /' SHOWY_QUOTA_WARN_MIN_REMAINING=oops)
+assert_equals "malformed coloring thresholds fall back to defaults" "bad|warn|good" "${out}"
+
+out=$(run_common_eval 'showy_quota_color_key 50' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_GOOD_MIN_REMAINING=80)
+assert_equals "valid coloring threshold is still honored" "warn" "${out}"
+
+# shellcheck disable=SC2016
+out=$(run_common_eval 'printf "%s|%s|%s" "$(showy_quota_uint 42 7)" "$(showy_quota_uint abc 7)" "$(showy_quota_uint 99999 7 100)"' SHOWY_QUOTA_NO_CONFIG=1)
+assert_equals "uint helper validates and clamps" "42|7|100" "${out}"
+
+# shellcheck disable=SC2016
+out=$(run_common_eval 'printf "%s" "${SHOWY_QUOTA_LOCK_WAIT_TENTHS}"' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_LOCK_WAIT_TENTHS=99999999)
+assert_equals "lock wait clamps to ceiling" "36000" "${out}"
 
 out=$(run_common_eval 'showy_quota_primary_palette good' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_THEME=catppuccin-mocha-blue)
 assert_equals "built-in Catppuccin Mocha Blue theme overrides the primary palette" "89b4fa" "${out}"

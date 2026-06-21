@@ -12,6 +12,19 @@ fi
 
 set -uo pipefail
 
+# Echo $1 when it is a base-10 unsigned integer (optionally clamped to <= $3);
+# otherwise echo the fallback $2. Keeps malformed numeric config out of bash
+# arithmetic, where a non-numeric value silently evaluates to 0.
+showy_quota_uint() {
+    local raw="$1" fallback="$2" max="${3:-}"
+    [[ "${raw}" =~ ^[0-9]+$ ]] || { printf '%s' "${fallback}"; return; }
+    if [[ -n "${max}" ]] && (( raw > max )); then
+        printf '%s' "${max}"
+    else
+        printf '%s' "${raw}"
+    fi
+}
+
 # ── config loading ─────────────────────────────────────────────────────
 
 showy_quota_load_config() {
@@ -100,6 +113,10 @@ showy_quota_load_config
 : "${SHOWY_QUOTA_SKETCHYBAR_UPDATE_FREQ:=10}"
 : "${SHOWY_QUOTA_PNG_BAR_W:=80}"
 : "${SHOWY_QUOTA_PNG_BAR_H:=18}"
+# Validate the PNG bar dimensions here (before the bar-width default derives
+# from PNG_BAR_W) so a non-numeric value cannot abort sourcing under `set -u`.
+SHOWY_QUOTA_PNG_BAR_W=$(showy_quota_uint "${SHOWY_QUOTA_PNG_BAR_W}" 80 4096)
+SHOWY_QUOTA_PNG_BAR_H=$(showy_quota_uint "${SHOWY_QUOTA_PNG_BAR_H}" 18 4096)
 : "${SHOWY_QUOTA_SKETCHYBAR_ICON_WIDTH:=22}"
 : "${SHOWY_QUOTA_SKETCHYBAR_ICON_PADDING_LEFT:=5}"
 : "${SHOWY_QUOTA_SKETCHYBAR_ICON_SCALE:=0.28}"
@@ -134,6 +151,38 @@ showy_quota_load_config
 : "${SHOWY_QUOTA_CODEXBAR_CLI_FAILURE_STAMP:=${SHOWY_QUOTA_CACHE_DIR}/cli-failed-at}"
 : "${SHOWY_QUOTA_CODEXBAR_CONFIG_PROVIDERS_FAILURE_STAMP:=${SHOWY_QUOTA_CACHE_DIR}/config-providers-failed-at}"
 : "${SHOWY_QUOTA_PROVIDER_FAILURE_DIR:=${SHOWY_QUOTA_CACHE_DIR}/provider-failures}"
+
+# ── numeric config validation ──────────────────────────────────────────
+# Malformed integer config (typos, empties) must not silently corrupt
+# arithmetic: a non-numeric value in (( )) evaluates to 0, which would e.g.
+# force every provider to render "good" or report the cache as never stale.
+# Clamp each arithmetic knob back to its default, and to a ceiling where an
+# unbounded value would otherwise stall a wait loop.
+SHOWY_QUOTA_REFRESH_SECONDS=$(showy_quota_uint "${SHOWY_QUOTA_REFRESH_SECONDS}" 120)
+SHOWY_QUOTA_LOCK_WAIT_TENTHS=$(showy_quota_uint "${SHOWY_QUOTA_LOCK_WAIT_TENTHS}" 100 36000)
+SHOWY_QUOTA_GOOD_MIN_REMAINING=$(showy_quota_uint "${SHOWY_QUOTA_GOOD_MIN_REMAINING}" 40)
+SHOWY_QUOTA_WARN_MIN_REMAINING=$(showy_quota_uint "${SHOWY_QUOTA_WARN_MIN_REMAINING}" 15)
+SHOWY_QUOTA_TIME_WARN_MINUTES=$(showy_quota_uint "${SHOWY_QUOTA_TIME_WARN_MINUTES}" 30)
+SHOWY_QUOTA_DIM_WINDOW_MINUTES=$(showy_quota_uint "${SHOWY_QUOTA_DIM_WINDOW_MINUTES}" 10080)
+SHOWY_QUOTA_ZELLIJ_PIPE_INTERVAL=$(showy_quota_uint "${SHOWY_QUOTA_ZELLIJ_PIPE_INTERVAL}" 10 86400)
+SHOWY_QUOTA_ZELLIJ_PIPE_TIMEOUT_TENTHS=$(showy_quota_uint "${SHOWY_QUOTA_ZELLIJ_PIPE_TIMEOUT_TENTHS}" 20 36000)
+
+# SketchyBar geometry knobs reach `sketchybar --set` / ImageMagick as numeric
+# arguments; clamp them to sane integer ceilings so a malformed value produces
+# the default instead of a broken/oversized item. (PNG_BAR_W/H are normalized
+# above, before the bar-width default derives from them.)
+SHOWY_QUOTA_SKETCHYBAR_UPDATE_FREQ=$(showy_quota_uint "${SHOWY_QUOTA_SKETCHYBAR_UPDATE_FREQ}" 10 86400)
+SHOWY_QUOTA_SKETCHYBAR_ICON_WIDTH=$(showy_quota_uint "${SHOWY_QUOTA_SKETCHYBAR_ICON_WIDTH}" 22 4096)
+SHOWY_QUOTA_SKETCHYBAR_ICON_PADDING_LEFT=$(showy_quota_uint "${SHOWY_QUOTA_SKETCHYBAR_ICON_PADDING_LEFT}" 5 4096)
+SHOWY_QUOTA_SKETCHYBAR_PROVIDER_ICON_FONT_PADDING_RIGHT=$(showy_quota_uint "${SHOWY_QUOTA_SKETCHYBAR_PROVIDER_ICON_FONT_PADDING_RIGHT}" 2 4096)
+SHOWY_QUOTA_SKETCHYBAR_LABEL_WIDTH=$(showy_quota_uint "${SHOWY_QUOTA_SKETCHYBAR_LABEL_WIDTH}" 32 4096)
+SHOWY_QUOTA_SKETCHYBAR_COMPACT_PROVIDER_COUNT=$(showy_quota_uint "${SHOWY_QUOTA_SKETCHYBAR_COMPACT_PROVIDER_COUNT}" 5 4096)
+SHOWY_QUOTA_SKETCHYBAR_PILL_RADIUS=$(showy_quota_uint "${SHOWY_QUOTA_SKETCHYBAR_PILL_RADIUS}" 14 4096)
+SHOWY_QUOTA_SKETCHYBAR_PILL_HEIGHT=$(showy_quota_uint "${SHOWY_QUOTA_SKETCHYBAR_PILL_HEIGHT}" 28 4096)
+SHOWY_QUOTA_SKETCHYBAR_BAR_WIDTH=$(showy_quota_uint "${SHOWY_QUOTA_SKETCHYBAR_BAR_WIDTH}" $((SHOWY_QUOTA_PNG_BAR_W + 3)) 4096)
+# ICON_SCALE is a float (sketchybar background.image.scale); fall back to the
+# default when it is not a plain decimal so the icon never gets a junk scale.
+[[ "${SHOWY_QUOTA_SKETCHYBAR_ICON_SCALE}" =~ ^[0-9]+([.][0-9]+)?$ ]] || SHOWY_QUOTA_SKETCHYBAR_ICON_SCALE=0.28
 
 declare -gA SHOWY_QUOTA_ROLE_PALETTE_CACHE=()
 

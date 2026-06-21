@@ -473,4 +473,44 @@ mod tests {
 
         assert_eq!(config.reset_description_timezone_offset_minutes, None);
     }
+
+    #[test]
+    fn parse_timezone_offset_minutes_handles_aliases_and_bounds() {
+        assert_eq!(parse_timezone_offset_minutes("utc"), Some(0));
+        assert_eq!(parse_timezone_offset_minutes("UTC"), Some(0));
+        assert_eq!(parse_timezone_offset_minutes("Z"), Some(0));
+        assert_eq!(parse_timezone_offset_minutes("+00:00"), Some(0));
+        assert_eq!(parse_timezone_offset_minutes("-00:00"), Some(0));
+        assert_eq!(parse_timezone_offset_minutes("+09:00"), Some(540));
+        assert_eq!(parse_timezone_offset_minutes("-05:30"), Some(-330));
+        // Out-of-range hours/minutes, missing separator, short/long, non-digit.
+        assert_eq!(parse_timezone_offset_minutes("+25:00"), None);
+        assert_eq!(parse_timezone_offset_minutes("+12:60"), None);
+        assert_eq!(parse_timezone_offset_minutes("+1234"), None);
+        assert_eq!(parse_timezone_offset_minutes("+5:00"), None);
+        assert_eq!(parse_timezone_offset_minutes("0700"), None);
+        assert_eq!(parse_timezone_offset_minutes("+ab:cd"), None);
+        assert_eq!(parse_timezone_offset_minutes(""), None);
+    }
+
+    #[test]
+    fn from_env_reads_environment_overrides() {
+        // from_env mirrors from_kdl_config but sources SHOWY_QUOTA_* from the
+        // process environment. Save/restore the knob so the shared process env
+        // is left clean for other tests.
+        let key = "SHOWY_QUOTA_GOOD_MIN_REMAINING";
+        let previous = std::env::var(key).ok();
+        std::env::set_var(key, "77");
+        let from_env = RenderConfig::from_env();
+        match previous {
+            Some(value) => std::env::set_var(key, value),
+            None => std::env::remove_var(key),
+        }
+        assert_eq!(from_env.good_min_remaining, 77);
+
+        // The KDL path applies the same key identically.
+        let mut kdl = BTreeMap::new();
+        kdl.insert(key.to_string(), "77".to_string());
+        assert_eq!(RenderConfig::from_kdl_config(&kdl).good_min_remaining, 77);
+    }
 }
