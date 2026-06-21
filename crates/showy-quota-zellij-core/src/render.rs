@@ -31,7 +31,7 @@ pub fn render_zellij(
     Ok(render_records(&records, config, options))
 }
 
-pub fn render_records(
+fn render_records(
     records: &[ProviderRecord],
     config: &RenderConfig,
     options: RenderOptions,

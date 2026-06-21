@@ -1,15 +1,14 @@
 use crate::config::RenderConfig;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Severity {
+enum Severity {
     Good,
     Warn,
     Bad,
-    Unknown,
 }
 
 impl RenderConfig {
-    pub fn color_key(&self, remaining: i32) -> Severity {
+    fn color_key(&self, remaining: i32) -> Severity {
         if remaining >= self.good_min_remaining {
             Severity::Good
         } else if remaining >= self.warn_min_remaining {
@@ -30,18 +29,17 @@ impl RenderConfig {
         }
     }
 
-    pub fn primary_palette(&self, severity: Severity) -> String {
+    fn primary_palette(&self, severity: Severity) -> String {
         match severity {
             Severity::Good => self.palette_primary_good.clone(),
             Severity::Warn => self.palette_primary_warn.clone(),
             Severity::Bad => self.palette_primary_bad.clone(),
-            Severity::Unknown => self.palette_primary_unknown.clone(),
         }
     }
 
     /// Dimmed palette for long-horizon windows: explicit override when set,
     /// otherwise the primary palette scaled down by `palette_dim_scale`.
-    pub fn dim_palette(&self, severity: Severity) -> String {
+    fn dim_palette(&self, severity: Severity) -> String {
         self.dim_override(severity)
             .cloned()
             .unwrap_or_else(|| scale_hex(&self.primary_palette(severity), &self.palette_dim_scale))
@@ -52,7 +50,6 @@ impl RenderConfig {
             Severity::Good => self.palette_dim_good.as_ref(),
             Severity::Warn => self.palette_dim_warn.as_ref(),
             Severity::Bad => self.palette_dim_bad.as_ref(),
-            Severity::Unknown => self.palette_dim_unknown.as_ref(),
         }
     }
 }

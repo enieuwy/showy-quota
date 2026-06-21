@@ -99,7 +99,7 @@ pub fn payload_has_renderable_provider(records: &[ProviderRecord]) -> bool {
     records.iter().any(is_renderable)
 }
 
-pub fn is_renderable(record: &ProviderRecord) -> bool {
+pub(crate) fn is_renderable(record: &ProviderRecord) -> bool {
     record.error.is_none()
         && valid_provider_id(&record.provider)
         && record
