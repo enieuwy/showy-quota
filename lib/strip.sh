@@ -182,6 +182,7 @@ showy_quota_mono_lane_bar() {
     local rem_s="$4" reset_s="$5" win_s="$6" present_s="$7"
     [[ "${width}" =~ ^[0-9]+$ ]] || width=12
     (( width < 8 )) && width=8
+    (( width > 400 )) && width=400
     local surface bg
     surface="$(showy_quota_palette surface)"
     bg="$(showy_quota_palette bg)"

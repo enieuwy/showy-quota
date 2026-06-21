@@ -304,7 +304,7 @@ fn render_provider(
     } else {
         secondary.and_then(UsageWindow::window_minutes)
     };
-    let width = config.zellij_bar_width.max(8);
+    let width = config.zellij_bar_width.clamp(8, 400);
     if !mono_lanes.is_empty() {
         let markers = mono_marker_cells(config, &mono_lanes, width, options.now_epoch);
         mono_lane_bar(out, config, options, &mono_lanes, &mono_color, &markers);
@@ -401,7 +401,7 @@ fn dual_metric_bar(
     options: RenderOptions,
     args: DualArgs<'_>,
 ) {
-    let width = config.zellij_bar_width.max(8);
+    let width = config.zellij_bar_width.clamp(8, 400);
     let surface_color = &config.palette_surface;
     let elapsed_color = &config.palette_elapsed;
     let p_fill = filled_cells(args.p_remaining, width);
@@ -593,7 +593,7 @@ fn mono_lane_bar(
     mono_color: &str,
     markers: &[(usize, &str)],
 ) {
-    let width = config.zellij_bar_width.max(8);
+    let width = config.zellij_bar_width.clamp(8, 400);
     let surface_color = &config.palette_surface;
     let fills: Vec<usize> = lanes
         .iter()
