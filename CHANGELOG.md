@@ -108,6 +108,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `showy-quota-zellij-bar --json <file>` now requires a regular file and
   validates it as quota JSON before rendering, so it can no longer be pointed at
   a FIFO/device or an arbitrary non-quota file (e.g. `/etc/passwd`).
+- The SketchyBar plugin renders provider-icon SVGs under a bundled restrictive
+  ImageMagick policy (`adapters/sketchybar/imagemagick/policy.xml`, injected via
+  `MAGICK_CONFIGURE_PATH`) that denies the network coders, so a provider SVG
+  from `SHOWY_QUOTA_CODEXBAR_RESOURCES` cannot make `magick` fetch a remote
+  `href` (SSRF/data exfiltration) regardless of the system ImageMagick policy.
 
 ## [0.3.0] — 2026-06-20
 

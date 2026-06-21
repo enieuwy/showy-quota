@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Restrictive ImageMagick policy used only by showy-quota's SketchyBar plugin
+  (injected via MAGICK_CONFIGURE_PATH). It blocks the network coders and
+  indirect-read syntax so a provider SVG under SHOWY_QUOTA_CODEXBAR_RESOURCES
+  cannot make ImageMagick fetch a remote `href` (SSRF / data exfiltration).
+  It deliberately does NOT restrict delegates or the MVG/drawing coders, so
+  local SVG rasterization and the drawn fallback icons keep working.
+-->
+<policymap>
+  <policy domain="coder" rights="none" pattern="URL" />
+  <policy domain="coder" rights="none" pattern="HTTP" />
+  <policy domain="coder" rights="none" pattern="HTTPS" />
+  <policy domain="coder" rights="none" pattern="FTP" />
+  <policy domain="coder" rights="none" pattern="MSL" />
+  <policy domain="path" rights="none" pattern="@*" />
+</policymap>

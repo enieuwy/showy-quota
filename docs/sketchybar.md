@@ -166,3 +166,14 @@ color. Serve recovery clears the marker on the next successful fetch.
 Only SVG fallback icons are PNG-cached in `${SHOWY_QUOTA_SKETCHYBAR_IMAGE_CACHE}`
 (default `~/.cache/showy-quota/sketchybar`). Native bars and mapped font icons
 are not rasterized.
+
+## Provider icons and `SHOWY_QUOTA_CODEXBAR_RESOURCES`
+
+Provider icons are rasterized from `${SHOWY_QUOTA_CODEXBAR_RESOURCES}/ProviderIcon-<id>.svg`
+(default the CodexBar app bundle's `Resources`) with ImageMagick. Point
+`SHOWY_QUOTA_CODEXBAR_RESOURCES` only at a directory you trust: a malicious SVG
+can otherwise instruct ImageMagick to fetch remote resources. As defense in
+depth the plugin runs `magick` under a bundled restrictive policy
+(`adapters/sketchybar/imagemagick/policy.xml`, injected via
+`MAGICK_CONFIGURE_PATH`) that blocks the network coders, so SVG `href` fetches
+(SSRF) are denied regardless of the system ImageMagick policy.

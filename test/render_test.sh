@@ -1583,6 +1583,50 @@ assert_contains "font icon mode colors degraded providers without magick" "showy
 assert_contains "font icon mode preserves degraded provider status click without magick" "click_script=open 'https://status.openai.com/'" "${font_status_log}"
 assert_not_contains "font icon mode skips status PNG for mapped provider without magick" "icon-v3-codex-" "${font_status_log}"
 
+# When magick is present, the plugin points MAGICK_CONFIGURE_PATH at the bundled
+# restrictive policy (SSRF defense) before any magick invocation.
+mp_bin="${TMP}/magick-policy-bin"
+mkdir -p "${mp_bin}"
+for tool in bash jq readlink dirname mkdir mktemp mv rm rmdir date stat sed tr cat python3; do
+    if [[ "${tool}" == "bash" && -x /opt/homebrew/bin/bash ]]; then
+        ln -sf /opt/homebrew/bin/bash "${mp_bin}/bash"
+    else
+        ln -sf "$(command -v "${tool}")" "${mp_bin}/${tool}"
+    fi
+done
+ln -sf "${stub_dir}/codexbar" "${mp_bin}/codexbar"
+ln -sf "${stub_dir}/sketchybar" "${mp_bin}/sketchybar"
+mp_env_log="${TMP}/magick-env.log"
+cat > "${mp_bin}/magick" <<EOF
+#!/bin/sh
+printf '%s\n' "\${MAGICK_CONFIGURE_PATH:-UNSET}" >> "${mp_env_log}"
+for a in "\$@"; do last="\$a"; done
+case "\${last}" in
+    info:) printf '0 0 0 ' ;;
+    PNG32:*) : > "\${last#PNG32:}" 2>/dev/null || true ;;
+    /*) : > "\${last}" 2>/dev/null || true ;;
+esac
+exit 0
+EOF
+chmod +x "${mp_bin}/magick"
+: > "${mp_env_log}"
+cache=$(mk_cache)
+env \
+    PATH="${mp_bin}" \
+    SHOWY_QUOTA_NO_CONFIG=1 \
+    SHOWY_QUOTA_CACHE_DIR="${cache}" \
+    SHOWY_QUOTA_SKETCHYBAR_IMAGE_CACHE="${cache}/sb" \
+    SHOWY_QUOTA_TEST_FIXTURE="$(fixture_path codexbar-mixed.json)" \
+    SHOWY_QUOTA_TEST_LOG="${TMP}/sb-magick-policy.log" \
+    SHOWY_QUOTA_DEGRADED_CLI=0 \
+    SHOWY_QUOTA_TEST_STATE_DIR="${cache}/sb-state" \
+    "${REPO_ROOT}/adapters/sketchybar/plugins/showy_quota.sh" >/dev/null 2>&1 || true
+if [[ -s "${mp_env_log}" ]] && grep -qF "${REPO_ROOT}/adapters/sketchybar/imagemagick" "${mp_env_log}"; then
+    ok "plugin runs magick under the bundled restrictive policy"
+else
+    fail "plugin runs magick under the bundled restrictive policy" "env log: $(cat "${mp_env_log}" 2>/dev/null)"
+fi
+
 if command -v magick >/dev/null 2>&1; then
     cache=$(mk_cache)
     log="${TMP}/sb-status.log"

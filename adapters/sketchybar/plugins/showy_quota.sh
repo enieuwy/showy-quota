@@ -442,6 +442,13 @@ showy_quota_have jq || {
 HAVE_MAGICK=0
 showy_quota_have magick && HAVE_MAGICK=1
 
+# Point ImageMagick at our restrictive policy.xml so a provider SVG cannot make
+# `magick` fetch a remote href (SSRF). Prepend so it wins over system configs;
+# guard on the file so a copied (non-repo-relative) install still renders.
+if (( HAVE_MAGICK )) && [[ -f "${REPO_ROOT}/adapters/sketchybar/imagemagick/policy.xml" ]]; then
+    export MAGICK_CONFIGURE_PATH="${REPO_ROOT}/adapters/sketchybar/imagemagick${MAGICK_CONFIGURE_PATH:+:${MAGICK_CONFIGURE_PATH}}"
+fi
+
 # Bar geometry. Bars sit inside SketchyBar's pill; tweak via env.
 : "${SHOWY_QUOTA_PNG_BAR_W:=80}"
 NATIVE_ROW_HEIGHT=6
