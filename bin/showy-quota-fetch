@@ -957,10 +957,14 @@ showy_quota_pid_start_epoch() {
 
 showy_quota_pid_command_matches_managed_serve() {
     local pid="$1" expected_basename="$2" expected_port="$3" command="" token="" previous=""
+    local -a tokens=()
     local saw_bin=0 saw_serve=0 saw_port=0
     command=$(ps -p "${pid}" -o command= 2>/dev/null) || return 1
     command="${command#"${command%%[![:space:]]*}"}"
-    for token in ${command}; do
+    # Split on whitespace without pathname expansion: an unquoted ${command}
+    # would glob ps output (e.g. a literal `*`) against the working directory.
+    read -ra tokens <<<"${command}"
+    for token in "${tokens[@]}"; do
         if [[ "${token##*/}" == "${expected_basename}" ]]; then
             saw_bin=1
         elif (( saw_bin )) && [[ "${token}" == "serve" ]]; then
@@ -1430,9 +1434,21 @@ publish_cache_payload() {
             showy_quota_log "could not write temporary source file"
             return 1
         }
-        mv "${tmp}" "${SHOWY_QUOTA_USAGE_FILE}"
-        mv "${stamp_tmp}" "${SHOWY_QUOTA_USAGE_STAMP}"
-        mv "${source_tmp}" "${SHOWY_QUOTA_SOURCE_FILE}"
+        mv "${tmp}" "${SHOWY_QUOTA_USAGE_FILE}" || {
+            rm -f "${tmp}" "${stamp_tmp}" "${source_tmp}"
+            showy_quota_log "could not publish cache file"
+            return 1
+        }
+        mv "${stamp_tmp}" "${SHOWY_QUOTA_USAGE_STAMP}" || {
+            rm -f "${stamp_tmp}" "${source_tmp}"
+            showy_quota_log "could not publish stamp file"
+            return 1
+        }
+        mv "${source_tmp}" "${SHOWY_QUOTA_SOURCE_FILE}" || {
+            rm -f "${source_tmp}"
+            showy_quota_log "could not publish source file"
+            return 1
+        }
         chmod 600 "${SHOWY_QUOTA_USAGE_FILE}" "${SHOWY_QUOTA_USAGE_STAMP}" "${SHOWY_QUOTA_SOURCE_FILE}" 2>/dev/null || true
         showy_quota_log "cache refreshed from ${source} (${#out} bytes)"
         return 0

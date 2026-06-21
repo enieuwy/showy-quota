@@ -6,6 +6,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- `bin/showy-quota-fetch` now matches the managed `codexbar serve` process by
+  splitting the `ps` command output with `read -ra` instead of an unquoted
+  expansion. The previous `for token in ${command}` glob-expanded the command
+  string against the working directory, so a cwd containing a file matching a
+  glob character in the command line could misclassify a healthy serve and
+  trigger an unnecessary restart (or miss a running serve).
+- `bin/showy-quota-fetch`'s cache publisher now checks each `mv` when promoting
+  the temporary `usage`/`usage-stamp`/`source` files and removes the leftover
+  temporaries on failure instead of leaking them into the cache directory.
+- The Rust renderer's pacing-marker math now computes in `u64` before narrowing
+  to `usize`, so a large `windowMinutes` no longer truncates or overflows on the
+  32-bit `usize` of the `wasm32` Zellij plugin (it already matched the shell's
+  64-bit arithmetic on native targets).
+- Palette dim-scaling widens to `u128` before multiplying, so a pathological
+  scale factor can no longer overflow (debug panic / release wrap); channels
+  clamp to `0xff` as before.
+
 ## [0.3.0] — 2026-06-20
 
 ### Fixed

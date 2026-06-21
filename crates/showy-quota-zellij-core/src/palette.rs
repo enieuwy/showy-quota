@@ -100,8 +100,11 @@ fn parse_factor(raw: &str) -> Option<(u64, u64)> {
 }
 
 fn scale_component(value: u8, factor_num: u64, factor_den: u64) -> u8 {
-    let den = factor_den.max(1);
-    ((value as u64 * factor_num) / den).min(255) as u8
+    // Widen to u128 before multiplying: a pathological config scale (e.g.
+    // factor_num near u64::MAX) would otherwise overflow `value as u64 *
+    // factor_num`, panicking in debug and wrapping in release.
+    let den = u128::from(factor_den.max(1));
+    ((u128::from(value) * u128::from(factor_num)) / den).min(255) as u8
 }
 
 #[cfg(test)]
@@ -119,5 +122,14 @@ mod tests {
     fn palette_helpers_accept_leading_hash() {
         assert_eq!(hex_to_rgb("#25be6a"), (0x25, 0xbe, 0x6a));
         assert_eq!(scale_hex("#25be6a", "0.55"), "14683a");
+    }
+
+    #[test]
+    fn scale_hex_clamps_huge_factor_without_overflow() {
+        // A pathological integer scale parses to (u64::MAX, 1); the widened
+        // multiply must clamp each channel to 0xff instead of overflowing.
+        assert_eq!(scale_hex("25be6a", "18446744073709551615"), "ffffff");
+        // A zero channel stays zero regardless of the factor.
+        assert_eq!(scale_component(0, u64::MAX, 1), 0);
     }
 }

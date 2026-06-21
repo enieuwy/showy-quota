@@ -82,44 +82,6 @@ showy_quota_filter_renderable() {
     '
 }
 
-# Render a single window slot as JSON: { used_pct, remaining_pct, reset_at,
-# window_minutes, color }.
-showy_quota_window_jq() {
-    cat <<'JQ'
-def window_obj(slot):
-    if (slot // null) == null then null
-    else
-        slot.usedPercent as $u
-        | { used_pct: ($u // 0),
-            remaining_pct: (100 - ($u // 0)),
-            reset_at: (slot.resetsAt // null),
-            window_minutes: (slot.windowMinutes // 0),
-            reset_description: (slot.resetDescription // null) }
-    end;
-JQ
-}
-
-# Build a compact bar (8 cells of unicode block) for a 0..100 percentage.
-# Args: $1 = percent (int 0..100). Echoes 8 chars.
-showy_quota_block_bar() {
-    local pct="${1:-0}"
-    [[ "${pct}" =~ ^-?[0-9]+$ ]] || pct=0
-    (( pct < 0 )) && pct=0
-    (( pct > 100 )) && pct=100
-    # Each of the 8 cells represents 12.5%; show ▆ for filled, ▁ for track.
-    # Using unambiguous half-block + bottom-block characters renders the
-    # same in any terminal with a default font.
-    local cells=8 i out=""
-    local filled=$(( (pct * cells + 50) / 100 ))
-    (( pct > 0 && filled == 0 )) && filled=1
-    for (( i=0; i<cells; i++ )); do
-        if (( i < filled )); then out+="█"
-        else out+="░"
-        fi
-    done
-    printf '%s' "${out}"
-}
-
 # Width-aware fill count for compact strip renderers.
 # Args: $1 = remaining percent, $2 = number of cells.
 showy_quota_filled_cells() {

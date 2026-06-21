@@ -966,7 +966,10 @@ fn elapsed_marker_cell(
     let duration = window_minutes.checked_mul(60)?;
     let start_epoch = reset_epoch.checked_sub(duration)?;
     let elapsed = (now_epoch - start_epoch).clamp(0, duration);
-    let mut marker = ((duration - elapsed) as usize).saturating_mul(width) / duration as usize;
+    // Compute in u64 so a large window_minutes does not truncate/overflow when
+    // cast to a 32-bit usize on wasm32; the quotient is <= width and fits usize.
+    let remaining = (duration - elapsed) as u64;
+    let mut marker = (remaining.saturating_mul(width as u64) / duration as u64) as usize;
     if marker >= width {
         marker = width - 1;
     }
@@ -1340,8 +1343,19 @@ mod tests {
 
     #[test]
     fn parses_reset_description_time_only() {
-        let epoch = reset_epoch("Resets 11:59 PM", 1_704_067_200, None).expect("reset epoch");
-        assert!(epoch > 1_704_067_200);
+        // Pin the offset to UTC so the result is deterministic regardless of the
+        // host timezone. now = 2024-01-01 00:00:00 UTC; "11:59 PM" resolves to the
+        // same UTC day at 23:59:00.
+        assert_eq!(
+            reset_epoch("Resets 11:59 PM", 1_704_067_200, Some(0)),
+            Some(1_704_153_540)
+        );
+        // When the parsed time is earlier than now, it rolls to the next day.
+        // now = 2024-01-01 23:00:00 UTC; "1:00 AM" rolls forward to 2024-01-02.
+        assert_eq!(
+            reset_epoch("Resets 1:00 AM", 1_704_150_000, Some(0)),
+            Some(1_704_157_200)
+        );
     }
 
     #[test]
