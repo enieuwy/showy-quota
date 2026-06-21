@@ -7,6 +7,8 @@ on:
 
 permissions:
   contents: write
+  id-token: write
+  attestations: write
 
 jobs:
   zellij-plugin:
@@ -74,6 +76,10 @@ jobs:
           missing = required - exports
           assert not missing, f"missing WASM exports: {sorted(missing)}"
           PY
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        with:
+          subject-path: showy-quota-zellij.wasm
       - name: Attach plugin artifact
         uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
         with:

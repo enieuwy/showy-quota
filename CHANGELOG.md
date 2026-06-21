@@ -118,6 +118,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   for the serve probe), the CLI and config-providers timeouts to 300s, and the
   serve start-wait poll to 300s, so a pathological value cannot turn a fetch into
   an effectively unbounded wait.
+- The release workflow now generates a signed build-provenance attestation for
+  the WASM plugin artifact (`actions/attest-build-provenance`), so a downloaded
+  `showy-quota-zellij.wasm` can be verified to have been built by this repo's
+  release workflow (`gh attestation verify showy-quota-zellij.wasm --repo
+  enieuwy/showy-quota`) rather than only checked against a recomputable sha256.
 
 ## [0.3.0] — 2026-06-20
 
