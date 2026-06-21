@@ -99,6 +99,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   back to their defaults otherwise. `bin/showy-quota-zellij-pipe` also caps the
   rendered payload at 4096 chars so a pathological render can't silently exceed
   the `zellij pipe` argument limit.
+- `showy-quota --grant-zellij` hardens the permissions.kdl write: the plugin
+  path is rejected if it contains a quote, backslash, or control character (so
+  it cannot break out of the KDL string literal and inject permission nodes),
+  and a `SHOWY_QUOTA_ZELLIJ_PERMISSIONS_FILE` override must be an absolute
+  `*.kdl` path (so an attacker-set env var cannot redirect the write to a shell
+  rc, LaunchAgent plist, `~/.ssh/authorized_keys`, or cron file).
+- `showy-quota-zellij-bar --json <file>` now requires a regular file and
+  validates it as quota JSON before rendering, so it can no longer be pointed at
+  a FIFO/device or an arbitrary non-quota file (e.g. `/etc/passwd`).
 
 ## [0.3.0] — 2026-06-20
 

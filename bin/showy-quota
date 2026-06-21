@@ -575,6 +575,12 @@ diagnose() {
 
 zellij_permissions_file() {
     if [[ -n "${SHOWY_QUOTA_ZELLIJ_PERMISSIONS_FILE:-}" ]]; then
+        # grant_zellij writes a KDL block to this path; require an absolute
+        # *.kdl path so an attacker-set env var cannot redirect the write to a
+        # shell rc, LaunchAgent plist, ~/.ssh/authorized_keys, cron file, etc.
+        if [[ "${SHOWY_QUOTA_ZELLIJ_PERMISSIONS_FILE}" != /*.kdl ]]; then
+            die "SHOWY_QUOTA_ZELLIJ_PERMISSIONS_FILE must be an absolute path to a .kdl file: ${SHOWY_QUOTA_ZELLIJ_PERMISSIONS_FILE}"
+        fi
         printf '%s' "${SHOWY_QUOTA_ZELLIJ_PERMISSIONS_FILE}"
         return 0
     fi
@@ -610,6 +616,12 @@ grant_zellij() {
     else
         plugins_dir="${ZELLIJ_PLUGINS:-${HOME}/.config/zellij/plugins}"
         plugin_path="$(resolve_abs_path "${plugins_dir}/showy-quota-zellij.wasm")"
+    fi
+
+    # The path is written into a KDL string literal ("<key>" { … }); a quote,
+    # backslash, or control char would let it break out and inject KDL nodes.
+    if [[ "${plugin_path}" == *'"'* || "${plugin_path}" == *\\* || "${plugin_path}" == *[$'\x01'-$'\x1f']* ]]; then
+        die "plugin path contains characters unsafe for the KDL permissions file (quote, backslash, or control char): ${plugin_path}"
     fi
 
     if [[ ! -e "${plugin_path}" ]]; then

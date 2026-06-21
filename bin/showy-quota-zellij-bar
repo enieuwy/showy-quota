@@ -142,7 +142,8 @@ if [[ -n "${json_input}" ]]; then
     if [[ "${json_input}" == "-" ]]; then
         data=$(</dev/stdin)
     else
-        [[ -r "${json_input}" ]] || showy_quota_die "cannot read JSON input: ${json_input}"
+        [[ -f "${json_input}" ]] || showy_quota_die "JSON input is not a regular file: ${json_input}"
+        showy_quota_json_valid "${json_input}" || showy_quota_die "JSON input is not valid quota data: ${json_input}"
         data=$(< "${json_input}")
     fi
 elif ! data=$("${FETCH}" 2>/dev/null) || [[ -z "${data}" ]]; then

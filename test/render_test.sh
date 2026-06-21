@@ -926,6 +926,28 @@ env \
     "${REPO_ROOT}/bin/showy-quota" --grant-zellij >/dev/null
 assert_contains "no-arg grant targets default plugin name" "/showy-quota-zellij.wasm\" {" "$(< "${grant_default_perms}")"
 
+# A plugin path containing a KDL-significant character is rejected (no injection).
+grant_inject_rc=0
+run_grant '/tmp/x" { RunCommands }; "y.wasm' >/dev/null 2>&1 || grant_inject_rc=$?
+if (( grant_inject_rc != 0 )); then
+    ok "grant rejects quote in plugin path"
+else
+    fail "grant rejects quote in plugin path" "rc=${grant_inject_rc}"
+fi
+
+# A non-.kdl permissions-file override is rejected before any write.
+grant_badperms_rc=0
+env \
+    PATH="${stub_dir}:${PATH}" \
+    HOME="${grant_home}" \
+    SHOWY_QUOTA_ZELLIJ_PERMISSIONS_FILE="${grant_home}/evil.txt" \
+    "${REPO_ROOT}/bin/showy-quota" --grant-zellij "${grant_plugin}" >/dev/null 2>&1 || grant_badperms_rc=$?
+if (( grant_badperms_rc != 0 )) && [[ ! -e "${grant_home}/evil.txt" ]]; then
+    ok "grant rejects non-.kdl permissions file override"
+else
+    fail "grant rejects non-.kdl permissions file override" "rc=${grant_badperms_rc}; file exists: $([[ -e ${grant_home}/evil.txt ]] && echo yes)"
+fi
+
 # ── zellij renderer ──────────────────────────────────────────────────
 printf 'zellij renderer\n'
 
@@ -1137,6 +1159,16 @@ out=$(
         "${REPO_ROOT}/bin/showy-quota-zellij-bar" --json "$(fixture_path codexbar-mixed.json)"
 )
 assert_not_contains "zellij --json file ignores live cache degraded marker" "⚠cli" "${out}"
+
+# --json must reject a readable file that is not valid quota JSON (e.g. a
+# non-array payload or an arbitrary file like /etc/passwd) rather than render it.
+json_bad_rc=0
+env SHOWY_QUOTA_NO_CONFIG=1 "${REPO_ROOT}/bin/showy-quota-zellij-bar" --json "$(fixture_path codexbar-non-array.json)" >/dev/null 2>&1 || json_bad_rc=$?
+if (( json_bad_rc != 0 )); then
+    ok "zellij --json rejects non-quota JSON file"
+else
+    fail "zellij --json rejects non-quota JSON file" "rc=${json_bad_rc}"
+fi
 
 printf '\nrust zellij parity\n'
 if (cd "${REPO_ROOT}" && cargo test -p showy-quota-zellij-core --test shell_parity); then
