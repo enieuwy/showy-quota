@@ -696,6 +696,19 @@ assert_equals "control-char provider icon font falls back to default" "sketchyba
 out=$(run_common_eval 'printf "%s" "${SHOWY_QUOTA_SKETCHYBAR_PROVIDER_ICON_FONT}"' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_SKETCHYBAR_PROVIDER_ICON_FONT='SF Pro:Bold:13.0')
 assert_equals "valid provider icon font with spaces is honored" "SF Pro:Bold:13.0" "${out}"
 
+# Zellij pipe identifiers are restricted to safe tokens.
+# shellcheck disable=SC2016
+out=$(run_common_eval 'printf "%s" "${SHOWY_QUOTA_ZELLIJ_WIDGET}"' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_ZELLIJ_WIDGET='foo::bar')
+assert_equals "widget with :: falls back to default" "pipe_showy_quota" "${out}"
+
+# shellcheck disable=SC2016
+out=$(run_common_eval 'printf "%s" "${SHOWY_QUOTA_ZELLIJ_WIDGET}"' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_ZELLIJ_WIDGET='my.widget-1')
+assert_equals "valid widget name is honored" "my.widget-1" "${out}"
+
+# shellcheck disable=SC2016
+out=$(run_common_eval 'printf "%s" "${SHOWY_QUOTA_ZELLIJ_PIPE_NAME}"' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_ZELLIJ_PIPE_NAME='bad name')
+assert_equals "pipe name with space falls back to default" "showy-quota" "${out}"
+
 # ── countdown formatting ──────────────────────────────────────────────
 printf '\ncountdown formatting\n'
 

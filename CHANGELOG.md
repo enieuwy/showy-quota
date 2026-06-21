@@ -92,6 +92,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `.` and `..` (which matched the existing `^[A-Za-z0-9_.-]+$` charset), so a
   CodexBar payload with a provider id of `..` can no longer point the
   per-provider failure-stamp path outside `SHOWY_QUOTA_PROVIDER_FAILURE_DIR`.
+- Zellij pipe identifiers are validated before use: `SHOWY_QUOTA_ZELLIJ_WIDGET`
+  must match `^[A-Za-z0-9_.-]+$` (so a `::` cannot shift the zjstatus
+  `pipe::<widget>::<output>` field split and misroute output to another widget)
+  and `SHOWY_QUOTA_ZELLIJ_PIPE_NAME` must match `^[A-Za-z0-9_-]+$`; both fall
+  back to their defaults otherwise. `bin/showy-quota-zellij-pipe` also caps the
+  rendered payload at 4096 chars so a pathological render can't silently exceed
+  the `zellij pipe` argument limit.
 
 ## [0.3.0] — 2026-06-20
 

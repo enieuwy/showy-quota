@@ -229,6 +229,14 @@ SHOWY_QUOTA_SKETCHYBAR_BAR_WIDTH=$(showy_quota_uint "${SHOWY_QUOTA_SKETCHYBAR_BA
 [[ "${SHOWY_QUOTA_SKETCHYBAR_PILL_COLOR}" =~ ^0x[0-9a-fA-F]{8}$ ]] || SHOWY_QUOTA_SKETCHYBAR_PILL_COLOR=0xcc24273a
 [[ "${SHOWY_QUOTA_SKETCHYBAR_PROVIDER_ICON_FONT}" != *[$'\x01'-$'\x1f']* && ${#SHOWY_QUOTA_SKETCHYBAR_PROVIDER_ICON_FONT} -le 128 ]] || SHOWY_QUOTA_SKETCHYBAR_PROVIDER_ICON_FONT='sketchybar-app-font:Regular:14.0'
 
+# Zellij pipe identifiers are embedded in the zjstatus protocol string
+# (`zjstatus::pipe::<widget>::<output>`) and passed to `zellij pipe --name`.
+# Restrict them to safe identifiers so a `::` in the widget cannot shift the
+# protocol field split (misrouting output to another widget) and a stray
+# character in the pipe name cannot confuse the zellij CLI.
+[[ "${SHOWY_QUOTA_ZELLIJ_WIDGET}" =~ ^[A-Za-z0-9_.-]+$ ]] || SHOWY_QUOTA_ZELLIJ_WIDGET=pipe_showy_quota
+[[ "${SHOWY_QUOTA_ZELLIJ_PIPE_NAME}" =~ ^[A-Za-z0-9_-]+$ ]] || SHOWY_QUOTA_ZELLIJ_PIPE_NAME=showy-quota
+
 # ── executable config validation ───────────────────────────────────────
 # The *_BIN knobs are exec'd directly; reject a value that is a shell snippet
 # or a non-runnable path back to its default so a poisoned env/config.env entry
