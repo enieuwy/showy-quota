@@ -113,6 +113,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `MAGICK_CONFIGURE_PATH`) that denies the network coders, so a provider SVG
   from `SHOWY_QUOTA_CODEXBAR_RESOURCES` cannot make `magick` fetch a remote
   `href` (SSRF/data exfiltration) regardless of the system ImageMagick policy.
+- The serve/CLI timeout knobs in `bin/showy-quota-fetch` are now bounded above:
+  `SHOWY_QUOTA_CODEXBAR_SERVE_TIMEOUT_SECONDS` clamps to 60s (the `curl --max-time`
+  for the serve probe), the CLI and config-providers timeouts to 300s, and the
+  serve start-wait poll to 300s, so a pathological value cannot turn a fetch into
+  an effectively unbounded wait.
 
 ## [0.3.0] — 2026-06-20
 

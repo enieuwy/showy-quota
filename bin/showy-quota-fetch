@@ -349,22 +349,28 @@ serve_base_url() {
 serve_timeout() {
     local timeout="${SHOWY_QUOTA_CODEXBAR_SERVE_TIMEOUT_SECONDS}"
     [[ "${timeout}" =~ ^[0-9]+([.][0-9]+)?$ ]] || timeout=0.5
+    # Clamp to a sane ceiling so a huge value cannot turn the serve HTTP probe
+    # (curl --max-time) into an effectively unbounded wait.
+    (( ${timeout%%.*} > 60 )) && timeout=60
     printf '%s\n' "${timeout}"
 }
 
 positive_integer_or_default() {
-    local value="$1" default="$2"
+    local value="$1" default="$2" max="${3:-}"
     if [[ "${value}" =~ ^[0-9]+$ ]]; then
         value=$((10#${value}))
     else
         value="${default}"
     fi
     (( value > 0 )) || value="${default}"
+    if [[ -n "${max}" ]] && (( value > max )); then
+        value="${max}"
+    fi
     printf '%s\n' "${value}"
 }
 
 codexbar_cli_timeout_seconds() {
-    positive_integer_or_default "${SHOWY_QUOTA_CODEXBAR_CLI_TIMEOUT_SECONDS:-20}" 20
+    positive_integer_or_default "${SHOWY_QUOTA_CODEXBAR_CLI_TIMEOUT_SECONDS:-20}" 20 300
 }
 
 serve_failure_restart_threshold() {
@@ -459,7 +465,7 @@ clear_cli_failure() {
 # ── provider discovery & per-provider fallback ─────────────────────────
 
 codexbar_config_providers_timeout_seconds() {
-    positive_integer_or_default "${SHOWY_QUOTA_CODEXBAR_CONFIG_PROVIDERS_TIMEOUT_SECONDS:-5}" 5
+    positive_integer_or_default "${SHOWY_QUOTA_CODEXBAR_CONFIG_PROVIDERS_TIMEOUT_SECONDS:-5}" 5 300
 }
 
 config_providers_backoff_seconds() {
@@ -936,6 +942,7 @@ wait_for_serve_health() {
     [[ "${max_tenths}" =~ ^[0-9]+$ ]] || max_tenths=30
     max_tenths=$((10#${max_tenths}))
     (( max_tenths > 0 )) || max_tenths=30
+    (( max_tenths > 3000 )) && max_tenths=3000
     local i
     for (( i=0; i<max_tenths; i++ )); do
         serve_health_ok && return 0

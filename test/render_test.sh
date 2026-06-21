@@ -2067,6 +2067,21 @@ fi
 assert_equals "fetcher records serve cache source" "serve" "$(< "${cache}/source")"
 assert_equals "fetcher uses production-safe default serve timeout" "10" "$(< "${cache}/curl-max-time")"
 
+# A pathological serve timeout is clamped so curl --max-time stays bounded.
+clamp_cache=$(mk_cache)
+env \
+    PATH="${stub_dir}:${PATH}" \
+    SHOWY_QUOTA_NO_CONFIG=1 \
+    SHOWY_QUOTA_CACHE_DIR="${clamp_cache}" \
+    SHOWY_QUOTA_CODEXBAR_BIN="${missing_bin}" \
+    SHOWY_QUOTA_CODEXBAR_SERVE_URL="${serve_url}" \
+    SHOWY_QUOTA_TEST_SERVE_URL="${serve_url}" \
+    SHOWY_QUOTA_TEST_SERVE_FIXTURE="${FIXTURE_DIR}/codexbar-realistic.json" \
+    SHOWY_QUOTA_TEST_CURL_MAX_TIME_FILE="${clamp_cache}/curl-max-time" \
+    SHOWY_QUOTA_CODEXBAR_SERVE_TIMEOUT_SECONDS=999999999 \
+    "${REPO_ROOT}/bin/showy-quota-fetch" >/dev/null 2>&1 || true
+assert_equals "fetcher clamps a pathological serve timeout" "60" "$(< "${clamp_cache}/curl-max-time")"
+
 large_payload_fixture="${TMP}/codexbar-large-payload.json"
 python3 -c '
 import json
