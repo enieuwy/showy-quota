@@ -533,6 +533,9 @@ clear_provider_failure() {
 
 valid_provider_id() {
     local id="$1"
+    # '.' and '..' match the charset below but are path components that would
+    # let a provider id escape the per-provider failure-stamp directory.
+    [[ "${id}" == "." || "${id}" == ".." ]] && return 1
     [[ "${id}" =~ ^[A-Za-z0-9_.-]+$ ]]
 }
 

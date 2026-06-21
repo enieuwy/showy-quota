@@ -1897,6 +1897,28 @@ else
     fail "fetcher rejects unsafe provider ids" "rc=${rc}; out=${out}"
 fi
 
+dotdot_provider="${TMP}/dotdot-provider.json"
+printf '%s\n' '[{"provider":"..","usage":{"primary":{"usedPercent":12}}},{"provider":"codex","usage":{"primary":{"usedPercent":30}}}]' > "${dotdot_provider}"
+cache=$(mk_cache)
+rc=0
+out=$(
+    PATH="${stub_dir}:${PATH}" \
+    SHOWY_QUOTA_NO_CONFIG=1 \
+    SHOWY_QUOTA_CACHE_DIR="${cache}" \
+    SHOWY_QUOTA_CODEXBAR_SERVE_URL='' \
+    SHOWY_QUOTA_TEST_FIXTURE="${dotdot_provider}" \
+    "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
+) || rc=$?
+# '..' is a path component that would escape the failure-stamp dir; it must be
+# dropped (valid_provider_id), while the legitimate provider still renders.
+if (( rc == 0 )) \
+    && printf '%s' "${out}" | jq -e 'any(.provider == "codex")' >/dev/null 2>&1 \
+    && ! printf '%s' "${out}" | jq -e 'any(.provider == "..")' >/dev/null 2>&1; then
+    ok "fetcher drops '..' provider id (no path traversal)"
+else
+    fail "fetcher drops '..' provider id (no path traversal)" "rc=${rc}; out=${out}"
+fi
+
 # 4. Missing codexbar binary, no cache → fetcher fails with diagnostic.
 missing_bin="${TMP}/no-such-codexbar"
 cache=$(mk_cache)

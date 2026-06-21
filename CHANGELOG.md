@@ -88,6 +88,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   malformed, so a bad value yields the default item style instead of a broken
   `sketchybar --set`. `share/config.env.example` now also documents that
   `SHOWY_QUOTA_SKETCHYBAR_CLICK` is run by SketchyBar as a shell command on click.
+- `valid_provider_id` in `bin/showy-quota-fetch` now rejects the path components
+  `.` and `..` (which matched the existing `^[A-Za-z0-9_.-]+$` charset), so a
+  CodexBar payload with a provider id of `..` can no longer point the
+  per-provider failure-stamp path outside `SHOWY_QUOTA_PROVIDER_FAILURE_DIR`.
 
 ## [0.3.0] — 2026-06-20
 
