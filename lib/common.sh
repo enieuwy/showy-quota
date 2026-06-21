@@ -68,6 +68,16 @@ showy_quota_load_config() {
 
     theme="${SHOWY_QUOTA_THEME:-}"
     [[ -n "${theme}" ]] || return 0
+    # SHOWY_QUOTA_THEME is interpolated into a path that gets sourced as shell.
+    # Restrict it to a bare theme name (same charset the CLI enforces) so a value
+    # like '../../../tmp/evil' cannot traverse out of the themes dir and source
+    # an arbitrary .env file.
+    if [[ ! "${theme}" =~ ^[A-Za-z0-9._-]+$ ]]; then
+        # Ignore the malformed/hostile name and keep rendering with defaults
+        # rather than aborting the renderer under `set -e`.
+        printf 'showy-quota: ignoring invalid theme name %q\n' "${theme}" >&2
+        return 0
+    fi
 
     repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
     for theme_path in \
@@ -319,6 +329,9 @@ showy_quota_parse_local_epoch() {
 showy_quota_reset_description_epoch() {
     local raw="$1"
     [[ -n "${raw}" && "${raw}" != "null" ]] || return 1
+    # CodexBar-supplied date text is handed to date/gdate -d; cap its length so a
+    # pathologically long payload field cannot stall the parser.
+    (( ${#raw} <= 64 )) || return 1
     local desc="${raw#Resets }"
     [[ "${desc}" != "${raw}" ]] || desc="${raw#resets }"
     [[ "${desc}" != "${raw}" ]] || return 1
@@ -350,6 +363,7 @@ showy_quota_reset_description_epoch() {
 showy_quota_reset_epoch() {
     local raw="$1"
     [[ -n "${raw}" && "${raw}" != "null" ]] || return 1
+    (( ${#raw} <= 64 )) || return 1
 
     # Normalize: strip fractional seconds (regardless of suffix style),
     # collapse +HH:MM → +HHMM, replace Z with +0000.

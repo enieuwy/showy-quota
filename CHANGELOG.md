@@ -73,6 +73,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   are rejected back to their defaults when they carry control characters or an
   absurd length, so a poisoned env/config value cannot corrupt SketchyBar or
   terminal-strip output.
+- `SHOWY_QUOTA_THEME` is validated against the same bare-name charset the CLI
+  enforces (`^[A-Za-z0-9._-]+$`) before `showy_quota_load_config` builds and
+  sources the theme `.env`, so a value like `../../../tmp/evil` can no longer
+  traverse out of the themes directory to source an arbitrary file. An invalid
+  name is ignored (defaults kept) rather than aborting the renderer.
+- CodexBar-supplied `resetsAt`/`resetDescription` date text is length-capped (64
+  chars) before it is handed to `date`/`gdate -d` in `showy_quota_reset_epoch`
+  and `showy_quota_reset_description_epoch`, so a pathologically long payload
+  field cannot stall the date parser.
 
 ## [0.3.0] — 2026-06-20
 

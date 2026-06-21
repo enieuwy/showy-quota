@@ -660,6 +660,25 @@ assert_equals "control-char stale glyph degrades to default" "⚠" "${out}"
 out=$(run_common_eval 'printf "%s" "${SHOWY_QUOTA_DEGRADED_CLI_GLYPH}"' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_DEGRADED_CLI_GLYPH='!!')
 assert_equals "clean custom degraded glyph preserved" "!!" "${out}"
 
+# A theme name that escapes the themes dir is ignored (no arbitrary .env source);
+# defaults are kept instead of aborting the renderer.
+# shellcheck disable=SC2016
+out=$(run_common_eval 'showy_quota_primary_palette good' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_THEME='../catppuccin-mocha-blue')
+assert_equals "traversal theme name is ignored (defaults kept)" "25be6a" "${out}"
+
+# CodexBar date fields are length-capped before reaching date/gdate -d.
+# shellcheck disable=SC2016
+out=$(run_common_eval 'r=$(showy_quota_reset_epoch 2099-01-15T00:00:00Z); [[ "$r" =~ ^[0-9]+$ ]] && printf digits || printf no' SHOWY_QUOTA_NO_CONFIG=1)
+assert_equals "reset_epoch accepts a short ISO timestamp" "digits" "${out}"
+
+# shellcheck disable=SC2016
+out=$(run_common_eval 'showy_quota_reset_epoch "$(printf "9%.0s" {1..100})" >/dev/null && printf accept || printf reject' SHOWY_QUOTA_NO_CONFIG=1)
+assert_equals "reset_epoch rejects an overlong date string" "reject" "${out}"
+
+# shellcheck disable=SC2016
+out=$(run_common_eval 'showy_quota_reset_description_epoch "Resets $(printf "x%.0s" {1..100})" >/dev/null && printf accept || printf reject' SHOWY_QUOTA_NO_CONFIG=1)
+assert_equals "reset_description_epoch rejects an overlong fragment" "reject" "${out}"
+
 # ── countdown formatting ──────────────────────────────────────────────
 printf '\ncountdown formatting\n'
 
