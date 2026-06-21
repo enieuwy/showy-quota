@@ -21,6 +21,11 @@ const SERVE_FAILURES_BEFORE_CLI: u8 = 3;
 const MANAGED_SERVE_RETRY_COOLDOWN_SECONDS: f64 = 30.0;
 const PROVIDER_DISCOVERY_BACKOFF_SECONDS_DEFAULT: f64 = 60.0;
 const PROVIDER_COMMAND_TIMEOUT_SECONDS: u64 = 15;
+// Zellij never reports a failed/cancelled web_request, so an in-flight /health
+// or /usage probe that hangs (dropped connection, wedged proxy) is expired
+// after this window and treated as a serve failure so the plugin retries and
+// can fall back to the CLI instead of latching forever.
+const WEB_REQUEST_TIMEOUT_SECONDS: f64 = 30.0;
 const PROVIDER_BACKOFF_MAX_SECONDS: f64 = 1800.0;
 
 /// POSIX-sh watchdog that runs `"$@"` but guarantees the spawned process cannot
@@ -182,6 +187,9 @@ struct State {
     last_output: String,
     health_in_flight: bool,
     usage_in_flight: bool,
+    // When the in-flight /health or /usage web request was started, so a hung
+    // request can be expired (Zellij never reports request failure).
+    web_flight_started_at: Option<f64>,
     permissions_granted: bool,
     // Provider discovery state: cached output of `codexbar config providers`.
     // An empty `discovered_providers` with `discovered_providers_at == None`
@@ -225,6 +233,7 @@ impl Default for State {
             last_output: " showy-quota: loading ".into(),
             health_in_flight: false,
             usage_in_flight: false,
+            web_flight_started_at: None,
             permissions_granted: false,
             discovered_providers: Vec::new(),
             discovered_providers_at: None,
@@ -248,6 +257,14 @@ impl ZellijPlugin for State {
             .or_else(|| configuration.get("SHOWY_QUOTA_CODEXBAR_SERVE_URL"))
             .cloned()
             .unwrap_or_else(|| "http://127.0.0.1:8080".into());
+        // Mirror the shell `serve_base_url` guard: only a loopback serve URL is
+        // honored. A non-loopback URL would turn Zellij's granted WebAccess into
+        // an SSRF / exfiltration vector (e.g. a shared KDL layout pointing the
+        // plugin at an internal or metadata endpoint), so drop it and fall back
+        // to the CLI path instead.
+        if !self.serve_url.trim().is_empty() && !is_loopback_serve_url(&self.serve_url) {
+            self.serve_url = String::new();
+        }
         self.interval_seconds = parse_positive_f64(
             configuration.get("interval_seconds").map(String::as_str),
             10.0,
@@ -330,6 +347,7 @@ impl ZellijPlugin for State {
                 self.permissions_granted = true;
                 self.health_in_flight = false;
                 self.usage_in_flight = false;
+                self.web_flight_started_at = None;
                 self.discovery_in_flight = false;
                 self.discovery_attempt_token = None;
                 self.discovery_started_at = None;
@@ -344,6 +362,7 @@ impl ZellijPlugin for State {
                 self.permissions_granted = false;
                 self.health_in_flight = false;
                 self.usage_in_flight = false;
+                self.web_flight_started_at = None;
                 self.discovery_in_flight = false;
                 self.discovery_attempt_token = None;
                 self.discovery_started_at = None;
@@ -366,6 +385,7 @@ impl ZellijPlugin for State {
                 match context.get("kind").map(String::as_str) {
                     Some(HEALTH_KIND) => {
                         self.health_in_flight = false;
+                        self.web_flight_started_at = None;
                         if status == 200 {
                             self.kick_usage();
                         } else {
@@ -375,6 +395,7 @@ impl ZellijPlugin for State {
                     }
                     Some(USAGE_KIND) => {
                         self.usage_in_flight = false;
+                        self.web_flight_started_at = None;
                         if status == 200 && self.accept_payload(body, Source::Serve) {
                             self.consecutive_serve_failures = 0;
                         } else {
@@ -469,9 +490,40 @@ impl State {
         self.discovery_failed_at = Some(now);
     }
 
+    /// Expire a hung /health or /usage probe. Returns true when it expired and
+    /// routed the timeout through the same failure path a non-200 result would,
+    /// so the caller (tick) should not also kick a fresh request this pass.
+    fn expire_stale_web_flight(&mut self) -> bool {
+        if !self.health_in_flight && !self.usage_in_flight {
+            return false;
+        }
+        let now = now_seconds();
+        let Some(started_at) = self.web_flight_started_at else {
+            // In-flight without a recorded start: stamp it so a later tick can
+            // expire it rather than wedging indefinitely.
+            self.web_flight_started_at = Some(now);
+            return false;
+        };
+        if (now - started_at).max(0.0) < WEB_REQUEST_TIMEOUT_SECONDS {
+            return false;
+        }
+        let was_usage = self.usage_in_flight;
+        self.health_in_flight = false;
+        self.usage_in_flight = false;
+        self.web_flight_started_at = None;
+        if was_usage {
+            self.handle_usage_failure();
+        } else {
+            self.handle_serve_unavailable();
+        }
+        true
+    }
 
     fn tick(&mut self) {
         if !self.permissions_granted {
+            return;
+        }
+        if self.expire_stale_web_flight() {
             return;
         }
         self.expire_stale_discovery();
@@ -522,6 +574,7 @@ impl State {
             return;
         }
         self.health_in_flight = true;
+        self.web_flight_started_at = Some(now_seconds());
         if self.source != Source::Cli {
             self.set_source(Source::Probing);
         }
@@ -548,6 +601,7 @@ impl State {
             return;
         }
         self.usage_in_flight = true;
+        self.web_flight_started_at = Some(now_seconds());
         let mut headers = BTreeMap::new();
         headers.insert("Accept".to_string(), "application/json".to_string());
         let mut context = BTreeMap::new();
@@ -1139,7 +1193,12 @@ impl State {
 
     fn accept_payload(&mut self, payload: Vec<u8>, source: Source) -> bool {
         let Ok(records) = parse_usage_payload(&payload) else {
-            return self.render_failure();
+            // Corrupt/invalid payload (e.g. a captive-portal or proxy page from
+            // an otherwise-200 serve): surface the failure state but report
+            // non-acceptance so the caller advances consecutive_serve_failures
+            // and can fall back to the CLI instead of latching on bad data.
+            self.render_failure();
+            return false;
         };
         if source == Source::Serve
             && self.cli_fallback != CliFallback::Off
@@ -1335,6 +1394,37 @@ fn derive_port_from_url(url: &str) -> Option<String> {
         Some(_) => None,
         None => default_port_for_scheme(scheme).map(str::to_string),
     }
+}
+
+/// True when `url` is an `http(s)://` URL whose host is a loopback literal
+/// (`127.0.0.1`, `localhost`, or `::1`). Mirrors the shell `serve_base_url`
+/// regex so the plugin honors the same localhost-only serve contract.
+fn is_loopback_serve_url(url: &str) -> bool {
+    let rest = match url
+        .trim()
+        .strip_prefix("http://")
+        .or_else(|| url.trim().strip_prefix("https://"))
+    {
+        Some(rest) => rest,
+        None => return false,
+    };
+    let authority = rest.split('/').next().unwrap_or(rest);
+    let authority = authority
+        .rsplit_once('@')
+        .map(|(_, authority)| authority)
+        .unwrap_or(authority);
+    let host = if let Some(after) = authority.strip_prefix('[') {
+        match after.split_once(']') {
+            Some((host, _)) => host,
+            None => return false,
+        }
+    } else {
+        authority
+            .rsplit_once(':')
+            .map(|(host, _)| host)
+            .unwrap_or(authority)
+    };
+    matches!(host, "127.0.0.1" | "localhost" | "::1")
 }
 
 fn now_epoch() -> i64 {
@@ -1550,6 +1640,133 @@ mod tests {
         assert_eq!(state.consecutive_serve_failures, 0);
         assert_eq!(state.source, Source::Serve);
         assert_eq!(state.last_output, output);
+    }
+
+    #[test]
+    fn corrupt_serve_payload_advances_failure_counter() {
+        // A 200 response carrying invalid JSON (captive portal / proxy page)
+        // must not count as success: the failure counter has to advance so the
+        // plugin eventually falls back to the CLI instead of latching forever.
+        let mut state = State {
+            permissions_granted: true,
+            source: Source::Serve,
+            cli_fallback: CliFallback::Off,
+            ..State::default()
+        };
+        let before = state.consecutive_serve_failures;
+        state.update(Event::WebRequestResult(
+            200,
+            BTreeMap::new(),
+            b"not-json".to_vec(),
+            event_context(USAGE_KIND),
+        ));
+        assert_eq!(state.consecutive_serve_failures, before + 1);
+    }
+
+    #[test]
+    fn hung_usage_web_request_expires_and_advances_failure() {
+        let mut state = State {
+            permissions_granted: true,
+            source: Source::Serve,
+            cli_fallback: CliFallback::Off,
+            usage_in_flight: true,
+            web_flight_started_at: Some(now_seconds() - (WEB_REQUEST_TIMEOUT_SECONDS + 1.0)),
+            ..State::default()
+        };
+        let before = state.consecutive_serve_failures;
+        state.tick();
+        assert!(!state.usage_in_flight);
+        assert!(state.web_flight_started_at.is_none());
+        assert_eq!(state.consecutive_serve_failures, before + 1);
+    }
+
+    #[test]
+    fn fresh_usage_web_request_is_not_expired() {
+        let mut state = State {
+            permissions_granted: true,
+            source: Source::Serve,
+            cli_fallback: CliFallback::Off,
+            usage_in_flight: true,
+            web_flight_started_at: Some(now_seconds()),
+            ..State::default()
+        };
+        state.tick();
+        assert!(state.usage_in_flight);
+        assert!(state.web_flight_started_at.is_some());
+    }
+
+    #[test]
+    fn parse_bool_accepts_known_truthy_and_falsy_tokens() {
+        for truthy in ["1", "true", "yes", "on", "ON", " Yes "] {
+            assert!(parse_bool(Some(truthy), false), "{truthy:?} should be true");
+        }
+        for falsy in ["0", "false", "no", "off", "OFF"] {
+            assert!(!parse_bool(Some(falsy), true), "{falsy:?} should be false");
+        }
+        assert!(parse_bool(None, true));
+        assert!(!parse_bool(None, false));
+        assert!(!parse_bool(Some("maybe"), false));
+    }
+
+    #[test]
+    fn valid_port_rejects_out_of_range_and_nonnumeric() {
+        assert!(valid_port("8080"));
+        assert!(valid_port("1"));
+        assert!(valid_port("65535"));
+        assert!(!valid_port("0"));
+        assert!(!valid_port("65536"));
+        assert!(!valid_port("abc"));
+        assert!(!valid_port(""));
+        assert!(!valid_port("-1"));
+    }
+
+    #[test]
+    fn prune_last_payload_drops_excluded_providers() {
+        let mut state = State {
+            last_payload: Some(mixed_payload()),
+            ..State::default()
+        };
+        state.render_config.providers_exclude = vec!["cursor".to_string()];
+        state.prune_last_payload_to_current_inventory();
+        let payload = state.last_payload.as_deref().expect("payload retained");
+        let records = parse_usage_payload(payload).expect("valid pruned payload");
+        let ids = provider_ids_from_records(&records);
+        assert_eq!(ids, vec!["claude", "codex", "gemini"]);
+        assert!(!ids.iter().any(|id| id == "cursor"));
+    }
+
+    #[test]
+    fn is_loopback_serve_url_matches_localhost_only() {
+        assert!(is_loopback_serve_url("http://127.0.0.1:8080"));
+        assert!(is_loopback_serve_url("http://localhost:8080/"));
+        assert!(is_loopback_serve_url("http://[::1]:8080"));
+        assert!(is_loopback_serve_url("https://127.0.0.1"));
+        assert!(!is_loopback_serve_url("http://169.254.169.254/"));
+        assert!(!is_loopback_serve_url("https://internal-service.corp/secret"));
+        assert!(!is_loopback_serve_url("http://127.0.0.1.evil.com"));
+        assert!(!is_loopback_serve_url("ftp://127.0.0.1"));
+        assert!(!is_loopback_serve_url(""));
+    }
+
+    #[test]
+    fn load_drops_non_loopback_serve_url() {
+        let mut state = State::default();
+        let mut config = BTreeMap::new();
+        config.insert(
+            "serve_url".to_string(),
+            "https://internal-service.corp/secret".to_string(),
+        );
+        state.load(config);
+        assert!(state.serve_url.is_empty());
+    }
+
+    #[test]
+    fn load_keeps_loopback_serve_url() {
+        let mut state = State::default();
+        let mut config = BTreeMap::new();
+        config.insert("serve_url".to_string(), "http://127.0.0.1:9000".to_string());
+        state.load(config);
+        assert_eq!(state.serve_url, "http://127.0.0.1:9000");
     }
 
     #[test]
