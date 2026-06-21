@@ -26,8 +26,16 @@ showy_quota_have jq || showy_quota_die "jq is required"
 
 FETCH="${SHOWY_QUOTA_FETCH_BIN:-${SCRIPT_DIR}/showy-quota-fetch}"
 
-CAP_LEFT="${SHOWY_QUOTA_CAP_LEFT-}"
-CAP_RIGHT="${SHOWY_QUOTA_CAP_RIGHT-}"
+# Default powerline caps: U+E0B6 (left half-circle) and U+E0B4 (right).
+CAP_LEFT_DEFAULT=$'\ue0b6'
+CAP_RIGHT_DEFAULT=$'\ue0b4'
+CAP_LEFT="${SHOWY_QUOTA_CAP_LEFT-${CAP_LEFT_DEFAULT}}"
+CAP_RIGHT="${SHOWY_QUOTA_CAP_RIGHT-${CAP_RIGHT_DEFAULT}}"
+# tmux parses '#' as its format escape ('#[', '#{', '#(' ...). Double any '#'
+# in the (user-supplied) caps so they render literally rather than as a
+# style/expansion directive.
+CAP_LEFT="${CAP_LEFT//#/##}"
+CAP_RIGHT="${CAP_RIGHT//#/##}"
 
 tmux_reset() { printf '#[default]'; }
 tmux_dim() { printf '#[dim]'; }
