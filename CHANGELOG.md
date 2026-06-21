@@ -38,6 +38,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   that hangs without ever producing a result (Zellij reports no request
   failure) after 30s, so a dropped connection no longer wedges the plugin — it
   retries and falls back to the CLI exactly as a returned failure would.
+- `share/config.env.example` no longer documents removed knobs: the
+  `SHOWY_QUOTA_PALETTE_{SECONDARY,TERTIARY}_*`/`*_SCALE` entries (replaced by
+  `SHOWY_QUOTA_PALETTE_DIM_SCALE` + `SHOWY_QUOTA_DIM_WINDOW_MINUTES`) and the
+  `SHOWY_QUOTA_MONO3_*` entries (replaced by `SHOWY_QUOTA_PROVIDER_MODES`,
+  `SHOWY_QUOTA_MONO_COLOR_MODE`, `SHOWY_QUOTA_MONO_MARKERS`) are updated to the
+  live names so following the example no longer sets variables that have no
+  effect.
 
 ### Security
 - All GitHub Actions in `ci.yml` and `release.yml` are pinned to commit SHAs
@@ -54,6 +61,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Terminal bar width (`SHOWY_QUOTA_TMUX_BAR_WIDTH` / `SHOWY_QUOTA_ZELLIJ_BAR_WIDTH`)
   is clamped to `[8, 400]` across the shell renderers and the Rust core so an
   unbounded value cannot drive a runaway render loop.
+- The `*_BIN` overrides (`SHOWY_QUOTA_FETCH_BIN`, `SHOWY_QUOTA_CODEXBAR_BIN`,
+  `SHOWY_QUOTA_ZELLIJ_BIN`) are validated before use across every renderer
+  entry point and `lib/common.sh`: a value carrying whitespace or shell
+  metacharacters (e.g. `/bin/sh -c …`) is rejected back to a trusted default
+  instead of being exec'd. A plain command name or path — including a
+  not-yet-installed one — is still honored, so cache-only and custom-path
+  installs are unaffected. The standalone Zellij plugin applies the same check
+  to the `serve_command`/`cli_command` KDL knobs.
+- Status glyphs (`SHOWY_QUOTA_STALE_GLYPH`, `SHOWY_QUOTA_DEGRADED_CLI_GLYPH`)
+  are rejected back to their defaults when they carry control characters or an
+  absurd length, so a poisoned env/config value cannot corrupt SketchyBar or
+  terminal-strip output.
 
 ## [0.3.0] — 2026-06-20
 

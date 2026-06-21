@@ -628,6 +628,38 @@ assert_equals "config env overrides themed primary palette" "010203" "${out}"
 out=$(run_common_eval 'printf "%s|%s|%s" "$(showy_quota_palette icon_text)" "$(showy_quota_palette countdown)" "$(showy_quota_palette countdown_warn)"' SHOWY_QUOTA_NO_CONFIG= XDG_CONFIG_HOME="${theme_xdg}")
 assert_equals "config env overrides themed text role palettes" "020304|030405|040506" "${out}"
 
+# ── executable & glyph config validation ──────────────────────────────
+printf '\nexecutable & glyph config validation\n'
+
+# Injection-shaped *_BIN values (whitespace / shell metacharacters) are rejected
+# back to their defaults so a poisoned env/config.env entry cannot be exec'd.
+# shellcheck disable=SC2016
+out=$(run_common_eval 'printf "%s" "${SHOWY_QUOTA_CODEXBAR_BIN}"' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_CODEXBAR_BIN='/bin/sh -c evil')
+assert_equals "injection-shaped codexbar bin degrades to default" "codexbar" "${out}"
+
+# shellcheck disable=SC2016
+out=$(run_common_eval 'printf "%s" "${SHOWY_QUOTA_ZELLIJ_BIN}"' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_ZELLIJ_BIN='zellij; rm -rf ~')
+assert_equals "injection-shaped zellij bin degrades to default" "zellij" "${out}"
+
+# A clean but currently-missing path is preserved: exec just fails into the
+# renderer's normal fallback (existence is not required).
+# shellcheck disable=SC2016
+out=$(run_common_eval 'printf "%s" "${SHOWY_QUOTA_CODEXBAR_BIN}"' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_CODEXBAR_BIN=/tmp/showy-quota/no-such-codexbar)
+assert_equals "clean missing codexbar path is preserved" "/tmp/showy-quota/no-such-codexbar" "${out}"
+
+# shellcheck disable=SC2016
+out=$(run_common_eval 'showy_quota_valid_bin "/usr/local/bin/codexbar"; printf "|"; showy_quota_valid_bin "a b" || printf "rej"' SHOWY_QUOTA_NO_CONFIG=1)
+assert_equals "valid_bin accepts path and rejects whitespace" "/usr/local/bin/codexbar|rej" "${out}"
+
+# Status glyphs carrying control characters fall back to defaults; clean ones stay.
+# shellcheck disable=SC2016
+out=$(run_common_eval 'printf "%s" "${SHOWY_QUOTA_STALE_GLYPH}"' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_STALE_GLYPH=$'\x1bboom')
+assert_equals "control-char stale glyph degrades to default" "⚠" "${out}"
+
+# shellcheck disable=SC2016
+out=$(run_common_eval 'printf "%s" "${SHOWY_QUOTA_DEGRADED_CLI_GLYPH}"' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_DEGRADED_CLI_GLYPH='!!')
+assert_equals "clean custom degraded glyph preserved" "!!" "${out}"
+
 # ── countdown formatting ──────────────────────────────────────────────
 printf '\ncountdown formatting\n'
 

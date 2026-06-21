@@ -280,7 +280,7 @@ impl ZellijPlugin for State {
             .get("serve_command")
             .or_else(|| configuration.get("SHOWY_QUOTA_CODEXBAR_BIN"))
             .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
+            .filter(|value| valid_command(value))
             .unwrap_or_else(|| "codexbar".into());
         self.serve_port = configuration
             .get("serve_port")
@@ -295,7 +295,7 @@ impl ZellijPlugin for State {
             .or_else(|| configuration.get("fallback_command"))
             .or_else(|| configuration.get("SHOWY_QUOTA_CODEXBAR_BIN"))
             .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
+            .filter(|value| valid_command(value))
             .unwrap_or_else(|| "codexbar".into());
         // Per-provider CLI backoff after a failure. Defaults to the same
         // interval that drives the bar so backoff scales with refresh cadence.
@@ -1363,6 +1363,17 @@ fn valid_port(value: &str) -> bool {
         && matches!(value.parse::<u16>(), Ok(port) if port > 0)
 }
 
+// Defense-in-depth for the serve_command/cli_command KDL knobs: they are spawned
+// via Zellij's RunCommand capability, so reject any value carrying whitespace or
+// shell metacharacters (the documented injection vector) back to the default
+// "codexbar". A bare name or plain path is accepted; the host resolves it.
+fn valid_command(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-' | '+' | '@' | '/'))
+}
+
 fn default_port_for_scheme(scheme: Option<&str>) -> Option<&'static str> {
     match scheme {
         Some(scheme) if scheme.eq_ignore_ascii_case("http") => Some("80"),
@@ -1732,6 +1743,18 @@ mod tests {
         assert!(!valid_port("abc"));
         assert!(!valid_port(""));
         assert!(!valid_port("-1"));
+    }
+
+    #[test]
+    fn valid_command_rejects_shell_metacharacters_and_whitespace() {
+        assert!(valid_command("codexbar"));
+        assert!(valid_command("/usr/local/bin/codexbar"));
+        assert!(valid_command("my-tool.v2_beta"));
+        assert!(!valid_command(""));
+        assert!(!valid_command("/bin/sh -c evil"));
+        assert!(!valid_command("codexbar; rm -rf /"));
+        assert!(!valid_command("$(curl evil)"));
+        assert!(!valid_command("a`b`"));
     }
 
     #[test]

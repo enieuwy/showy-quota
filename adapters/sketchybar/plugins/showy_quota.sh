@@ -35,6 +35,7 @@ REPO_ROOT="$(resolve_repo_root)"
 . "${REPO_ROOT}/lib/strip.sh"
 
 FETCH="${SHOWY_QUOTA_FETCH_BIN:-${REPO_ROOT}/bin/showy-quota-fetch}"
+FETCH="$(showy_quota_valid_bin "${FETCH}")" || FETCH="${REPO_ROOT}/bin/showy-quota-fetch"
 CACHE_DIR="${SHOWY_QUOTA_SKETCHYBAR_IMAGE_CACHE}"
 mkdir -p "${CACHE_DIR}" || exit 0
 STATE_FILE="${CACHE_DIR}/providers.txt"

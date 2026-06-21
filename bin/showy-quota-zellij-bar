@@ -32,6 +32,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${SCRIPT_PATH}")" && pwd -P)"
 showy_quota_have jq || showy_quota_die "jq is required"
 
 FETCH="${SHOWY_QUOTA_FETCH_BIN:-${SCRIPT_DIR}/showy-quota-fetch}"
+FETCH="$(showy_quota_valid_bin "${FETCH}")" || FETCH="${SCRIPT_DIR}/showy-quota-fetch"
 
 json_input=""
 while (($#)); do

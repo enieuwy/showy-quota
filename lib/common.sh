@@ -25,6 +25,33 @@ showy_quota_uint() {
     fi
 }
 
+# Validate a configured executable reference. The *_BIN knobs come from the
+# environment/config.env and are exec'd directly; this is defense-in-depth so a
+# value carrying whitespace or shell metacharacters (the documented injection
+# vector, e.g. `/bin/sh -c …`) cannot be exec'd. A plain command name or
+# filesystem path is accepted as-is; existence is deliberately NOT required, so
+# a missing or not-yet-installed target just fails to exec and the caller's
+# normal fallback handles it (an existence check cannot block a real malicious
+# binary anyway, and would break legitimate missing-path fallbacks). Echoes the
+# value on success, returns 1 otherwise so callers degrade to a trusted
+# default. Pure bash: no subprocess, safe to call while sourcing.
+showy_quota_valid_bin() {
+    local value="$1"
+    [[ "${value}" =~ ^[A-Za-z0-9._+@/-]+$ ]] || return 1
+    printf '%s' "${value}"
+}
+
+# Validate a configured status glyph. Glyphs reach `sketchybar --set` and the
+# terminal strips; a control character or an absurd length from env/config could
+# corrupt rendering (quoting already prevents argument injection). Echoes the
+# value on success, returns 1 otherwise so callers fall back to the default.
+showy_quota_valid_glyph() {
+    local value="$1"
+    [[ "${value}" != *[$'\x01'-$'\x1f']* ]] || return 1
+    (( ${#value} <= 16 )) || return 1
+    printf '%s' "${value}"
+}
+
 # ── config loading ─────────────────────────────────────────────────────
 
 showy_quota_load_config() {
@@ -183,6 +210,19 @@ SHOWY_QUOTA_SKETCHYBAR_BAR_WIDTH=$(showy_quota_uint "${SHOWY_QUOTA_SKETCHYBAR_BA
 # ICON_SCALE is a float (sketchybar background.image.scale); fall back to the
 # default when it is not a plain decimal so the icon never gets a junk scale.
 [[ "${SHOWY_QUOTA_SKETCHYBAR_ICON_SCALE}" =~ ^[0-9]+([.][0-9]+)?$ ]] || SHOWY_QUOTA_SKETCHYBAR_ICON_SCALE=0.28
+
+# ── executable config validation ───────────────────────────────────────
+# The *_BIN knobs are exec'd directly; reject a value that is a shell snippet
+# or a non-runnable path back to its default so a poisoned env/config.env entry
+# cannot become an arbitrary-binary launch. FETCH_BIN is validated at its
+# point of use in the renderer entry points (its default is a sibling path).
+SHOWY_QUOTA_CODEXBAR_BIN=$(showy_quota_valid_bin "${SHOWY_QUOTA_CODEXBAR_BIN}") || SHOWY_QUOTA_CODEXBAR_BIN=codexbar
+SHOWY_QUOTA_ZELLIJ_BIN=$(showy_quota_valid_bin "${SHOWY_QUOTA_ZELLIJ_BIN}") || SHOWY_QUOTA_ZELLIJ_BIN=zellij
+
+# Status glyphs come from env/config and reach sketchybar/terminal output;
+# reject control characters or absurd lengths back to their defaults.
+SHOWY_QUOTA_STALE_GLYPH=$(showy_quota_valid_glyph "${SHOWY_QUOTA_STALE_GLYPH}") || SHOWY_QUOTA_STALE_GLYPH='⚠'
+SHOWY_QUOTA_DEGRADED_CLI_GLYPH=$(showy_quota_valid_glyph "${SHOWY_QUOTA_DEGRADED_CLI_GLYPH}") || SHOWY_QUOTA_DEGRADED_CLI_GLYPH='⚠cli'
 
 declare -gA SHOWY_QUOTA_ROLE_PALETTE_CACHE=()
 
