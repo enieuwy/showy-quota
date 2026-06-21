@@ -1,0 +1,19 @@
+# cargo-audit configuration (read automatically by `cargo audit`, incl. CI).
+#
+# These advisories are all transitive through `zellij-tile 0.44.3`, which is the
+# latest published version (no 0.45.x exists) and pulls `zellij-utils`
+# non-optionally with no feature flags to shed it. None is independently
+# fixable; each is accepted with the rationale below. Re-evaluate when a
+# `zellij-tile > 0.44.3` release lands.
+[advisories]
+ignore = [
+  # atty 0.2.14 unmaintained. Path: zellij-tile -> clap_complete/clap 3.2.25 -> atty.
+  # Shipped in the wasm32 plugin but no exploitable defect; clap 3 is owned by zellij-utils.
+  "RUSTSEC-2024-0375",
+  # atty 0.2.14 potential unaligned read (unsound). Windows-only and requires a
+  # non-default global allocator; the plugin targets wasm32-wasip1, so not reachable.
+  "RUSTSEC-2021-0145",
+  # proc-macro-error 1.0.4 unmaintained. Path: clap 3.2.25 -> clap_derive (proc-macro).
+  # Build-time only; never linked into the shipped .wasm binary.
+  "RUSTSEC-2024-0370",
+]
