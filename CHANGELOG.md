@@ -62,6 +62,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   version from the app bundle via `argv[0]`: a bare command name reports no
   version (in `--version` or `/health`), which would otherwise leave the gate
   inert and spawn version-less serves.
+- The standalone Zellij plugin now detects a stale-build `codexbar serve` and
+  appends a `⚠ver` marker. It parses the serve's `/health` `version`, compares
+  it against the installed `codexbar --version` (a periodic, absolute-path-
+  resolving, watchdog-bounded probe gated on `cli_fallback`), and flags a
+  mismatch using the same version-token normalization as the shell and glean.
+  Detection only — the plugin never kills or recycles a session serve (that
+  stays with `showy-quota-fetch`); a serve or build that reports no version,
+  or `cli_fallback "off"`, is a silent no-op.
 
 ### Security
 - All GitHub Actions in `ci.yml` and `release.yml` are pinned to commit SHAs

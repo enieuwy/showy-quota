@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use showy_quota_zellij_core::palette::hex_to_rgb;
 use showy_quota_zellij_core::{
     parse_provider_config_payload, parse_usage_payload, payload_has_renderable_provider,
     provider_ids_from_records, render_zellij, valid_provider_id, ProviderConfigError,
@@ -27,6 +28,16 @@ const PROVIDER_COMMAND_TIMEOUT_SECONDS: u64 = 15;
 // can fall back to the CLI instead of latching forever.
 const WEB_REQUEST_TIMEOUT_SECONDS: f64 = 30.0;
 const PROVIDER_BACKOFF_MAX_SECONDS: f64 = 1800.0;
+const VERSION_KIND: &str = "showy-quota-version";
+const VERSION_ATTEMPT_KEY: &str = "showy-quota-version-attempt";
+const VERSION_COMMAND_TIMEOUT_SECONDS: u64 = 5;
+// How long an on-disk `codexbar --version` result is trusted before re-probing.
+const ONDISK_VERSION_TTL_SECONDS: f64 = 300.0;
+// Plugin-appended marker (integration boundary) meaning "the running serve is an
+// older build than the installed binary; restart it." Distinct from the core
+// `stale_glyph` (data old) and `degraded_cli_glyph` (on CLI fallback); styled to
+// match them (bold, countdown-warn fg, bar bg).
+const BUILD_STALE_MARKER: &str = "⚠ver";
 
 /// POSIX-sh watchdog that runs `"$@"` but guarantees the spawned process cannot
 /// outlive `timeout_secs`. Zellij exposes no API to cancel a `run_command`, so a
@@ -47,6 +58,25 @@ fn watchdog_argv<'a>(script: &'a str, command: &[&'a str]) -> Vec<&'a str> {
     let mut argv = vec!["/bin/sh", "-c", script, "showy-quota-watchdog"];
     argv.extend_from_slice(command);
     argv
+}
+
+/// Like `watchdog_script`, but first resolves the binary in `$1` to an absolute
+/// path: CodexBar reads its version from the app bundle via `argv[0]`, so a bare
+/// command name reports no version. Mirrors the shell `codexbar_bin_abs` — a
+/// value containing a slash is trusted as-is, otherwise `command -v` resolves
+/// it. The binary still rides in `$1` (never interpolated), so this is
+/// injection-safe like `watchdog_script`.
+fn version_probe_script(timeout_secs: u64) -> String {
+    format!(
+        "case $1 in */*) b=$1;; *) b=$(command -v \"$1\" 2>/dev/null) || b=$1;; esac; \"$b\" --version & __p=$!; (sleep {t}; kill \"$__p\" 2>/dev/null; sleep 2; kill -9 \"$__p\" 2>/dev/null) & __k=$!; wait \"$__p\"; __r=$?; kill \"$__k\" 2>/dev/null; exit \"$__r\"",
+        t = timeout_secs
+    )
+}
+
+/// Build the argv for a version probe: the binary rides in `$1` (never
+/// interpolated into the script); `$0` is only a label.
+fn version_probe_argv<'a>(script: &'a str, bin: &'a str) -> Vec<&'a str> {
+    vec!["/bin/sh", "-c", script, "showy-quota-version", bin]
 }
 #[cfg(target_arch = "wasm32")]
 fn shim_set_selectable(selectable: bool) {
@@ -208,6 +238,16 @@ struct State {
     // Per-provider fallback state: tracks in-flight commands and last-known
     // good records so one provider's failure never blocks the others.
     provider_states: BTreeMap<String, ProviderFallbackState>,
+    // Stale-serve build gate. `serve_build_version` is the version reported by
+    // the running serve's /health (None for a pre-#1703 serve that omits it);
+    // `ondisk_version` is the installed binary's version from a periodic
+    // `codexbar --version` probe. A marker shows only when both are known and
+    // differ. Probe state mirrors the discovery in-flight/token guard.
+    serve_build_version: Option<String>,
+    ondisk_version: Option<String>,
+    ondisk_version_checked_at: Option<f64>,
+    version_probe_in_flight: bool,
+    version_probe_token: Option<String>,
 }
 
 impl Default for State {
@@ -245,6 +285,11 @@ impl Default for State {
             discovery_failed_at: None,
             discovery_failure_backoff_seconds: PROVIDER_DISCOVERY_BACKOFF_SECONDS_DEFAULT,
             provider_states: BTreeMap::new(),
+            serve_build_version: None,
+            ondisk_version: None,
+            ondisk_version_checked_at: None,
+            version_probe_in_flight: false,
+            version_probe_token: None,
         }
     }
 }
@@ -387,6 +432,7 @@ impl ZellijPlugin for State {
                         self.health_in_flight = false;
                         self.web_flight_started_at = None;
                         if status == 200 {
+                            self.update_serve_build_version(&body);
                             self.kick_usage();
                         } else {
                             self.handle_serve_unavailable();
@@ -425,6 +471,12 @@ impl ZellijPlugin for State {
                             .get(FALLBACK_PROVIDER_ATTEMPT_KEY)
                             .map(String::as_str);
                         self.handle_provider_fallback_result(&provider, attempt, exit, stdout)
+                    }
+                    Some(VERSION_KIND) => {
+                        let previous_output = self.last_output.clone();
+                        let attempt = context.get(VERSION_ATTEMPT_KEY).map(String::as_str);
+                        self.handle_version_result(exit, stdout, attempt);
+                        self.last_output != previous_output
                     }
                     _ => false,
                 }
@@ -527,6 +579,7 @@ impl State {
             return;
         }
         self.expire_stale_discovery();
+        self.maybe_kick_version_probe();
         if self.source == Source::Serve {
             if self.discovery_in_flight {
                 self.usage_after_discovery = true;
@@ -611,6 +664,7 @@ impl State {
     }
 
     fn handle_serve_unavailable(&mut self) {
+        self.serve_build_version = None;
         if self.should_start_managed_serve(now_seconds()) {
             self.start_managed_serve();
             return;
@@ -813,6 +867,92 @@ impl State {
                 } else {
                     self.fallback_after_discovery();
                 }
+            }
+        }
+    }
+
+    /// Parse the running serve build version from a /health 200 body. A body
+    /// without a `version` field (pre-#1703 serve) yields None, which keeps the
+    /// gate inert. Never alters the serve/usage flow.
+    fn update_serve_build_version(&mut self, body: &[u8]) {
+        self.serve_build_version = serde_json::from_slice::<serde_json::Value>(body)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("version")
+                    .and_then(|v| v.as_str())
+                    .and_then(codexbar_version_token)
+            });
+    }
+
+    /// True only when we are rendering serve data AND both versions are known
+    /// AND they differ. Unknown either side (or any non-serve source) => false,
+    /// so the marker never shows on CLI output or pre-#1703 serves.
+    fn serve_build_stale(&self) -> bool {
+        self.source == Source::Serve
+            && matches!(
+                (
+                    self.serve_build_version.as_deref(),
+                    self.ondisk_version.as_deref(),
+                ),
+                (Some(running), Some(ondisk)) if running != ondisk
+            )
+    }
+
+    /// Issue an on-disk `codexbar --version` probe when we have a serve build to
+    /// compare against, CLI fallback (RunCommands) is available, and the cached
+    /// on-disk version is stale. Strictly orthogonal to the serve failure path:
+    /// it never touches consecutive_serve_failures or the CLI burst.
+    fn maybe_kick_version_probe(&mut self) {
+        if self.cli_fallback == CliFallback::Off || !self.permissions_granted {
+            return;
+        }
+        if self.source != Source::Serve || self.serve_build_version.is_none() {
+            return;
+        }
+        if self.version_probe_in_flight {
+            return;
+        }
+        let now = now_seconds();
+        let due = self
+            .ondisk_version_checked_at
+            .map(|checked| (now - checked).max(0.0) >= ONDISK_VERSION_TTL_SECONDS)
+            .unwrap_or(true);
+        if due {
+            self.kick_version_probe(now);
+        }
+    }
+
+    fn kick_version_probe(&mut self, now: f64) {
+        self.version_probe_in_flight = true;
+        let attempt_token = format!("{:.6}", now);
+        self.version_probe_token = Some(attempt_token.clone());
+        let mut context = BTreeMap::new();
+        context.insert("kind".to_string(), VERSION_KIND.to_string());
+        context.insert(VERSION_ATTEMPT_KEY.to_string(), attempt_token);
+        let script = version_probe_script(VERSION_COMMAND_TIMEOUT_SECONDS);
+        shim_run_command(&version_probe_argv(&script, &self.cli_command), context);
+    }
+
+    /// Absorb an on-disk version probe result. A stale token (a late result from
+    /// a superseded probe) is ignored. On failure or an unparseable version the
+    /// last-known on-disk version is kept (no marker flapping); only the check
+    /// timestamp advances.
+    fn handle_version_result(&mut self, exit: Option<i32>, stdout: Vec<u8>, attempt: Option<&str>) {
+        if attempt != self.version_probe_token.as_deref() {
+            return;
+        }
+        self.version_probe_in_flight = false;
+        self.version_probe_token = None;
+        self.ondisk_version_checked_at = Some(now_seconds());
+        if exit != Some(0) {
+            return;
+        }
+        let raw = String::from_utf8_lossy(&stdout);
+        if let Some(token) = codexbar_version_token(&raw) {
+            if self.ondisk_version.as_deref() != Some(token.as_str()) {
+                self.ondisk_version = Some(token);
+                self.refresh_output();
             }
         }
     }
@@ -1304,10 +1444,19 @@ impl State {
         ) {
             Ok(output) => {
                 let output = output.trim_end_matches(['\r', '\n']);
-                let changed = self.last_output != output;
+                let mut composed = output.to_string();
+                if self.serve_build_stale() {
+                    composed.push(' ');
+                    style_build_marker(
+                        &mut composed,
+                        BUILD_STALE_MARKER,
+                        &self.render_config.palette_countdown_warn,
+                        &self.render_config.palette_bg,
+                    );
+                }
+                let changed = self.last_output != composed;
                 if changed {
-                    self.last_output.clear();
-                    self.last_output.push_str(output);
+                    self.last_output = composed;
                 }
                 changed
             }
@@ -1372,6 +1521,34 @@ fn valid_command(value: &str) -> bool {
         && value
             .chars()
             .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-' | '+' | '@' | '/'))
+}
+
+/// Extract a comparable CodexBar version token: the first whitespace-separated
+/// field that looks like a version (optional leading `v` then a digit), with the
+/// `v` stripped. Mirrors the shell `codexbar_version_token` and glean's
+/// `ParseCodexBarVersion` so all three agree. Returns None for a string with no
+/// version-looking field (e.g. a transient bare `CodexBar`).
+fn codexbar_version_token(raw: &str) -> Option<String> {
+    raw.split_whitespace().find_map(|field| {
+        let candidate = field.strip_prefix('v').unwrap_or(field);
+        match candidate.chars().next() {
+            Some(first) if first.is_ascii_digit() => Some(candidate.to_string()),
+            _ => None,
+        }
+    })
+}
+
+/// Append an ANSI-styled marker mirroring the core `style_text` used for the
+/// ⚠/⚠cli glyphs (bold, truecolor fg/bg, trailing reset), so a plugin-appended
+/// marker matches the rendered bar without the core's private styling helpers.
+fn style_build_marker(out: &mut String, glyph: &str, fg_hex: &str, bg_hex: &str) {
+    let (fr, fg, fb) = hex_to_rgb(fg_hex);
+    let (br, bg, bb) = hex_to_rgb(bg_hex);
+    out.push_str("\x1b[1m");
+    out.push_str(&format!("\x1b[38;2;{fr};{fg};{fb}m"));
+    out.push_str(&format!("\x1b[48;2;{br};{bg};{bb}m"));
+    out.push_str(glyph);
+    out.push_str("\x1b[0m");
 }
 
 fn default_port_for_scheme(scheme: Option<&str>) -> Option<&'static str> {
@@ -2585,5 +2762,218 @@ mod tests {
     #[test]
     fn extract_provider_record_accepts_empty_provider_payload() {
         assert!(matches!(extract_provider_record(b"[]", "codex"), Ok(None)));
+    }
+
+    #[test]
+    fn codexbar_version_token_truth_table() {
+        assert_eq!(codexbar_version_token("0.37.2").as_deref(), Some("0.37.2"));
+        assert_eq!(
+            codexbar_version_token("CodexBar 0.37.2").as_deref(),
+            Some("0.37.2")
+        );
+        assert_eq!(codexbar_version_token("CodexBar"), None);
+        assert_eq!(codexbar_version_token("v0.37.1").as_deref(), Some("0.37.1"));
+        assert_eq!(
+            codexbar_version_token("CodexBar v0.37.1").as_deref(),
+            Some("0.37.1")
+        );
+        assert_eq!(
+            codexbar_version_token("0.37.1 (build abc)").as_deref(),
+            Some("0.37.1")
+        );
+        assert_eq!(codexbar_version_token(""), None);
+    }
+
+    #[test]
+    fn serve_build_version_parsed_from_health_body() {
+        let mut state = State::default();
+        state.update_serve_build_version(br#"{"status":"ok","version":"0.37.2"}"#);
+        assert_eq!(state.serve_build_version.as_deref(), Some("0.37.2"));
+        // A pre-#1703 serve omits the field -> None -> gate inert.
+        state.update_serve_build_version(br#"{"status":"ok"}"#);
+        assert_eq!(state.serve_build_version, None);
+        // A prefixed /health value normalizes the same as --version.
+        state.update_serve_build_version(br#"{"version":"CodexBar 0.37.2"}"#);
+        assert_eq!(state.serve_build_version.as_deref(), Some("0.37.2"));
+    }
+
+    #[test]
+    fn health_version_does_not_disturb_serve_source() {
+        let mut state = State {
+            permissions_granted: true,
+            source: Source::Serve,
+            last_payload: Some(mixed_payload()),
+            ..State::default()
+        };
+        state.update(Event::WebRequestResult(
+            200,
+            BTreeMap::new(),
+            br#"{"status":"ok","version":"0.37.2"}"#.to_vec(),
+            event_context(HEALTH_KIND),
+        ));
+        assert_eq!(state.serve_build_version.as_deref(), Some("0.37.2"));
+        assert_eq!(state.source, Source::Serve);
+        assert_eq!(state.consecutive_serve_failures, 0);
+    }
+
+    #[test]
+    fn serve_build_stale_truth_table() {
+        let stale = |source: Source, sv: Option<&str>, ov: Option<&str>| -> bool {
+            State {
+                source,
+                serve_build_version: sv.map(String::from),
+                ondisk_version: ov.map(String::from),
+                ..State::default()
+            }
+            .serve_build_stale()
+        };
+        assert!(stale(Source::Serve, Some("0.37.1"), Some("0.37.2")));
+        assert!(!stale(Source::Serve, Some("0.37.2"), Some("0.37.2")));
+        assert!(!stale(Source::Serve, Some("0.37.1"), None));
+        assert!(!stale(Source::Serve, None, Some("0.37.2")));
+        // Never flag on non-serve output even when versions differ.
+        assert!(!stale(Source::Cli, Some("0.37.1"), Some("0.37.2")));
+    }
+
+    #[test]
+    fn build_marker_appended_only_when_stale_on_serve() {
+        // Mismatch on serve data -> marker present and is the final token.
+        let mut state = State {
+            permissions_granted: true,
+            source: Source::Serve,
+            last_payload: Some(mixed_payload()),
+            serve_build_version: Some("0.37.1".into()),
+            ondisk_version: Some("0.37.2".into()),
+            ..State::default()
+        };
+        assert!(state.refresh_output());
+        assert!(state.last_output.contains(BUILD_STALE_MARKER));
+        assert!(state.last_output.ends_with("ver\u{1b}[0m"));
+
+        // Matching versions -> no marker.
+        let mut state = State {
+            permissions_granted: true,
+            source: Source::Serve,
+            last_payload: Some(mixed_payload()),
+            serve_build_version: Some("0.37.2".into()),
+            ondisk_version: Some("0.37.2".into()),
+            ..State::default()
+        };
+        assert!(state.refresh_output());
+        assert!(!state.last_output.contains(BUILD_STALE_MARKER));
+
+        // CLI source -> no build marker even if versions differ (still ⚠cli).
+        let mut state = State {
+            permissions_granted: true,
+            source: Source::Cli,
+            last_payload: Some(mixed_payload()),
+            serve_build_version: Some("0.37.1".into()),
+            ondisk_version: Some("0.37.2".into()),
+            ..State::default()
+        };
+        assert!(state.refresh_output());
+        assert!(!state.last_output.contains(BUILD_STALE_MARKER));
+        assert!(state.last_output.contains("⚠cli"));
+    }
+
+    #[test]
+    fn version_probe_kicks_only_when_gated() {
+        let gated = |source: Source, sv: Option<&str>, cli: CliFallback, perms: bool| -> bool {
+            let mut state = State {
+                permissions_granted: perms,
+                source,
+                serve_build_version: sv.map(String::from),
+                cli_fallback: cli,
+                ..State::default()
+            };
+            state.maybe_kick_version_probe();
+            state.version_probe_in_flight
+        };
+        // All conditions met -> probe kicked.
+        assert!(gated(
+            Source::Serve,
+            Some("0.37.2"),
+            CliFallback::Degraded,
+            true
+        ));
+        // No RunCommands (cli_fallback off) -> no probe.
+        assert!(!gated(
+            Source::Serve,
+            Some("0.37.2"),
+            CliFallback::Off,
+            true
+        ));
+        // Not on serve -> no probe.
+        assert!(!gated(
+            Source::Cli,
+            Some("0.37.2"),
+            CliFallback::Degraded,
+            true
+        ));
+        // No serve build to compare against -> no probe.
+        assert!(!gated(Source::Serve, None, CliFallback::Degraded, true));
+        // No permissions -> no probe.
+        assert!(!gated(
+            Source::Serve,
+            Some("0.37.2"),
+            CliFallback::Degraded,
+            false
+        ));
+    }
+
+    #[test]
+    fn handle_version_result_success_sets_ondisk() {
+        let mut state = State {
+            version_probe_in_flight: true,
+            version_probe_token: Some("tok".into()),
+            ..State::default()
+        };
+        state.handle_version_result(Some(0), b"CodexBar 0.37.2\n".to_vec(), Some("tok"));
+        assert_eq!(state.ondisk_version.as_deref(), Some("0.37.2"));
+        assert!(!state.version_probe_in_flight);
+        assert!(state.ondisk_version_checked_at.is_some());
+    }
+
+    #[test]
+    fn handle_version_result_ignores_stale_token() {
+        let mut state = State {
+            version_probe_in_flight: true,
+            version_probe_token: Some("tok".into()),
+            ondisk_version: Some("1.0.0".into()),
+            ..State::default()
+        };
+        state.handle_version_result(Some(0), b"CodexBar 2.0.0\n".to_vec(), Some("other"));
+        assert_eq!(state.ondisk_version.as_deref(), Some("1.0.0"));
+        assert!(state.version_probe_in_flight);
+    }
+
+    #[test]
+    fn handle_version_result_failure_keeps_last_known() {
+        let mut state = State {
+            version_probe_in_flight: true,
+            version_probe_token: Some("tok".into()),
+            ondisk_version: Some("1.0.0".into()),
+            ..State::default()
+        };
+        state.handle_version_result(Some(124), Vec::new(), Some("tok"));
+        assert_eq!(state.ondisk_version.as_deref(), Some("1.0.0"));
+        assert!(!state.version_probe_in_flight);
+        assert!(state.ondisk_version_checked_at.is_some());
+    }
+
+    #[test]
+    fn version_probe_argv_wraps_bin_without_interpolation() {
+        let script = version_probe_script(5);
+        let argv = version_probe_argv(&script, "codexbar");
+        assert_eq!(argv[0], "/bin/sh");
+        assert_eq!(argv[1], "-c");
+        assert_eq!(argv[2], script.as_str());
+        assert_eq!(argv[3], "showy-quota-version");
+        assert_eq!(argv[4], "codexbar");
+        assert!(script.contains("command -v"));
+        assert!(script.contains("--version"));
+        assert!(script.contains("sleep 5"));
+        // The binary rides in $1, never interpolated into the shell string.
+        assert!(!script.contains("codexbar"));
     }
 }
