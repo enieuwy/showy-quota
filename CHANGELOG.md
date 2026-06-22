@@ -45,6 +45,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `SHOWY_QUOTA_MONO_COLOR_MODE`, `SHOWY_QUOTA_MONO_MARKERS`) are updated to the
   live names so following the example no longer sets variables that have no
   effect.
+- `bin/showy-quota-fetch` now build-version-gates `codexbar serve` reuse: when a
+  healthy serve's `/health` reports a `version`, it is reused only if that build
+  matches the installed `codexbar --version`. Both strings are reduced to a
+  comparable version token (matching glean's stale-serve detector), so a
+  `CodexBar`-prefixed `/health` value is not mistaken for a stale build. A
+  mismatch (e.g. after a CodexBar
+  update left a stale in-memory binary on the port) recycles the serve —
+  terminating a managed serve through its pidfile or freeing the configured
+  port of a foreign one — and starts a fresh build. A serve whose `/health`
+  omits `version` is reused unchanged, so the gate is a no-op for builds that
+  predate the field. This stops reuse of a stale serve binary, the trigger for
+  the post-update SecurityAgent keychain-prompt storm.
 
 ### Security
 - All GitHub Actions in `ci.yml` and `release.yml` are pinned to commit SHAs

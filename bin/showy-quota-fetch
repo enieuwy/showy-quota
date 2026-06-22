@@ -937,6 +937,71 @@ serve_health_ok() {
     curl --fail --silent --max-time "$(serve_timeout)" "${base}/health" >/dev/null 2>&1
 }
 
+# Extract a comparable CodexBar version token from a version string on stdin so
+# /health's `.version` and `codexbar --version` are normalized identically
+# (matching glean's stale-serve detector): the first whitespace field that looks
+# like a version (optional leading `v` then a digit), with the `v` stripped. A
+# string with no version-looking field (e.g. a transient bare `CodexBar`) yields
+# empty, which makes the gate reuse the serve rather than recycle it.
+codexbar_version_token() {
+    awk 'NR==1 { for (i = 1; i <= NF; i++) if ($i ~ /^v?[0-9]/) { token = $i; sub(/^v/, "", token); print token; exit } }'
+}
+
+# Build version reported by a running codexbar serve via /health. Empty when
+# unavailable, when curl/jq are missing, or for pre-#1703 builds whose /health
+# omits the version field (so the version gate stays a no-op there).
+serve_running_version() {
+    local base
+    base=$(serve_base_url) || return 1
+    showy_quota_have curl || return 1
+    showy_quota_have jq || return 1
+    curl --fail --silent --max-time "$(serve_timeout)" "${base}/health" 2>/dev/null \
+        | jq -r '.version // empty' 2>/dev/null \
+        | codexbar_version_token
+}
+
+# Build version of the installed codexbar binary (cheap, bounded fresh process).
+# Empty when the binary is missing or its --version output is unrecognized; an
+# empty result makes the version gate reuse the running serve, never recycle.
+serve_ondisk_version() {
+    showy_quota_have "${SHOWY_QUOTA_CODEXBAR_BIN}" || return 1
+    run_with_hard_timeout 5 "${SHOWY_QUOTA_CODEXBAR_BIN}" --version 2>/dev/null \
+        | codexbar_version_token
+}
+
+# Free the configured serve port so ensure_serve_running can start a fresh
+# serve. A serve we manage is terminated via its pidfile (waits for exit so the
+# port is released before restart); a foreign serve holding our port is killed
+# by listener PID (surgical) and only then by name as a last resort. Returns
+# non-zero when no recycle mechanism is available so the caller keeps the
+# stale serve rather than failing to rebind.
+serve_recycle_stale() {
+    local pid="" start_epoch="" basename_rec=""
+    if managed_serve_valid_pidfile pid start_epoch basename_rec; then
+        showy_quota_log "recycling stale managed codexbar serve pid ${pid}"
+        terminate_managed_serve_pid "${pid}" "${start_epoch}" "${basename_rec}" || true
+        rm -f -- "${SHOWY_QUOTA_CODEXBAR_SERVE_PID_FILE}"
+        return 0
+    fi
+    local port="" listeners=""
+    if port=$(serve_port_from_base_url) && showy_quota_have lsof; then
+        listeners=$(lsof -ti "tcp:${port}" -sTCP:LISTEN 2>/dev/null) || listeners=""
+        if [[ -n "${listeners}" ]]; then
+            # shellcheck disable=SC2086 # word-split listener PIDs into kill args
+            kill ${listeners} 2>/dev/null || true
+            showy_quota_log "recycled foreign codexbar serve on port ${port} (${listeners//$'\n'/ })"
+            return 0
+        fi
+    fi
+    if showy_quota_have pkill; then
+        pkill -f 'codexbar serve' 2>/dev/null || true
+        showy_quota_log "recycled foreign codexbar serve via pkill"
+        return 0
+    fi
+    showy_quota_log "cannot recycle foreign codexbar serve: no lsof/pkill; reusing"
+    return 1
+}
+
 wait_for_serve_health() {
     local max_tenths="${SHOWY_QUOTA_CODEXBAR_SERVE_START_WAIT_TENTHS:-30}"
     [[ "${max_tenths}" =~ ^[0-9]+$ ]] || max_tenths=30
@@ -1121,7 +1186,27 @@ restart_managed_serve_once() {
 ensure_serve_running() {
     [[ -n "${SHOWY_QUOTA_CODEXBAR_SERVE_URL}" ]] || return 127
     showy_quota_have curl || return 127
-    serve_health_ok && return 0
+    if serve_health_ok; then
+        # Reuse a healthy serve unless it is a provably stale build: only when
+        # we may manage serves, both versions are known, and they differ.
+        # Pre-#1703 builds expose no /health version (running_version empty)
+        # and short-circuit here with zero codexbar spawn.
+        if [[ "${SHOWY_QUOTA_MANAGE_SERVE:-1}" != "1" ]]; then
+            return 0
+        fi
+        local running_version=""
+        running_version=$(serve_running_version) || running_version=""
+        if [[ -z "${running_version}" ]]; then
+            return 0
+        fi
+        local ondisk_version=""
+        ondisk_version=$(serve_ondisk_version) || ondisk_version=""
+        if [[ -z "${ondisk_version}" || "${running_version}" == "${ondisk_version}" ]]; then
+            return 0
+        fi
+        showy_quota_log "codexbar serve stale: running ${running_version} but on-disk ${ondisk_version}; recycling"
+        serve_recycle_stale || return 0
+    fi
     [[ "${SHOWY_QUOTA_MANAGE_SERVE:-1}" == "1" ]] || return 1
     if managed_serve_pid_alive; then
         if wait_for_serve_health; then

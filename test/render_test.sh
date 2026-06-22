@@ -2476,6 +2476,197 @@ fi
 kill "${unrelated_codexbar_pid}" 2>/dev/null || true
 wait "${unrelated_codexbar_pid}" 2>/dev/null || true
 
+# ── codexbar serve build-version gate (showy-quota-serve-stale-gate) ─────
+# A serve must be reused only while its /health build matches the installed
+# binary; a mismatch (e.g. after a CodexBar update) must recycle it.
+version_bin_dir="${TMP}/codexbar-version-bin"
+mkdir -p "${version_bin_dir}"
+cat > "${version_bin_dir}/codexbar" <<'EOF'
+#!/usr/bin/env bash
+set -eu
+if [[ "${1:-}" == "--version" ]]; then
+    printf 'CodexBar %s\n' "${SHOWY_QUOTA_TEST_ONDISK_VERSION:-0.0.0}"
+    exit 0
+fi
+if [[ "${1:-}" == "serve" ]]; then
+    shift
+    port=""
+    while (($#)); do
+        case "$1" in
+            --port)
+                shift
+                port="${1:-}"
+                ;;
+            --refresh-interval)
+                shift
+                ;;
+        esac
+        shift
+    done
+    [[ -n "${port}" ]] || exit 91
+
+    count=1
+    if [[ -n "${SHOWY_QUOTA_TEST_MANAGED_COUNT_FILE:-}" ]]; then
+        count=0
+        if [[ -r "${SHOWY_QUOTA_TEST_MANAGED_COUNT_FILE}" ]]; then
+            IFS= read -r count < "${SHOWY_QUOTA_TEST_MANAGED_COUNT_FILE}" || count=0
+        fi
+        count=$((count + 1))
+        printf '%s\n' "${count}" > "${SHOWY_QUOTA_TEST_MANAGED_COUNT_FILE}"
+    fi
+
+    python3 - "${port}" "${SHOWY_QUOTA_TEST_SERVE_FIXTURE}" "${SHOWY_QUOTA_TEST_SERVE_VERSION:-}" <<'PY' &
+import http.server
+import json
+import sys
+
+port = int(sys.argv[1])
+fixture = sys.argv[2]
+version = sys.argv[3]
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/health":
+            payload = {"status": "ok"}
+            if version:
+                payload["version"] = version
+            body = json.dumps(payload).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if self.path == "/usage":
+            with open(fixture, "rb") as fh:
+                body = fh.read()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        self.send_response(404)
+        self.end_headers()
+
+    def log_message(self, _format, *args):
+        return
+
+http.server.ThreadingHTTPServer.allow_reuse_address = True
+http.server.ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()
+PY
+    child=$!
+    trap 'kill "${child}" 2>/dev/null || true' EXIT TERM INT
+    wait "${child}"
+    exit $?
+fi
+exit 90
+EOF
+chmod +x "${version_bin_dir}/codexbar"
+
+version_gate_fetch() {
+    local _cache="$1" _url="$2" _count="$3" _sver="$4" _over="$5" _manage="$6"
+    shift 6
+    PATH="${version_bin_dir}:${PATH}" \
+        SHOWY_QUOTA_NO_CONFIG=1 \
+        SHOWY_QUOTA_MANAGE_SERVE="${_manage}" \
+        SHOWY_QUOTA_CACHE_DIR="${_cache}" \
+        SHOWY_QUOTA_CODEXBAR_SERVE_URL="${_url}" \
+        SHOWY_QUOTA_CODEXBAR_SERVE_START_WAIT_TENTHS=50 \
+        SHOWY_QUOTA_TEST_MANAGED_COUNT_FILE="${_count}" \
+        SHOWY_QUOTA_TEST_SERVE_VERSION="${_sver}" \
+        SHOWY_QUOTA_TEST_ONDISK_VERSION="${_over}" \
+        SHOWY_QUOTA_TEST_SERVE_FIXTURE="${FIXTURE_DIR}/codexbar-realistic.json" \
+        "${REPO_ROOT}/bin/showy-quota-fetch" "$@"
+}
+
+version_gate_stop() {
+    SHOWY_QUOTA_NO_CONFIG=1 \
+        SHOWY_QUOTA_CACHE_DIR="$1" \
+        SHOWY_QUOTA_CODEXBAR_BIN="${version_bin_dir}/codexbar" \
+        SHOWY_QUOTA_CODEXBAR_SERVE_URL="$2" \
+        "${REPO_ROOT}/bin/showy-quota-fetch" --stop-serve >/dev/null 2>/dev/null || true
+}
+
+# Matching build: the healthy serve is reused, never recycled (count stays 1).
+cache=$(mk_cache)
+managed_port=$(unused_tcp_port)
+managed_url="http://127.0.0.1:${managed_port}"
+count_file="${TMP}/version-match-count.log"
+rm -f "${count_file}"
+version_gate_fetch "${cache}" "${managed_url}" "${count_file}" 9.9.9 9.9.9 1 --refresh >/dev/null 2>/dev/null || true
+rc=0
+out=$(version_gate_fetch "${cache}" "${managed_url}" "${count_file}" 9.9.9 9.9.9 1 --refresh 2>/dev/null) || rc=$?
+count_value="missing"; [[ -r "${count_file}" ]] && count_value=$(< "${count_file}")
+source_value=$(cat "${cache}/source" 2>/dev/null || true)
+version_gate_stop "${cache}" "${managed_url}"
+if (( rc == 0 )) && [[ "${count_value}" == "1" ]] && [[ "${source_value}" == "serve" ]] \
+    && printf '%s' "${out}" | jq -e 'type == "array" and any(.provider == "codex")' >/dev/null 2>&1; then
+    ok "fetcher reuses healthy serve when build version matches on-disk"
+else
+    fail "fetcher reuses healthy serve when build version matches on-disk" "rc=${rc}; count=${count_value}; source=${source_value}; out=${out}"
+fi
+
+# Stale build: running serve reports an older version than on-disk -> recycle
+# and start a fresh serve (count becomes 2).
+cache=$(mk_cache)
+managed_port=$(unused_tcp_port)
+managed_url="http://127.0.0.1:${managed_port}"
+count_file="${TMP}/version-mismatch-count.log"
+rm -f "${count_file}"
+version_gate_fetch "${cache}" "${managed_url}" "${count_file}" 1.0.0 1.0.0 1 --refresh >/dev/null 2>/dev/null || true
+rc=0
+out=$(version_gate_fetch "${cache}" "${managed_url}" "${count_file}" 2.0.0 2.0.0 1 --refresh 2>/dev/null) || rc=$?
+count_value="missing"; [[ -r "${count_file}" ]] && count_value=$(< "${count_file}")
+source_value=$(cat "${cache}/source" 2>/dev/null || true)
+version_gate_stop "${cache}" "${managed_url}"
+if (( rc == 0 )) && [[ "${count_value}" == "2" ]] && [[ "${source_value}" == "serve" ]] \
+    && printf '%s' "${out}" | jq -e 'type == "array" and any(.provider == "codex")' >/dev/null 2>&1; then
+    ok "fetcher recycles stale serve when build version differs from on-disk"
+else
+    fail "fetcher recycles stale serve when build version differs from on-disk" "rc=${rc}; count=${count_value}; source=${source_value}; out=${out}"
+fi
+
+# Management disabled: a version mismatch must not recycle (count stays 1); the
+# stale serve is still reused rather than killed without a restart path.
+cache=$(mk_cache)
+managed_port=$(unused_tcp_port)
+managed_url="http://127.0.0.1:${managed_port}"
+count_file="${TMP}/version-unmanaged-count.log"
+rm -f "${count_file}"
+version_gate_fetch "${cache}" "${managed_url}" "${count_file}" 1.0.0 1.0.0 1 --refresh >/dev/null 2>/dev/null || true
+rc=0
+out=$(version_gate_fetch "${cache}" "${managed_url}" "${count_file}" 1.0.0 2.0.0 0 --refresh 2>/dev/null) || rc=$?
+count_value="missing"; [[ -r "${count_file}" ]] && count_value=$(< "${count_file}")
+source_value=$(cat "${cache}/source" 2>/dev/null || true)
+version_gate_stop "${cache}" "${managed_url}"
+if (( rc == 0 )) && [[ "${count_value}" == "1" ]] && [[ "${source_value}" == "serve" ]] \
+    && printf '%s' "${out}" | jq -e 'type == "array" and any(.provider == "codex")' >/dev/null 2>&1; then
+    ok "fetcher does not recycle stale serve when serve management is disabled"
+else
+    fail "fetcher does not recycle stale serve when serve management is disabled" "rc=${rc}; count=${count_value}; source=${source_value}; out=${out}"
+fi
+
+# Cross-tool normalization: a /health version carrying the "CodexBar " prefix
+# must normalize the same as `codexbar --version`, so a current serve is reused,
+# not recycled (the divergence flagged by the glean stale-serve detector).
+cache=$(mk_cache)
+managed_port=$(unused_tcp_port)
+managed_url="http://127.0.0.1:${managed_port}"
+count_file="${TMP}/version-normalize-count.log"
+rm -f "${count_file}"
+version_gate_fetch "${cache}" "${managed_url}" "${count_file}" "CodexBar 9.9.9" 9.9.9 1 --refresh >/dev/null 2>/dev/null || true
+rc=0
+out=$(version_gate_fetch "${cache}" "${managed_url}" "${count_file}" "CodexBar 9.9.9" 9.9.9 1 --refresh 2>/dev/null) || rc=$?
+count_value="missing"; [[ -r "${count_file}" ]] && count_value=$(< "${count_file}")
+source_value=$(cat "${cache}/source" 2>/dev/null || true)
+version_gate_stop "${cache}" "${managed_url}"
+if (( rc == 0 )) && [[ "${count_value}" == "1" ]] && [[ "${source_value}" == "serve" ]] \
+    && printf '%s' "${out}" | jq -e 'type == "array" and any(.provider == "codex")' >/dev/null 2>&1; then
+    ok "fetcher normalizes prefixed /health version and reuses current serve"
+else
+    fail "fetcher normalizes prefixed /health version and reuses current serve" "rc=${rc}; count=${count_value}; source=${source_value}; out=${out}"
+fi
+
 cache=$(mk_cache)
 cp "${FIXTURE_DIR}/codexbar-mixed.json" "${cache}/usage.json"
 rc=0
