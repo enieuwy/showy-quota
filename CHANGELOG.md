@@ -57,6 +57,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   omits `version` is reused unchanged, so the gate is a no-op for builds that
   predate the field. This stops reuse of a stale serve binary, the trigger for
   the post-update SecurityAgent keychain-prompt storm.
+  The configured `codexbar` binary is resolved to an absolute path before
+  `--version` and before launching a managed serve, because CodexBar reads its
+  version from the app bundle via `argv[0]`: a bare command name reports no
+  version (in `--version` or `/health`), which would otherwise leave the gate
+  inert and spawn version-less serves.
 
 ### Security
 - All GitHub Actions in `ci.yml` and `release.yml` are pinned to commit SHAs

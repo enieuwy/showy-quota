@@ -960,12 +960,29 @@ serve_running_version() {
         | codexbar_version_token
 }
 
+# Resolve the configured codexbar binary to an absolute path. CodexBar reads its
+# version from the app bundle via argv[0]: invoked by a bare command name (no
+# directory) it cannot locate the bundle, so `--version` and serve `/health`
+# omit the version and the stale-serve gate stays inert. A value that already
+# carries a path is trusted as-is; an unresolvable bare name falls back to
+# itself (callers still guard with showy_quota_have).
+codexbar_bin_abs() {
+    local bin="${SHOWY_QUOTA_CODEXBAR_BIN}"
+    if [[ "${bin}" == */* ]]; then
+        printf '%s\n' "${bin}"
+        return 0
+    fi
+    command -v "${bin}" 2>/dev/null || printf '%s\n' "${bin}"
+}
+
 # Build version of the installed codexbar binary (cheap, bounded fresh process).
 # Empty when the binary is missing or its --version output is unrecognized; an
 # empty result makes the version gate reuse the running serve, never recycle.
 serve_ondisk_version() {
-    showy_quota_have "${SHOWY_QUOTA_CODEXBAR_BIN}" || return 1
-    run_with_hard_timeout 5 "${SHOWY_QUOTA_CODEXBAR_BIN}" --version 2>/dev/null \
+    local bin
+    bin=$(codexbar_bin_abs)
+    showy_quota_have "${bin}" || return 1
+    run_with_hard_timeout 5 "${bin}" --version 2>/dev/null \
         | codexbar_version_token
 }
 
@@ -1148,7 +1165,8 @@ terminate_managed_serve_pid() {
 }
 
 start_managed_serve() {
-    local bin="${SHOWY_QUOTA_CODEXBAR_BIN}"
+    local bin
+    bin=$(codexbar_bin_abs)
     showy_quota_have "${bin}" || return 1
 
     local port="" refresh_interval="${SHOWY_QUOTA_CODEXBAR_SERVE_REFRESH_INTERVAL_SECONDS:-60}"

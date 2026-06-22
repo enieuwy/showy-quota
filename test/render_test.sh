@@ -2667,6 +2667,142 @@ else
     fail "fetcher normalizes prefixed /health version and reuses current serve" "rc=${rc}; count=${count_value}; source=${source_value}; out=${out}"
 fi
 
+# Regression: a bare-configured codexbar bin must resolve to an absolute path so
+# `--version` and the spawned serve's /health report a version. CodexBar reads
+# its version from the app bundle via argv[0], so a bare invocation yields none
+# and the gate would be silently inert. This fake mimics that: it reports a
+# version only when invoked with a path in argv[0]. The on-disk version moves
+# 1.1.1 -> 2.2.2 between fetches, so a working resolver recycles (count == 2);
+# a broken one (bare argv[0], no version on either side) would reuse (count 1).
+argv0_bin_dir="${TMP}/codexbar-argv0-bin"
+mkdir -p "${argv0_bin_dir}"
+cat > "${argv0_bin_dir}/codexbar" <<'EOF'
+#!/usr/bin/env bash
+set -eu
+has_path=0
+case "$0" in */*) has_path=1 ;; esac
+if [[ "${1:-}" == "--version" ]]; then
+    if (( has_path )); then
+        printf 'CodexBar %s\n' "${SHOWY_QUOTA_TEST_ONDISK_VERSION:-0.0.0}"
+    else
+        printf 'CodexBar\n'
+    fi
+    exit 0
+fi
+if [[ "${1:-}" == "serve" ]]; then
+    shift
+    port=""
+    while (($#)); do
+        case "$1" in
+            --port)
+                shift
+                port="${1:-}"
+                ;;
+            --refresh-interval)
+                shift
+                ;;
+        esac
+        shift
+    done
+    [[ -n "${port}" ]] || exit 91
+
+    count=1
+    if [[ -n "${SHOWY_QUOTA_TEST_MANAGED_COUNT_FILE:-}" ]]; then
+        count=0
+        if [[ -r "${SHOWY_QUOTA_TEST_MANAGED_COUNT_FILE}" ]]; then
+            IFS= read -r count < "${SHOWY_QUOTA_TEST_MANAGED_COUNT_FILE}" || count=0
+        fi
+        count=$((count + 1))
+        printf '%s\n' "${count}" > "${SHOWY_QUOTA_TEST_MANAGED_COUNT_FILE}"
+    fi
+
+    serve_version=""
+    if (( has_path )); then
+        serve_version="${SHOWY_QUOTA_TEST_SERVE_VERSION:-}"
+    fi
+
+    python3 - "${port}" "${SHOWY_QUOTA_TEST_SERVE_FIXTURE}" "${serve_version}" <<'PY' &
+import http.server
+import json
+import sys
+
+port = int(sys.argv[1])
+fixture = sys.argv[2]
+version = sys.argv[3]
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/health":
+            payload = {"status": "ok"}
+            if version:
+                payload["version"] = version
+            body = json.dumps(payload).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if self.path == "/usage":
+            with open(fixture, "rb") as fh:
+                body = fh.read()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        self.send_response(404)
+        self.end_headers()
+
+    def log_message(self, _format, *args):
+        return
+
+http.server.ThreadingHTTPServer.allow_reuse_address = True
+http.server.ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()
+PY
+    child=$!
+    trap 'kill "${child}" 2>/dev/null || true' EXIT TERM INT
+    wait "${child}"
+    exit $?
+fi
+exit 90
+EOF
+chmod +x "${argv0_bin_dir}/codexbar"
+
+argv0_gate_fetch() {
+    local _cache="$1" _url="$2" _count="$3" _sver="$4" _over="$5"
+    shift 5
+    PATH="${argv0_bin_dir}:${PATH}" \
+        SHOWY_QUOTA_NO_CONFIG=1 \
+        SHOWY_QUOTA_MANAGE_SERVE=1 \
+        SHOWY_QUOTA_CACHE_DIR="${_cache}" \
+        SHOWY_QUOTA_CODEXBAR_SERVE_URL="${_url}" \
+        SHOWY_QUOTA_CODEXBAR_SERVE_START_WAIT_TENTHS=50 \
+        SHOWY_QUOTA_TEST_MANAGED_COUNT_FILE="${_count}" \
+        SHOWY_QUOTA_TEST_SERVE_VERSION="${_sver}" \
+        SHOWY_QUOTA_TEST_ONDISK_VERSION="${_over}" \
+        SHOWY_QUOTA_TEST_SERVE_FIXTURE="${FIXTURE_DIR}/codexbar-realistic.json" \
+        "${REPO_ROOT}/bin/showy-quota-fetch" "$@"
+}
+
+cache=$(mk_cache)
+managed_port=$(unused_tcp_port)
+managed_url="http://127.0.0.1:${managed_port}"
+count_file="${TMP}/argv0-gate-count.log"
+rm -f "${count_file}"
+argv0_gate_fetch "${cache}" "${managed_url}" "${count_file}" 1.1.1 1.1.1 --refresh >/dev/null 2>/dev/null || true
+rc=0
+out=$(argv0_gate_fetch "${cache}" "${managed_url}" "${count_file}" 2.2.2 2.2.2 --refresh 2>/dev/null) || rc=$?
+count_value="missing"; [[ -r "${count_file}" ]] && count_value=$(< "${count_file}")
+source_value=$(cat "${cache}/source" 2>/dev/null || true)
+SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_CACHE_DIR="${cache}" SHOWY_QUOTA_CODEXBAR_BIN="${argv0_bin_dir}/codexbar" SHOWY_QUOTA_CODEXBAR_SERVE_URL="${managed_url}" "${REPO_ROOT}/bin/showy-quota-fetch" --stop-serve >/dev/null 2>/dev/null || true
+if (( rc == 0 )) && [[ "${count_value}" == "2" ]] && [[ "${source_value}" == "serve" ]] \
+    && printf '%s' "${out}" | jq -e 'type == "array" and any(.provider == "codex")' >/dev/null 2>&1; then
+    ok "fetcher resolves bare codexbar bin to absolute so the version gate engages"
+else
+    fail "fetcher resolves bare codexbar bin to absolute so the version gate engages" "rc=${rc}; count=${count_value}; source=${source_value}; out=${out}"
+fi
+
 cache=$(mk_cache)
 cp "${FIXTURE_DIR}/codexbar-mixed.json" "${cache}/usage.json"
 rc=0
