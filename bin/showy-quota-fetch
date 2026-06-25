@@ -355,6 +355,21 @@ serve_timeout() {
     printf '%s\n' "${timeout}"
 }
 
+serve_usage_timeout() {
+    # The /usage probe needs more headroom than the /health probe: a healthy
+    # `codexbar serve` bounds collection per provider (~0.8x its request
+    # deadline, ~24s by default) and still returns the healthy providers when a
+    # slow one degrades to an error row. Using the short health timeout here
+    # would abandon that usable partial response and fall back to degraded CLI
+    # whenever any provider is briefly slow.
+    local timeout="${SHOWY_QUOTA_CODEXBAR_SERVE_USAGE_TIMEOUT_SECONDS}"
+    [[ "${timeout}" =~ ^[0-9]+([.][0-9]+)?$ ]] || timeout=30
+    # Clamp to a sane ceiling so a huge value cannot turn the serve HTTP probe
+    # (curl --max-time) into an effectively unbounded wait.
+    (( ${timeout%%.*} > 60 )) && timeout=60
+    printf '%s\n' "${timeout}"
+}
+
 positive_integer_or_default() {
     local value="$1" default="$2" max="${3:-}"
     if [[ "${value}" =~ ^[0-9]+$ ]]; then
@@ -1261,7 +1276,7 @@ run_codexbar_serve() {
         return 127
     }
 
-    curl --fail --silent --show-error --max-time "$(serve_timeout)" "${base}/usage" 2>/dev/null
+    curl --fail --silent --show-error --max-time "$(serve_usage_timeout)" "${base}/usage" 2>/dev/null
 }
 
 serve_payload_is_publishable() {

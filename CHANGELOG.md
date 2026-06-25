@@ -6,6 +6,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- `SHOWY_QUOTA_CODEXBAR_SERVE_USAGE_TIMEOUT_SECONDS` (default `30`) gives the
+  `/usage` probe its own budget, separate from the `/health` probe's
+  `SHOWY_QUOTA_CODEXBAR_SERVE_TIMEOUT_SECONDS` (default `10`). A healthy
+  `codexbar serve` bounds collection per provider and can take up to ~0.8x its
+  request deadline (~24s by default) to return the healthy providers when a slow
+  one degrades to an error row; the short health timeout previously abandoned
+  that usable partial response and dropped the bar to degraded CLI output
+  whenever any provider was briefly slow.
+
 ### Fixed
 - `bin/showy-quota-fetch` now matches the managed `codexbar serve` process by
   splitting the `ps` command output with `read -ra` instead of an unquoted

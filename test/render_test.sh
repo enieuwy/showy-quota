@@ -2065,7 +2065,7 @@ else
     fail "fetcher reads codexbar serve usage endpoint" "rc=${rc}; out=${out}"
 fi
 assert_equals "fetcher records serve cache source" "serve" "$(< "${cache}/source")"
-assert_equals "fetcher uses production-safe default serve timeout" "10" "$(< "${cache}/curl-max-time")"
+assert_equals "fetcher uses production-safe default usage probe timeout" "30" "$(< "${cache}/curl-max-time")"
 
 # A pathological serve timeout is clamped so curl --max-time stays bounded.
 clamp_cache=$(mk_cache)
@@ -2078,9 +2078,9 @@ env \
     SHOWY_QUOTA_TEST_SERVE_URL="${serve_url}" \
     SHOWY_QUOTA_TEST_SERVE_FIXTURE="${FIXTURE_DIR}/codexbar-realistic.json" \
     SHOWY_QUOTA_TEST_CURL_MAX_TIME_FILE="${clamp_cache}/curl-max-time" \
-    SHOWY_QUOTA_CODEXBAR_SERVE_TIMEOUT_SECONDS=999999999 \
+    SHOWY_QUOTA_CODEXBAR_SERVE_USAGE_TIMEOUT_SECONDS=999999999 \
     "${REPO_ROOT}/bin/showy-quota-fetch" >/dev/null 2>&1 || true
-assert_equals "fetcher clamps a pathological serve timeout" "60" "$(< "${clamp_cache}/curl-max-time")"
+assert_equals "fetcher clamps a pathological usage probe timeout" "60" "$(< "${clamp_cache}/curl-max-time")"
 
 large_payload_fixture="${TMP}/codexbar-large-payload.json"
 python3 -c '
@@ -2414,6 +2414,7 @@ out=$(
     SHOWY_QUOTA_CODEXBAR_SERVE_URL="${managed_url}" \
     SHOWY_QUOTA_CODEXBAR_SERVE_START_WAIT_TENTHS=50 \
     SHOWY_QUOTA_CODEXBAR_SERVE_TIMEOUT_SECONDS=1 \
+    SHOWY_QUOTA_CODEXBAR_SERVE_USAGE_TIMEOUT_SECONDS=1 \
     SHOWY_QUOTA_CODEXBAR_SERVE_FAILURES_BEFORE_RESTART=1 \
     SHOWY_QUOTA_PROVIDERS=claude \
     SHOWY_QUOTA_TEST_MANAGED_MODE=health-ok-usage-hang \
