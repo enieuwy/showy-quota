@@ -15,6 +15,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   one degrades to an error row; the short health timeout previously abandoned
   that usable partial response and dropped the bar to degraded CLI output
   whenever any provider was briefly slow.
+- The standalone Zellij plugin now expires a hung `/health` probe on a short
+  10s window while giving the `/usage` probe a 30s budget, mirroring the shell
+  fetcher's split. Previously both shared one 30s watchdog, so an unreachable
+  serve latched for 30s before the plugin fell back. Both surfaces now use the
+  same fast-health / patient-usage model.
 
 ### Fixed
 - `bin/showy-quota-fetch` now matches the managed `codexbar serve` process by

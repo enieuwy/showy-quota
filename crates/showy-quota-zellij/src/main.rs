@@ -22,11 +22,18 @@ const SERVE_FAILURES_BEFORE_CLI: u8 = 3;
 const MANAGED_SERVE_RETRY_COOLDOWN_SECONDS: f64 = 30.0;
 const PROVIDER_DISCOVERY_BACKOFF_SECONDS_DEFAULT: f64 = 60.0;
 const PROVIDER_COMMAND_TIMEOUT_SECONDS: u64 = 15;
-// Zellij never reports a failed/cancelled web_request, so an in-flight /health
-// or /usage probe that hangs (dropped connection, wedged proxy) is expired
-// after this window and treated as a serve failure so the plugin retries and
-// can fall back to the CLI instead of latching forever.
-const WEB_REQUEST_TIMEOUT_SECONDS: f64 = 30.0;
+// Zellij never reports a failed/cancelled web_request, so an in-flight probe
+// that hangs (dropped connection, wedged proxy) is expired after its window and
+// treated as a serve failure so the plugin retries and can fall back to the CLI
+// instead of latching forever. /health is a cheap liveness check and expires
+// fast; /usage gets a larger budget because a healthy serve bounds collection
+// per provider (~0.8x its request deadline, ~24s by default) and still returns
+// the healthy providers when a slow one degrades to an error row — expiring it
+// on the short health window would abandon that usable partial response. These
+// mirror the shell fetcher's SHOWY_QUOTA_CODEXBAR_SERVE_TIMEOUT_SECONDS (health)
+// and SHOWY_QUOTA_CODEXBAR_SERVE_USAGE_TIMEOUT_SECONDS (usage) defaults.
+const SERVE_HEALTH_TIMEOUT_SECONDS: f64 = 10.0;
+const SERVE_USAGE_TIMEOUT_SECONDS: f64 = 30.0;
 const PROVIDER_BACKOFF_MAX_SECONDS: f64 = 1800.0;
 const VERSION_KIND: &str = "showy-quota-version";
 const VERSION_ATTEMPT_KEY: &str = "showy-quota-version-attempt";
@@ -564,7 +571,12 @@ impl State {
             self.web_flight_started_at = Some(now);
             return false;
         };
-        if (now - started_at).max(0.0) < WEB_REQUEST_TIMEOUT_SECONDS {
+        let timeout = if self.usage_in_flight {
+            SERVE_USAGE_TIMEOUT_SECONDS
+        } else {
+            SERVE_HEALTH_TIMEOUT_SECONDS
+        };
+        if (now - started_at).max(0.0) < timeout {
             return false;
         }
         let was_usage = self.usage_in_flight;
@@ -1883,7 +1895,7 @@ mod tests {
             source: Source::Serve,
             cli_fallback: CliFallback::Off,
             usage_in_flight: true,
-            web_flight_started_at: Some(now_seconds() - (WEB_REQUEST_TIMEOUT_SECONDS + 1.0)),
+            web_flight_started_at: Some(now_seconds() - (SERVE_USAGE_TIMEOUT_SECONDS + 1.0)),
             ..State::default()
         };
         let before = state.consecutive_serve_failures;
@@ -1906,6 +1918,40 @@ mod tests {
         state.tick();
         assert!(state.usage_in_flight);
         assert!(state.web_flight_started_at.is_some());
+    }
+    #[test]
+    fn usage_probe_survives_the_health_timeout_window() {
+        // A /usage probe must get the longer usage budget, not the short health
+        // window: still in flight at health-timeout + 1s, well under the usage
+        // timeout, so the bounded partial response is not abandoned.
+        let mut state = State {
+            permissions_granted: true,
+            source: Source::Serve,
+            cli_fallback: CliFallback::Off,
+            usage_in_flight: true,
+            web_flight_started_at: Some(now_seconds() - (SERVE_HEALTH_TIMEOUT_SECONDS + 1.0)),
+            ..State::default()
+        };
+        state.tick();
+        assert!(state.usage_in_flight);
+        assert!(state.web_flight_started_at.is_some());
+    }
+
+    #[test]
+    fn hung_health_probe_expires_at_the_short_health_timeout() {
+        // A /health probe expires on the short window so an unreachable serve is
+        // abandoned quickly instead of latching for the full usage budget.
+        let mut state = State {
+            permissions_granted: true,
+            source: Source::Unknown,
+            cli_fallback: CliFallback::Off,
+            health_in_flight: true,
+            web_flight_started_at: Some(now_seconds() - (SERVE_HEALTH_TIMEOUT_SECONDS + 1.0)),
+            ..State::default()
+        };
+        state.tick();
+        assert!(!state.health_in_flight);
+        assert!(state.web_flight_started_at.is_none());
     }
 
     #[test]
