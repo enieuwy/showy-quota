@@ -248,6 +248,11 @@ struct State {
     ondisk_version_checked_at: Option<f64>,
     version_probe_in_flight: bool,
     version_probe_token: Option<String>,
+    // Opt-in (KDL `build_marker true`, default off). When off, the on-disk
+    // version probe never runs and the ⚠ver marker is never appended — the
+    // whole stale-build gate is a silent no-op. The plugin only flags; it
+    // never recycles a session-owned serve.
+    show_build_marker: bool,
 }
 
 impl Default for State {
@@ -290,6 +295,7 @@ impl Default for State {
             ondisk_version_checked_at: None,
             version_probe_in_flight: false,
             version_probe_token: None,
+            show_build_marker: false,
         }
     }
 }
@@ -321,6 +327,8 @@ impl ZellijPlugin for State {
             120.0,
         );
         self.manage_serve = parse_bool(configuration.get("manage_serve").map(String::as_str), true);
+        self.show_build_marker =
+            parse_bool(configuration.get("build_marker").map(String::as_str), false);
         self.serve_command = configuration
             .get("serve_command")
             .or_else(|| configuration.get("SHOWY_QUOTA_CODEXBAR_BIN"))
@@ -904,6 +912,9 @@ impl State {
     /// on-disk version is stale. Strictly orthogonal to the serve failure path:
     /// it never touches consecutive_serve_failures or the CLI burst.
     fn maybe_kick_version_probe(&mut self) {
+        if !self.show_build_marker {
+            return;
+        }
         if self.cli_fallback == CliFallback::Off || !self.permissions_granted {
             return;
         }
@@ -1445,7 +1456,7 @@ impl State {
             Ok(output) => {
                 let output = output.trim_end_matches(['\r', '\n']);
                 let mut composed = output.to_string();
-                if self.serve_build_stale() {
+                if self.show_build_marker && self.serve_build_stale() {
                     composed.push(' ');
                     style_build_marker(
                         &mut composed,
@@ -2838,12 +2849,14 @@ mod tests {
     #[test]
     fn build_marker_appended_only_when_stale_on_serve() {
         // Mismatch on serve data -> marker present and is the final token.
+        // (default config has the marker off; these cases opt in.)
         let mut state = State {
             permissions_granted: true,
             source: Source::Serve,
             last_payload: Some(mixed_payload()),
             serve_build_version: Some("0.37.1".into()),
             ondisk_version: Some("0.37.2".into()),
+            show_build_marker: true,
             ..State::default()
         };
         assert!(state.refresh_output());
@@ -2874,6 +2887,19 @@ mod tests {
         assert!(state.refresh_output());
         assert!(!state.last_output.contains(BUILD_STALE_MARKER));
         assert!(state.last_output.contains("⚠cli"));
+
+        // Marker disabled (default) -> no ⚠ver even when versions differ.
+        let mut state = State {
+            permissions_granted: true,
+            source: Source::Serve,
+            last_payload: Some(mixed_payload()),
+            serve_build_version: Some("0.37.1".into()),
+            ondisk_version: Some("0.37.2".into()),
+            show_build_marker: false,
+            ..State::default()
+        };
+        assert!(state.refresh_output());
+        assert!(!state.last_output.contains(BUILD_STALE_MARKER));
     }
 
     #[test]
@@ -2884,6 +2910,7 @@ mod tests {
                 source,
                 serve_build_version: sv.map(String::from),
                 cli_fallback: cli,
+                show_build_marker: true,
                 ..State::default()
             };
             state.maybe_kick_version_probe();
@@ -2919,6 +2946,17 @@ mod tests {
             CliFallback::Degraded,
             false
         ));
+        // Marker disabled (default) -> no probe even with all else satisfied.
+        let mut off = State {
+            permissions_granted: true,
+            source: Source::Serve,
+            serve_build_version: Some("0.37.2".into()),
+            cli_fallback: CliFallback::Degraded,
+            show_build_marker: false,
+            ..State::default()
+        };
+        off.maybe_kick_version_probe();
+        assert!(!off.version_probe_in_flight);
     }
 
     #[test]
