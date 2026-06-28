@@ -22,6 +22,10 @@ const SERVE_FAILURES_BEFORE_CLI: u8 = 3;
 const MANAGED_SERVE_RETRY_COOLDOWN_SECONDS: f64 = 30.0;
 const PROVIDER_DISCOVERY_BACKOFF_SECONDS_DEFAULT: f64 = 60.0;
 const PROVIDER_COMMAND_TIMEOUT_SECONDS: u64 = 15;
+// While an outage hold is active the bar wakes on this short cadence to re-probe
+// serve, so a fast managed-serve restart is detected within seconds instead of a
+// full `interval_seconds`.
+const HOLD_REPROBE_INTERVAL_SECONDS: f64 = 3.0;
 // Zellij never reports a failed/cancelled web_request, so an in-flight probe
 // that hangs (dropped connection, wedged proxy) is expired after its window and
 // treated as a serve failure so the plugin retries and can fall back to the CLI
@@ -161,6 +165,20 @@ fn shim_open_command_pane_background(
 ) -> Option<PaneId> {
     Some(PaneId::Plugin(0))
 }
+
+#[cfg(target_arch = "wasm32")]
+fn shim_get_plugin_ids() -> (u32, String) {
+    let ids = get_plugin_ids();
+    (
+        ids.plugin_id,
+        ids.initial_cwd.to_string_lossy().into_owned(),
+    )
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn shim_get_plugin_ids() -> (u32, String) {
+    (0, String::new())
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Source {
     Unknown,
@@ -260,6 +278,16 @@ struct State {
     // whole stale-build gate is a silent no-op. The plugin only flags; it
     // never recycles a session-owned serve.
     show_build_marker: bool,
+    // Stable per-instance seed (Zellij plugin id + cwd + serve/cli command),
+    // used to disperse the degraded-fallback hold and per-provider retry backoff
+    // across the N same-config tab instances without any shared state or RNG.
+    instance_hash: u64,
+    // Max per-instance random hold (seconds) before the first CLI fallback after
+    // a serve outage; 0 disables the hold (legacy immediate-fallback behavior).
+    fallback_jitter_seconds: f64,
+    // Deadline of the active degraded-fallback hold, if any. While set and in the
+    // future, the plugin re-probes serve instead of spawning CLI work.
+    cli_hold_until: Option<f64>,
 }
 
 impl Default for State {
@@ -303,6 +331,9 @@ impl Default for State {
             version_probe_in_flight: false,
             version_probe_token: None,
             show_build_marker: false,
+            instance_hash: 0,
+            fallback_jitter_seconds: 60.0,
+            cli_hold_until: None,
         }
     }
 }
@@ -379,6 +410,15 @@ impl ZellijPlugin for State {
             Some("off") | Some("false") | Some("0") | Some("none") => CliFallback::Off,
             _ => CliFallback::Degraded,
         };
+        let (plugin_id, initial_cwd) = shim_get_plugin_ids();
+        self.instance_hash =
+            instance_seed(plugin_id, &initial_cwd, &self.serve_url, &self.cli_command);
+        self.fallback_jitter_seconds = parse_nonnegative_f64(
+            configuration
+                .get("fallback_jitter_seconds")
+                .map(String::as_str),
+            self.cli_interval_seconds.min(60.0),
+        );
 
         shim_set_selectable(false);
         shim_subscribe(&[
@@ -414,6 +454,7 @@ impl ZellijPlugin for State {
                 self.usage_after_discovery = false;
                 self.serve_inventory_mismatch = false;
                 self.clear_all_provider_in_flight();
+                self.cli_hold_until = None;
                 self.schedule_timer();
                 self.tick();
                 self.last_output != previous_output
@@ -429,6 +470,7 @@ impl ZellijPlugin for State {
                 self.usage_after_discovery = false;
                 self.serve_inventory_mismatch = false;
                 self.clear_all_provider_in_flight();
+                self.cli_hold_until = None;
                 self.last_output = " showy-quota: permission denied ".into();
                 true
             }
@@ -510,6 +552,11 @@ impl State {
         if matches!(source, Source::Cli | Source::Unavailable) {
             self.managed_serve_requested = false;
         }
+        // Returning to the serve HTTP path makes any pending degraded-fallback
+        // hold moot: the outage we were holding through is over.
+        if source == Source::Serve {
+            self.cli_hold_until = None;
+        }
         self.source = source;
     }
 
@@ -535,7 +582,41 @@ impl State {
     }
 
     fn schedule_timer(&self) {
-        shim_set_timeout(self.interval_seconds);
+        shim_set_timeout(self.next_timeout_seconds(now_seconds()));
+    }
+
+    /// Single scheduling chokepoint. While an outage hold is active, wake on a
+    /// short cadence to re-probe serve; otherwise use the normal bar cadence.
+    /// Centralized so the hold never spawns a second, overlapping timer stream.
+    fn next_timeout_seconds(&self, now: f64) -> f64 {
+        if let Some(until) = self.cli_hold_until {
+            if now < until {
+                let remaining = (until - now).max(0.1);
+                let reprobe = HOLD_REPROBE_INTERVAL_SECONDS.min(self.interval_seconds);
+                return remaining.min(reprobe);
+            }
+        }
+        self.interval_seconds
+    }
+
+    /// Whether a serve->CLI transition should first wait out a per-instance
+    /// jittered hold (re-probing serve) instead of immediately stampeding the
+    /// per-provider CLI. Gated to genuine outage transitions: never delays a
+    /// cold start (no prior payload), an already-committed CLI source, the
+    /// inventory-mismatch correctness fallback (which set source to Cli), or
+    /// pure-CLI mode (empty serve_url). `fallback_jitter_seconds = 0` disables.
+    fn should_cli_hold(&self) -> bool {
+        self.fallback_jitter_seconds > 0.0
+            && !self.serve_url.trim().is_empty()
+            && !matches!(self.source, Source::Cli)
+            && self.last_payload.is_some()
+    }
+
+    /// Deterministic per-instance hold length in `[0, fallback_jitter_seconds)`.
+    /// Pure function of the instance seed, so the N same-config tab instances
+    /// disperse to distinct offsets with no shared state or RNG.
+    fn hold_delay_seconds(&self) -> f64 {
+        unit_from(self.instance_hash) * self.fallback_jitter_seconds
     }
     fn expire_stale_discovery(&mut self) {
         if !self.discovery_in_flight {
@@ -740,9 +821,42 @@ impl State {
 
     fn kick_cli_fallback_or_render_failure(&mut self) {
         if self.cli_fallback == CliFallback::Off {
+            self.cli_hold_until = None;
             self.set_source(Source::Unavailable);
             self.render_failure();
             return;
+        }
+        if self.should_cli_hold() {
+            let now = now_seconds();
+            match self.cli_hold_until {
+                // Still holding: do NOT re-probe inline. Re-probes are paced by
+                // the short-cadence Timer (see next_timeout_seconds; source is
+                // Probing during the hold so tick() issues them every ~3s) and
+                // bounded by expire_stale_web_flight. Probing here would chain
+                // off every fast non-200 WebRequestResult into a tight request
+                // loop that all N tabs run at once against a recovering serve.
+                Some(until) if now < until => return,
+                // Hold expired with serve still down: commit to CLI and latch
+                // the source so a subsequent failure does not re-arm the hold
+                // every cycle (we stay steadily degraded until serve recovers).
+                Some(_) => {
+                    self.cli_hold_until = None;
+                    self.set_source(Source::Cli);
+                }
+                // First fallback this outage: arm the per-instance hold and do a
+                // single re-probe (which moves source off Serve so a later
+                // committed CLI result is accepted), then let the Timer pace it.
+                None => {
+                    let delay = self.hold_delay_seconds();
+                    if delay > 0.0 {
+                        self.cli_hold_until = Some(now + delay);
+                        self.kick_health_probe();
+                        return;
+                    }
+                }
+            }
+        } else {
+            self.cli_hold_until = None;
         }
         self.kick_cli_fallback();
     }
@@ -1519,6 +1633,47 @@ fn parse_positive_f64(value: Option<&str>, default: f64) -> f64 {
         .and_then(|value| value.parse::<f64>().ok())
         .filter(|value| value.is_finite() && *value > 0.0)
         .unwrap_or(default)
+}
+
+fn parse_nonnegative_f64(value: Option<&str>, default: f64) -> f64 {
+    value
+        .and_then(|value| value.parse::<f64>().ok())
+        .filter(|value| value.is_finite() && *value >= 0.0)
+        .unwrap_or(default)
+}
+
+// FNV-1a + SplitMix64 finalizer: a tiny, dependency-free, stable hash used to
+// derive deterministic per-instance phases. Not for security; chosen over
+// DefaultHasher because the latter's algorithm is not a stable contract.
+fn fnv1a(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for &b in bytes {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
+}
+
+fn splitmix64(mut x: u64) -> u64 {
+    x = x.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    x = (x ^ (x >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    x = (x ^ (x >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    x ^ (x >> 31)
+}
+
+/// Map a 64-bit hash to a uniform `[0, 1)` double (top 53 bits).
+fn unit_from(seed: u64) -> f64 {
+    (seed >> 11) as f64 / ((1u64 << 53) as f64)
+}
+
+/// Stable per-instance seed for jitter dispersion. The decisive input is the
+/// Zellij `plugin_id` (a unique-per-instance pane id), salted with cwd / serve /
+/// cli so distinct configs also differ. `\u{1}` field delimiters keep adjacent
+/// fields from colliding (e.g. id `1` + cwd `2…` vs id `12` + cwd `…`). The
+/// SplitMix64 finalizer decorrelates small consecutive plugin ids.
+fn instance_seed(plugin_id: u32, cwd: &str, serve_url: &str, cli_command: &str) -> u64 {
+    let seed_src = format!("{plugin_id}\u{1}{cwd}\u{1}{serve_url}\u{1}{cli_command}");
+    splitmix64(fnv1a(seed_src.as_bytes()))
 }
 
 fn parse_bool(value: Option<&str>, default: bool) -> bool {
@@ -3059,5 +3214,259 @@ mod tests {
         assert!(script.contains("sleep 5"));
         // The binary rides in $1, never interpolated into the shell string.
         assert!(!script.contains("codexbar"));
+    }
+
+    fn holding_state() -> State {
+        State {
+            fallback_jitter_seconds: 60.0,
+            serve_url: "http://127.0.0.1:8080".into(),
+            source: Source::Serve,
+            last_payload: Some(mixed_payload()),
+            permissions_granted: true,
+            instance_hash: splitmix64(fnv1a(b"fixture-tab")),
+            ..State::default()
+        }
+    }
+
+    #[test]
+    fn should_cli_hold_only_on_genuine_outage_transitions() {
+        assert!(holding_state().should_cli_hold());
+
+        let mut s = holding_state();
+        s.fallback_jitter_seconds = 0.0;
+        assert!(!s.should_cli_hold(), "jitter=0 disables the hold");
+
+        let mut s = holding_state();
+        s.serve_url = String::new();
+        assert!(!s.should_cli_hold(), "pure-CLI mode never holds");
+
+        let mut s = holding_state();
+        s.source = Source::Cli;
+        assert!(
+            !s.should_cli_hold(),
+            "already-degraded source never re-holds"
+        );
+
+        let mut s = holding_state();
+        s.last_payload = None;
+        assert!(!s.should_cli_hold(), "cold start never holds");
+    }
+
+    #[test]
+    fn instance_seed_disperses_consecutive_plugin_ids() {
+        // Worst case: identical config across tabs, only plugin_id differs.
+        // Derive via the production seed fn so a regression in the real
+        // derivation (dropped plugin_id, delimiter collision, weakened mixing)
+        // is caught here instead of silently reintroducing the herd.
+        let jitter = 60.0;
+        let delays: Vec<f64> = (1u32..=16)
+            .map(|id| {
+                unit_from(instance_seed(id, "", "http://127.0.0.1:8080", "codexbar")) * jitter
+            })
+            .collect();
+
+        assert!(
+            delays.iter().all(|d| (0.0..jitter).contains(d)),
+            "every delay within [0, jitter)"
+        );
+        let mut sorted = delays.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        for w in sorted.windows(2) {
+            assert!(w[1] > w[0], "consecutive plugin ids must not collide");
+        }
+        // Anti-herd: no 5s sub-window may bunch too many instances (actual max
+        // is 3 for ids 1..=16; guard at 4 to catch a mixing regression).
+        let max_bunch = (0..12)
+            .map(|i| {
+                let lo = i as f64 * 5.0;
+                delays.iter().filter(|&&d| d >= lo && d < lo + 5.0).count()
+            })
+            .max()
+            .unwrap();
+        assert!(
+            max_bunch <= 4,
+            "instances bunched in a 5s window: {max_bunch}"
+        );
+
+        // Pure / deterministic.
+        assert_eq!(
+            instance_seed(7, "", "http://127.0.0.1:8080", "codexbar"),
+            instance_seed(7, "", "http://127.0.0.1:8080", "codexbar")
+        );
+    }
+
+    #[test]
+    fn next_timeout_uses_short_cadence_while_holding() {
+        let mut s = holding_state();
+        s.interval_seconds = 120.0;
+        assert_eq!(
+            s.next_timeout_seconds(1000.0),
+            120.0,
+            "no hold -> normal cadence"
+        );
+        s.cli_hold_until = Some(2000.0);
+        assert_eq!(
+            s.next_timeout_seconds(1000.0),
+            HOLD_REPROBE_INTERVAL_SECONDS,
+            "holding far out -> short re-probe cadence"
+        );
+        s.cli_hold_until = Some(1000.5);
+        assert!(
+            (s.next_timeout_seconds(1000.0) - 0.5).abs() < 1e-9,
+            "near expiry -> wake at the deadline"
+        );
+        s.cli_hold_until = Some(500.0);
+        assert_eq!(
+            s.next_timeout_seconds(1000.0),
+            120.0,
+            "expired -> normal cadence"
+        );
+    }
+
+    #[test]
+    fn returning_to_serve_clears_the_hold() {
+        let mut s = holding_state();
+        s.cli_hold_until = Some(now_seconds() + 100.0);
+        s.set_source(Source::Serve);
+        assert!(s.cli_hold_until.is_none());
+    }
+
+    #[test]
+    fn first_fallback_arms_hold_and_reprobes_without_cli() {
+        let mut s = holding_state();
+        s.cli_fallback = CliFallback::Degraded;
+        s.discovered_providers = vec!["codex".to_string()];
+        s.discovered_providers_at = Some(now_seconds());
+        assert!(s.cli_hold_until.is_none());
+
+        s.kick_cli_fallback_or_render_failure();
+
+        assert!(s.cli_hold_until.is_some(), "hold armed on first transition");
+        assert_eq!(
+            s.source,
+            Source::Probing,
+            "the one-shot re-probe moves source off Serve so a later commit is accepted"
+        );
+        assert!(s.health_in_flight, "the one-shot re-probe is in flight");
+        assert!(
+            !s.has_provider_work_in_flight(),
+            "no CLI spawned during the hold"
+        );
+        assert!(
+            !s.discovery_in_flight,
+            "no discovery spawned during the hold"
+        );
+    }
+
+    #[test]
+    fn active_hold_is_idempotent() {
+        let mut s = holding_state();
+        s.source = Source::Probing;
+        let deadline = now_seconds() + 100.0;
+        s.cli_hold_until = Some(deadline);
+        s.kick_cli_fallback_or_render_failure();
+        assert_eq!(
+            s.cli_hold_until,
+            Some(deadline),
+            "deadline unchanged by re-probe"
+        );
+        assert!(!s.has_provider_work_in_flight());
+        assert!(
+            !s.health_in_flight,
+            "active hold must not re-probe inline; the Timer paces re-probes"
+        );
+    }
+
+    #[test]
+    fn expired_hold_commits_to_cli() {
+        let mut s = holding_state();
+        s.source = Source::Probing;
+        s.cli_fallback = CliFallback::Degraded;
+        s.discovered_providers = vec!["codex".to_string()];
+        s.discovered_providers_at = Some(now_seconds());
+        s.cli_hold_until = Some(now_seconds() - 1.0);
+        s.kick_cli_fallback_or_render_failure();
+        assert!(s.cli_hold_until.is_none(), "hold cleared on commit");
+        assert!(s.has_provider_work_in_flight(), "committed -> CLI spawned");
+        assert_eq!(
+            s.source,
+            Source::Cli,
+            "commit latches source to Cli so the hold cannot re-arm next cycle"
+        );
+    }
+
+    #[test]
+    fn serve_recovery_during_hold_spawns_no_cli() {
+        let mut s = holding_state();
+        s.cli_fallback = CliFallback::Degraded;
+        // Inventory matches mixed_payload so accept_payload(Serve) succeeds.
+        s.discovered_providers = vec![
+            "claude".to_string(),
+            "codex".to_string(),
+            "gemini".to_string(),
+            "cursor".to_string(),
+        ];
+        s.discovered_providers_at = Some(now_seconds());
+
+        // Arm the hold (source Serve -> Probing, one-shot re-probe in flight).
+        s.kick_cli_fallback_or_render_failure();
+        assert!(s.cli_hold_until.is_some());
+        assert!(!s.has_provider_work_in_flight());
+
+        // Serve recovers mid-hold: /health 200 kicks /usage, /usage 200 accepts.
+        s.update(Event::WebRequestResult(
+            200,
+            BTreeMap::new(),
+            b"{}".to_vec(),
+            event_context(HEALTH_KIND),
+        ));
+        s.update(Event::WebRequestResult(
+            200,
+            BTreeMap::new(),
+            mixed_payload(),
+            event_context(USAGE_KIND),
+        ));
+
+        assert_eq!(s.source, Source::Serve, "recovered to the serve HTTP path");
+        assert!(s.cli_hold_until.is_none(), "hold cleared on recovery");
+        assert!(
+            !s.has_provider_work_in_flight(),
+            "zero CLI spawned across the whole recovery"
+        );
+    }
+
+    #[test]
+    fn jitter_zero_keeps_legacy_immediate_fallback() {
+        let mut s = holding_state();
+        s.fallback_jitter_seconds = 0.0;
+        s.source = Source::Probing;
+        s.cli_fallback = CliFallback::Degraded;
+        s.discovered_providers = vec!["codex".to_string()];
+        s.discovered_providers_at = Some(now_seconds());
+        s.kick_cli_fallback_or_render_failure();
+        assert!(s.cli_hold_until.is_none(), "disabled -> no hold");
+        assert!(
+            s.has_provider_work_in_flight(),
+            "disabled -> immediate fallback"
+        );
+    }
+
+    #[test]
+    fn cli_fallback_off_clears_hold_and_marks_unavailable() {
+        let mut s = holding_state();
+        s.cli_fallback = CliFallback::Off;
+        s.cli_hold_until = Some(now_seconds() + 100.0);
+        s.kick_cli_fallback_or_render_failure();
+        assert!(s.cli_hold_until.is_none());
+        assert_eq!(s.source, Source::Unavailable);
+    }
+
+    #[test]
+    fn parse_nonnegative_allows_zero_rejects_negative() {
+        assert_eq!(parse_nonnegative_f64(Some("0"), 60.0), 0.0);
+        assert_eq!(parse_nonnegative_f64(Some("30"), 60.0), 30.0);
+        assert_eq!(parse_nonnegative_f64(Some("-5"), 60.0), 60.0);
+        assert_eq!(parse_nonnegative_f64(Some("nope"), 60.0), 60.0);
+        assert_eq!(parse_nonnegative_f64(None, 60.0), 60.0);
     }
 }

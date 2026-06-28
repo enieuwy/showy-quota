@@ -20,6 +20,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   fetcher's split. Previously both shared one 30s watchdog, so an unreachable
   serve latched for 30s before the plugin fell back. Both surfaces now use the
   same fast-health / patient-usage model.
+- The standalone Zellij plugin now staggers its degraded CLI fallback across
+  instances. On a serve outage, each per-tab plugin instance waits a distinct,
+  stable per-instance hold (`fallback_jitter_seconds`, default
+  `min(cli_interval_seconds, 60)`) — re-probing serve on a short cadence — before
+  spawning the first `codexbar usage --provider <id>` call. The offset is derived
+  from the Zellij plugin id, so N tabs no longer stampede `codexbar` at the same
+  instant when serve blips; because a fast managed-serve restart is usually seen
+  during the hold, most instances return to the HTTP path and spawn no CLI work
+  at all. Set `fallback_jitter_seconds 0` to restore the previous immediate
+  fallback.
 
 ### Fixed
 - The SketchyBar plugin no longer drops a model-pooled provider's whole family
