@@ -22,6 +22,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   same fast-health / patient-usage model.
 
 ### Fixed
+- The SketchyBar plugin no longer drops a model-pooled provider's whole family
+  when CodexBar transiently marks one family's windows `usageKnown:false` (e.g.
+  Antigravity's Claude/GPT pool during a collection hiccup). The pooled layout
+  previously rendered those placeholder windows as absent rows, so the
+  `has_t`/`has_q` lane gate collapsed and the bar dropped to just the measured
+  (Gemini) lanes. Such a window now keeps its lane drawn as an empty track (no
+  pacing marker), so a transiently-thin family stays visible — matching the
+  Zellij renderer, which keeps the `AGᶜ` lane.
 - `bin/showy-quota-fetch` now matches the managed `codexbar serve` process by
   splitting the `ps` command output with `read -ra` instead of an unquoted
   expansion. The previous `for token in ${command}` glob-expanded the command

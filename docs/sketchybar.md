@@ -124,6 +124,11 @@ primary/secondary/tertiary windows (5h, weekly, …), tertiary hidden when absen
 A model-pooled provider whose `extraRateWindows` carry every positional slot
 (e.g. Antigravity) shows its pool windows instead, family-grouped — Antigravity
 renders four: Gemini 5h/weekly then Claude+GPT 5h/weekly.
+If CodexBar transiently marks one family's windows `usageKnown:false`
+(placeholder, not a real measurement — e.g. the Claude/GPT pool during a
+collection hiccup), those lanes stay drawn as empty tracks with no pacing
+marker rather than collapsing, so a momentarily-thin family does not vanish
+from the stack (parity with the Zellij `AGᶜ` lane).
 
 ## Customizing colors
 

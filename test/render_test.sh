@@ -1494,6 +1494,20 @@ assert_contains "plugin pooled provider draws gemini weekly row" "--set showy_qu
 assert_contains "plugin pooled provider draws claude session row" "--set showy_quota.antigravity.tertiary drawing=on slider.percentage=90" "${plugin_log}"
 assert_contains "plugin pooled provider draws claude weekly row in fourth lane" "--set showy_quota.antigravity.quaternary drawing=on slider.percentage=18" "${plugin_log}"
 
+# Regression: when CodexBar transiently marks a pooled family's windows
+# `usageKnown:false` (e.g. Antigravity's Claude/GPT pool during a collection
+# hiccup), the lanes must stay drawn as empty tracks rather than collapsing —
+# otherwise the whole Claude family vanishes and SketchyBar drops to the two
+# Gemini bars. Mirrors the Zellij renderer, which keeps the AGᶜ lane.
+cache=$(mk_cache)
+log="${TMP}/sb-degraded-family.log"
+run_sketchybar_plugin codexbar-antigravity-degraded-family.json "${cache}" "${log}" SHOWY_QUOTA_NOW_EPOCH=4070908800
+plugin_log="$(< "${log}")"
+assert_contains "plugin degraded-family keeps gemini session row" "--set showy_quota.antigravity.primary drawing=on slider.percentage=65" "${plugin_log}"
+assert_contains "plugin degraded-family keeps gemini weekly row" "--set showy_quota.antigravity.secondary drawing=on slider.percentage=0" "${plugin_log}"
+assert_contains "plugin degraded-family keeps unmeasured claude session lane present" "--set showy_quota.antigravity.tertiary drawing=on slider.percentage=0" "${plugin_log}"
+assert_contains "plugin degraded-family keeps unmeasured claude weekly lane present" "--set showy_quota.antigravity.quaternary drawing=on slider.percentage=0" "${plugin_log}"
+
 cache=$(mk_cache)
 log="${TMP}/sb-degraded.log"
 run_sketchybar_plugin codexbar-mixed.json "${cache}" "${log}" SHOWY_QUOTA_DEGRADED_CLI=1

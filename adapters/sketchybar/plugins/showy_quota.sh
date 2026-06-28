@@ -766,7 +766,12 @@ fi
 
 # Slots are semantic: primary/secondary/tertiary map to fixed item rows.
 # A slot only counts when that exact window has a numeric usedPercent;
-# missing slots stay empty instead of later windows shifting up.
+# missing slots stay empty instead of later windows shifting up. In the
+# pooled layout a `usageKnown:false` window is present-but-unmeasured (e.g.
+# Antigravity's Claude/GPT pool during a collection hiccup): keep its lane
+# drawn as an empty track (rem 0, no marker) instead of collapsing it, so a
+# transiently-thin family does not vanish — parity with the Zellij renderer,
+# which keeps the AGᶜ lane.
 rows=$(printf '%s' "${filtered}" | jq -r '
     def pct(x): if x == null then 0 else ([0, ([100, (x|tonumber|floor)] | min)] | max) end;
     def slot(w): if (w != null and (w.usedPercent | type == "number")) then w else null end;
@@ -783,7 +788,7 @@ rows=$(printf '%s' "${filtered}" | jq -r '
     | ([ $slots[] | select( [wmin(.), (.resetsAt // null)] as $k | (any($exkeys[]; . == $k) | not) ) ]) as $unmatched
     | (($ex | length) > 0 and ($unmatched | length) == 0) as $pooled
     | (if $pooled
-         then [ $ex[] | (if .usageKnown == false then {rem:"",reset:"",win:""} else row(.window) end) ]
+         then [ $ex[] | (if .usageKnown == false then {rem:0,reset:"",win:""} else row(.window) end) ]
          else [ row($p), row($s), row($t) ]
        end) as $rows
     | [
