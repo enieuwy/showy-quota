@@ -124,6 +124,11 @@ primary/secondary/tertiary windows (5h, weekly, …), tertiary hidden when absen
 A model-pooled provider whose `extraRateWindows` carry every positional slot
 (e.g. Antigravity) shows its pool windows instead, family-grouped — Antigravity
 renders four: Gemini 5h/weekly then Claude+GPT 5h/weekly.
+If CodexBar transiently marks one family's windows `usageKnown:false`
+(placeholder, not a real measurement — e.g. the Claude/GPT pool during a
+collection hiccup), those lanes stay drawn as empty tracks with no pacing
+marker rather than collapsing, so a momentarily-thin family does not vanish
+from the stack (parity with the Zellij `AGᶜ` lane).
 
 ## Customizing colors
 
@@ -166,3 +171,14 @@ color. Serve recovery clears the marker on the next successful fetch.
 Only SVG fallback icons are PNG-cached in `${SHOWY_QUOTA_SKETCHYBAR_IMAGE_CACHE}`
 (default `~/.cache/showy-quota/sketchybar`). Native bars and mapped font icons
 are not rasterized.
+
+## Provider icons and `SHOWY_QUOTA_CODEXBAR_RESOURCES`
+
+Provider icons are rasterized from `${SHOWY_QUOTA_CODEXBAR_RESOURCES}/ProviderIcon-<id>.svg`
+(default the CodexBar app bundle's `Resources`) with ImageMagick. Point
+`SHOWY_QUOTA_CODEXBAR_RESOURCES` only at a directory you trust: a malicious SVG
+can otherwise instruct ImageMagick to fetch remote resources. As defense in
+depth the plugin runs `magick` under a bundled restrictive policy
+(`adapters/sketchybar/imagemagick/policy.xml`, injected via
+`MAGICK_CONFIGURE_PATH`) that blocks the network coders, so SVG `href` fetches
+(SSRF) are denied regardless of the system ImageMagick policy.

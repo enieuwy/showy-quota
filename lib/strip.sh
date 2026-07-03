@@ -82,44 +82,6 @@ showy_quota_filter_renderable() {
     '
 }
 
-# Render a single window slot as JSON: { used_pct, remaining_pct, reset_at,
-# window_minutes, color }.
-showy_quota_window_jq() {
-    cat <<'JQ'
-def window_obj(slot):
-    if (slot // null) == null then null
-    else
-        slot.usedPercent as $u
-        | { used_pct: ($u // 0),
-            remaining_pct: (100 - ($u // 0)),
-            reset_at: (slot.resetsAt // null),
-            window_minutes: (slot.windowMinutes // 0),
-            reset_description: (slot.resetDescription // null) }
-    end;
-JQ
-}
-
-# Build a compact bar (8 cells of unicode block) for a 0..100 percentage.
-# Args: $1 = percent (int 0..100). Echoes 8 chars.
-showy_quota_block_bar() {
-    local pct="${1:-0}"
-    [[ "${pct}" =~ ^-?[0-9]+$ ]] || pct=0
-    (( pct < 0 )) && pct=0
-    (( pct > 100 )) && pct=100
-    # Each of the 8 cells represents 12.5%; show ▆ for filled, ▁ for track.
-    # Using unambiguous half-block + bottom-block characters renders the
-    # same in any terminal with a default font.
-    local cells=8 i out=""
-    local filled=$(( (pct * cells + 50) / 100 ))
-    (( pct > 0 && filled == 0 )) && filled=1
-    for (( i=0; i<cells; i++ )); do
-        if (( i < filled )); then out+="█"
-        else out+="░"
-        fi
-    done
-    printf '%s' "${out}"
-}
-
 # Width-aware fill count for compact strip renderers.
 # Args: $1 = remaining percent, $2 = number of cells.
 showy_quota_filled_cells() {
@@ -220,6 +182,7 @@ showy_quota_mono_lane_bar() {
     local rem_s="$4" reset_s="$5" win_s="$6" present_s="$7"
     [[ "${width}" =~ ^[0-9]+$ ]] || width=12
     (( width < 8 )) && width=8
+    (( width > 400 )) && width=400
     local surface bg
     surface="$(showy_quota_palette surface)"
     bg="$(showy_quota_palette bg)"
@@ -367,10 +330,11 @@ showy_quota_mode_for_provider() {
 
 # Resolve a provider's terminal body. Args: provider, has_tertiary (1/0),
 # pooled (1/0 — auto-detected model-pooled provider whose extras carry every
-# positional slot). mono3 collapses to dual without a tertiary slot; the family
-# bodies (dual2/mono4) pass through and adapt to the pool count at render.
+# positional slot), assembled_window_count. mono3 collapses to dual without a
+# tertiary slot; mono4 renders only with four distinct assembled windows and
+# collapses through mono3 for exactly three.
 showy_quota_terminal_mode_for_provider() {
-    local provider="$1" has_tertiary="${2:-0}" pooled="${3:-0}"
+    local provider="$1" has_tertiary="${2:-0}" pooled="${3:-0}" assembled_count="${4:-0}"
     local requested
     case "${SHOWY_QUOTA_TERMINAL_BAR_MODE:-auto}" in
         dual) requested=dual ;;
@@ -388,7 +352,7 @@ showy_quota_terminal_mode_for_provider() {
     local mode=dual
     case "${requested}" in
         mono3) [[ "${has_tertiary}" == "1" ]] && mode=mono3 || mode=dual ;;
-        mono4) if (( ! pooled )) && [[ "${has_tertiary}" == "1" ]]; then mode=mono3; else mode=mono4; fi ;;
+        mono4) if (( assembled_count >= 4 )); then mode=mono4; elif (( assembled_count == 3 )); then mode=mono3; else mode=dual; fi ;;
         dual2) mode=dual2 ;;
         *) mode=dual ;;
     esac

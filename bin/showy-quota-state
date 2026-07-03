@@ -48,6 +48,7 @@ done
 showy_quota_have jq || showy_quota_die "jq is required"
 
 FETCH="${SHOWY_QUOTA_FETCH_BIN:-${SCRIPT_DIR}/showy-quota-fetch}"
+FETCH="$(showy_quota_valid_bin "${FETCH}")" || FETCH="${SCRIPT_DIR}/showy-quota-fetch"
 threshold="${SHOWY_QUOTA_SKETCHYBAR_COMPACT_PROVIDER_COUNT:-5}"
 if [[ ! "${threshold}" =~ ^[0-9]+$ ]]; then
     threshold=5

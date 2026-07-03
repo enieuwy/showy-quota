@@ -35,6 +35,7 @@ REPO_ROOT="$(resolve_repo_root)"
 . "${REPO_ROOT}/lib/strip.sh"
 
 FETCH="${SHOWY_QUOTA_FETCH_BIN:-${REPO_ROOT}/bin/showy-quota-fetch}"
+FETCH="$(showy_quota_valid_bin "${FETCH}")" || FETCH="${REPO_ROOT}/bin/showy-quota-fetch"
 CACHE_DIR="${SHOWY_QUOTA_SKETCHYBAR_IMAGE_CACHE}"
 mkdir -p "${CACHE_DIR}" || exit 0
 STATE_FILE="${CACHE_DIR}/providers.txt"
@@ -441,12 +442,19 @@ showy_quota_have jq || {
 HAVE_MAGICK=0
 showy_quota_have magick && HAVE_MAGICK=1
 
+# Point ImageMagick at our restrictive policy.xml so a provider SVG cannot make
+# `magick` fetch a remote href (SSRF). Prepend so it wins over system configs;
+# guard on the file so a copied (non-repo-relative) install still renders.
+if (( HAVE_MAGICK )) && [[ -f "${REPO_ROOT}/adapters/sketchybar/imagemagick/policy.xml" ]]; then
+    export MAGICK_CONFIGURE_PATH="${REPO_ROOT}/adapters/sketchybar/imagemagick${MAGICK_CONFIGURE_PATH:+:${MAGICK_CONFIGURE_PATH}}"
+fi
+
 # Bar geometry. Bars sit inside SketchyBar's pill; tweak via env.
 : "${SHOWY_QUOTA_PNG_BAR_W:=80}"
 NATIVE_ROW_HEIGHT=6
 # Default 3 == NATIVE_ROW_HEIGHT/2 → fully rounded ends. Set to 0 for a
 # squared track; intermediate values yield partial rounding.
-NATIVE_ROW_RADIUS="${SHOWY_QUOTA_SKETCHYBAR_ROW_RADIUS:-3}"
+NATIVE_ROW_RADIUS=$(showy_quota_uint "${SHOWY_QUOTA_SKETCHYBAR_ROW_RADIUS:-3}" 3 4096)
 
 # ── ARGB helpers ─────────────────────────────────────────────────────
 
@@ -595,7 +603,7 @@ provider_icon_png() {
             rm -f "${normal_tmp}"; return 1
         fi
     else
-        if ! magick -background none -density 300 "${svg}" \
+        if ! magick -background none -density 300 "MSVG:${svg}" \
                     -resize 64x64 "PNG32:${normal_tmp}" >/dev/null 2>&1; then
             if ! render_fallback_icon_png "${pid}" "${normal_tmp}"; then
                 rm -f "${normal_tmp}"; return 1
@@ -758,7 +766,12 @@ fi
 
 # Slots are semantic: primary/secondary/tertiary map to fixed item rows.
 # A slot only counts when that exact window has a numeric usedPercent;
-# missing slots stay empty instead of later windows shifting up.
+# missing slots stay empty instead of later windows shifting up. In the
+# pooled layout a `usageKnown:false` window is present-but-unmeasured (e.g.
+# Antigravity's Claude/GPT pool during a collection hiccup): keep its lane
+# drawn as an empty track (rem 0, no marker) instead of collapsing it, so a
+# transiently-thin family does not vanish — parity with the Zellij renderer,
+# which keeps the AGᶜ lane.
 rows=$(printf '%s' "${filtered}" | jq -r '
     def pct(x): if x == null then 0 else ([0, ([100, (x|tonumber|floor)] | min)] | max) end;
     def slot(w): if (w != null and (w.usedPercent | type == "number")) then w else null end;
@@ -775,7 +788,7 @@ rows=$(printf '%s' "${filtered}" | jq -r '
     | ([ $slots[] | select( [wmin(.), (.resetsAt // null)] as $k | (any($exkeys[]; . == $k) | not) ) ]) as $unmatched
     | (($ex | length) > 0 and ($unmatched | length) == 0) as $pooled
     | (if $pooled
-         then [ $ex[] | (if .usageKnown == false then {rem:"",reset:"",win:""} else row(.window) end) ]
+         then [ $ex[] | (if .usageKnown == false then {rem:0,reset:"",win:""} else row(.window) end) ]
          else [ row($p), row($s), row($t) ]
        end) as $rows
     | [

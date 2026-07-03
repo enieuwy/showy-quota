@@ -238,16 +238,18 @@ Config is optional; create it only for values you want to override. The full env
 | `SHOWY_QUOTA_REFRESH_SECONDS` | Slow CLI fallback refresh interval. default=`120` |
 | `SHOWY_QUOTA_MANAGE_SERVE` | Start `codexbar serve` automatically before CLI fallback; set `0` to disable. default=`1` |
 | `SHOWY_QUOTA_CODEXBAR_SERVE_URL` | Local `codexbar serve` base URL; set empty to skip HTTP probing. default=`http://127.0.0.1:8080` |
-| `SHOWY_QUOTA_CODEXBAR_SERVE_TIMEOUT_SECONDS` | Per-request timeout for local `/health` and `/usage` probes. default=`10` |
+| `SHOWY_QUOTA_CODEXBAR_SERVE_TIMEOUT_SECONDS` | Bounded positive timeout for local `/health` probes. configured default=`10` |
+| `SHOWY_QUOTA_CODEXBAR_SERVE_USAGE_TIMEOUT_SECONDS` | Bounded positive timeout for local `/usage` probes. default=`30` |
 | `SHOWY_QUOTA_CODEXBAR_SERVE_PORT` | Port passed to managed `codexbar serve --port`. default=`8080` |
 | `SHOWY_QUOTA_CODEXBAR_SERVE_REFRESH_SECONDS` | Refresh interval when `codexbar serve` is available. default=`10` |
 | `SHOWY_QUOTA_TIME_WARN_MINUTES` | Urgent countdown threshold. default=`30` |
 | `SHOWY_QUOTA_SKETCHYBAR_CLICK` | Default SketchyBar click action; degraded icons open provider status URLs. default=`open -b com.steipete.codexbar` |
 
-Palette overrides use role-first keys such as `SHOWY_QUOTA_PALETTE_PRIMARY_*`.
-Secondary and tertiary row colors auto-derive from the primary palette at
-`0.55` unless overridden; see `share/config.env.example` for the full palette
-surface.
+Palette overrides use role-first primary keys such as
+`SHOWY_QUOTA_PALETTE_PRIMARY_*`; long-horizon windows are dimmed from the
+primary palette with `SHOWY_QUOTA_PALETTE_DIM_SCALE` after
+`SHOWY_QUOTA_DIM_WINDOW_MINUTES`. There are no separate secondary/tertiary
+palette overrides; see `share/config.env.example` for the full palette surface.
 
 ## Theme gallery
 

@@ -346,25 +346,49 @@ serve_base_url() {
     printf '%s\n' "${base}"
 }
 
-serve_timeout() {
-    local timeout="${SHOWY_QUOTA_CODEXBAR_SERVE_TIMEOUT_SECONDS}"
-    [[ "${timeout}" =~ ^[0-9]+([.][0-9]+)?$ ]] || timeout=0.5
+serve_positive_timeout_or_default() {
+    local timeout="$1" default="$2" whole
+    if [[ "${timeout}" =~ ^[0-9]+([.][0-9]+)?$ && ! "${timeout}" =~ ^0+([.]0+)?$ ]]; then
+        whole="${timeout%%.*}"
+        # Clamp to a sane ceiling so a huge value cannot turn the serve HTTP
+        # probe (curl --max-time) into an effectively unbounded wait.
+        (( 10#${whole} > 60 )) && timeout=60
+    else
+        timeout="${default}"
+    fi
     printf '%s\n' "${timeout}"
 }
 
+serve_timeout() {
+    serve_positive_timeout_or_default "${SHOWY_QUOTA_CODEXBAR_SERVE_TIMEOUT_SECONDS}" 0.5
+}
+
+serve_usage_timeout() {
+    # The /usage probe needs more headroom than the /health probe: a healthy
+    # `codexbar serve` bounds collection per provider (~0.8x its request
+    # deadline, ~24s by default) and still returns the healthy providers when a
+    # slow one degrades to an error row. Using the short health timeout here
+    # would abandon that usable partial response and fall back to degraded CLI
+    # whenever any provider is briefly slow.
+    serve_positive_timeout_or_default "${SHOWY_QUOTA_CODEXBAR_SERVE_USAGE_TIMEOUT_SECONDS}" 30
+}
+
 positive_integer_or_default() {
-    local value="$1" default="$2"
+    local value="$1" default="$2" max="${3:-}"
     if [[ "${value}" =~ ^[0-9]+$ ]]; then
         value=$((10#${value}))
     else
         value="${default}"
     fi
     (( value > 0 )) || value="${default}"
+    if [[ -n "${max}" ]] && (( value > max )); then
+        value="${max}"
+    fi
     printf '%s\n' "${value}"
 }
 
 codexbar_cli_timeout_seconds() {
-    positive_integer_or_default "${SHOWY_QUOTA_CODEXBAR_CLI_TIMEOUT_SECONDS:-20}" 20
+    positive_integer_or_default "${SHOWY_QUOTA_CODEXBAR_CLI_TIMEOUT_SECONDS:-20}" 20 300
 }
 
 serve_failure_restart_threshold() {
@@ -459,7 +483,7 @@ clear_cli_failure() {
 # ── provider discovery & per-provider fallback ─────────────────────────
 
 codexbar_config_providers_timeout_seconds() {
-    positive_integer_or_default "${SHOWY_QUOTA_CODEXBAR_CONFIG_PROVIDERS_TIMEOUT_SECONDS:-5}" 5
+    positive_integer_or_default "${SHOWY_QUOTA_CODEXBAR_CONFIG_PROVIDERS_TIMEOUT_SECONDS:-5}" 5 300
 }
 
 config_providers_backoff_seconds() {
@@ -533,6 +557,9 @@ clear_provider_failure() {
 
 valid_provider_id() {
     local id="$1"
+    # '.' and '..' match the charset below but are path components that would
+    # let a provider id escape the per-provider failure-stamp directory.
+    [[ "${id}" == "." || "${id}" == ".." ]] && return 1
     [[ "${id}" =~ ^[A-Za-z0-9_.-]+$ ]]
 }
 
@@ -928,11 +955,94 @@ serve_health_ok() {
     curl --fail --silent --max-time "$(serve_timeout)" "${base}/health" >/dev/null 2>&1
 }
 
+# Extract a comparable CodexBar version token from a version string on stdin so
+# /health's `.version` and `codexbar --version` are normalized identically
+# (matching glean's stale-serve detector): the first whitespace field that looks
+# like a version (optional leading `v` then a digit), with the `v` stripped. A
+# string with no version-looking field (e.g. a transient bare `CodexBar`) yields
+# empty, which makes the gate reuse the serve rather than recycle it.
+codexbar_version_token() {
+    awk 'NR==1 { for (i = 1; i <= NF; i++) if ($i ~ /^v?[0-9]/) { token = $i; sub(/^v/, "", token); print token; exit } }'
+}
+
+# Build version reported by a running codexbar serve via /health. Empty when
+# unavailable, when curl/jq are missing, or for pre-#1703 builds whose /health
+# omits the version field (so the version gate stays a no-op there).
+serve_running_version() {
+    local base
+    base=$(serve_base_url) || return 1
+    showy_quota_have curl || return 1
+    showy_quota_have jq || return 1
+    curl --fail --silent --max-time "$(serve_timeout)" "${base}/health" 2>/dev/null \
+        | jq -r '.version // empty' 2>/dev/null \
+        | codexbar_version_token
+}
+
+# Resolve the configured codexbar binary to an absolute path. CodexBar reads its
+# version from the app bundle via argv[0]: invoked by a bare command name (no
+# directory) it cannot locate the bundle, so `--version` and serve `/health`
+# omit the version and the stale-serve gate stays inert. A value that already
+# carries a path is trusted as-is; an unresolvable bare name falls back to
+# itself (callers still guard with showy_quota_have).
+codexbar_bin_abs() {
+    local bin="${SHOWY_QUOTA_CODEXBAR_BIN}"
+    if [[ "${bin}" == */* ]]; then
+        printf '%s\n' "${bin}"
+        return 0
+    fi
+    command -v "${bin}" 2>/dev/null || printf '%s\n' "${bin}"
+}
+
+# Build version of the installed codexbar binary (cheap, bounded fresh process).
+# Empty when the binary is missing or its --version output is unrecognized; an
+# empty result makes the version gate reuse the running serve, never recycle.
+serve_ondisk_version() {
+    local bin
+    bin=$(codexbar_bin_abs)
+    showy_quota_have "${bin}" || return 1
+    run_with_hard_timeout 5 "${bin}" --version 2>/dev/null \
+        | codexbar_version_token
+}
+
+# Free the configured serve port so ensure_serve_running can start a fresh
+# serve. A serve we manage is terminated via its pidfile (waits for exit so the
+# port is released before restart); a foreign serve holding our port is killed
+# by listener PID (surgical) and only then by name as a last resort. Returns
+# non-zero when no recycle mechanism is available so the caller keeps the
+# stale serve rather than failing to rebind.
+serve_recycle_stale() {
+    local pid="" start_epoch="" basename_rec=""
+    if managed_serve_valid_pidfile pid start_epoch basename_rec; then
+        showy_quota_log "recycling stale managed codexbar serve pid ${pid}"
+        terminate_managed_serve_pid "${pid}" "${start_epoch}" "${basename_rec}" || true
+        rm -f -- "${SHOWY_QUOTA_CODEXBAR_SERVE_PID_FILE}"
+        return 0
+    fi
+    local port="" listeners=""
+    if port=$(serve_port_from_base_url) && showy_quota_have lsof; then
+        listeners=$(lsof -ti "tcp:${port}" -sTCP:LISTEN 2>/dev/null) || listeners=""
+        if [[ -n "${listeners}" ]]; then
+            # shellcheck disable=SC2086 # word-split listener PIDs into kill args
+            kill ${listeners} 2>/dev/null || true
+            showy_quota_log "recycled foreign codexbar serve on port ${port} (${listeners//$'\n'/ })"
+            return 0
+        fi
+    fi
+    if showy_quota_have pkill; then
+        pkill -f 'codexbar serve' 2>/dev/null || true
+        showy_quota_log "recycled foreign codexbar serve via pkill"
+        return 0
+    fi
+    showy_quota_log "cannot recycle foreign codexbar serve: no lsof/pkill; reusing"
+    return 1
+}
+
 wait_for_serve_health() {
     local max_tenths="${SHOWY_QUOTA_CODEXBAR_SERVE_START_WAIT_TENTHS:-30}"
     [[ "${max_tenths}" =~ ^[0-9]+$ ]] || max_tenths=30
     max_tenths=$((10#${max_tenths}))
     (( max_tenths > 0 )) || max_tenths=30
+    (( max_tenths > 3000 )) && max_tenths=3000
     local i
     for (( i=0; i<max_tenths; i++ )); do
         serve_health_ok && return 0
@@ -957,10 +1067,14 @@ showy_quota_pid_start_epoch() {
 
 showy_quota_pid_command_matches_managed_serve() {
     local pid="$1" expected_basename="$2" expected_port="$3" command="" token="" previous=""
+    local -a tokens=()
     local saw_bin=0 saw_serve=0 saw_port=0
     command=$(ps -p "${pid}" -o command= 2>/dev/null) || return 1
     command="${command#"${command%%[![:space:]]*}"}"
-    for token in ${command}; do
+    # Split on whitespace without pathname expansion: an unquoted ${command}
+    # would glob ps output (e.g. a literal `*`) against the working directory.
+    read -ra tokens <<<"${command}"
+    for token in "${tokens[@]}"; do
         if [[ "${token##*/}" == "${expected_basename}" ]]; then
             saw_bin=1
         elif (( saw_bin )) && [[ "${token}" == "serve" ]]; then
@@ -1069,17 +1183,23 @@ terminate_managed_serve_pid() {
 }
 
 start_managed_serve() {
-    local bin="${SHOWY_QUOTA_CODEXBAR_BIN}"
+    local bin
+    bin=$(codexbar_bin_abs)
     showy_quota_have "${bin}" || return 1
 
     local port="" refresh_interval="${SHOWY_QUOTA_CODEXBAR_SERVE_REFRESH_INTERVAL_SECONDS:-60}"
     port=$(serve_port_from_base_url) || return 1
     [[ "${refresh_interval}" =~ ^[0-9]+$ ]] || refresh_interval=60
 
+    # Close the flock descriptor (fd 9, opened by showy_quota_with_lock) in the
+    # long-lived daemon: setsid/nohup detach the session but still inherit open
+    # fds, so a serve started while we hold the lock would keep fd 9 open and
+    # pin the advisory lock for its whole life, starving every later fetch
+    # (the mkdir fallback path has no fd to leak, so this only bit flock hosts).
     if showy_quota_have setsid; then
-        setsid "${bin}" serve --port "${port}" --refresh-interval "${refresh_interval}" >/dev/null 2>&1 &
+        setsid "${bin}" serve --port "${port}" --refresh-interval "${refresh_interval}" >/dev/null 2>&1 9>&- &
     else
-        nohup "${bin}" serve --port "${port}" --refresh-interval "${refresh_interval}" >/dev/null 2>&1 &
+        nohup "${bin}" serve --port "${port}" --refresh-interval "${refresh_interval}" >/dev/null 2>&1 9>&- &
     fi
     local pid=$! start_epoch=""
     start_epoch=$(managed_serve_pid_start_epoch_for_record "${pid}")
@@ -1107,7 +1227,27 @@ restart_managed_serve_once() {
 ensure_serve_running() {
     [[ -n "${SHOWY_QUOTA_CODEXBAR_SERVE_URL}" ]] || return 127
     showy_quota_have curl || return 127
-    serve_health_ok && return 0
+    if serve_health_ok; then
+        # Reuse a healthy serve unless it is a provably stale build: only when
+        # we may manage serves, both versions are known, and they differ.
+        # Pre-#1703 builds expose no /health version (running_version empty)
+        # and short-circuit here with zero codexbar spawn.
+        if [[ "${SHOWY_QUOTA_MANAGE_SERVE:-1}" != "1" ]]; then
+            return 0
+        fi
+        local running_version=""
+        running_version=$(serve_running_version) || running_version=""
+        if [[ -z "${running_version}" ]]; then
+            return 0
+        fi
+        local ondisk_version=""
+        ondisk_version=$(serve_ondisk_version) || ondisk_version=""
+        if [[ -z "${ondisk_version}" || "${running_version}" == "${ondisk_version}" ]]; then
+            return 0
+        fi
+        showy_quota_log "codexbar serve stale: running ${running_version} but on-disk ${ondisk_version}; recycling"
+        serve_recycle_stale || return 0
+    fi
     [[ "${SHOWY_QUOTA_MANAGE_SERVE:-1}" == "1" ]] || return 1
     if managed_serve_pid_alive; then
         if wait_for_serve_health; then
@@ -1144,7 +1284,7 @@ run_codexbar_serve() {
         return 127
     }
 
-    curl --fail --silent --show-error --max-time "$(serve_timeout)" "${base}/usage" 2>/dev/null
+    curl --fail --silent --show-error --max-time "$(serve_usage_timeout)" "${base}/usage" 2>/dev/null
 }
 
 serve_payload_is_publishable() {
@@ -1430,9 +1570,21 @@ publish_cache_payload() {
             showy_quota_log "could not write temporary source file"
             return 1
         }
-        mv "${tmp}" "${SHOWY_QUOTA_USAGE_FILE}"
-        mv "${stamp_tmp}" "${SHOWY_QUOTA_USAGE_STAMP}"
-        mv "${source_tmp}" "${SHOWY_QUOTA_SOURCE_FILE}"
+        mv "${tmp}" "${SHOWY_QUOTA_USAGE_FILE}" || {
+            rm -f "${tmp}" "${stamp_tmp}" "${source_tmp}"
+            showy_quota_log "could not publish cache file"
+            return 1
+        }
+        mv "${stamp_tmp}" "${SHOWY_QUOTA_USAGE_STAMP}" || {
+            rm -f "${stamp_tmp}" "${source_tmp}"
+            showy_quota_log "could not publish stamp file"
+            return 1
+        }
+        mv "${source_tmp}" "${SHOWY_QUOTA_SOURCE_FILE}" || {
+            rm -f "${source_tmp}"
+            showy_quota_log "could not publish source file"
+            return 1
+        }
         chmod 600 "${SHOWY_QUOTA_USAGE_FILE}" "${SHOWY_QUOTA_USAGE_STAMP}" "${SHOWY_QUOTA_SOURCE_FILE}" 2>/dev/null || true
         showy_quota_log "cache refreshed from ${source} (${#out} bytes)"
         return 0

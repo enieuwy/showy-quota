@@ -99,7 +99,7 @@ pub fn payload_has_renderable_provider(records: &[ProviderRecord]) -> bool {
     records.iter().any(is_renderable)
 }
 
-pub fn is_renderable(record: &ProviderRecord) -> bool {
+pub(crate) fn is_renderable(record: &ProviderRecord) -> bool {
     record.error.is_none()
         && valid_provider_id(&record.provider)
         && record
@@ -327,5 +327,71 @@ mod tests {
         assert!(usage.primary.is_none());
         assert_eq!(usage.secondary.as_ref().unwrap().used_percent, Some(0.0));
         assert_eq!(usage.tertiary.as_ref().unwrap().used_percent, Some(25.0));
+    }
+
+    #[test]
+    fn valid_provider_id_accepts_alnum_and_separators() {
+        assert!(valid_provider_id("codex"));
+        assert!(valid_provider_id("Codex123"));
+        assert!(valid_provider_id("open_code.go-1"));
+    }
+
+    #[test]
+    fn valid_provider_id_rejects_empty_and_invalid_chars() {
+        assert!(!valid_provider_id(""));
+        assert!(!valid_provider_id("bad/id"));
+        assert!(!valid_provider_id("has space"));
+        assert!(!valid_provider_id("bang!"));
+        // Non-ASCII bytes are rejected even when alphabetic.
+        assert!(!valid_provider_id("café"));
+    }
+
+    #[test]
+    fn valid_window_treats_absent_window_as_valid() {
+        assert!(valid_window(None));
+    }
+
+    #[test]
+    fn valid_window_requires_used_percent_when_present() {
+        let with_pct: UsageWindow =
+            serde_json::from_str(r#"{"usedPercent": 42}"#).expect("window json");
+        assert!(valid_window(Some(&with_pct)));
+
+        let without_pct: UsageWindow =
+            serde_json::from_str(r#"{"resetsAt": "2099-01-01T00:00:00Z"}"#).expect("window json");
+        assert!(!valid_window(Some(&without_pct)));
+    }
+
+    #[test]
+    fn parse_usage_payload_rejects_non_array_json() {
+        assert!(parse_usage_payload(br#"{"provider": "codex"}"#).is_err());
+        assert!(parse_usage_payload(b"not json").is_err());
+    }
+
+    #[test]
+    fn parse_usage_payload_rejects_empty_provider_id() {
+        assert!(parse_usage_payload(br#"[{"provider": ""}]"#).is_err());
+    }
+
+    #[test]
+    fn parse_usage_payload_rejects_invalid_provider_id() {
+        assert!(parse_usage_payload(br#"[{"provider": "bad/id"}]"#).is_err());
+    }
+
+    #[test]
+    fn parse_usage_payload_rejects_window_without_used_percent() {
+        // A present window object missing usedPercent fails strict validation;
+        // the whole payload is rejected rather than silently dropping the window.
+        let payload = br#"[
+            {"provider": "codex", "usage": {"secondary": {"resetsAt": "2099-01-01T00:00:00Z"}}}
+        ]"#;
+        assert!(parse_usage_payload(payload).is_err());
+    }
+
+    #[test]
+    fn parse_usage_payload_accepts_error_only_and_empty_records() {
+        // Error-only records and an empty array are valid by design.
+        assert!(parse_usage_payload(br#"[{"provider": "codex", "error": "boom"}]"#).is_ok());
+        assert!(parse_usage_payload(b"[]").is_ok());
     }
 }

@@ -70,6 +70,7 @@ pane size=1 borderless=true {
         cli_interval_seconds 120
         // provider_failure_backoff_seconds 120
         // provider_discovery_backoff_seconds 60
+        // build_marker false  // opt-in ⚠ver stale-build warning
     }
 }
 ```
@@ -224,9 +225,11 @@ Common options:
 |`serve_port`|URL port|Port passed to `codexbar serve --port`; defaults to the port in `serve_url` so custom localhost ports stay aligned.|
 |`interval_seconds`|`10`|Serve refresh cadence; timers are one-shot and re-armed after each tick.|
 |`cli_fallback`|`degraded`|`degraded` or `off`. Degraded fallback appends `degraded_cli_glyph`.|
+|`build_marker`|`false`|Opt-in stale-build warning. When `true`, the plugin periodically probes the installed `codexbar --version` and appends `⚠ver` while the running serve's `/health` version differs (detection only — never recycles a session serve). Off by default: the version probe does not run and no marker shows. Needs `cli_fallback` enabled (the probe uses `RunCommands`).|
 |`cli_command`|`codexbar`|Command used for provider discovery (`codexbar config providers …`) and per-provider fallback (`codexbar usage --provider <id> …`). Do not point this at `showy-quota-fetch`; the plugin is intentionally self-contained.|
 |`cli_interval_seconds`|`120`|Slow cadence while fallback is active; the plugin still probes serve every tick and switches back when it recovers.|
 |`provider_failure_backoff_seconds`|`cli_interval_seconds`|Base window to skip a provider after a CLI call fails. The window escalates exponentially per consecutive failure (capped at 30 min), so a provider that keeps wedging is probed rarely.|
+|`fallback_jitter_seconds`|`min(cli_interval_seconds, 60)`|Per-instance random hold (re-probing serve) before the first CLI fallback after a serve outage. Each plugin instance derives a distinct, stable offset from its Zellij plugin id, so multiple tabs do not stampede `codexbar usage` at the same instant when serve blips; a fast managed-serve restart is usually seen during the hold, so most instances skip CLI entirely. `0` disables the hold (immediate fallback, legacy behavior).|
 |`reset_description_timezone_offset`|`UTC`|Optional fixed offset (`UTC`, `+HH:MM`, or `-HH:MM`) used only when CodexBar provides local-time `resetDescription` text without an ISO `resetsAt`. The WASM plugin cannot infer the host timezone reliably, so set this explicitly if CodexBar emits local-time descriptions and your local zone is not UTC. Prefer ISO timestamps when available; this fallback cannot model DST transitions.|
 |`provider_discovery_backoff_seconds`|`60`|How long to skip provider discovery after failure, and how long a successful CodexBar provider inventory is reused before refresh.|
 |`providers`|empty|Comma-separated allow-list and render order. When set, it also constrains the per-provider fallback work list.|
@@ -264,8 +267,10 @@ The shell integrations still use `config.env`; the plugin uses KDL so the WASM a
 |Permission denied|Shows `showy-quota: permission denied`.|
 |CodexBar serve unavailable before first success|Starts `codexbar serve`; if startup fails, runs `codexbar config providers` discovery followed by per-provider `codexbar usage --provider <id>` calls. Shows `showy-quota: CodexBar serve unavailable` only when `cli_fallback "off"` is set.|
 |CLI fallback active|Merges successful per-provider records into the in-memory payload, marks output with `⚠cli`, and continues probing serve so it can switch back automatically.|
+|Serve build behind the installed binary|Opt-in via `build_marker true` (off by default). When enabled and the running serve's `/health` reports a `version` that differs from the installed `codexbar --version`, appends a `⚠ver` marker so you know to restart the serve onto the new build. Detection only — the plugin never kills or recycles a session serve (recycling stays with `showy-quota-fetch`). Requires `cli_fallback` enabled (the on-disk `codexbar --version` probe needs `RunCommands`) and a serve/binary that reports a version (CodexBar invoked by absolute path); otherwise it is a silent no-op.|
 |Single provider hangs or errors|A POSIX-sh watchdog terminates the spawned `codexbar usage` after 15s (Zellij has no command-cancel API), so a wedged call — e.g. one blocked on the macOS keychain — cannot leak as a zellij-server child or re-prompt every retry. That provider's slot keeps its previous record, and its backoff escalates so repeated hangs retry rarely. Other providers continue to render normally.|
 |Serve fails after a success|Keeps rendering last-known-good output; turns stale at `2 × interval_seconds`; falls back only after repeated failures.|
+|Serve outage with many tabs|Each plugin instance waits a distinct, stable per-instance hold (`fallback_jitter_seconds`, re-probing serve every few seconds) before its first per-provider CLI call, so N tabs do not spawn `codexbar usage` simultaneously. If serve recovers during the hold (e.g. a managed-serve restart), the instance returns to the HTTP path and spawns no CLI work.|
 |Serve returns invalid JSON|Keeps last-known-good output; before first success tries the per-provider degraded fallback.|
 |No renderable providers and no prior data|Renders `AI idle`. CodexBar reporting zero enabled providers is the same canonical empty state, not an error.|
 

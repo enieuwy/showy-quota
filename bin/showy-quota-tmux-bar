@@ -25,9 +25,18 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${SCRIPT_PATH}")" && pwd -P)"
 showy_quota_have jq || showy_quota_die "jq is required"
 
 FETCH="${SHOWY_QUOTA_FETCH_BIN:-${SCRIPT_DIR}/showy-quota-fetch}"
+FETCH="$(showy_quota_valid_bin "${FETCH}")" || FETCH="${SCRIPT_DIR}/showy-quota-fetch"
 
-CAP_LEFT="${SHOWY_QUOTA_CAP_LEFT-}"
-CAP_RIGHT="${SHOWY_QUOTA_CAP_RIGHT-}"
+# Default powerline caps: U+E0B6 (left half-circle) and U+E0B4 (right).
+CAP_LEFT_DEFAULT=$'\ue0b6'
+CAP_RIGHT_DEFAULT=$'\ue0b4'
+CAP_LEFT="${SHOWY_QUOTA_CAP_LEFT-${CAP_LEFT_DEFAULT}}"
+CAP_RIGHT="${SHOWY_QUOTA_CAP_RIGHT-${CAP_RIGHT_DEFAULT}}"
+# tmux parses '#' as its format escape ('#[', '#{', '#(' ...). Double any '#'
+# in the (user-supplied) caps so they render literally rather than as a
+# style/expansion directive.
+CAP_LEFT="${CAP_LEFT//#/##}"
+CAP_RIGHT="${CAP_RIGHT//#/##}"
 
 tmux_reset() { printf '#[default]'; }
 tmux_dim() { printf '#[dim]'; }
@@ -59,6 +68,7 @@ tmux_dual_metric_bar() {
     local width="${SHOWY_QUOTA_TMUX_BAR_WIDTH:-${SHOWY_QUOTA_ZELLIJ_BAR_WIDTH:-12}}"
     [[ "${width}" =~ ^[0-9]+$ ]] || width=12
     (( width < 8 )) && width=8
+    (( width > 400 )) && width=400
 
     local primary_color secondary_color bg_color surface_color elapsed_color
     primary_color="${primary_override:-$(showy_quota_window_color "${p_remaining}" "$(showy_quota_is_long_window "${p_window}")")}"
@@ -136,6 +146,12 @@ rows=$(printf '%s' "${filtered}" | jq -r '
     | ([ $ex[] | [ wmin(.window), (.window.resetsAt // null) ] ]) as $exkeys
     | ([ $slots[] | select( [wmin(.), (.resetsAt // null)] as $k | (any($exkeys[]; . == $k) | not) ) ]) as $unmatched
     | (($ex | length) > 0 and ($unmatched | length) == 0) as $pooled
+    | ($slots + [ $ex[] | select(.usageKnown != false) | .window ]) as $all
+    | ([ range(0; ($all | length)) as $i
+         | $all[$i] as $w
+         | [wmin($w), ($w.resetsAt // null)] as $k
+         | select(([ range(0; $i) as $j | [wmin($all[$j]), ($all[$j].resetsAt // null)] ] | index($k) | not))
+         | $w ][0:4]) as $rw
     | ($unmatched | sort_by(wmin(.) // 1.0e18)) as $um
     | (if ($um | length) > 0 then
          [ { lbl: flabel(.provider),
@@ -161,6 +177,11 @@ rows=$(printf '%s' "${filtered}" | jq -r '
         pct($t.usedPercent), ($t.resetsAt // $t.resetDescription // ""), ($t.windowMinutes // ""),
         (if $pooled then 1 else 0 end),
         ($fams | length),
+        ($rw | length),
+        pct($rw[0].usedPercent), ($rw[0].resetsAt // $rw[0].resetDescription // ""), ($rw[0].windowMinutes // ""),
+        pct($rw[1].usedPercent), ($rw[1].resetsAt // $rw[1].resetDescription // ""), ($rw[1].windowMinutes // ""),
+        pct($rw[2].usedPercent), ($rw[2].resetsAt // $rw[2].resetDescription // ""), ($rw[2].windowMinutes // ""),
+        pct($rw[3].usedPercent), ($rw[3].resetsAt // $rw[3].resetDescription // ""), ($rw[3].windowMinutes // ""),
         ($fams[0].lbl // "?"), ($fams[0].tu // -1), ($fams[0].tr // ""), ($fams[0].tw // ""), ($fams[0].bu // -1), ($fams[0].br // ""), ($fams[0].bw // ""),
         ($fams[1].lbl // "?"), ($fams[1].tu // -1), ($fams[1].tr // ""), ($fams[1].tw // ""), ($fams[1].bu // -1), ($fams[1].br // ""), ($fams[1].bw // "")
     ] | map(tostring) | join("\u001f")')
@@ -235,30 +256,53 @@ emit_chunk() {
     local has_tertiary=0
     [[ "${t_used}" =~ ^[0-9]+$ ]] && has_tertiary=1
     local bar_mode
-    bar_mode=$(showy_quota_terminal_mode_for_provider "${provider}" "${has_tertiary}" "${pooled:-0}")
+    bar_mode=$(showy_quota_terminal_mode_for_provider "${provider}" "${has_tertiary}" "${pooled:-0}" "${rw_count:-0}")
 
     local mono_color="" mono_rem="" mono_reset="" mono_win="" mono_present=""
-    if [[ "${bar_mode}" == "mono4" ]] && (( ${d2_count:-0} >= 2 )); then
+    if [[ "${bar_mode}" == "mono4" ]] && (( ${rw_count:-0} >= 4 )); then
         local a1=0 pa1=0 a2=0 pa2=0 a3=0 pa3=0 a4=0 pa4=0
-        [[ "${f1t_used}" =~ ^[0-9]+$ ]] && { a1=$((100 - f1t_used)); pa1=1; }
-        [[ "${f1b_used}" =~ ^[0-9]+$ ]] && { a2=$((100 - f1b_used)); pa2=1; }
-        [[ "${f2t_used}" =~ ^[0-9]+$ ]] && { a3=$((100 - f2t_used)); pa3=1; }
-        [[ "${f2b_used}" =~ ^[0-9]+$ ]] && { a4=$((100 - f2b_used)); pa4=1; }
-        local bx1="${f1t_reset}" bw1="${f1t_window}" bx2="${f1b_reset}" bw2="${f1b_window}"
-        local bx3="${f2t_reset}" bw3="${f2t_window}" bx4="${f2b_reset}" bw4="${f2b_window}"
+        local family_lane_count=0
+        [[ "${f1t_used}" =~ ^[0-9]+$ ]] && family_lane_count=$((family_lane_count + 1))
+        [[ "${f1b_used}" =~ ^[0-9]+$ ]] && family_lane_count=$((family_lane_count + 1))
+        [[ "${f2t_used}" =~ ^[0-9]+$ ]] && family_lane_count=$((family_lane_count + 1))
+        [[ "${f2b_used}" =~ ^[0-9]+$ ]] && family_lane_count=$((family_lane_count + 1))
+        local bx1 bx2 bx3 bx4 bw1 bw2 bw3 bw4
+        if (( family_lane_count >= 4 )); then
+            [[ "${f1t_used}" =~ ^[0-9]+$ ]] && { a1=$((100 - f1t_used)); pa1=1; }
+            [[ "${f1b_used}" =~ ^[0-9]+$ ]] && { a2=$((100 - f1b_used)); pa2=1; }
+            [[ "${f2t_used}" =~ ^[0-9]+$ ]] && { a3=$((100 - f2t_used)); pa3=1; }
+            [[ "${f2b_used}" =~ ^[0-9]+$ ]] && { a4=$((100 - f2b_used)); pa4=1; }
+            bx1="${f1t_reset}"; bw1="${f1t_window}"; bx2="${f1b_reset}"; bw2="${f1b_window}"
+            bx3="${f2t_reset}"; bw3="${f2t_window}"; bx4="${f2b_reset}"; bw4="${f2b_window}"
+        else
+            [[ "${rw1_used}" =~ ^[0-9]+$ ]] && { a1=$((100 - rw1_used)); pa1=1; }
+            [[ "${rw2_used}" =~ ^[0-9]+$ ]] && { a2=$((100 - rw2_used)); pa2=1; }
+            [[ "${rw3_used}" =~ ^[0-9]+$ ]] && { a3=$((100 - rw3_used)); pa3=1; }
+            [[ "${rw4_used}" =~ ^[0-9]+$ ]] && { a4=$((100 - rw4_used)); pa4=1; }
+            bx1="${rw1_reset}"; bw1="${rw1_window}"; bx2="${rw2_reset}"; bw2="${rw2_window}"
+            bx3="${rw3_reset}"; bw3="${rw3_window}"; bx4="${rw4_reset}"; bw4="${rw4_window}"
+        fi
         (( stale )) && { bx1=""; bw1=""; bx2=""; bw2=""; bx3=""; bw3=""; bx4=""; bw4=""; }
         mono_rem=$(printf '%s\x1f%s\x1f%s\x1f%s' "${a1}" "${a2}" "${a3}" "${a4}")
         mono_reset=$(printf '%s\x1f%s\x1f%s\x1f%s' "${bx1}" "${bx2}" "${bx3}" "${bx4}")
         mono_win=$(printf '%s\x1f%s\x1f%s\x1f%s' "${bw1}" "${bw2}" "${bw3}" "${bw4}")
         mono_present=$(printf '%s\x1f%s\x1f%s\x1f%s' "${pa1}" "${pa2}" "${pa3}" "${pa4}")
     elif [[ "${bar_mode}" == "mono3" ]]; then
-        local p1=0 p2=0 p3=0
-        [[ "${p_used}" =~ ^[0-9]+$ ]] && p1=1
-        [[ "${s_used}" =~ ^[0-9]+$ ]] && p2=1
-        [[ "${t_used}" =~ ^[0-9]+$ ]] && p3=1
-        mono_rem=$(printf '%s\x1f%s\x1f%s' "${p_remaining}" "${s_remaining}" "${t_remaining}")
-        mono_reset=$(printf '%s\x1f%s\x1f%s' "${marker_p_reset}" "${marker_s_reset}" "${marker_t_reset}")
-        mono_win=$(printf '%s\x1f%s\x1f%s' "${marker_p_window}" "${marker_s_window}" "${marker_t_window}")
+        local p1=0 p2=0 p3=0 m1="${p_remaining}" m2="${s_remaining}" m3="${t_remaining}"
+        local x1="${marker_p_reset}" w1="${marker_p_window}" x2="${marker_s_reset}" w2="${marker_s_window}" x3="${marker_t_reset}" w3="${marker_t_window}"
+        if (( ! has_tertiary )) && (( ${rw_count:-0} >= 3 )); then
+            [[ "${rw1_used}" =~ ^[0-9]+$ ]] && { m1=$((100 - rw1_used)); p1=1; }
+            [[ "${rw2_used}" =~ ^[0-9]+$ ]] && { m2=$((100 - rw2_used)); p2=1; }
+            [[ "${rw3_used}" =~ ^[0-9]+$ ]] && { m3=$((100 - rw3_used)); p3=1; }
+            x1="${rw1_reset}"; w1="${rw1_window}"; x2="${rw2_reset}"; w2="${rw2_window}"; x3="${rw3_reset}"; w3="${rw3_window}"
+        else
+            [[ "${p_used}" =~ ^[0-9]+$ ]] && p1=1
+            [[ "${s_used}" =~ ^[0-9]+$ ]] && p2=1
+            [[ "${t_used}" =~ ^[0-9]+$ ]] && p3=1
+        fi
+        mono_rem=$(printf '%s\x1f%s\x1f%s' "${m1}" "${m2}" "${m3}")
+        mono_reset=$(printf '%s\x1f%s\x1f%s' "${x1}" "${x2}" "${x3}")
+        mono_win=$(printf '%s\x1f%s\x1f%s' "${w1}" "${w2}" "${w3}")
         mono_present=$(printf '%s\x1f%s\x1f%s' "${p1}" "${p2}" "${p3}")
     fi
     if [[ -n "${mono_rem}" ]]; then
@@ -286,13 +330,14 @@ space_chunk() {
 }
 
 while IFS=$'\x1f' read -r provider p_used p_reset p_window s_used s_reset s_window t_used t_reset t_window \
-    pooled d2_count \
+    pooled d2_count rw_count \
+    rw1_used rw1_reset rw1_window rw2_used rw2_reset rw2_window rw3_used rw3_reset rw3_window rw4_used rw4_reset rw4_window \
     f1_label f1t_used f1t_reset f1t_window f1b_used f1b_reset f1b_window \
     f2_label f2t_used f2t_reset f2t_window f2b_used f2b_reset f2b_window; do
     [[ -n "${provider}" ]] || continue
     row_has_tertiary=0
     [[ "${t_used}" =~ ^[0-9]+$ ]] && row_has_tertiary=1
-    row_mode=$(showy_quota_terminal_mode_for_provider "${provider}" "${row_has_tertiary}" "${pooled:-0}")
+    row_mode=$(showy_quota_terminal_mode_for_provider "${provider}" "${row_has_tertiary}" "${pooled:-0}" "${rw_count:-0}")
     if [[ "${row_mode}" == "dual2" ]] && (( ${d2_count:-0} >= 2 )); then
         # Split a model-pooled provider into one standalone dual per family.
         base_sigil=$(showy_quota_provider_sigil "${provider}")
@@ -310,7 +355,7 @@ while IFS=$'\x1f' read -r provider p_used p_reset p_window s_used s_reset s_wind
         sigil=$(showy_quota_provider_sigil "${provider}")
         space_chunk; emit_chunk
     fi
-done <<< "${rows}"
+done < <(printf '%s\n' "${rows}")
 if (( stale )); then
     tmux_style_text ' ' "$(showy_quota_palette bg)" "$(showy_quota_palette bg)"
     tmux_style_text "${SHOWY_QUOTA_STALE_GLYPH}" "${countdown_warn}" "${chunk_bg}" bold

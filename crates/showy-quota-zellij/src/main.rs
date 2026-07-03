@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use showy_quota_zellij_core::palette::hex_to_rgb;
 use showy_quota_zellij_core::{
     parse_provider_config_payload, parse_usage_payload, payload_has_renderable_provider,
     provider_ids_from_records, render_zellij, valid_provider_id, ProviderConfigError,
@@ -12,6 +13,7 @@ use zellij_tile::prelude::*;
 
 const HEALTH_KIND: &str = "showy-quota-health";
 const USAGE_KIND: &str = "showy-quota-usage";
+const WEB_REQUEST_GENERATION_KEY: &str = "showy-quota-web-generation";
 const FALLBACK_DISCOVER_KIND: &str = "showy-quota-fallback-discover";
 const FALLBACK_DISCOVER_ATTEMPT_KEY: &str = "showy-quota-discover-attempt";
 const FALLBACK_PROVIDER_KIND: &str = "showy-quota-fallback-provider";
@@ -21,7 +23,33 @@ const SERVE_FAILURES_BEFORE_CLI: u8 = 3;
 const MANAGED_SERVE_RETRY_COOLDOWN_SECONDS: f64 = 30.0;
 const PROVIDER_DISCOVERY_BACKOFF_SECONDS_DEFAULT: f64 = 60.0;
 const PROVIDER_COMMAND_TIMEOUT_SECONDS: u64 = 15;
+// While an outage hold is active the bar wakes on this short cadence to re-probe
+// serve, so a fast managed-serve restart is detected within seconds instead of a
+// full `interval_seconds`.
+const HOLD_REPROBE_INTERVAL_SECONDS: f64 = 3.0;
+// Zellij never reports a failed/cancelled web_request, so an in-flight probe
+// that hangs (dropped connection, wedged proxy) is expired after its window and
+// treated as a serve failure so the plugin retries and can fall back to the CLI
+// instead of latching forever. /health is a cheap liveness check and expires
+// fast; /usage gets a larger budget because a healthy serve bounds collection
+// per provider (~0.8x its request deadline, ~24s by default) and still returns
+// the healthy providers when a slow one degrades to an error row — expiring it
+// on the short health window would abandon that usable partial response. These
+// mirror the shell fetcher's SHOWY_QUOTA_CODEXBAR_SERVE_TIMEOUT_SECONDS (health)
+// and SHOWY_QUOTA_CODEXBAR_SERVE_USAGE_TIMEOUT_SECONDS (usage) defaults.
+const SERVE_HEALTH_TIMEOUT_SECONDS: f64 = 10.0;
+const SERVE_USAGE_TIMEOUT_SECONDS: f64 = 30.0;
 const PROVIDER_BACKOFF_MAX_SECONDS: f64 = 1800.0;
+const VERSION_KIND: &str = "showy-quota-version";
+const VERSION_ATTEMPT_KEY: &str = "showy-quota-version-attempt";
+const VERSION_COMMAND_TIMEOUT_SECONDS: u64 = 5;
+// How long an on-disk `codexbar --version` result is trusted before re-probing.
+const ONDISK_VERSION_TTL_SECONDS: f64 = 300.0;
+// Plugin-appended marker (integration boundary) meaning "the running serve is an
+// older build than the installed binary; restart it." Distinct from the core
+// `stale_glyph` (data old) and `degraded_cli_glyph` (on CLI fallback); styled to
+// match them (bold, countdown-warn fg, bar bg).
+const BUILD_STALE_MARKER: &str = "⚠ver";
 
 /// POSIX-sh watchdog that runs `"$@"` but guarantees the spawned process cannot
 /// outlive `timeout_secs`. Zellij exposes no API to cancel a `run_command`, so a
@@ -42,6 +70,25 @@ fn watchdog_argv<'a>(script: &'a str, command: &[&'a str]) -> Vec<&'a str> {
     let mut argv = vec!["/bin/sh", "-c", script, "showy-quota-watchdog"];
     argv.extend_from_slice(command);
     argv
+}
+
+/// Like `watchdog_script`, but first resolves the binary in `$1` to an absolute
+/// path: CodexBar reads its version from the app bundle via `argv[0]`, so a bare
+/// command name reports no version. Mirrors the shell `codexbar_bin_abs` — a
+/// value containing a slash is trusted as-is, otherwise `command -v` resolves
+/// it. The binary still rides in `$1` (never interpolated), so this is
+/// injection-safe like `watchdog_script`.
+fn version_probe_script(timeout_secs: u64) -> String {
+    format!(
+        "case $1 in */*) b=$1;; *) b=$(command -v \"$1\" 2>/dev/null) || b=$1;; esac; \"$b\" --version & __p=$!; (sleep {t}; kill \"$__p\" 2>/dev/null; sleep 2; kill -9 \"$__p\" 2>/dev/null) & __k=$!; wait \"$__p\"; __r=$?; kill \"$__k\" 2>/dev/null; exit \"$__r\"",
+        t = timeout_secs
+    )
+}
+
+/// Build the argv for a version probe: the binary rides in `$1` (never
+/// interpolated into the script); `$0` is only a label.
+fn version_probe_argv<'a>(script: &'a str, bin: &'a str) -> Vec<&'a str> {
+    vec!["/bin/sh", "-c", script, "showy-quota-version", bin]
 }
 #[cfg(target_arch = "wasm32")]
 fn shim_set_selectable(selectable: bool) {
@@ -119,6 +166,20 @@ fn shim_open_command_pane_background(
 ) -> Option<PaneId> {
     Some(PaneId::Plugin(0))
 }
+
+#[cfg(target_arch = "wasm32")]
+fn shim_get_plugin_ids() -> (u32, String) {
+    let ids = get_plugin_ids();
+    (
+        ids.plugin_id,
+        ids.initial_cwd.to_string_lossy().into_owned(),
+    )
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn shim_get_plugin_ids() -> (u32, String) {
+    (0, String::new())
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Source {
     Unknown,
@@ -182,6 +243,13 @@ struct State {
     last_output: String,
     health_in_flight: bool,
     usage_in_flight: bool,
+    health_generation: u64,
+    usage_generation: u64,
+    active_health_generation: Option<u64>,
+    active_usage_generation: Option<u64>,
+    // When the in-flight /health or /usage web request was started, so a hung
+    // request can be expired (Zellij never reports request failure).
+    web_flight_started_at: Option<f64>,
     permissions_granted: bool,
     // Provider discovery state: cached output of `codexbar config providers`.
     // An empty `discovered_providers` with `discovered_providers_at == None`
@@ -200,6 +268,31 @@ struct State {
     // Per-provider fallback state: tracks in-flight commands and last-known
     // good records so one provider's failure never blocks the others.
     provider_states: BTreeMap<String, ProviderFallbackState>,
+    // Stale-serve build gate. `serve_build_version` is the version reported by
+    // the running serve's /health (None for a pre-#1703 serve that omits it);
+    // `ondisk_version` is the installed binary's version from a periodic
+    // `codexbar --version` probe. A marker shows only when both are known and
+    // differ. Probe state mirrors the discovery in-flight/token guard.
+    serve_build_version: Option<String>,
+    ondisk_version: Option<String>,
+    ondisk_version_checked_at: Option<f64>,
+    version_probe_in_flight: bool,
+    version_probe_token: Option<String>,
+    // Opt-in (KDL `build_marker true`, default off). When off, the on-disk
+    // version probe never runs and the ⚠ver marker is never appended — the
+    // whole stale-build gate is a silent no-op. The plugin only flags; it
+    // never recycles a session-owned serve.
+    show_build_marker: bool,
+    // Stable per-instance seed (Zellij plugin id + cwd + serve/cli command),
+    // used to disperse the degraded-fallback hold and per-provider retry backoff
+    // across the N same-config tab instances without any shared state or RNG.
+    instance_hash: u64,
+    // Max per-instance random hold (seconds) before the first CLI fallback after
+    // a serve outage; 0 disables the hold (legacy immediate-fallback behavior).
+    fallback_jitter_seconds: f64,
+    // Deadline of the active degraded-fallback hold, if any. While set and in the
+    // future, the plugin re-probes serve instead of spawning CLI work.
+    cli_hold_until: Option<f64>,
 }
 
 impl Default for State {
@@ -225,6 +318,11 @@ impl Default for State {
             last_output: " showy-quota: loading ".into(),
             health_in_flight: false,
             usage_in_flight: false,
+            health_generation: 0,
+            usage_generation: 0,
+            active_health_generation: None,
+            active_usage_generation: None,
+            web_flight_started_at: None,
             permissions_granted: false,
             discovered_providers: Vec::new(),
             discovered_providers_at: None,
@@ -236,6 +334,15 @@ impl Default for State {
             discovery_failed_at: None,
             discovery_failure_backoff_seconds: PROVIDER_DISCOVERY_BACKOFF_SECONDS_DEFAULT,
             provider_states: BTreeMap::new(),
+            serve_build_version: None,
+            ondisk_version: None,
+            ondisk_version_checked_at: None,
+            version_probe_in_flight: false,
+            version_probe_token: None,
+            show_build_marker: false,
+            instance_hash: 0,
+            fallback_jitter_seconds: 60.0,
+            cli_hold_until: None,
         }
     }
 }
@@ -248,6 +355,14 @@ impl ZellijPlugin for State {
             .or_else(|| configuration.get("SHOWY_QUOTA_CODEXBAR_SERVE_URL"))
             .cloned()
             .unwrap_or_else(|| "http://127.0.0.1:8080".into());
+        // Mirror the shell `serve_base_url` guard: only a loopback serve URL is
+        // honored. A non-loopback URL would turn Zellij's granted WebAccess into
+        // an SSRF / exfiltration vector (e.g. a shared KDL layout pointing the
+        // plugin at an internal or metadata endpoint), so drop it and fall back
+        // to the CLI path instead.
+        if !self.serve_url.trim().is_empty() && !is_loopback_serve_url(&self.serve_url) {
+            self.serve_url = String::new();
+        }
         self.interval_seconds = parse_positive_f64(
             configuration.get("interval_seconds").map(String::as_str),
             10.0,
@@ -259,11 +374,13 @@ impl ZellijPlugin for State {
             120.0,
         );
         self.manage_serve = parse_bool(configuration.get("manage_serve").map(String::as_str), true);
+        self.show_build_marker =
+            parse_bool(configuration.get("build_marker").map(String::as_str), false);
         self.serve_command = configuration
             .get("serve_command")
             .or_else(|| configuration.get("SHOWY_QUOTA_CODEXBAR_BIN"))
             .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
+            .filter(|value| valid_command(value))
             .unwrap_or_else(|| "codexbar".into());
         self.serve_port = configuration
             .get("serve_port")
@@ -278,7 +395,7 @@ impl ZellijPlugin for State {
             .or_else(|| configuration.get("fallback_command"))
             .or_else(|| configuration.get("SHOWY_QUOTA_CODEXBAR_BIN"))
             .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
+            .filter(|value| valid_command(value))
             .unwrap_or_else(|| "codexbar".into());
         // Per-provider CLI backoff after a failure. Defaults to the same
         // interval that drives the bar so backoff scales with refresh cadence.
@@ -302,6 +419,15 @@ impl ZellijPlugin for State {
             Some("off") | Some("false") | Some("0") | Some("none") => CliFallback::Off,
             _ => CliFallback::Degraded,
         };
+        let (plugin_id, initial_cwd) = shim_get_plugin_ids();
+        self.instance_hash =
+            instance_seed(plugin_id, &initial_cwd, &self.serve_url, &self.cli_command);
+        self.fallback_jitter_seconds = parse_nonnegative_f64(
+            configuration
+                .get("fallback_jitter_seconds")
+                .map(String::as_str),
+            self.cli_interval_seconds.min(60.0),
+        );
 
         shim_set_selectable(false);
         shim_subscribe(&[
@@ -330,12 +456,16 @@ impl ZellijPlugin for State {
                 self.permissions_granted = true;
                 self.health_in_flight = false;
                 self.usage_in_flight = false;
+                self.active_health_generation = None;
+                self.active_usage_generation = None;
+                self.web_flight_started_at = None;
                 self.discovery_in_flight = false;
                 self.discovery_attempt_token = None;
                 self.discovery_started_at = None;
                 self.usage_after_discovery = false;
                 self.serve_inventory_mismatch = false;
                 self.clear_all_provider_in_flight();
+                self.cli_hold_until = None;
                 self.schedule_timer();
                 self.tick();
                 self.last_output != previous_output
@@ -344,12 +474,16 @@ impl ZellijPlugin for State {
                 self.permissions_granted = false;
                 self.health_in_flight = false;
                 self.usage_in_flight = false;
+                self.active_health_generation = None;
+                self.active_usage_generation = None;
+                self.web_flight_started_at = None;
                 self.discovery_in_flight = false;
                 self.discovery_attempt_token = None;
                 self.discovery_started_at = None;
                 self.usage_after_discovery = false;
                 self.serve_inventory_mismatch = false;
                 self.clear_all_provider_in_flight();
+                self.cli_hold_until = None;
                 self.last_output = " showy-quota: permission denied ".into();
                 true
             }
@@ -365,8 +499,14 @@ impl ZellijPlugin for State {
                 let previous_output = self.last_output.clone();
                 match context.get("kind").map(String::as_str) {
                     Some(HEALTH_KIND) => {
+                        if !self.web_response_matches(HEALTH_KIND, &context) {
+                            return false;
+                        }
                         self.health_in_flight = false;
+                        self.active_health_generation = None;
+                        self.web_flight_started_at = None;
                         if status == 200 {
+                            self.update_serve_build_version(&body);
                             self.kick_usage();
                         } else {
                             self.handle_serve_unavailable();
@@ -374,7 +514,12 @@ impl ZellijPlugin for State {
                         self.last_output != previous_output
                     }
                     Some(USAGE_KIND) => {
+                        if !self.web_response_matches(USAGE_KIND, &context) {
+                            return false;
+                        }
                         self.usage_in_flight = false;
+                        self.active_usage_generation = None;
+                        self.web_flight_started_at = None;
                         if status == 200 && self.accept_payload(body, Source::Serve) {
                             self.consecutive_serve_failures = 0;
                         } else {
@@ -405,6 +550,12 @@ impl ZellijPlugin for State {
                             .map(String::as_str);
                         self.handle_provider_fallback_result(&provider, attempt, exit, stdout)
                     }
+                    Some(VERSION_KIND) => {
+                        let previous_output = self.last_output.clone();
+                        let attempt = context.get(VERSION_ATTEMPT_KEY).map(String::as_str);
+                        self.handle_version_result(exit, stdout, attempt);
+                        self.last_output != previous_output
+                    }
                     _ => false,
                 }
             }
@@ -421,6 +572,11 @@ impl State {
     fn set_source(&mut self, source: Source) {
         if matches!(source, Source::Cli | Source::Unavailable) {
             self.managed_serve_requested = false;
+        }
+        // Returning to the serve HTTP path makes any pending degraded-fallback
+        // hold moot: the outage we were holding through is over.
+        if source == Source::Serve {
+            self.cli_hold_until = None;
         }
         self.source = source;
     }
@@ -447,7 +603,58 @@ impl State {
     }
 
     fn schedule_timer(&self) {
-        shim_set_timeout(self.interval_seconds);
+        shim_set_timeout(self.next_timeout_seconds(now_seconds()));
+    }
+
+    /// Single scheduling chokepoint. While an outage hold is active, wake on a
+    /// short cadence to re-probe serve; otherwise use the normal bar cadence.
+    /// Centralized so the hold never spawns a second, overlapping timer stream.
+    fn next_timeout_seconds(&self, now: f64) -> f64 {
+        if let Some(until) = self.cli_hold_until {
+            if now < until {
+                let remaining = (until - now).max(0.1);
+                let reprobe = HOLD_REPROBE_INTERVAL_SECONDS.min(self.interval_seconds);
+                return remaining.min(reprobe);
+            }
+        }
+        self.interval_seconds
+    }
+
+    fn web_response_matches(&self, kind: &str, context: &BTreeMap<String, String>) -> bool {
+        let generation = context
+            .get(WEB_REQUEST_GENERATION_KEY)
+            .and_then(|value| value.parse::<u64>().ok());
+        match kind {
+            HEALTH_KIND => matches!(
+                (generation, self.active_health_generation),
+                (Some(response), Some(active)) if self.health_in_flight && response == active
+            ),
+            USAGE_KIND => matches!(
+                (generation, self.active_usage_generation),
+                (Some(response), Some(active)) if self.usage_in_flight && response == active
+            ),
+            _ => false,
+        }
+    }
+
+    /// Whether a serve->CLI transition should first wait out a per-instance
+    /// jittered hold (re-probing serve) instead of immediately stampeding the
+    /// per-provider CLI. Gated to genuine outage transitions: never delays a
+    /// cold start (no prior payload), an already-committed CLI source, the
+    /// inventory-mismatch correctness fallback (which set source to Cli), or
+    /// pure-CLI mode (empty serve_url). `fallback_jitter_seconds = 0` disables.
+    fn should_cli_hold(&self) -> bool {
+        self.fallback_jitter_seconds > 0.0
+            && !self.serve_url.trim().is_empty()
+            && !matches!(self.source, Source::Cli)
+            && self.last_payload.is_some()
+    }
+
+    /// Deterministic per-instance hold length in `[0, fallback_jitter_seconds)`.
+    /// Pure function of the instance seed, so the N same-config tab instances
+    /// disperse to distinct offsets with no shared state or RNG.
+    fn hold_delay_seconds(&self) -> f64 {
+        unit_from(self.instance_hash) * self.fallback_jitter_seconds
     }
     fn expire_stale_discovery(&mut self) {
         if !self.discovery_in_flight {
@@ -469,12 +676,54 @@ impl State {
         self.discovery_failed_at = Some(now);
     }
 
+    /// Expire a hung /health or /usage probe. Returns true when it expired and
+    /// routed the timeout through the same failure path a non-200 result would,
+    /// so the caller (tick) should not also kick a fresh request this pass.
+    fn expire_stale_web_flight(&mut self) -> bool {
+        if !self.health_in_flight && !self.usage_in_flight {
+            return false;
+        }
+        let now = now_seconds();
+        let Some(started_at) = self.web_flight_started_at else {
+            // In-flight without a recorded start: stamp it so a later tick can
+            // expire it rather than wedging indefinitely.
+            self.web_flight_started_at = Some(now);
+            return false;
+        };
+        let timeout = if self.usage_in_flight {
+            SERVE_USAGE_TIMEOUT_SECONDS
+        } else {
+            SERVE_HEALTH_TIMEOUT_SECONDS
+        };
+        if (now - started_at).max(0.0) < timeout {
+            return false;
+        }
+        let was_usage = self.usage_in_flight;
+        if was_usage {
+            self.usage_in_flight = false;
+            self.active_usage_generation = None;
+        } else {
+            self.health_in_flight = false;
+            self.active_health_generation = None;
+        }
+        self.web_flight_started_at = None;
+        if was_usage {
+            self.handle_usage_failure();
+        } else {
+            self.handle_serve_unavailable();
+        }
+        true
+    }
 
     fn tick(&mut self) {
         if !self.permissions_granted {
             return;
         }
+        if self.expire_stale_web_flight() {
+            return;
+        }
         self.expire_stale_discovery();
+        self.maybe_kick_version_probe();
         if self.source == Source::Serve {
             if self.discovery_in_flight {
                 self.usage_after_discovery = true;
@@ -521,7 +770,11 @@ impl State {
             self.kick_cli_fallback_or_render_failure();
             return;
         }
+        self.health_generation = self.health_generation.saturating_add(1);
+        let generation = self.health_generation;
+        self.active_health_generation = Some(generation);
         self.health_in_flight = true;
+        self.web_flight_started_at = Some(now_seconds());
         if self.source != Source::Cli {
             self.set_source(Source::Probing);
         }
@@ -529,6 +782,10 @@ impl State {
         headers.insert("Accept".to_string(), "application/json".to_string());
         let mut context = BTreeMap::new();
         context.insert("kind".to_string(), HEALTH_KIND.to_string());
+        context.insert(
+            WEB_REQUEST_GENERATION_KEY.to_string(),
+            generation.to_string(),
+        );
         let url = format!("{}/health", self.serve_url.trim_end_matches('/'));
         shim_web_request(url, HttpVerb::Get, headers, Vec::new(), context);
     }
@@ -547,16 +804,25 @@ impl State {
             self.kick_discovery();
             return;
         }
+        self.usage_generation = self.usage_generation.saturating_add(1);
+        let generation = self.usage_generation;
+        self.active_usage_generation = Some(generation);
         self.usage_in_flight = true;
+        self.web_flight_started_at = Some(now_seconds());
         let mut headers = BTreeMap::new();
         headers.insert("Accept".to_string(), "application/json".to_string());
         let mut context = BTreeMap::new();
         context.insert("kind".to_string(), USAGE_KIND.to_string());
+        context.insert(
+            WEB_REQUEST_GENERATION_KEY.to_string(),
+            generation.to_string(),
+        );
         let url = format!("{}/usage", self.serve_url.trim_end_matches('/'));
         shim_web_request(url, HttpVerb::Get, headers, Vec::new(), context);
     }
 
     fn handle_serve_unavailable(&mut self) {
+        self.serve_build_version = None;
         if self.should_start_managed_serve(now_seconds()) {
             self.start_managed_serve();
             return;
@@ -612,9 +878,43 @@ impl State {
 
     fn kick_cli_fallback_or_render_failure(&mut self) {
         if self.cli_fallback == CliFallback::Off {
+            self.cli_hold_until = None;
             self.set_source(Source::Unavailable);
             self.render_failure();
             return;
+        }
+        if self.should_cli_hold() {
+            let now = now_seconds();
+            match self.cli_hold_until {
+                // Still holding: do NOT re-probe inline. Re-probes are paced by
+                // the short-cadence Timer (see next_timeout_seconds; source is
+                // Probing during the hold so tick() issues them every ~3s) and
+                // bounded by expire_stale_web_flight. Probing here would chain
+                // off every fast non-200 WebRequestResult into a tight request
+                // loop that all N tabs run at once against a recovering serve.
+                Some(until) if now < until => return,
+                // Hold expired with serve still down: commit to CLI and latch
+                // the source so a subsequent failure does not re-arm the hold
+                // every cycle (we stay steadily degraded until serve recovers).
+                Some(_) => {
+                    self.cli_hold_until = None;
+                    self.set_source(Source::Cli);
+                }
+                // First fallback this outage: arm the per-instance hold and do a
+                // single re-probe (which moves source off Serve so a later
+                // committed CLI result is accepted), then let the Timer pace it.
+                None => {
+                    let delay = self.hold_delay_seconds();
+                    if delay > 0.0 {
+                        self.cli_hold_until = Some(now + delay);
+                        self.schedule_timer();
+                        self.kick_health_probe();
+                        return;
+                    }
+                }
+            }
+        } else {
+            self.cli_hold_until = None;
         }
         self.kick_cli_fallback();
     }
@@ -684,7 +984,10 @@ impl State {
     }
 
     fn kick_discovery(&mut self) {
-        if self.cli_fallback == CliFallback::Off || self.discovery_in_flight || !self.permissions_granted {
+        if self.cli_fallback == CliFallback::Off
+            || self.discovery_in_flight
+            || !self.permissions_granted
+        {
             return;
         }
         let attempt_token = format!("{:.6}", now_seconds());
@@ -693,10 +996,7 @@ impl State {
         self.discovery_in_flight = true;
         let mut context = BTreeMap::new();
         context.insert("kind".to_string(), FALLBACK_DISCOVER_KIND.to_string());
-        context.insert(
-            FALLBACK_DISCOVER_ATTEMPT_KEY.to_string(),
-            attempt_token,
-        );
+        context.insert(FALLBACK_DISCOVER_ATTEMPT_KEY.to_string(), attempt_token);
         let argv = [
             self.cli_command.as_str(),
             "config",
@@ -709,7 +1009,12 @@ impl State {
         shim_run_command(&watchdog_argv(&script, &argv), context);
     }
 
-    fn handle_discovery_result(&mut self, exit: Option<i32>, stdout: Vec<u8>, attempt: Option<&str>) {
+    fn handle_discovery_result(
+        &mut self,
+        exit: Option<i32>,
+        stdout: Vec<u8>,
+        attempt: Option<&str>,
+    ) {
         if attempt != self.discovery_attempt_token.as_deref() {
             return;
         }
@@ -754,6 +1059,95 @@ impl State {
                 } else {
                     self.fallback_after_discovery();
                 }
+            }
+        }
+    }
+
+    /// Parse the running serve build version from a /health 200 body. A body
+    /// without a `version` field (pre-#1703 serve) yields None, which keeps the
+    /// gate inert. Never alters the serve/usage flow.
+    fn update_serve_build_version(&mut self, body: &[u8]) {
+        self.serve_build_version = serde_json::from_slice::<serde_json::Value>(body)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("version")
+                    .and_then(|v| v.as_str())
+                    .and_then(codexbar_version_token)
+            });
+    }
+
+    /// True only when we are rendering serve data AND both versions are known
+    /// AND they differ. Unknown either side (or any non-serve source) => false,
+    /// so the marker never shows on CLI output or pre-#1703 serves.
+    fn serve_build_stale(&self) -> bool {
+        self.source == Source::Serve
+            && matches!(
+                (
+                    self.serve_build_version.as_deref(),
+                    self.ondisk_version.as_deref(),
+                ),
+                (Some(running), Some(ondisk)) if running != ondisk
+            )
+    }
+
+    /// Issue an on-disk `codexbar --version` probe when we have a serve build to
+    /// compare against, CLI fallback (RunCommands) is available, and the cached
+    /// on-disk version is stale. Strictly orthogonal to the serve failure path:
+    /// it never touches consecutive_serve_failures or the CLI burst.
+    fn maybe_kick_version_probe(&mut self) {
+        if !self.show_build_marker {
+            return;
+        }
+        if self.cli_fallback == CliFallback::Off || !self.permissions_granted {
+            return;
+        }
+        if self.source != Source::Serve || self.serve_build_version.is_none() {
+            return;
+        }
+        if self.version_probe_in_flight {
+            return;
+        }
+        let now = now_seconds();
+        let due = self
+            .ondisk_version_checked_at
+            .map(|checked| (now - checked).max(0.0) >= ONDISK_VERSION_TTL_SECONDS)
+            .unwrap_or(true);
+        if due {
+            self.kick_version_probe(now);
+        }
+    }
+
+    fn kick_version_probe(&mut self, now: f64) {
+        self.version_probe_in_flight = true;
+        let attempt_token = format!("{:.6}", now);
+        self.version_probe_token = Some(attempt_token.clone());
+        let mut context = BTreeMap::new();
+        context.insert("kind".to_string(), VERSION_KIND.to_string());
+        context.insert(VERSION_ATTEMPT_KEY.to_string(), attempt_token);
+        let script = version_probe_script(VERSION_COMMAND_TIMEOUT_SECONDS);
+        shim_run_command(&version_probe_argv(&script, &self.cli_command), context);
+    }
+
+    /// Absorb an on-disk version probe result. A stale token (a late result from
+    /// a superseded probe) is ignored. On failure or an unparseable version the
+    /// last-known on-disk version is kept (no marker flapping); only the check
+    /// timestamp advances.
+    fn handle_version_result(&mut self, exit: Option<i32>, stdout: Vec<u8>, attempt: Option<&str>) {
+        if attempt != self.version_probe_token.as_deref() {
+            return;
+        }
+        self.version_probe_in_flight = false;
+        self.version_probe_token = None;
+        self.ondisk_version_checked_at = Some(now_seconds());
+        if exit != Some(0) {
+            return;
+        }
+        let raw = String::from_utf8_lossy(&stdout);
+        if let Some(token) = codexbar_version_token(&raw) {
+            if self.ondisk_version.as_deref() != Some(token.as_str()) {
+                self.ondisk_version = Some(token);
+                self.refresh_output();
             }
         }
     }
@@ -1139,15 +1533,29 @@ impl State {
 
     fn accept_payload(&mut self, payload: Vec<u8>, source: Source) -> bool {
         let Ok(records) = parse_usage_payload(&payload) else {
-            return self.render_failure();
+            // Corrupt/invalid payload (e.g. a captive-portal or proxy page from
+            // an otherwise-200 serve): surface the failure state but report
+            // non-acceptance so the caller advances consecutive_serve_failures
+            // and can fall back to the CLI instead of latching on bad data.
+            self.render_failure();
+            return false;
         };
         if source == Source::Serve
             && self.cli_fallback != CliFallback::Off
             && self.discovered_providers_at.is_some()
         {
             self.serve_inventory_mismatch = false;
-            let payload_providers: std::collections::BTreeSet<&str> = records.iter().map(|r| r.provider.as_str()).filter(|id| valid_provider_id(id)).collect();
-            let discovered_providers: std::collections::BTreeSet<&str> = self.discovered_providers.iter().map(|s| s.as_str()).filter(|id| valid_provider_id(id)).collect();
+            let payload_providers: std::collections::BTreeSet<&str> = records
+                .iter()
+                .map(|r| r.provider.as_str())
+                .filter(|id| valid_provider_id(id))
+                .collect();
+            let discovered_providers: std::collections::BTreeSet<&str> = self
+                .discovered_providers
+                .iter()
+                .map(|s| s.as_str())
+                .filter(|id| valid_provider_id(id))
+                .collect();
             if payload_providers != discovered_providers {
                 self.serve_inventory_mismatch = true;
                 return false;
@@ -1231,10 +1639,19 @@ impl State {
         ) {
             Ok(output) => {
                 let output = output.trim_end_matches(['\r', '\n']);
-                let changed = self.last_output != output;
+                let mut composed = output.to_string();
+                if self.show_build_marker && self.serve_build_stale() {
+                    composed.push(' ');
+                    style_build_marker(
+                        &mut composed,
+                        BUILD_STALE_MARKER,
+                        &self.render_config.palette_countdown_warn,
+                        &self.render_config.palette_bg,
+                    );
+                }
+                let changed = self.last_output != composed;
                 if changed {
-                    self.last_output.clear();
-                    self.last_output.push_str(output);
+                    self.last_output = composed;
                 }
                 changed
             }
@@ -1276,6 +1693,47 @@ fn parse_positive_f64(value: Option<&str>, default: f64) -> f64 {
         .unwrap_or(default)
 }
 
+fn parse_nonnegative_f64(value: Option<&str>, default: f64) -> f64 {
+    value
+        .and_then(|value| value.parse::<f64>().ok())
+        .filter(|value| value.is_finite() && *value >= 0.0)
+        .unwrap_or(default)
+}
+
+// FNV-1a + SplitMix64 finalizer: a tiny, dependency-free, stable hash used to
+// derive deterministic per-instance phases. Not for security; chosen over
+// DefaultHasher because the latter's algorithm is not a stable contract.
+fn fnv1a(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for &b in bytes {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
+}
+
+fn splitmix64(mut x: u64) -> u64 {
+    x = x.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    x = (x ^ (x >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    x = (x ^ (x >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    x ^ (x >> 31)
+}
+
+/// Map a 64-bit hash to a uniform `[0, 1)` double (top 53 bits).
+fn unit_from(seed: u64) -> f64 {
+    (seed >> 11) as f64 / ((1u64 << 53) as f64)
+}
+
+/// Stable per-instance seed for jitter dispersion. The decisive input is the
+/// Zellij `plugin_id` (a unique-per-instance pane id), salted with cwd / serve /
+/// cli so distinct configs also differ. `\u{1}` field delimiters keep adjacent
+/// fields from colliding (e.g. id `1` + cwd `2…` vs id `12` + cwd `…`). The
+/// SplitMix64 finalizer decorrelates small consecutive plugin ids.
+fn instance_seed(plugin_id: u32, cwd: &str, serve_url: &str, cli_command: &str) -> u64 {
+    let seed_src = format!("{plugin_id}\u{1}{cwd}\u{1}{serve_url}\u{1}{cli_command}");
+    splitmix64(fnv1a(seed_src.as_bytes()))
+}
+
 fn parse_bool(value: Option<&str>, default: bool) -> bool {
     match value.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
         Some("1") | Some("true") | Some("yes") | Some("on") => true,
@@ -1288,6 +1746,45 @@ fn valid_port(value: &str) -> bool {
     !value.is_empty()
         && value.chars().all(|ch| ch.is_ascii_digit())
         && matches!(value.parse::<u16>(), Ok(port) if port > 0)
+}
+
+// Defense-in-depth for the serve_command/cli_command KDL knobs: they are spawned
+// via Zellij's RunCommand capability, so reject any value carrying whitespace or
+// shell metacharacters (the documented injection vector) back to the default
+// "codexbar". A bare name or plain path is accepted; the host resolves it.
+fn valid_command(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-' | '+' | '@' | '/'))
+}
+
+/// Extract a comparable CodexBar version token: the first whitespace-separated
+/// field that looks like a version (optional leading `v` then a digit), with the
+/// `v` stripped. Mirrors the shell `codexbar_version_token` and glean's
+/// `ParseCodexBarVersion` so all three agree. Returns None for a string with no
+/// version-looking field (e.g. a transient bare `CodexBar`).
+fn codexbar_version_token(raw: &str) -> Option<String> {
+    raw.split_whitespace().find_map(|field| {
+        let candidate = field.strip_prefix('v').unwrap_or(field);
+        match candidate.chars().next() {
+            Some(first) if first.is_ascii_digit() => Some(candidate.to_string()),
+            _ => None,
+        }
+    })
+}
+
+/// Append an ANSI-styled marker mirroring the core `style_text` used for the
+/// ⚠/⚠cli glyphs (bold, truecolor fg/bg, trailing reset), so a plugin-appended
+/// marker matches the rendered bar without the core's private styling helpers.
+fn style_build_marker(out: &mut String, glyph: &str, fg_hex: &str, bg_hex: &str) {
+    let (fr, fg, fb) = hex_to_rgb(fg_hex);
+    let (br, bg, bb) = hex_to_rgb(bg_hex);
+    out.push_str("\x1b[1m");
+    out.push_str(&format!("\x1b[38;2;{fr};{fg};{fb}m"));
+    out.push_str(&format!("\x1b[48;2;{br};{bg};{bb}m"));
+    out.push_str(glyph);
+    out.push_str("\x1b[0m");
 }
 
 fn default_port_for_scheme(scheme: Option<&str>) -> Option<&'static str> {
@@ -1337,6 +1834,37 @@ fn derive_port_from_url(url: &str) -> Option<String> {
     }
 }
 
+/// True when `url` is an `http(s)://` URL whose host is a loopback literal
+/// (`127.0.0.1`, `localhost`, or `::1`). Mirrors the shell `serve_base_url`
+/// regex so the plugin honors the same localhost-only serve contract.
+fn is_loopback_serve_url(url: &str) -> bool {
+    let rest = match url
+        .trim()
+        .strip_prefix("http://")
+        .or_else(|| url.trim().strip_prefix("https://"))
+    {
+        Some(rest) => rest,
+        None => return false,
+    };
+    let authority = rest.split('/').next().unwrap_or(rest);
+    let authority = authority
+        .rsplit_once('@')
+        .map(|(_, authority)| authority)
+        .unwrap_or(authority);
+    let host = if let Some(after) = authority.strip_prefix('[') {
+        match after.split_once(']') {
+            Some((host, _)) => host,
+            None => return false,
+        }
+    } else {
+        authority
+            .rsplit_once(':')
+            .map(|(host, _)| host)
+            .unwrap_or(authority)
+    };
+    matches!(host, "127.0.0.1" | "localhost" | "::1")
+}
+
 fn now_epoch() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1367,6 +1895,37 @@ mod tests {
         let mut context = BTreeMap::new();
         context.insert("kind".to_string(), kind.to_string());
         context
+    }
+
+    fn web_context(kind: &str, generation: u64) -> BTreeMap<String, String> {
+        let mut context = event_context(kind);
+        context.insert(
+            WEB_REQUEST_GENERATION_KEY.to_string(),
+            generation.to_string(),
+        );
+        context
+    }
+
+    fn current_web_context(state: &State, kind: &str) -> BTreeMap<String, String> {
+        let generation = match kind {
+            HEALTH_KIND => state.active_health_generation,
+            USAGE_KIND => state.active_usage_generation,
+            _ => None,
+        }
+        .expect("active web request generation");
+        web_context(kind, generation)
+    }
+
+    fn arm_health_probe(state: &mut State, generation: u64) {
+        state.health_generation = generation;
+        state.active_health_generation = Some(generation);
+        state.health_in_flight = true;
+    }
+
+    fn arm_usage_probe(state: &mut State, generation: u64) {
+        state.usage_generation = generation;
+        state.active_usage_generation = Some(generation);
+        state.usage_in_flight = true;
     }
 
     fn provider_fallback_context(provider: &str) -> BTreeMap<String, String> {
@@ -1495,21 +2054,24 @@ mod tests {
         };
         assert!(state.refresh_output());
         assert!(state.last_output.contains("⚠cli"));
+        arm_health_probe(&mut state, 1);
+        let health_context = current_web_context(&state, HEALTH_KIND);
 
         assert!(!state.update(Event::WebRequestResult(
             200,
             BTreeMap::new(),
             Vec::new(),
-            event_context(HEALTH_KIND),
+            health_context,
         )));
         assert_eq!(state.source, Source::Cli);
 
-        state.usage_in_flight = true;
+        arm_usage_probe(&mut state, 1);
+        let usage_context = current_web_context(&state, USAGE_KIND);
         assert!(!state.update(Event::WebRequestResult(
             503,
             BTreeMap::new(),
             Vec::new(),
-            event_context(USAGE_KIND),
+            usage_context,
         )));
         assert_eq!(state.source, Source::Cli);
         assert!(state.last_output.contains("⚠cli"));
@@ -1539,17 +2101,254 @@ mod tests {
         };
         assert!(state.refresh_output());
         let output = state.last_output.clone();
+        arm_usage_probe(&mut state, 1);
+        let usage_context = current_web_context(&state, USAGE_KIND);
 
         assert!(!state.update(Event::WebRequestResult(
             200,
             BTreeMap::new(),
             mixed_payload(),
-            event_context(USAGE_KIND),
+            usage_context,
         )));
 
         assert_eq!(state.consecutive_serve_failures, 0);
         assert_eq!(state.source, Source::Serve);
         assert_eq!(state.last_output, output);
+    }
+
+    #[test]
+    fn corrupt_serve_payload_advances_failure_counter() {
+        // A 200 response carrying invalid JSON (captive portal / proxy page)
+        // must not count as success: the failure counter has to advance so the
+        // plugin eventually falls back to the CLI instead of latching forever.
+        let mut state = State {
+            permissions_granted: true,
+            source: Source::Serve,
+            cli_fallback: CliFallback::Off,
+            ..State::default()
+        };
+        arm_usage_probe(&mut state, 1);
+        let usage_context = current_web_context(&state, USAGE_KIND);
+        let before = state.consecutive_serve_failures;
+        state.update(Event::WebRequestResult(
+            200,
+            BTreeMap::new(),
+            b"not-json".to_vec(),
+            usage_context,
+        ));
+        assert_eq!(state.consecutive_serve_failures, before + 1);
+    }
+
+    #[test]
+    fn hung_usage_web_request_expires_and_advances_failure() {
+        let mut state = State {
+            permissions_granted: true,
+            source: Source::Serve,
+            cli_fallback: CliFallback::Off,
+            usage_in_flight: true,
+            web_flight_started_at: Some(now_seconds() - (SERVE_USAGE_TIMEOUT_SECONDS + 1.0)),
+            ..State::default()
+        };
+        let before = state.consecutive_serve_failures;
+        state.tick();
+        assert!(!state.usage_in_flight);
+        assert!(state.web_flight_started_at.is_none());
+        assert_eq!(state.consecutive_serve_failures, before + 1);
+    }
+
+    #[test]
+    fn stale_usage_response_after_timeout_does_not_clear_newer_flight() {
+        let mut state = State {
+            permissions_granted: true,
+            source: Source::Serve,
+            cli_fallback: CliFallback::Off,
+            usage_in_flight: true,
+            usage_generation: 1,
+            active_usage_generation: Some(1),
+            web_flight_started_at: Some(now_seconds() - (SERVE_USAGE_TIMEOUT_SECONDS + 1.0)),
+            ..State::default()
+        };
+
+        assert!(state.expire_stale_web_flight());
+        assert!(!state.usage_in_flight);
+        state.kick_usage();
+        assert_eq!(state.active_usage_generation, Some(2));
+
+        assert!(!state.update(Event::WebRequestResult(
+            200,
+            BTreeMap::new(),
+            mixed_payload(),
+            web_context(USAGE_KIND, 1),
+        )));
+        assert!(state.usage_in_flight);
+        assert_eq!(state.active_usage_generation, Some(2));
+        assert!(state.last_payload.is_none());
+    }
+
+    #[test]
+    fn stale_health_response_after_timeout_does_not_clear_newer_probe() {
+        let mut state = State {
+            permissions_granted: true,
+            source: Source::Probing,
+            manage_serve: false,
+            cli_fallback: CliFallback::Off,
+            health_in_flight: true,
+            health_generation: 1,
+            active_health_generation: Some(1),
+            web_flight_started_at: Some(now_seconds() - (SERVE_HEALTH_TIMEOUT_SECONDS + 1.0)),
+            ..State::default()
+        };
+
+        assert!(state.expire_stale_web_flight());
+        assert!(!state.health_in_flight);
+        state.kick_health_probe();
+        assert_eq!(state.active_health_generation, Some(2));
+
+        assert!(!state.update(Event::WebRequestResult(
+            200,
+            BTreeMap::new(),
+            br#"{"status":"ok","version":"0.37.2"}"#.to_vec(),
+            web_context(HEALTH_KIND, 1),
+        )));
+        assert!(state.health_in_flight);
+        assert_eq!(state.active_health_generation, Some(2));
+        assert!(state.serve_build_version.is_none());
+    }
+    #[test]
+    fn fresh_usage_web_request_is_not_expired() {
+        let mut state = State {
+            permissions_granted: true,
+            source: Source::Serve,
+            cli_fallback: CliFallback::Off,
+            usage_in_flight: true,
+            web_flight_started_at: Some(now_seconds()),
+            ..State::default()
+        };
+        state.tick();
+        assert!(state.usage_in_flight);
+        assert!(state.web_flight_started_at.is_some());
+    }
+    #[test]
+    fn usage_probe_survives_the_health_timeout_window() {
+        // A /usage probe must get the longer usage budget, not the short health
+        // window: still in flight at health-timeout + 1s, well under the usage
+        // timeout, so the bounded partial response is not abandoned.
+        let mut state = State {
+            permissions_granted: true,
+            source: Source::Serve,
+            cli_fallback: CliFallback::Off,
+            usage_in_flight: true,
+            web_flight_started_at: Some(now_seconds() - (SERVE_HEALTH_TIMEOUT_SECONDS + 1.0)),
+            ..State::default()
+        };
+        state.tick();
+        assert!(state.usage_in_flight);
+        assert!(state.web_flight_started_at.is_some());
+    }
+
+    #[test]
+    fn hung_health_probe_expires_at_the_short_health_timeout() {
+        // A /health probe expires on the short window so an unreachable serve is
+        // abandoned quickly instead of latching for the full usage budget.
+        let mut state = State {
+            permissions_granted: true,
+            source: Source::Unknown,
+            cli_fallback: CliFallback::Off,
+            health_in_flight: true,
+            web_flight_started_at: Some(now_seconds() - (SERVE_HEALTH_TIMEOUT_SECONDS + 1.0)),
+            ..State::default()
+        };
+        state.tick();
+        assert!(!state.health_in_flight);
+        assert!(state.web_flight_started_at.is_none());
+    }
+
+    #[test]
+    fn parse_bool_accepts_known_truthy_and_falsy_tokens() {
+        for truthy in ["1", "true", "yes", "on", "ON", " Yes "] {
+            assert!(parse_bool(Some(truthy), false), "{truthy:?} should be true");
+        }
+        for falsy in ["0", "false", "no", "off", "OFF"] {
+            assert!(!parse_bool(Some(falsy), true), "{falsy:?} should be false");
+        }
+        assert!(parse_bool(None, true));
+        assert!(!parse_bool(None, false));
+        assert!(!parse_bool(Some("maybe"), false));
+    }
+
+    #[test]
+    fn valid_port_rejects_out_of_range_and_nonnumeric() {
+        assert!(valid_port("8080"));
+        assert!(valid_port("1"));
+        assert!(valid_port("65535"));
+        assert!(!valid_port("0"));
+        assert!(!valid_port("65536"));
+        assert!(!valid_port("abc"));
+        assert!(!valid_port(""));
+        assert!(!valid_port("-1"));
+    }
+
+    #[test]
+    fn valid_command_rejects_shell_metacharacters_and_whitespace() {
+        assert!(valid_command("codexbar"));
+        assert!(valid_command("/usr/local/bin/codexbar"));
+        assert!(valid_command("my-tool.v2_beta"));
+        assert!(!valid_command(""));
+        assert!(!valid_command("/bin/sh -c evil"));
+        assert!(!valid_command("codexbar; rm -rf /"));
+        assert!(!valid_command("$(curl evil)"));
+        assert!(!valid_command("a`b`"));
+    }
+
+    #[test]
+    fn prune_last_payload_drops_excluded_providers() {
+        let mut state = State {
+            last_payload: Some(mixed_payload()),
+            ..State::default()
+        };
+        state.render_config.providers_exclude = vec!["cursor".to_string()];
+        state.prune_last_payload_to_current_inventory();
+        let payload = state.last_payload.as_deref().expect("payload retained");
+        let records = parse_usage_payload(payload).expect("valid pruned payload");
+        let ids = provider_ids_from_records(&records);
+        assert_eq!(ids, vec!["claude", "codex", "gemini"]);
+        assert!(!ids.iter().any(|id| id == "cursor"));
+    }
+
+    #[test]
+    fn is_loopback_serve_url_matches_localhost_only() {
+        assert!(is_loopback_serve_url("http://127.0.0.1:8080"));
+        assert!(is_loopback_serve_url("http://localhost:8080/"));
+        assert!(is_loopback_serve_url("http://[::1]:8080"));
+        assert!(is_loopback_serve_url("https://127.0.0.1"));
+        assert!(!is_loopback_serve_url("http://169.254.169.254/"));
+        assert!(!is_loopback_serve_url(
+            "https://internal-service.corp/secret"
+        ));
+        assert!(!is_loopback_serve_url("http://127.0.0.1.evil.com"));
+        assert!(!is_loopback_serve_url("ftp://127.0.0.1"));
+        assert!(!is_loopback_serve_url(""));
+    }
+
+    #[test]
+    fn load_drops_non_loopback_serve_url() {
+        let mut state = State::default();
+        let mut config = BTreeMap::new();
+        config.insert(
+            "serve_url".to_string(),
+            "https://internal-service.corp/secret".to_string(),
+        );
+        state.load(config);
+        assert!(state.serve_url.is_empty());
+    }
+
+    #[test]
+    fn load_keeps_loopback_serve_url() {
+        let mut state = State::default();
+        let mut config = BTreeMap::new();
+        config.insert("serve_url".to_string(), "http://127.0.0.1:9000".to_string());
+        state.load(config);
+        assert_eq!(state.serve_url, "http://127.0.0.1:9000");
     }
 
     #[test]
@@ -1607,7 +2406,12 @@ mod tests {
         };
 
         // 1. Exact match is accepted and discovery remains valid.
-        state.discovered_providers = vec!["claude".to_string(), "codex".to_string(), "gemini".to_string(), "cursor".to_string()];
+        state.discovered_providers = vec![
+            "claude".to_string(),
+            "codex".to_string(),
+            "gemini".to_string(),
+            "cursor".to_string(),
+        ];
         state.discovered_providers_at = Some(now_seconds());
         assert!(state.accept_payload(mixed_payload(), Source::Serve));
         assert!(state.discovered_providers_at.is_some());
@@ -1621,7 +2425,13 @@ mod tests {
 
         // 3. Subset is rejected (serve missing expected providers) and
         // discovery remains valid so fallback can query the expected providers.
-        state.discovered_providers = vec!["claude".to_string(), "codex".to_string(), "gemini".to_string(), "cursor".to_string(), "antigravity".to_string()];
+        state.discovered_providers = vec![
+            "claude".to_string(),
+            "codex".to_string(),
+            "gemini".to_string(),
+            "cursor".to_string(),
+            "antigravity".to_string(),
+        ];
         state.discovered_providers_at = Some(now_seconds());
         assert!(!state.accept_payload(mixed_payload(), Source::Serve));
         assert!(state.discovered_providers_at.is_some());
@@ -1699,19 +2509,25 @@ mod tests {
             health_in_flight: true,
             ..State::default()
         };
+        state.active_health_generation = Some(1);
+        state.health_generation = 1;
+        let health_context = current_web_context(&state, HEALTH_KIND);
 
         assert!(!state.update(Event::WebRequestResult(
             200,
             BTreeMap::new(),
             Vec::new(),
-            event_context(HEALTH_KIND),
+            health_context,
         )));
 
         assert!(state.discovery_in_flight);
         assert!(state.usage_after_discovery);
         assert!(!state.usage_in_flight);
 
-        let attempt = state.discovery_attempt_token.clone().expect("discovery attempt");
+        let attempt = state
+            .discovery_attempt_token
+            .clone()
+            .expect("discovery attempt");
         state.handle_discovery_result(
             Some(0),
             br#"[{"provider":"claude","enabled":true}]"#.to_vec(),
@@ -2315,5 +3131,503 @@ mod tests {
     #[test]
     fn extract_provider_record_accepts_empty_provider_payload() {
         assert!(matches!(extract_provider_record(b"[]", "codex"), Ok(None)));
+    }
+
+    #[test]
+    fn codexbar_version_token_truth_table() {
+        assert_eq!(codexbar_version_token("0.37.2").as_deref(), Some("0.37.2"));
+        assert_eq!(
+            codexbar_version_token("CodexBar 0.37.2").as_deref(),
+            Some("0.37.2")
+        );
+        assert_eq!(codexbar_version_token("CodexBar"), None);
+        assert_eq!(codexbar_version_token("v0.37.1").as_deref(), Some("0.37.1"));
+        assert_eq!(
+            codexbar_version_token("CodexBar v0.37.1").as_deref(),
+            Some("0.37.1")
+        );
+        assert_eq!(
+            codexbar_version_token("0.37.1 (build abc)").as_deref(),
+            Some("0.37.1")
+        );
+        assert_eq!(codexbar_version_token(""), None);
+    }
+
+    #[test]
+    fn serve_build_version_parsed_from_health_body() {
+        let mut state = State::default();
+        state.update_serve_build_version(br#"{"status":"ok","version":"0.37.2"}"#);
+        assert_eq!(state.serve_build_version.as_deref(), Some("0.37.2"));
+        // A pre-#1703 serve omits the field -> None -> gate inert.
+        state.update_serve_build_version(br#"{"status":"ok"}"#);
+        assert_eq!(state.serve_build_version, None);
+        // A prefixed /health value normalizes the same as --version.
+        state.update_serve_build_version(br#"{"version":"CodexBar 0.37.2"}"#);
+        assert_eq!(state.serve_build_version.as_deref(), Some("0.37.2"));
+    }
+
+    #[test]
+    fn health_version_does_not_disturb_serve_source() {
+        let mut state = State {
+            permissions_granted: true,
+            source: Source::Serve,
+            last_payload: Some(mixed_payload()),
+            ..State::default()
+        };
+        arm_health_probe(&mut state, 1);
+        let health_context = current_web_context(&state, HEALTH_KIND);
+        state.update(Event::WebRequestResult(
+            200,
+            BTreeMap::new(),
+            br#"{"status":"ok","version":"0.37.2"}"#.to_vec(),
+            health_context,
+        ));
+        assert_eq!(state.serve_build_version.as_deref(), Some("0.37.2"));
+        assert_eq!(state.source, Source::Serve);
+        assert_eq!(state.consecutive_serve_failures, 0);
+    }
+
+    #[test]
+    fn serve_build_stale_truth_table() {
+        let stale = |source: Source, sv: Option<&str>, ov: Option<&str>| -> bool {
+            State {
+                source,
+                serve_build_version: sv.map(String::from),
+                ondisk_version: ov.map(String::from),
+                ..State::default()
+            }
+            .serve_build_stale()
+        };
+        assert!(stale(Source::Serve, Some("0.37.1"), Some("0.37.2")));
+        assert!(!stale(Source::Serve, Some("0.37.2"), Some("0.37.2")));
+        assert!(!stale(Source::Serve, Some("0.37.1"), None));
+        assert!(!stale(Source::Serve, None, Some("0.37.2")));
+        // Never flag on non-serve output even when versions differ.
+        assert!(!stale(Source::Cli, Some("0.37.1"), Some("0.37.2")));
+    }
+
+    #[test]
+    fn build_marker_appended_only_when_stale_on_serve() {
+        // Mismatch on serve data -> marker present and is the final token.
+        // (default config has the marker off; these cases opt in.)
+        let mut state = State {
+            permissions_granted: true,
+            source: Source::Serve,
+            last_payload: Some(mixed_payload()),
+            serve_build_version: Some("0.37.1".into()),
+            ondisk_version: Some("0.37.2".into()),
+            show_build_marker: true,
+            ..State::default()
+        };
+        assert!(state.refresh_output());
+        assert!(state.last_output.contains(BUILD_STALE_MARKER));
+        assert!(state.last_output.ends_with("ver\u{1b}[0m"));
+
+        // Matching versions -> no marker.
+        let mut state = State {
+            permissions_granted: true,
+            source: Source::Serve,
+            last_payload: Some(mixed_payload()),
+            serve_build_version: Some("0.37.2".into()),
+            ondisk_version: Some("0.37.2".into()),
+            ..State::default()
+        };
+        assert!(state.refresh_output());
+        assert!(!state.last_output.contains(BUILD_STALE_MARKER));
+
+        // CLI source -> no build marker even if versions differ (still ⚠cli).
+        let mut state = State {
+            permissions_granted: true,
+            source: Source::Cli,
+            last_payload: Some(mixed_payload()),
+            serve_build_version: Some("0.37.1".into()),
+            ondisk_version: Some("0.37.2".into()),
+            ..State::default()
+        };
+        assert!(state.refresh_output());
+        assert!(!state.last_output.contains(BUILD_STALE_MARKER));
+        assert!(state.last_output.contains("⚠cli"));
+
+        // Marker disabled (default) -> no ⚠ver even when versions differ.
+        let mut state = State {
+            permissions_granted: true,
+            source: Source::Serve,
+            last_payload: Some(mixed_payload()),
+            serve_build_version: Some("0.37.1".into()),
+            ondisk_version: Some("0.37.2".into()),
+            show_build_marker: false,
+            ..State::default()
+        };
+        assert!(state.refresh_output());
+        assert!(!state.last_output.contains(BUILD_STALE_MARKER));
+    }
+
+    #[test]
+    fn version_probe_kicks_only_when_gated() {
+        let gated = |source: Source, sv: Option<&str>, cli: CliFallback, perms: bool| -> bool {
+            let mut state = State {
+                permissions_granted: perms,
+                source,
+                serve_build_version: sv.map(String::from),
+                cli_fallback: cli,
+                show_build_marker: true,
+                ..State::default()
+            };
+            state.maybe_kick_version_probe();
+            state.version_probe_in_flight
+        };
+        // All conditions met -> probe kicked.
+        assert!(gated(
+            Source::Serve,
+            Some("0.37.2"),
+            CliFallback::Degraded,
+            true
+        ));
+        // No RunCommands (cli_fallback off) -> no probe.
+        assert!(!gated(
+            Source::Serve,
+            Some("0.37.2"),
+            CliFallback::Off,
+            true
+        ));
+        // Not on serve -> no probe.
+        assert!(!gated(
+            Source::Cli,
+            Some("0.37.2"),
+            CliFallback::Degraded,
+            true
+        ));
+        // No serve build to compare against -> no probe.
+        assert!(!gated(Source::Serve, None, CliFallback::Degraded, true));
+        // No permissions -> no probe.
+        assert!(!gated(
+            Source::Serve,
+            Some("0.37.2"),
+            CliFallback::Degraded,
+            false
+        ));
+        // Marker disabled (default) -> no probe even with all else satisfied.
+        let mut off = State {
+            permissions_granted: true,
+            source: Source::Serve,
+            serve_build_version: Some("0.37.2".into()),
+            cli_fallback: CliFallback::Degraded,
+            show_build_marker: false,
+            ..State::default()
+        };
+        off.maybe_kick_version_probe();
+        assert!(!off.version_probe_in_flight);
+    }
+
+    #[test]
+    fn handle_version_result_success_sets_ondisk() {
+        let mut state = State {
+            version_probe_in_flight: true,
+            version_probe_token: Some("tok".into()),
+            ..State::default()
+        };
+        state.handle_version_result(Some(0), b"CodexBar 0.37.2\n".to_vec(), Some("tok"));
+        assert_eq!(state.ondisk_version.as_deref(), Some("0.37.2"));
+        assert!(!state.version_probe_in_flight);
+        assert!(state.ondisk_version_checked_at.is_some());
+    }
+
+    #[test]
+    fn handle_version_result_ignores_stale_token() {
+        let mut state = State {
+            version_probe_in_flight: true,
+            version_probe_token: Some("tok".into()),
+            ondisk_version: Some("1.0.0".into()),
+            ..State::default()
+        };
+        state.handle_version_result(Some(0), b"CodexBar 2.0.0\n".to_vec(), Some("other"));
+        assert_eq!(state.ondisk_version.as_deref(), Some("1.0.0"));
+        assert!(state.version_probe_in_flight);
+    }
+
+    #[test]
+    fn handle_version_result_failure_keeps_last_known() {
+        let mut state = State {
+            version_probe_in_flight: true,
+            version_probe_token: Some("tok".into()),
+            ondisk_version: Some("1.0.0".into()),
+            ..State::default()
+        };
+        state.handle_version_result(Some(124), Vec::new(), Some("tok"));
+        assert_eq!(state.ondisk_version.as_deref(), Some("1.0.0"));
+        assert!(!state.version_probe_in_flight);
+        assert!(state.ondisk_version_checked_at.is_some());
+    }
+
+    #[test]
+    fn version_probe_argv_wraps_bin_without_interpolation() {
+        let script = version_probe_script(5);
+        let argv = version_probe_argv(&script, "codexbar");
+        assert_eq!(argv[0], "/bin/sh");
+        assert_eq!(argv[1], "-c");
+        assert_eq!(argv[2], script.as_str());
+        assert_eq!(argv[3], "showy-quota-version");
+        assert_eq!(argv[4], "codexbar");
+        assert!(script.contains("command -v"));
+        assert!(script.contains("--version"));
+        assert!(script.contains("sleep 5"));
+        // The binary rides in $1, never interpolated into the shell string.
+        assert!(!script.contains("codexbar"));
+    }
+
+    fn holding_state() -> State {
+        State {
+            fallback_jitter_seconds: 60.0,
+            serve_url: "http://127.0.0.1:8080".into(),
+            source: Source::Serve,
+            last_payload: Some(mixed_payload()),
+            permissions_granted: true,
+            instance_hash: splitmix64(fnv1a(b"fixture-tab")),
+            ..State::default()
+        }
+    }
+
+    #[test]
+    fn should_cli_hold_only_on_genuine_outage_transitions() {
+        assert!(holding_state().should_cli_hold());
+
+        let mut s = holding_state();
+        s.fallback_jitter_seconds = 0.0;
+        assert!(!s.should_cli_hold(), "jitter=0 disables the hold");
+
+        let mut s = holding_state();
+        s.serve_url = String::new();
+        assert!(!s.should_cli_hold(), "pure-CLI mode never holds");
+
+        let mut s = holding_state();
+        s.source = Source::Cli;
+        assert!(
+            !s.should_cli_hold(),
+            "already-degraded source never re-holds"
+        );
+
+        let mut s = holding_state();
+        s.last_payload = None;
+        assert!(!s.should_cli_hold(), "cold start never holds");
+    }
+
+    #[test]
+    fn instance_seed_disperses_consecutive_plugin_ids() {
+        // Worst case: identical config across tabs, only plugin_id differs.
+        // Derive via the production seed fn so a regression in the real
+        // derivation (dropped plugin_id, delimiter collision, weakened mixing)
+        // is caught here instead of silently reintroducing the herd.
+        let jitter = 60.0;
+        let delays: Vec<f64> = (1u32..=16)
+            .map(|id| {
+                unit_from(instance_seed(id, "", "http://127.0.0.1:8080", "codexbar")) * jitter
+            })
+            .collect();
+
+        assert!(
+            delays.iter().all(|d| (0.0..jitter).contains(d)),
+            "every delay within [0, jitter)"
+        );
+        let mut sorted = delays.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        for w in sorted.windows(2) {
+            assert!(w[1] > w[0], "consecutive plugin ids must not collide");
+        }
+        // Anti-herd: no 5s sub-window may bunch too many instances (actual max
+        // is 3 for ids 1..=16; guard at 4 to catch a mixing regression).
+        let max_bunch = (0..12)
+            .map(|i| {
+                let lo = i as f64 * 5.0;
+                delays.iter().filter(|&&d| d >= lo && d < lo + 5.0).count()
+            })
+            .max()
+            .unwrap();
+        assert!(
+            max_bunch <= 4,
+            "instances bunched in a 5s window: {max_bunch}"
+        );
+
+        // Pure / deterministic.
+        assert_eq!(
+            instance_seed(7, "", "http://127.0.0.1:8080", "codexbar"),
+            instance_seed(7, "", "http://127.0.0.1:8080", "codexbar")
+        );
+    }
+
+    #[test]
+    fn next_timeout_uses_short_cadence_while_holding() {
+        let mut s = holding_state();
+        s.interval_seconds = 120.0;
+        assert_eq!(
+            s.next_timeout_seconds(1000.0),
+            120.0,
+            "no hold -> normal cadence"
+        );
+        s.cli_hold_until = Some(2000.0);
+        assert_eq!(
+            s.next_timeout_seconds(1000.0),
+            HOLD_REPROBE_INTERVAL_SECONDS,
+            "holding far out -> short re-probe cadence"
+        );
+        s.cli_hold_until = Some(1000.5);
+        assert!(
+            (s.next_timeout_seconds(1000.0) - 0.5).abs() < 1e-9,
+            "near expiry -> wake at the deadline"
+        );
+        s.cli_hold_until = Some(500.0);
+        assert_eq!(
+            s.next_timeout_seconds(1000.0),
+            120.0,
+            "expired -> normal cadence"
+        );
+    }
+
+    #[test]
+    fn returning_to_serve_clears_the_hold() {
+        let mut s = holding_state();
+        s.cli_hold_until = Some(now_seconds() + 100.0);
+        s.set_source(Source::Serve);
+        assert!(s.cli_hold_until.is_none());
+    }
+
+    #[test]
+    fn first_fallback_arms_hold_and_reprobes_without_cli() {
+        let mut s = holding_state();
+        s.cli_fallback = CliFallback::Degraded;
+        s.discovered_providers = vec!["codex".to_string()];
+        s.discovered_providers_at = Some(now_seconds());
+        assert!(s.cli_hold_until.is_none());
+
+        s.kick_cli_fallback_or_render_failure();
+
+        assert!(s.cli_hold_until.is_some(), "hold armed on first transition");
+        assert_eq!(
+            s.source,
+            Source::Probing,
+            "the one-shot re-probe moves source off Serve so a later commit is accepted"
+        );
+        assert!(s.health_in_flight, "the one-shot re-probe is in flight");
+        assert!(
+            !s.has_provider_work_in_flight(),
+            "no CLI spawned during the hold"
+        );
+        assert!(
+            !s.discovery_in_flight,
+            "no discovery spawned during the hold"
+        );
+    }
+
+    #[test]
+    fn active_hold_is_idempotent() {
+        let mut s = holding_state();
+        s.source = Source::Probing;
+        let deadline = now_seconds() + 100.0;
+        s.cli_hold_until = Some(deadline);
+        s.kick_cli_fallback_or_render_failure();
+        assert_eq!(
+            s.cli_hold_until,
+            Some(deadline),
+            "deadline unchanged by re-probe"
+        );
+        assert!(!s.has_provider_work_in_flight());
+        assert!(
+            !s.health_in_flight,
+            "active hold must not re-probe inline; the Timer paces re-probes"
+        );
+    }
+
+    #[test]
+    fn expired_hold_commits_to_cli() {
+        let mut s = holding_state();
+        s.source = Source::Probing;
+        s.cli_fallback = CliFallback::Degraded;
+        s.discovered_providers = vec!["codex".to_string()];
+        s.discovered_providers_at = Some(now_seconds());
+        s.cli_hold_until = Some(now_seconds() - 1.0);
+        s.kick_cli_fallback_or_render_failure();
+        assert!(s.cli_hold_until.is_none(), "hold cleared on commit");
+        assert!(s.has_provider_work_in_flight(), "committed -> CLI spawned");
+        assert_eq!(
+            s.source,
+            Source::Cli,
+            "commit latches source to Cli so the hold cannot re-arm next cycle"
+        );
+    }
+
+    #[test]
+    fn serve_recovery_during_hold_spawns_no_cli() {
+        let mut s = holding_state();
+        s.cli_fallback = CliFallback::Degraded;
+        // Inventory matches mixed_payload so accept_payload(Serve) succeeds.
+        s.discovered_providers = vec![
+            "claude".to_string(),
+            "codex".to_string(),
+            "gemini".to_string(),
+            "cursor".to_string(),
+        ];
+        s.discovered_providers_at = Some(now_seconds());
+
+        // Arm the hold (source Serve -> Probing, one-shot re-probe in flight).
+        s.kick_cli_fallback_or_render_failure();
+        assert!(s.cli_hold_until.is_some());
+        assert!(!s.has_provider_work_in_flight());
+
+        let health_context = current_web_context(&s, HEALTH_KIND);
+        // Serve recovers mid-hold: /health 200 kicks /usage, /usage 200 accepts.
+        s.update(Event::WebRequestResult(
+            200,
+            BTreeMap::new(),
+            b"{}".to_vec(),
+            health_context,
+        ));
+        let usage_context = current_web_context(&s, USAGE_KIND);
+        s.update(Event::WebRequestResult(
+            200,
+            BTreeMap::new(),
+            mixed_payload(),
+            usage_context,
+        ));
+
+        assert_eq!(s.source, Source::Serve, "recovered to the serve HTTP path");
+        assert!(s.cli_hold_until.is_none(), "hold cleared on recovery");
+        assert!(
+            !s.has_provider_work_in_flight(),
+            "zero CLI spawned across the whole recovery"
+        );
+    }
+
+    #[test]
+    fn jitter_zero_keeps_legacy_immediate_fallback() {
+        let mut s = holding_state();
+        s.fallback_jitter_seconds = 0.0;
+        s.source = Source::Probing;
+        s.cli_fallback = CliFallback::Degraded;
+        s.discovered_providers = vec!["codex".to_string()];
+        s.discovered_providers_at = Some(now_seconds());
+        s.kick_cli_fallback_or_render_failure();
+        assert!(s.cli_hold_until.is_none(), "disabled -> no hold");
+        assert!(
+            s.has_provider_work_in_flight(),
+            "disabled -> immediate fallback"
+        );
+    }
+
+    #[test]
+    fn cli_fallback_off_clears_hold_and_marks_unavailable() {
+        let mut s = holding_state();
+        s.cli_fallback = CliFallback::Off;
+        s.cli_hold_until = Some(now_seconds() + 100.0);
+        s.kick_cli_fallback_or_render_failure();
+        assert!(s.cli_hold_until.is_none());
+        assert_eq!(s.source, Source::Unavailable);
+    }
+
+    #[test]
+    fn parse_nonnegative_allows_zero_rejects_negative() {
+        assert_eq!(parse_nonnegative_f64(Some("0"), 60.0), 0.0);
+        assert_eq!(parse_nonnegative_f64(Some("30"), 60.0), 30.0);
+        assert_eq!(parse_nonnegative_f64(Some("-5"), 60.0), 60.0);
+        assert_eq!(parse_nonnegative_f64(Some("nope"), 60.0), 60.0);
+        assert_eq!(parse_nonnegative_f64(None, 60.0), 60.0);
     }
 }

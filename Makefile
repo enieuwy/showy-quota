@@ -29,7 +29,7 @@ PLUGIN_CRATE  := showy-quota-zellij
 PLUGIN_WASM   := $(REPO)/target/wasm32-wasip1/release/showy-quota-zellij.wasm
 PLUGIN_TARGET := $(ZELLIJ_PLUGINS)/showy-quota-zellij.wasm
 
-.PHONY: help doctor diagnose install install-bin install-sketchybar plugin install-plugin grant-zellij-permissions install-all uninstall test lint clean
+.PHONY: help doctor diagnose install install-bin install-sketchybar plugin install-plugin grant-zellij-permissions install-all uninstall test lint hooks clean
 
 help: ## Show this help.
 	@awk 'BEGIN{FS=":.*##"}/^[a-zA-Z_-]+:.*##/{printf "  \033[36m%-20s\033[0m %s\n",$$1,$$2}' $(MAKEFILE_LIST)
@@ -203,6 +203,10 @@ lint: ## Run shellcheck if available.
 	else \
 		printf 'shellcheck not installed; skipping\n'; \
 	fi
+
+hooks: ## Install the git pre-commit hook (rustfmt check via .githooks).
+	@git config core.hooksPath .githooks
+	@printf 'Installed git hooks: core.hooksPath -> .githooks\n'
 
 
 clean: ## Remove the user-cache directory used by this repo.

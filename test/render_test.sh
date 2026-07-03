@@ -553,6 +553,14 @@ assert_equals "scale helper matches legacy 0.55 green" "14683a" "${out}"
 out=$(run_common_eval 'showy_quota_scale_hex "#25be6a" 0.55' SHOWY_QUOTA_NO_CONFIG=1)
 assert_equals "scale helper accepts leading hash" "14683a" "${out}"
 
+rc=0
+out=$(run_common_eval 'showy_quota_scale_hex 123 0.55' SHOWY_QUOTA_NO_CONFIG=1 2>&1) || rc=$?
+assert_equals "scale helper rejects malformed hex" "1" "${rc}"
+
+rc=0
+out=$(run_common_eval 'showy_quota_scale_hex 25be6a abc' SHOWY_QUOTA_NO_CONFIG=1 2>&1) || rc=$?
+assert_equals "scale helper rejects non-numeric scale" "1" "${rc}"
+
 out=$(run_common_eval 'showy_quota_primary_palette good' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_PALETTE_PRIMARY_GOOD="#25BE6A")
 assert_equals "primary palette normalizes leading hash" "25be6a" "${out}"
 
@@ -579,6 +587,27 @@ assert_equals "is_long_window flags weekly and monthly horizons" "0|0|1|1|0" "${
 out=$(run_common_eval 'showy_quota_is_long_window 1440' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_DIM_WINDOW_MINUTES=1440)
 assert_equals "dim window minutes threshold is configurable" "1" "${out}"
 
+# ── numeric config validation ─────────────────────────────────────────
+printf '\nnumeric config validation\n'
+
+# shellcheck disable=SC2016
+out=$(run_common_eval 'printf "%s|%s|%s" "$(showy_quota_color_key 10)" "$(showy_quota_color_key 20)" "$(showy_quota_color_key 50)"' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_GOOD_MIN_REMAINING='evil; rm -rf /' SHOWY_QUOTA_WARN_MIN_REMAINING=oops)
+assert_equals "malformed coloring thresholds fall back to defaults" "bad|warn|good" "${out}"
+
+out=$(run_common_eval 'showy_quota_color_key 50' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_GOOD_MIN_REMAINING=80)
+assert_equals "valid coloring threshold is still honored" "warn" "${out}"
+
+# shellcheck disable=SC2016
+out=$(run_common_eval 'printf "%s|%s|%s|%s" "$(showy_quota_uint 42 7)" "$(showy_quota_uint abc 7)" "$(showy_quota_uint 99999 7 100)" "$(showy_quota_uint 09 7)"' SHOWY_QUOTA_NO_CONFIG=1)
+assert_equals "uint helper validates, clamps, and decimal-normalizes" "42|7|100|9" "${out}"
+
+out=$(run_renderer showy-quota-zellij-bar codexbar-mixed.json SHOWY_QUOTA_PNG_BAR_W=09 NO_COLOR=1 SHOWY_QUOTA_FORCE_COLOR=0)
+assert_contains "leading-zero numeric config renders without octal abort" "CL" "${out}"
+
+# shellcheck disable=SC2016
+out=$(run_common_eval 'printf "%s" "${SHOWY_QUOTA_LOCK_WAIT_TENTHS}"' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_LOCK_WAIT_TENTHS=99999999)
+assert_equals "lock wait clamps to ceiling" "36000" "${out}"
+
 out=$(run_common_eval 'showy_quota_primary_palette good' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_THEME=catppuccin-mocha-blue)
 assert_equals "built-in Catppuccin Mocha Blue theme overrides the primary palette" "89b4fa" "${out}"
 
@@ -601,6 +630,96 @@ assert_equals "config env overrides themed primary palette" "010203" "${out}"
 # shellcheck disable=SC2016
 out=$(run_common_eval 'printf "%s|%s|%s" "$(showy_quota_palette icon_text)" "$(showy_quota_palette countdown)" "$(showy_quota_palette countdown_warn)"' SHOWY_QUOTA_NO_CONFIG= XDG_CONFIG_HOME="${theme_xdg}")
 assert_equals "config env overrides themed text role palettes" "020304|030405|040506" "${out}"
+
+# ── executable & glyph config validation ──────────────────────────────
+printf '\nexecutable & glyph config validation\n'
+
+# Injection-shaped *_BIN values (whitespace / shell metacharacters) are rejected
+# back to their defaults so a poisoned env/config.env entry cannot be exec'd.
+# shellcheck disable=SC2016
+out=$(run_common_eval 'printf "%s" "${SHOWY_QUOTA_CODEXBAR_BIN}"' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_CODEXBAR_BIN='/bin/sh -c evil')
+assert_equals "injection-shaped codexbar bin degrades to default" "codexbar" "${out}"
+
+# shellcheck disable=SC2016
+out=$(run_common_eval 'printf "%s" "${SHOWY_QUOTA_ZELLIJ_BIN}"' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_ZELLIJ_BIN='zellij; rm -rf ~')
+assert_equals "injection-shaped zellij bin degrades to default" "zellij" "${out}"
+
+# A clean but currently-missing path is preserved: exec just fails into the
+# renderer's normal fallback (existence is not required).
+# shellcheck disable=SC2016
+out=$(run_common_eval 'printf "%s" "${SHOWY_QUOTA_CODEXBAR_BIN}"' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_CODEXBAR_BIN=/tmp/showy-quota/no-such-codexbar)
+assert_equals "clean missing codexbar path is preserved" "/tmp/showy-quota/no-such-codexbar" "${out}"
+
+# shellcheck disable=SC2016
+out=$(run_common_eval 'showy_quota_valid_bin "/usr/local/bin/codexbar"; printf "|"; showy_quota_valid_bin "a b" || printf "rej"' SHOWY_QUOTA_NO_CONFIG=1)
+assert_equals "valid_bin accepts path and rejects whitespace" "/usr/local/bin/codexbar|rej" "${out}"
+
+# Status glyphs carrying control characters fall back to defaults; clean ones stay.
+# shellcheck disable=SC2016
+out=$(run_common_eval 'printf "%s" "${SHOWY_QUOTA_STALE_GLYPH}"' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_STALE_GLYPH=$'\x1bboom')
+assert_equals "control-char stale glyph degrades to default" "⚠" "${out}"
+
+# shellcheck disable=SC2016
+out=$(run_common_eval 'printf "%s" "${SHOWY_QUOTA_DEGRADED_CLI_GLYPH}"' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_DEGRADED_CLI_GLYPH='!!')
+assert_equals "clean custom degraded glyph preserved" "!!" "${out}"
+
+# A theme name that escapes the themes dir is ignored (no arbitrary .env source);
+# defaults are kept instead of aborting the renderer.
+# shellcheck disable=SC2016
+out=$(run_common_eval 'showy_quota_primary_palette good' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_THEME='../catppuccin-mocha-blue')
+assert_equals "traversal theme name is ignored (defaults kept)" "25be6a" "${out}"
+
+# CodexBar date fields are length-capped before reaching date/gdate -d.
+# shellcheck disable=SC2016
+out=$(run_common_eval 'r=$(showy_quota_reset_epoch 2099-01-15T00:00:00Z); [[ "$r" =~ ^[0-9]+$ ]] && printf digits || printf no' SHOWY_QUOTA_NO_CONFIG=1)
+assert_equals "reset_epoch accepts a short ISO timestamp" "digits" "${out}"
+
+# shellcheck disable=SC2016
+out=$(run_common_eval 'showy_quota_reset_epoch "$(printf "9%.0s" {1..100})" >/dev/null && printf accept || printf reject' SHOWY_QUOTA_NO_CONFIG=1)
+assert_equals "reset_epoch rejects an overlong date string" "reject" "${out}"
+
+# shellcheck disable=SC2016
+out=$(run_common_eval 'showy_quota_reset_description_epoch "Resets $(printf "x%.0s" {1..100})" >/dev/null && printf accept || printf reject' SHOWY_QUOTA_NO_CONFIG=1)
+assert_equals "reset_description_epoch rejects an overlong fragment" "reject" "${out}"
+
+# SketchyBar string knobs are clamped to a known-good shape.
+# shellcheck disable=SC2016
+out=$(run_common_eval 'printf "%s" "${SHOWY_QUOTA_SKETCHYBAR_PILL_COLOR}"' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_SKETCHYBAR_PILL_COLOR='0xff112233 drawing=on')
+assert_equals "malformed pill color falls back to default" "0xcc24273a" "${out}"
+
+# shellcheck disable=SC2016
+out=$(run_common_eval 'printf "%s" "${SHOWY_QUOTA_SKETCHYBAR_PILL_COLOR}"' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_SKETCHYBAR_PILL_COLOR=0xAA00FF80)
+assert_equals "valid pill color is honored" "0xAA00FF80" "${out}"
+
+# shellcheck disable=SC2016
+out=$(run_common_eval 'printf "%s" "${SHOWY_QUOTA_SKETCHYBAR_PROVIDER_ICON_FONT}"' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_SKETCHYBAR_PROVIDER_ICON_FONT=$'evil\nlabel=x')
+assert_equals "control-char provider icon font falls back to default" "sketchybar-app-font:Regular:14.0" "${out}"
+
+# shellcheck disable=SC2016
+out=$(run_common_eval 'printf "%s" "${SHOWY_QUOTA_SKETCHYBAR_PROVIDER_ICON_FONT}"' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_SKETCHYBAR_PROVIDER_ICON_FONT='SF Pro:Bold:13.0')
+assert_equals "valid provider icon font with spaces is honored" "SF Pro:Bold:13.0" "${out}"
+
+# Zellij pipe identifiers are restricted to safe tokens.
+# shellcheck disable=SC2016
+out=$(run_common_eval 'printf "%s" "${SHOWY_QUOTA_ZELLIJ_WIDGET}"' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_ZELLIJ_WIDGET='foo::bar')
+assert_equals "widget with :: falls back to default" "pipe_showy_quota" "${out}"
+
+# shellcheck disable=SC2016
+out=$(run_common_eval 'printf "%s" "${SHOWY_QUOTA_ZELLIJ_WIDGET}"' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_ZELLIJ_WIDGET='my.widget-1')
+assert_equals "valid widget name is honored" "my.widget-1" "${out}"
+
+# shellcheck disable=SC2016
+out=$(run_common_eval 'printf "%s" "${SHOWY_QUOTA_ZELLIJ_PIPE_NAME}"' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_ZELLIJ_PIPE_NAME='bad name')
+assert_equals "pipe name with space falls back to default" "showy-quota" "${out}"
+
+long_zellij_identifier="$(printf 'x%.0s' {1..129})"
+# shellcheck disable=SC2016
+out=$(run_common_eval 'printf "%s" "${SHOWY_QUOTA_ZELLIJ_WIDGET}"' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_ZELLIJ_WIDGET="${long_zellij_identifier}")
+assert_equals "overlong widget falls back to default" "pipe_showy_quota" "${out}"
+
+# shellcheck disable=SC2016
+out=$(run_common_eval 'printf "%s" "${SHOWY_QUOTA_ZELLIJ_PIPE_NAME}"' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_ZELLIJ_PIPE_NAME="${long_zellij_identifier}")
+assert_equals "overlong pipe name falls back to default" "showy-quota" "${out}"
 
 # ── countdown formatting ──────────────────────────────────────────────
 printf '\ncountdown formatting\n'
@@ -819,6 +938,28 @@ env \
     "${REPO_ROOT}/bin/showy-quota" --grant-zellij >/dev/null
 assert_contains "no-arg grant targets default plugin name" "/showy-quota-zellij.wasm\" {" "$(< "${grant_default_perms}")"
 
+# A plugin path containing a KDL-significant character is rejected (no injection).
+grant_inject_rc=0
+run_grant '/tmp/x" { RunCommands }; "y.wasm' >/dev/null 2>&1 || grant_inject_rc=$?
+if (( grant_inject_rc != 0 )); then
+    ok "grant rejects quote in plugin path"
+else
+    fail "grant rejects quote in plugin path" "rc=${grant_inject_rc}"
+fi
+
+# A non-.kdl permissions-file override is rejected before any write.
+grant_badperms_rc=0
+env \
+    PATH="${stub_dir}:${PATH}" \
+    HOME="${grant_home}" \
+    SHOWY_QUOTA_ZELLIJ_PERMISSIONS_FILE="${grant_home}/evil.txt" \
+    "${REPO_ROOT}/bin/showy-quota" --grant-zellij "${grant_plugin}" >/dev/null 2>&1 || grant_badperms_rc=$?
+if (( grant_badperms_rc != 0 )) && [[ ! -e "${grant_home}/evil.txt" ]]; then
+    ok "grant rejects non-.kdl permissions file override"
+else
+    fail "grant rejects non-.kdl permissions file override" "rc=${grant_badperms_rc}; file exists: $([[ -e ${grant_home}/evil.txt ]] && echo yes)"
+fi
+
 # ── zellij renderer ──────────────────────────────────────────────────
 printf 'zellij renderer\n'
 
@@ -942,6 +1083,13 @@ assert_contains "zellij mono4 draws two configured pacing markers" "AG▕𜷝�
 out=$(run_renderer showy-quota-zellij-bar codexbar-no-tertiary.json SHOWY_QUOTA_PROVIDER_MODES=antigravity=mono4 SHOWY_QUOTA_ZELLIJ_BAR_WIDTH=8 SHOWY_QUOTA_REFRESH_SECONDS=9999999999 SHOWY_QUOTA_NOW_EPOCH=4070908800 NO_COLOR=1 SHOWY_QUOTA_FORCE_COLOR=0)
 assert_contains "zellij mono4 collapses to dual without four windows" "AG▕▀▀▀▀▀▀▀▀▏" "${out}"
 
+out=$(run_renderer showy-quota-zellij-bar codexbar-codex-mono4-four.json SHOWY_QUOTA_PROVIDER_MODES=codex=mono4 SHOWY_QUOTA_ZELLIJ_BAR_WIDTH=12 SHOWY_QUOTA_REFRESH_SECONDS=9999999999 SHOWY_QUOTA_NOW_EPOCH=4070908800 NO_COLOR=1 SHOWY_QUOTA_FORCE_COLOR=0)
+assert_contains "zellij forced mono4 keeps three positional plus one extra as four lanes" "CX▕█🮅🮅▀▀▀🮂│🮂   ▏" "${out}"
+
+out=$(run_renderer showy-quota-zellij-bar codexbar-codex-mono4-three.json SHOWY_QUOTA_PROVIDER_MODES=codex=mono4 SHOWY_QUOTA_ZELLIJ_BAR_WIDTH=12 SHOWY_QUOTA_REFRESH_SECONDS=9999999999 SHOWY_QUOTA_NOW_EPOCH=4070908800 NO_COLOR=1 SHOWY_QUOTA_FORCE_COLOR=0)
+assert_contains "zellij forced mono4 collapses three assembled windows to mono3" "CX▕███🬎🬎🬎🬂│🬂   ▏" "${out}"
+assert_not_contains "zellij forced mono4 three-window fallback omits octant-only cells" "🮅" "${out}"
+
 # dual2: a model-pooled provider splits into one standalone per-family dual each
 # (AGᴳ, AGᶜ), rendered through the normal dual path — half-blocks, every terminal.
 out=$(run_renderer showy-quota-zellij-bar codexbar-antigravity-quad.json SHOWY_QUOTA_PROVIDER_MODES=antigravity=dual2 SHOWY_QUOTA_ZELLIJ_BAR_WIDTH=12 SHOWY_QUOTA_REFRESH_SECONDS=9999999999 SHOWY_QUOTA_NOW_EPOCH=4070908800 NO_COLOR=1 SHOWY_QUOTA_FORCE_COLOR=0)
@@ -1030,6 +1178,16 @@ out=$(
         "${REPO_ROOT}/bin/showy-quota-zellij-bar" --json "$(fixture_path codexbar-mixed.json)"
 )
 assert_not_contains "zellij --json file ignores live cache degraded marker" "⚠cli" "${out}"
+
+# --json must reject a readable file that is not valid quota JSON (e.g. a
+# non-array payload or an arbitrary file like /etc/passwd) rather than render it.
+json_bad_rc=0
+env SHOWY_QUOTA_NO_CONFIG=1 "${REPO_ROOT}/bin/showy-quota-zellij-bar" --json "$(fixture_path codexbar-non-array.json)" >/dev/null 2>&1 || json_bad_rc=$?
+if (( json_bad_rc != 0 )); then
+    ok "zellij --json rejects non-quota JSON file"
+else
+    fail "zellij --json rejects non-quota JSON file" "rc=${json_bad_rc}"
+fi
 
 printf '\nrust zellij parity\n'
 if (cd "${REPO_ROOT}" && cargo test -p showy-quota-zellij-core --test shell_parity); then
@@ -1355,6 +1513,20 @@ assert_contains "plugin pooled provider draws gemini weekly row" "--set showy_qu
 assert_contains "plugin pooled provider draws claude session row" "--set showy_quota.antigravity.tertiary drawing=on slider.percentage=90" "${plugin_log}"
 assert_contains "plugin pooled provider draws claude weekly row in fourth lane" "--set showy_quota.antigravity.quaternary drawing=on slider.percentage=18" "${plugin_log}"
 
+# Regression: when CodexBar transiently marks a pooled family's windows
+# `usageKnown:false` (e.g. Antigravity's Claude/GPT pool during a collection
+# hiccup), the lanes must stay drawn as empty tracks rather than collapsing —
+# otherwise the whole Claude family vanishes and SketchyBar drops to the two
+# Gemini bars. Mirrors the Zellij renderer, which keeps the AGᶜ lane.
+cache=$(mk_cache)
+log="${TMP}/sb-degraded-family.log"
+run_sketchybar_plugin codexbar-antigravity-degraded-family.json "${cache}" "${log}" SHOWY_QUOTA_NOW_EPOCH=4070908800
+plugin_log="$(< "${log}")"
+assert_contains "plugin degraded-family keeps gemini session row" "--set showy_quota.antigravity.primary drawing=on slider.percentage=65" "${plugin_log}"
+assert_contains "plugin degraded-family keeps gemini weekly row" "--set showy_quota.antigravity.secondary drawing=on slider.percentage=0" "${plugin_log}"
+assert_contains "plugin degraded-family keeps unmeasured claude session lane present" "--set showy_quota.antigravity.tertiary drawing=on slider.percentage=0" "${plugin_log}"
+assert_contains "plugin degraded-family keeps unmeasured claude weekly lane present" "--set showy_quota.antigravity.quaternary drawing=on slider.percentage=0" "${plugin_log}"
+
 cache=$(mk_cache)
 log="${TMP}/sb-degraded.log"
 run_sketchybar_plugin codexbar-mixed.json "${cache}" "${log}" SHOWY_QUOTA_DEGRADED_CLI=1
@@ -1444,7 +1616,65 @@ assert_contains "font icon mode colors degraded providers without magick" "showy
 assert_contains "font icon mode preserves degraded provider status click without magick" "click_script=open 'https://status.openai.com/'" "${font_status_log}"
 assert_not_contains "font icon mode skips status PNG for mapped provider without magick" "icon-v3-codex-" "${font_status_log}"
 
+# When magick is present, the plugin points MAGICK_CONFIGURE_PATH at the bundled
+# restrictive policy (SSRF defense) before any magick invocation.
+mp_bin="${TMP}/magick-policy-bin"
+mkdir -p "${mp_bin}"
+for tool in bash jq readlink dirname mkdir mktemp mv rm rmdir date stat sed tr cat python3; do
+    if [[ "${tool}" == "bash" && -x /opt/homebrew/bin/bash ]]; then
+        ln -sf /opt/homebrew/bin/bash "${mp_bin}/bash"
+    else
+        ln -sf "$(command -v "${tool}")" "${mp_bin}/${tool}"
+    fi
+done
+ln -sf "${stub_dir}/codexbar" "${mp_bin}/codexbar"
+ln -sf "${stub_dir}/sketchybar" "${mp_bin}/sketchybar"
+mp_env_log="${TMP}/magick-env.log"
+cat > "${mp_bin}/magick" <<EOF
+#!/bin/sh
+printf '%s\n' "\${MAGICK_CONFIGURE_PATH:-UNSET}" >> "${mp_env_log}"
+for a in "\$@"; do last="\$a"; done
+case "\${last}" in
+    info:) printf '0 0 0 ' ;;
+    PNG32:*) : > "\${last#PNG32:}" 2>/dev/null || true ;;
+    /*) : > "\${last}" 2>/dev/null || true ;;
+esac
+exit 0
+EOF
+chmod +x "${mp_bin}/magick"
+: > "${mp_env_log}"
+cache=$(mk_cache)
+env \
+    PATH="${mp_bin}" \
+    SHOWY_QUOTA_NO_CONFIG=1 \
+    SHOWY_QUOTA_CACHE_DIR="${cache}" \
+    SHOWY_QUOTA_SKETCHYBAR_IMAGE_CACHE="${cache}/sb" \
+    SHOWY_QUOTA_TEST_FIXTURE="$(fixture_path codexbar-mixed.json)" \
+    SHOWY_QUOTA_TEST_LOG="${TMP}/sb-magick-policy.log" \
+    SHOWY_QUOTA_DEGRADED_CLI=0 \
+    SHOWY_QUOTA_TEST_STATE_DIR="${cache}/sb-state" \
+    "${REPO_ROOT}/adapters/sketchybar/plugins/showy_quota.sh" >/dev/null 2>&1 || true
+if [[ -s "${mp_env_log}" ]] && grep -qF "${REPO_ROOT}/adapters/sketchybar/imagemagick" "${mp_env_log}"; then
+    ok "plugin runs magick under the bundled restrictive policy"
+else
+    fail "plugin runs magick under the bundled restrictive policy" "env log: $(cat "${mp_env_log}" 2>/dev/null)"
+fi
+
+if grep -qF '<policy domain="delegate" rights="none" pattern="*" />' "${REPO_ROOT}/adapters/sketchybar/imagemagick/policy.xml"; then
+    ok "ImageMagick policy disables external delegates"
+else
+    fail "ImageMagick policy disables external delegates"
+fi
+
 if command -v magick >/dev/null 2>&1; then
+    policy_dir="${REPO_ROOT}/adapters/sketchybar/imagemagick"
+    policy_listing="$(MAGICK_CONFIGURE_PATH="${policy_dir}" magick -list policy 2>/dev/null || true)"
+    if [[ "${policy_listing}" == *"${policy_dir}/policy.xml"* && "${policy_listing}" == *"Policy: Delegate"* && "${policy_listing}" == *"pattern: *"* ]]; then
+        ok "ImageMagick loads bundled delegate-deny policy"
+    else
+        fail "ImageMagick loads bundled delegate-deny policy" "${policy_listing}"
+    fi
+
     cache=$(mk_cache)
     log="${TMP}/sb-status.log"
     run_sketchybar_plugin codexbar-status-major.json "${cache}" "${log}"
@@ -1464,6 +1694,77 @@ if command -v magick >/dev/null 2>&1; then
     resource_dir="${TMP}/opencode-resources"
     mkdir -p "${resource_dir}"
     printf '%s\n' '<svg width="100" height="100" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg"><path fill-rule="evenodd" clip-rule="evenodd" d="M80 88H20V12H80V88ZM35 27H65V72H35V27Z" fill="#211E1E"/></svg>' > "${resource_dir}/ProviderIcon-opencode.svg"
+
+    policy_svg_png="${TMP}/policy-opencode.png"
+    if MAGICK_CONFIGURE_PATH="${policy_dir}" magick -background none -density 300 "MSVG:${resource_dir}/ProviderIcon-opencode.svg" \
+            -resize 64x64 "PNG32:${policy_svg_png}" >/dev/null 2>&1 && [[ -s "${policy_svg_png}" ]]; then
+        ok "restrictive ImageMagick policy still rasterizes provider SVGs"
+    else
+        fail "restrictive ImageMagick policy still rasterizes provider SVGs"
+    fi
+
+    policy_http_server="${TMP}/policy-http-server.py"
+    policy_http_port_file="${TMP}/policy-http-port"
+    policy_http_log="${TMP}/policy-http-requests.log"
+    cat > "${policy_http_server}" <<'PY'
+import sys
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+port_file, request_log = sys.argv[1], sys.argv[2]
+
+class Handler(BaseHTTPRequestHandler):
+    def _record(self):
+        with open(request_log, "a", encoding="utf-8") as fh:
+            fh.write(f"{self.command} {self.path}\n")
+        self.send_response(404)
+        self.end_headers()
+
+    def do_GET(self):
+        self._record()
+
+    def do_HEAD(self):
+        self._record()
+
+    def log_message(self, fmt, *args):
+        pass
+
+server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+with open(port_file, "w", encoding="utf-8") as fh:
+    fh.write(str(server.server_address[1]))
+server.serve_forever()
+PY
+    : > "${policy_http_log}"
+    python3 "${policy_http_server}" "${policy_http_port_file}" "${policy_http_log}" &
+    policy_http_pid=$!
+    for _ in {1..50}; do
+        [[ -s "${policy_http_port_file}" ]] && break
+        sleep 0.1
+    done
+    if [[ ! -s "${policy_http_port_file}" ]]; then
+        kill "${policy_http_pid}" 2>/dev/null || true
+        wait "${policy_http_pid}" 2>/dev/null || true
+        fail "restricted policy test HTTP server starts"
+    else
+        ok "restricted policy test HTTP server starts"
+        policy_http_port="$(< "${policy_http_port_file}")"
+        policy_hostile_svg="${TMP}/policy-hostile.svg"
+        policy_hostile_png="${TMP}/policy-hostile.png"
+        cat > "${policy_hostile_svg}" <<EOF
+<svg width="64" height="64" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+  <rect width="64" height="64" fill="#211e1e"/>
+  <image width="32" height="32" href="http://127.0.0.1:${policy_http_port}/href.png" xlink:href="http://127.0.0.1:${policy_http_port}/xlink.png"/>
+</svg>
+EOF
+        MAGICK_CONFIGURE_PATH="${policy_dir}" magick -background none -density 300 "MSVG:${policy_hostile_svg}" \
+            -resize 64x64 "PNG32:${policy_hostile_png}" >/dev/null 2>&1 || true
+        kill "${policy_http_pid}" 2>/dev/null || true
+        wait "${policy_http_pid}" 2>/dev/null || true
+        if [[ ! -s "${policy_http_log}" ]]; then
+            ok "hostile SVG under restrictive ImageMagick policy does not fetch external resources"
+        else
+            fail "hostile SVG under restrictive ImageMagick policy does not fetch external resources" "$(cat "${policy_http_log}")"
+        fi
+    fi
     cache=$(mk_cache)
     log="${TMP}/sb-opencode.log"
     run_sketchybar_plugin "${opencode_fixture}" "${cache}" "${log}" SHOWY_QUOTA_CODEXBAR_RESOURCES="${resource_dir}"
@@ -1803,6 +2104,28 @@ else
     fail "fetcher rejects unsafe provider ids" "rc=${rc}; out=${out}"
 fi
 
+dotdot_provider="${TMP}/dotdot-provider.json"
+printf '%s\n' '[{"provider":"..","usage":{"primary":{"usedPercent":12}}},{"provider":"codex","usage":{"primary":{"usedPercent":30}}}]' > "${dotdot_provider}"
+cache=$(mk_cache)
+rc=0
+out=$(
+    PATH="${stub_dir}:${PATH}" \
+    SHOWY_QUOTA_NO_CONFIG=1 \
+    SHOWY_QUOTA_CACHE_DIR="${cache}" \
+    SHOWY_QUOTA_CODEXBAR_SERVE_URL='' \
+    SHOWY_QUOTA_TEST_FIXTURE="${dotdot_provider}" \
+    "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
+) || rc=$?
+# '..' is a path component that would escape the failure-stamp dir; it must be
+# dropped (valid_provider_id), while the legitimate provider still renders.
+if (( rc == 0 )) \
+    && printf '%s' "${out}" | jq -e 'any(.provider == "codex")' >/dev/null 2>&1 \
+    && ! printf '%s' "${out}" | jq -e 'any(.provider == "..")' >/dev/null 2>&1; then
+    ok "fetcher drops '..' provider id (no path traversal)"
+else
+    fail "fetcher drops '..' provider id (no path traversal)" "rc=${rc}; out=${out}"
+fi
+
 # 4. Missing codexbar binary, no cache → fetcher fails with diagnostic.
 missing_bin="${TMP}/no-such-codexbar"
 cache=$(mk_cache)
@@ -1860,7 +2183,36 @@ else
     fail "fetcher reads codexbar serve usage endpoint" "rc=${rc}; out=${out}"
 fi
 assert_equals "fetcher records serve cache source" "serve" "$(< "${cache}/source")"
-assert_equals "fetcher uses production-safe default serve timeout" "10" "$(< "${cache}/curl-max-time")"
+assert_equals "fetcher uses production-safe default usage probe timeout" "30" "$(< "${cache}/curl-max-time")"
+
+# A pathological serve timeout is clamped so curl --max-time stays bounded.
+clamp_cache=$(mk_cache)
+env \
+    PATH="${stub_dir}:${PATH}" \
+    SHOWY_QUOTA_NO_CONFIG=1 \
+    SHOWY_QUOTA_CACHE_DIR="${clamp_cache}" \
+    SHOWY_QUOTA_CODEXBAR_BIN="${missing_bin}" \
+    SHOWY_QUOTA_CODEXBAR_SERVE_URL="${serve_url}" \
+    SHOWY_QUOTA_TEST_SERVE_URL="${serve_url}" \
+    SHOWY_QUOTA_TEST_SERVE_FIXTURE="${FIXTURE_DIR}/codexbar-realistic.json" \
+    SHOWY_QUOTA_TEST_CURL_MAX_TIME_FILE="${clamp_cache}/curl-max-time" \
+    SHOWY_QUOTA_CODEXBAR_SERVE_USAGE_TIMEOUT_SECONDS=999999999 \
+    "${REPO_ROOT}/bin/showy-quota-fetch" >/dev/null 2>&1 || true
+assert_equals "fetcher clamps a pathological usage probe timeout" "60" "$(< "${clamp_cache}/curl-max-time")"
+
+zero_timeout_cache=$(mk_cache)
+env \
+    PATH="${stub_dir}:${PATH}" \
+    SHOWY_QUOTA_NO_CONFIG=1 \
+    SHOWY_QUOTA_CACHE_DIR="${zero_timeout_cache}" \
+    SHOWY_QUOTA_CODEXBAR_BIN="${missing_bin}" \
+    SHOWY_QUOTA_CODEXBAR_SERVE_URL="${serve_url}" \
+    SHOWY_QUOTA_TEST_SERVE_URL="${serve_url}" \
+    SHOWY_QUOTA_TEST_SERVE_FIXTURE="${FIXTURE_DIR}/codexbar-realistic.json" \
+    SHOWY_QUOTA_TEST_CURL_MAX_TIME_FILE="${zero_timeout_cache}/curl-max-time" \
+    SHOWY_QUOTA_CODEXBAR_SERVE_USAGE_TIMEOUT_SECONDS=0 \
+    "${REPO_ROOT}/bin/showy-quota-fetch" >/dev/null 2>&1 || true
+assert_equals "fetcher rejects zero usage probe timeout back to default" "30" "$(< "${zero_timeout_cache}/curl-max-time")"
 
 large_payload_fixture="${TMP}/codexbar-large-payload.json"
 python3 -c '
@@ -2194,6 +2546,7 @@ out=$(
     SHOWY_QUOTA_CODEXBAR_SERVE_URL="${managed_url}" \
     SHOWY_QUOTA_CODEXBAR_SERVE_START_WAIT_TENTHS=50 \
     SHOWY_QUOTA_CODEXBAR_SERVE_TIMEOUT_SECONDS=1 \
+    SHOWY_QUOTA_CODEXBAR_SERVE_USAGE_TIMEOUT_SECONDS=1 \
     SHOWY_QUOTA_CODEXBAR_SERVE_FAILURES_BEFORE_RESTART=1 \
     SHOWY_QUOTA_PROVIDERS=claude \
     SHOWY_QUOTA_TEST_MANAGED_MODE=health-ok-usage-hang \
@@ -2255,6 +2608,333 @@ else
 fi
 kill "${unrelated_codexbar_pid}" 2>/dev/null || true
 wait "${unrelated_codexbar_pid}" 2>/dev/null || true
+
+# ── codexbar serve build-version gate (showy-quota-serve-stale-gate) ─────
+# A serve must be reused only while its /health build matches the installed
+# binary; a mismatch (e.g. after a CodexBar update) must recycle it.
+version_bin_dir="${TMP}/codexbar-version-bin"
+mkdir -p "${version_bin_dir}"
+cat > "${version_bin_dir}/codexbar" <<'EOF'
+#!/usr/bin/env bash
+set -eu
+if [[ "${1:-}" == "--version" ]]; then
+    printf 'CodexBar %s\n' "${SHOWY_QUOTA_TEST_ONDISK_VERSION:-0.0.0}"
+    exit 0
+fi
+if [[ "${1:-}" == "serve" ]]; then
+    shift
+    port=""
+    while (($#)); do
+        case "$1" in
+            --port)
+                shift
+                port="${1:-}"
+                ;;
+            --refresh-interval)
+                shift
+                ;;
+        esac
+        shift
+    done
+    [[ -n "${port}" ]] || exit 91
+
+    count=1
+    if [[ -n "${SHOWY_QUOTA_TEST_MANAGED_COUNT_FILE:-}" ]]; then
+        count=0
+        if [[ -r "${SHOWY_QUOTA_TEST_MANAGED_COUNT_FILE}" ]]; then
+            IFS= read -r count < "${SHOWY_QUOTA_TEST_MANAGED_COUNT_FILE}" || count=0
+        fi
+        count=$((count + 1))
+        printf '%s\n' "${count}" > "${SHOWY_QUOTA_TEST_MANAGED_COUNT_FILE}"
+    fi
+
+    python3 - "${port}" "${SHOWY_QUOTA_TEST_SERVE_FIXTURE}" "${SHOWY_QUOTA_TEST_SERVE_VERSION:-}" <<'PY' &
+import http.server
+import json
+import sys
+
+port = int(sys.argv[1])
+fixture = sys.argv[2]
+version = sys.argv[3]
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/health":
+            payload = {"status": "ok"}
+            if version:
+                payload["version"] = version
+            body = json.dumps(payload).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if self.path == "/usage":
+            with open(fixture, "rb") as fh:
+                body = fh.read()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        self.send_response(404)
+        self.end_headers()
+
+    def log_message(self, _format, *args):
+        return
+
+http.server.ThreadingHTTPServer.allow_reuse_address = True
+http.server.ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()
+PY
+    child=$!
+    trap 'kill "${child}" 2>/dev/null || true' EXIT TERM INT
+    wait "${child}"
+    exit $?
+fi
+exit 90
+EOF
+chmod +x "${version_bin_dir}/codexbar"
+
+version_gate_fetch() {
+    local _cache="$1" _url="$2" _count="$3" _sver="$4" _over="$5" _manage="$6"
+    shift 6
+    PATH="${version_bin_dir}:${PATH}" \
+        SHOWY_QUOTA_NO_CONFIG=1 \
+        SHOWY_QUOTA_MANAGE_SERVE="${_manage}" \
+        SHOWY_QUOTA_CACHE_DIR="${_cache}" \
+        SHOWY_QUOTA_CODEXBAR_SERVE_URL="${_url}" \
+        SHOWY_QUOTA_CODEXBAR_SERVE_START_WAIT_TENTHS=50 \
+        SHOWY_QUOTA_TEST_MANAGED_COUNT_FILE="${_count}" \
+        SHOWY_QUOTA_TEST_SERVE_VERSION="${_sver}" \
+        SHOWY_QUOTA_TEST_ONDISK_VERSION="${_over}" \
+        SHOWY_QUOTA_TEST_SERVE_FIXTURE="${FIXTURE_DIR}/codexbar-realistic.json" \
+        "${REPO_ROOT}/bin/showy-quota-fetch" "$@"
+}
+
+version_gate_stop() {
+    SHOWY_QUOTA_NO_CONFIG=1 \
+        SHOWY_QUOTA_CACHE_DIR="$1" \
+        SHOWY_QUOTA_CODEXBAR_BIN="${version_bin_dir}/codexbar" \
+        SHOWY_QUOTA_CODEXBAR_SERVE_URL="$2" \
+        "${REPO_ROOT}/bin/showy-quota-fetch" --stop-serve >/dev/null 2>/dev/null || true
+}
+
+# Matching build: the healthy serve is reused, never recycled (count stays 1).
+cache=$(mk_cache)
+managed_port=$(unused_tcp_port)
+managed_url="http://127.0.0.1:${managed_port}"
+count_file="${TMP}/version-match-count.log"
+rm -f "${count_file}"
+version_gate_fetch "${cache}" "${managed_url}" "${count_file}" 9.9.9 9.9.9 1 --refresh >/dev/null 2>/dev/null || true
+rc=0
+out=$(version_gate_fetch "${cache}" "${managed_url}" "${count_file}" 9.9.9 9.9.9 1 --refresh 2>/dev/null) || rc=$?
+count_value="missing"; [[ -r "${count_file}" ]] && count_value=$(< "${count_file}")
+source_value=$(cat "${cache}/source" 2>/dev/null || true)
+version_gate_stop "${cache}" "${managed_url}"
+if (( rc == 0 )) && [[ "${count_value}" == "1" ]] && [[ "${source_value}" == "serve" ]] \
+    && printf '%s' "${out}" | jq -e 'type == "array" and any(.provider == "codex")' >/dev/null 2>&1; then
+    ok "fetcher reuses healthy serve when build version matches on-disk"
+else
+    fail "fetcher reuses healthy serve when build version matches on-disk" "rc=${rc}; count=${count_value}; source=${source_value}; out=${out}"
+fi
+
+# Stale build: running serve reports an older version than on-disk -> recycle
+# and start a fresh serve (count becomes 2).
+cache=$(mk_cache)
+managed_port=$(unused_tcp_port)
+managed_url="http://127.0.0.1:${managed_port}"
+count_file="${TMP}/version-mismatch-count.log"
+rm -f "${count_file}"
+version_gate_fetch "${cache}" "${managed_url}" "${count_file}" 1.0.0 1.0.0 1 --refresh >/dev/null 2>/dev/null || true
+rc=0
+out=$(version_gate_fetch "${cache}" "${managed_url}" "${count_file}" 2.0.0 2.0.0 1 --refresh 2>/dev/null) || rc=$?
+count_value="missing"; [[ -r "${count_file}" ]] && count_value=$(< "${count_file}")
+source_value=$(cat "${cache}/source" 2>/dev/null || true)
+version_gate_stop "${cache}" "${managed_url}"
+if (( rc == 0 )) && [[ "${count_value}" == "2" ]] && [[ "${source_value}" == "serve" ]] \
+    && printf '%s' "${out}" | jq -e 'type == "array" and any(.provider == "codex")' >/dev/null 2>&1; then
+    ok "fetcher recycles stale serve when build version differs from on-disk"
+else
+    fail "fetcher recycles stale serve when build version differs from on-disk" "rc=${rc}; count=${count_value}; source=${source_value}; out=${out}"
+fi
+
+# Management disabled: a version mismatch must not recycle (count stays 1); the
+# stale serve is still reused rather than killed without a restart path.
+cache=$(mk_cache)
+managed_port=$(unused_tcp_port)
+managed_url="http://127.0.0.1:${managed_port}"
+count_file="${TMP}/version-unmanaged-count.log"
+rm -f "${count_file}"
+version_gate_fetch "${cache}" "${managed_url}" "${count_file}" 1.0.0 1.0.0 1 --refresh >/dev/null 2>/dev/null || true
+rc=0
+out=$(version_gate_fetch "${cache}" "${managed_url}" "${count_file}" 1.0.0 2.0.0 0 --refresh 2>/dev/null) || rc=$?
+count_value="missing"; [[ -r "${count_file}" ]] && count_value=$(< "${count_file}")
+source_value=$(cat "${cache}/source" 2>/dev/null || true)
+version_gate_stop "${cache}" "${managed_url}"
+if (( rc == 0 )) && [[ "${count_value}" == "1" ]] && [[ "${source_value}" == "serve" ]] \
+    && printf '%s' "${out}" | jq -e 'type == "array" and any(.provider == "codex")' >/dev/null 2>&1; then
+    ok "fetcher does not recycle stale serve when serve management is disabled"
+else
+    fail "fetcher does not recycle stale serve when serve management is disabled" "rc=${rc}; count=${count_value}; source=${source_value}; out=${out}"
+fi
+
+# Cross-tool normalization: a /health version carrying the "CodexBar " prefix
+# must normalize the same as `codexbar --version`, so a current serve is reused,
+# not recycled (the divergence flagged by the glean stale-serve detector).
+cache=$(mk_cache)
+managed_port=$(unused_tcp_port)
+managed_url="http://127.0.0.1:${managed_port}"
+count_file="${TMP}/version-normalize-count.log"
+rm -f "${count_file}"
+version_gate_fetch "${cache}" "${managed_url}" "${count_file}" "CodexBar 9.9.9" 9.9.9 1 --refresh >/dev/null 2>/dev/null || true
+rc=0
+out=$(version_gate_fetch "${cache}" "${managed_url}" "${count_file}" "CodexBar 9.9.9" 9.9.9 1 --refresh 2>/dev/null) || rc=$?
+count_value="missing"; [[ -r "${count_file}" ]] && count_value=$(< "${count_file}")
+source_value=$(cat "${cache}/source" 2>/dev/null || true)
+version_gate_stop "${cache}" "${managed_url}"
+if (( rc == 0 )) && [[ "${count_value}" == "1" ]] && [[ "${source_value}" == "serve" ]] \
+    && printf '%s' "${out}" | jq -e 'type == "array" and any(.provider == "codex")' >/dev/null 2>&1; then
+    ok "fetcher normalizes prefixed /health version and reuses current serve"
+else
+    fail "fetcher normalizes prefixed /health version and reuses current serve" "rc=${rc}; count=${count_value}; source=${source_value}; out=${out}"
+fi
+
+# Regression: a bare-configured codexbar bin must resolve to an absolute path so
+# `--version` and the spawned serve's /health report a version. CodexBar reads
+# its version from the app bundle via argv[0], so a bare invocation yields none
+# and the gate would be silently inert. This fake mimics that: it reports a
+# version only when invoked with a path in argv[0]. The on-disk version moves
+# 1.1.1 -> 2.2.2 between fetches, so a working resolver recycles (count == 2);
+# a broken one (bare argv[0], no version on either side) would reuse (count 1).
+argv0_bin_dir="${TMP}/codexbar-argv0-bin"
+mkdir -p "${argv0_bin_dir}"
+cat > "${argv0_bin_dir}/codexbar" <<'EOF'
+#!/usr/bin/env bash
+set -eu
+has_path=0
+case "$0" in */*) has_path=1 ;; esac
+if [[ "${1:-}" == "--version" ]]; then
+    if (( has_path )); then
+        printf 'CodexBar %s\n' "${SHOWY_QUOTA_TEST_ONDISK_VERSION:-0.0.0}"
+    else
+        printf 'CodexBar\n'
+    fi
+    exit 0
+fi
+if [[ "${1:-}" == "serve" ]]; then
+    shift
+    port=""
+    while (($#)); do
+        case "$1" in
+            --port)
+                shift
+                port="${1:-}"
+                ;;
+            --refresh-interval)
+                shift
+                ;;
+        esac
+        shift
+    done
+    [[ -n "${port}" ]] || exit 91
+
+    count=1
+    if [[ -n "${SHOWY_QUOTA_TEST_MANAGED_COUNT_FILE:-}" ]]; then
+        count=0
+        if [[ -r "${SHOWY_QUOTA_TEST_MANAGED_COUNT_FILE}" ]]; then
+            IFS= read -r count < "${SHOWY_QUOTA_TEST_MANAGED_COUNT_FILE}" || count=0
+        fi
+        count=$((count + 1))
+        printf '%s\n' "${count}" > "${SHOWY_QUOTA_TEST_MANAGED_COUNT_FILE}"
+    fi
+
+    serve_version=""
+    if (( has_path )); then
+        serve_version="${SHOWY_QUOTA_TEST_SERVE_VERSION:-}"
+    fi
+
+    python3 - "${port}" "${SHOWY_QUOTA_TEST_SERVE_FIXTURE}" "${serve_version}" <<'PY' &
+import http.server
+import json
+import sys
+
+port = int(sys.argv[1])
+fixture = sys.argv[2]
+version = sys.argv[3]
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/health":
+            payload = {"status": "ok"}
+            if version:
+                payload["version"] = version
+            body = json.dumps(payload).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if self.path == "/usage":
+            with open(fixture, "rb") as fh:
+                body = fh.read()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        self.send_response(404)
+        self.end_headers()
+
+    def log_message(self, _format, *args):
+        return
+
+http.server.ThreadingHTTPServer.allow_reuse_address = True
+http.server.ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()
+PY
+    child=$!
+    trap 'kill "${child}" 2>/dev/null || true' EXIT TERM INT
+    wait "${child}"
+    exit $?
+fi
+exit 90
+EOF
+chmod +x "${argv0_bin_dir}/codexbar"
+
+argv0_gate_fetch() {
+    local _cache="$1" _url="$2" _count="$3" _sver="$4" _over="$5"
+    shift 5
+    PATH="${argv0_bin_dir}:${PATH}" \
+        SHOWY_QUOTA_NO_CONFIG=1 \
+        SHOWY_QUOTA_MANAGE_SERVE=1 \
+        SHOWY_QUOTA_CACHE_DIR="${_cache}" \
+        SHOWY_QUOTA_CODEXBAR_SERVE_URL="${_url}" \
+        SHOWY_QUOTA_CODEXBAR_SERVE_START_WAIT_TENTHS=50 \
+        SHOWY_QUOTA_TEST_MANAGED_COUNT_FILE="${_count}" \
+        SHOWY_QUOTA_TEST_SERVE_VERSION="${_sver}" \
+        SHOWY_QUOTA_TEST_ONDISK_VERSION="${_over}" \
+        SHOWY_QUOTA_TEST_SERVE_FIXTURE="${FIXTURE_DIR}/codexbar-realistic.json" \
+        "${REPO_ROOT}/bin/showy-quota-fetch" "$@"
+}
+
+cache=$(mk_cache)
+managed_port=$(unused_tcp_port)
+managed_url="http://127.0.0.1:${managed_port}"
+count_file="${TMP}/argv0-gate-count.log"
+rm -f "${count_file}"
+argv0_gate_fetch "${cache}" "${managed_url}" "${count_file}" 1.1.1 1.1.1 --refresh >/dev/null 2>/dev/null || true
+rc=0
+out=$(argv0_gate_fetch "${cache}" "${managed_url}" "${count_file}" 2.2.2 2.2.2 --refresh 2>/dev/null) || rc=$?
+count_value="missing"; [[ -r "${count_file}" ]] && count_value=$(< "${count_file}")
+source_value=$(cat "${cache}/source" 2>/dev/null || true)
+SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_CACHE_DIR="${cache}" SHOWY_QUOTA_CODEXBAR_BIN="${argv0_bin_dir}/codexbar" SHOWY_QUOTA_CODEXBAR_SERVE_URL="${managed_url}" "${REPO_ROOT}/bin/showy-quota-fetch" --stop-serve >/dev/null 2>/dev/null || true
+if (( rc == 0 )) && [[ "${count_value}" == "2" ]] && [[ "${source_value}" == "serve" ]] \
+    && printf '%s' "${out}" | jq -e 'type == "array" and any(.provider == "codex")' >/dev/null 2>&1; then
+    ok "fetcher resolves bare codexbar bin to absolute so the version gate engages"
+else
+    fail "fetcher resolves bare codexbar bin to absolute so the version gate engages" "rc=${rc}; count=${count_value}; source=${source_value}; out=${out}"
+fi
 
 cache=$(mk_cache)
 cp "${FIXTURE_DIR}/codexbar-mixed.json" "${cache}/usage.json"

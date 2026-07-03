@@ -5,7 +5,9 @@ use time::format_description::well_known::Rfc3339;
 use time::macros::format_description;
 use time::{Duration, OffsetDateTime, PrimitiveDateTime, Time, UtcOffset};
 
-use crate::codexbar::{is_renderable, parse_usage_payload, NamedWindow, ProviderRecord, Usage, UsageWindow};
+use crate::codexbar::{
+    is_renderable, parse_usage_payload, NamedWindow, ProviderRecord, Usage, UsageWindow,
+};
 use crate::config::RenderConfig;
 use crate::palette::hex_to_rgb;
 
@@ -31,7 +33,7 @@ pub fn render_zellij(
     Ok(render_records(&records, config, options))
 }
 
-pub fn render_records(
+fn render_records(
     records: &[ProviderRecord],
     config: &RenderConfig,
     options: RenderOptions,
@@ -70,7 +72,15 @@ pub fn render_records(
             if idx > 0 {
                 out.push(' ');
             }
-            render_provider(&mut out, record, sigil, config, options, chunk_bg, stale_color);
+            render_provider(
+                &mut out,
+                record,
+                sigil,
+                config,
+                options,
+                chunk_bg,
+                stale_color,
+            );
         }
     }
 
@@ -207,21 +217,18 @@ fn render_provider(
     let p_long = !shared && is_long_window(primary, config.dim_window_minutes);
     let s_long = !shared && is_long_window(secondary, config.dim_window_minutes);
     let slots = [primary, secondary, tertiary];
+    let assembled_windows = distinct_render_windows(&slots, &usage.extra_rate_windows, 4);
     let bar_mode = terminal_mode_for_provider(
         config,
         &record.provider,
         tertiary.is_some(),
         pooled_auto(&slots, &usage.extra_rate_windows),
+        assembled_windows.len(),
     );
     // Only mono4 still assembles per-pool family lanes here; dual2 pooled
     // providers are pre-expanded into standalone dual records upstream.
     let families = if bar_mode == "mono4" {
-        pool_families(
-            &slots,
-            &usage.extra_rate_windows,
-            config,
-            options.stale,
-        )
+        pool_families(&slots, &usage.extra_rate_windows, config, options.stale)
     } else {
         Vec::new()
     };
@@ -232,10 +239,26 @@ fn render_provider(
     // slots (absent slots stay empty and never shift up); mono4 uses the
     // assembled per-pool windows.
     let mut mono_lanes: Vec<Lane> = match bar_mode.as_str() {
-        "mono4" if families.len() >= 2 => families
+        "mono4" if assembled_windows.len() >= 4 => {
+            let family_lanes: Vec<Lane> = families
+                .iter()
+                .take(2)
+                .flat_map(|family| [family.top, family.bottom])
+                .collect();
+            if family_lanes.iter().filter(|lane| lane.present).count() >= 4 {
+                family_lanes
+            } else {
+                assembled_windows
+                    .iter()
+                    .take(4)
+                    .map(|window| Lane::from_window(window, config, options.stale))
+                    .collect()
+            }
+        }
+        "mono3" if tertiary.is_none() && assembled_windows.len() >= 3 => assembled_windows
             .iter()
-            .take(2)
-            .flat_map(|family| [family.top, family.bottom])
+            .take(3)
+            .map(|window| Lane::from_window(window, config, options.stale))
             .collect(),
         "mono3" => [primary, secondary, tertiary]
             .into_iter()
@@ -304,7 +327,7 @@ fn render_provider(
     } else {
         secondary.and_then(UsageWindow::window_minutes)
     };
-    let width = config.zellij_bar_width.max(8);
+    let width = config.zellij_bar_width.clamp(8, 400);
     if !mono_lanes.is_empty() {
         let markers = mono_marker_cells(config, &mono_lanes, width, options.now_epoch);
         mono_lane_bar(out, config, options, &mono_lanes, &mono_color, &markers);
@@ -401,7 +424,7 @@ fn dual_metric_bar(
     options: RenderOptions,
     args: DualArgs<'_>,
 ) {
-    let width = config.zellij_bar_width.max(8);
+    let width = config.zellij_bar_width.clamp(8, 400);
     let surface_color = &config.palette_surface;
     let elapsed_color = &config.palette_elapsed;
     let p_fill = filled_cells(args.p_remaining, width);
@@ -593,7 +616,7 @@ fn mono_lane_bar(
     mono_color: &str,
     markers: &[(usize, &str)],
 ) {
-    let width = config.zellij_bar_width.max(8);
+    let width = config.zellij_bar_width.clamp(8, 400);
     let surface_color = &config.palette_surface;
     let fills: Vec<usize> = lanes
         .iter()
@@ -758,6 +781,47 @@ fn main_family<'a>(
     })
 }
 
+/// Up to `max` distinct renderable windows for collapse decisions and non-pooled
+/// mono4/mono3 fallback lanes: positional slots first, then extra rate windows
+/// with known usage, deduped by the render-window key (windowMinutes + resetsAt).
+fn distinct_render_windows<'a>(
+    slots: &[Option<&'a UsageWindow>; 3],
+    extras: &'a [NamedWindow],
+    max: usize,
+) -> Vec<&'a UsageWindow> {
+    let mut out: Vec<&'a UsageWindow> = Vec::new();
+    let mut seen: Vec<(Option<i64>, Option<&'a str>)> = Vec::new();
+    for window in slots.iter().copied().flatten() {
+        let key = (window.window_minutes(), window.resets_at.as_deref());
+        if seen.contains(&key) {
+            continue;
+        }
+        seen.push(key);
+        out.push(window);
+        if out.len() >= max {
+            return out;
+        }
+    }
+    for named in extras {
+        let Some(window) = named.window.as_ref() else {
+            continue;
+        };
+        if window.used_percent.is_none() || named.usage_known == Some(false) {
+            continue;
+        }
+        let key = (window.window_minutes(), window.resets_at.as_deref());
+        if seen.contains(&key) {
+            continue;
+        }
+        seen.push(key);
+        out.push(window);
+        if out.len() >= max {
+            return out;
+        }
+    }
+    out
+}
+
 /// A provider is model-pooled in `auto` mode when its `extraRateWindows` carry
 /// every present positional slot (matched on windowMinutes + resetsAt): the
 /// extras are then the canonical, complete dataset, so per-pool families drive
@@ -897,7 +961,13 @@ fn expand_pooled(
         semantic_slot(&usage.tertiary),
     ];
     let pooled = pooled_auto(&slots, &usage.extra_rate_windows);
-    let mode = terminal_mode_for_provider(config, &record.provider, slots[2].is_some(), pooled);
+    let mode = terminal_mode_for_provider(
+        config,
+        &record.provider,
+        slots[2].is_some(),
+        pooled,
+        distinct_render_windows(&slots, &usage.extra_rate_windows, 4).len(),
+    );
     if mode != "dual2" {
         return None;
     }
@@ -966,7 +1036,10 @@ fn elapsed_marker_cell(
     let duration = window_minutes.checked_mul(60)?;
     let start_epoch = reset_epoch.checked_sub(duration)?;
     let elapsed = (now_epoch - start_epoch).clamp(0, duration);
-    let mut marker = ((duration - elapsed) as usize).saturating_mul(width) / duration as usize;
+    // Compute in u64 so a large window_minutes does not truncate/overflow when
+    // cast to a 32-bit usize on wasm32; the quotient is <= width and fits usize.
+    let remaining = (duration - elapsed) as u64;
+    let mut marker = (remaining.saturating_mul(width as u64) / duration as u64) as usize;
     if marker >= width {
         marker = width - 1;
     }
@@ -978,6 +1051,7 @@ fn terminal_mode_for_provider(
     provider: &str,
     has_tertiary: bool,
     pooled: bool,
+    assembled_window_count: usize,
 ) -> String {
     let requested = match config.terminal_bar_mode.as_str() {
         "dual" => "dual",
@@ -990,17 +1064,16 @@ fn terminal_mode_for_provider(
             .mode_for(provider)
             .unwrap_or(if pooled { "dual2" } else { "dual" }),
     };
-    // mono3 collapses to dual without its third positional slot; the family
-    // bodies (dual2/mono4) pass through and adapt to the pool count at render.
+    // mono4 is an explicit four-lane body: render it only when the assembled
+    // distinct-window set has all four lanes. With three assembled windows,
+    // collapse to mono3; with fewer, follow the existing mono3→dual chain.
     let mode = match requested {
+        "mono4" if assembled_window_count >= 4 => "mono4",
+        "mono4" if assembled_window_count == 3 => "mono3",
+        "mono4" => "dual",
         "mono3" if has_tertiary => "mono3",
         "mono3" => "dual",
         "dual2" => "dual2",
-        // mono4 on a non-pooled provider with a third positional slot has no
-        // family to fill four lanes; keep the old collapse to mono3 so all
-        // three windows stay visible instead of dropping to a 2-window dual.
-        "mono4" if !pooled && has_tertiary => "mono3",
-        "mono4" => "mono4",
         _ => "dual",
     };
     mode.to_string()
@@ -1340,8 +1413,19 @@ mod tests {
 
     #[test]
     fn parses_reset_description_time_only() {
-        let epoch = reset_epoch("Resets 11:59 PM", 1_704_067_200, None).expect("reset epoch");
-        assert!(epoch > 1_704_067_200);
+        // Pin the offset to UTC so the result is deterministic regardless of the
+        // host timezone. now = 2024-01-01 00:00:00 UTC; "11:59 PM" resolves to the
+        // same UTC day at 23:59:00.
+        assert_eq!(
+            reset_epoch("Resets 11:59 PM", 1_704_067_200, Some(0)),
+            Some(1_704_153_540)
+        );
+        // When the parsed time is earlier than now, it rolls to the next day.
+        // now = 2024-01-01 23:00:00 UTC; "1:00 AM" rolls forward to 2024-01-02.
+        assert_eq!(
+            reset_epoch("Resets 1:00 AM", 1_704_150_000, Some(0)),
+            Some(1_704_157_200)
+        );
     }
 
     #[test]

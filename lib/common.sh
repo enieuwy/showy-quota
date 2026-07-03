@@ -12,6 +12,49 @@ fi
 
 set -uo pipefail
 
+# Echo $1 when it is a base-10 unsigned integer (optionally clamped to <= $3);
+# otherwise echo the fallback $2. Keeps malformed numeric config out of bash
+# arithmetic, where a non-numeric value silently evaluates to 0. Returned valid
+# values are canonicalized to decimal so leading zeroes cannot become octal in a
+# later arithmetic context.
+showy_quota_uint() {
+    local raw="$1" fallback="$2" max="${3:-}" value
+    [[ "${raw}" =~ ^[0-9]+$ ]] || { printf '%s' "${fallback}"; return; }
+    value=$((10#${raw}))
+    if [[ -n "${max}" ]] && (( value > max )); then
+        printf '%s' "${max}"
+    else
+        printf '%s' "${value}"
+    fi
+}
+
+# Validate a configured executable reference. The *_BIN knobs come from the
+# environment/config.env and are exec'd directly; this is defense-in-depth so a
+# value carrying whitespace or shell metacharacters (the documented injection
+# vector, e.g. `/bin/sh -c …`) cannot be exec'd. A plain command name or
+# filesystem path is accepted as-is; existence is deliberately NOT required, so
+# a missing or not-yet-installed target just fails to exec and the caller's
+# normal fallback handles it (an existence check cannot block a real malicious
+# binary anyway, and would break legitimate missing-path fallbacks). Echoes the
+# value on success, returns 1 otherwise so callers degrade to a trusted
+# default. Pure bash: no subprocess, safe to call while sourcing.
+showy_quota_valid_bin() {
+    local value="$1"
+    [[ "${value}" =~ ^[A-Za-z0-9._+@/-]+$ ]] || return 1
+    printf '%s' "${value}"
+}
+
+# Validate a configured status glyph. Glyphs reach `sketchybar --set` and the
+# terminal strips; a control character or an absurd length from env/config could
+# corrupt rendering (quoting already prevents argument injection). Echoes the
+# value on success, returns 1 otherwise so callers fall back to the default.
+showy_quota_valid_glyph() {
+    local value="$1"
+    [[ "${value}" != *[$'\x01'-$'\x1f']* ]] || return 1
+    (( ${#value} <= 16 )) || return 1
+    printf '%s' "${value}"
+}
+
 # ── config loading ─────────────────────────────────────────────────────
 
 showy_quota_load_config() {
@@ -28,6 +71,16 @@ showy_quota_load_config() {
 
     theme="${SHOWY_QUOTA_THEME:-}"
     [[ -n "${theme}" ]] || return 0
+    # SHOWY_QUOTA_THEME is interpolated into a path that gets sourced as shell.
+    # Restrict it to a bare theme name (same charset the CLI enforces) so a value
+    # like '../../../tmp/evil' cannot traverse out of the themes dir and source
+    # an arbitrary .env file.
+    if [[ ! "${theme}" =~ ^[A-Za-z0-9._-]+$ ]]; then
+        # Ignore the malformed/hostile name and keep rendering with defaults
+        # rather than aborting the renderer under `set -e`.
+        printf 'showy-quota: ignoring invalid theme name %q\n' "${theme}" >&2
+        return 0
+    fi
 
     repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
     for theme_path in \
@@ -58,6 +111,7 @@ showy_quota_load_config
 : "${SHOWY_QUOTA_CODEXBAR_SERVE_START_WAIT_TENTHS:=30}"
 : "${SHOWY_QUOTA_MANAGE_SERVE:=1}"
 : "${SHOWY_QUOTA_CODEXBAR_SERVE_TIMEOUT_SECONDS:=10}"
+: "${SHOWY_QUOTA_CODEXBAR_SERVE_USAGE_TIMEOUT_SECONDS:=30}"
 : "${SHOWY_QUOTA_CODEXBAR_SERVE_REFRESH_SECONDS:=10}"
 : "${SHOWY_QUOTA_CODEXBAR_CLI_TIMEOUT_SECONDS:=20}"
 : "${SHOWY_QUOTA_CODEXBAR_SERVE_FAILURES_BEFORE_RESTART:=3}"
@@ -100,6 +154,10 @@ showy_quota_load_config
 : "${SHOWY_QUOTA_SKETCHYBAR_UPDATE_FREQ:=10}"
 : "${SHOWY_QUOTA_PNG_BAR_W:=80}"
 : "${SHOWY_QUOTA_PNG_BAR_H:=18}"
+# Validate the PNG bar dimensions here (before the bar-width default derives
+# from PNG_BAR_W) so a non-numeric value cannot abort sourcing under `set -u`.
+SHOWY_QUOTA_PNG_BAR_W=$(showy_quota_uint "${SHOWY_QUOTA_PNG_BAR_W}" 80 4096)
+SHOWY_QUOTA_PNG_BAR_H=$(showy_quota_uint "${SHOWY_QUOTA_PNG_BAR_H}" 18 4096)
 : "${SHOWY_QUOTA_SKETCHYBAR_ICON_WIDTH:=22}"
 : "${SHOWY_QUOTA_SKETCHYBAR_ICON_PADDING_LEFT:=5}"
 : "${SHOWY_QUOTA_SKETCHYBAR_ICON_SCALE:=0.28}"
@@ -134,6 +192,68 @@ showy_quota_load_config
 : "${SHOWY_QUOTA_CODEXBAR_CLI_FAILURE_STAMP:=${SHOWY_QUOTA_CACHE_DIR}/cli-failed-at}"
 : "${SHOWY_QUOTA_CODEXBAR_CONFIG_PROVIDERS_FAILURE_STAMP:=${SHOWY_QUOTA_CACHE_DIR}/config-providers-failed-at}"
 : "${SHOWY_QUOTA_PROVIDER_FAILURE_DIR:=${SHOWY_QUOTA_CACHE_DIR}/provider-failures}"
+
+# ── numeric config validation ──────────────────────────────────────────
+# Malformed integer config (typos, empties) must not silently corrupt
+# arithmetic: a non-numeric value in (( )) evaluates to 0, which would e.g.
+# force every provider to render "good" or report the cache as never stale.
+# Clamp each arithmetic knob back to its default, and to a ceiling where an
+# unbounded value would otherwise stall a wait loop.
+SHOWY_QUOTA_REFRESH_SECONDS=$(showy_quota_uint "${SHOWY_QUOTA_REFRESH_SECONDS}" 120)
+SHOWY_QUOTA_LOCK_WAIT_TENTHS=$(showy_quota_uint "${SHOWY_QUOTA_LOCK_WAIT_TENTHS}" 100 36000)
+SHOWY_QUOTA_GOOD_MIN_REMAINING=$(showy_quota_uint "${SHOWY_QUOTA_GOOD_MIN_REMAINING}" 40)
+SHOWY_QUOTA_WARN_MIN_REMAINING=$(showy_quota_uint "${SHOWY_QUOTA_WARN_MIN_REMAINING}" 15)
+SHOWY_QUOTA_TIME_WARN_MINUTES=$(showy_quota_uint "${SHOWY_QUOTA_TIME_WARN_MINUTES}" 30)
+SHOWY_QUOTA_DIM_WINDOW_MINUTES=$(showy_quota_uint "${SHOWY_QUOTA_DIM_WINDOW_MINUTES}" 10080)
+SHOWY_QUOTA_ZELLIJ_PIPE_INTERVAL=$(showy_quota_uint "${SHOWY_QUOTA_ZELLIJ_PIPE_INTERVAL}" 10 86400)
+SHOWY_QUOTA_ZELLIJ_PIPE_TIMEOUT_TENTHS=$(showy_quota_uint "${SHOWY_QUOTA_ZELLIJ_PIPE_TIMEOUT_TENTHS}" 20 36000)
+
+# SketchyBar geometry knobs reach `sketchybar --set` / ImageMagick as numeric
+# arguments; clamp them to sane integer ceilings so a malformed value produces
+# the default instead of a broken/oversized item. (PNG_BAR_W/H are normalized
+# above, before the bar-width default derives from them.)
+SHOWY_QUOTA_SKETCHYBAR_UPDATE_FREQ=$(showy_quota_uint "${SHOWY_QUOTA_SKETCHYBAR_UPDATE_FREQ}" 10 86400)
+SHOWY_QUOTA_SKETCHYBAR_ICON_WIDTH=$(showy_quota_uint "${SHOWY_QUOTA_SKETCHYBAR_ICON_WIDTH}" 22 4096)
+SHOWY_QUOTA_SKETCHYBAR_ICON_PADDING_LEFT=$(showy_quota_uint "${SHOWY_QUOTA_SKETCHYBAR_ICON_PADDING_LEFT}" 5 4096)
+SHOWY_QUOTA_SKETCHYBAR_PROVIDER_ICON_FONT_PADDING_RIGHT=$(showy_quota_uint "${SHOWY_QUOTA_SKETCHYBAR_PROVIDER_ICON_FONT_PADDING_RIGHT}" 2 4096)
+SHOWY_QUOTA_SKETCHYBAR_LABEL_WIDTH=$(showy_quota_uint "${SHOWY_QUOTA_SKETCHYBAR_LABEL_WIDTH}" 32 4096)
+SHOWY_QUOTA_SKETCHYBAR_COMPACT_PROVIDER_COUNT=$(showy_quota_uint "${SHOWY_QUOTA_SKETCHYBAR_COMPACT_PROVIDER_COUNT}" 5 4096)
+SHOWY_QUOTA_SKETCHYBAR_PILL_RADIUS=$(showy_quota_uint "${SHOWY_QUOTA_SKETCHYBAR_PILL_RADIUS}" 14 4096)
+SHOWY_QUOTA_SKETCHYBAR_PILL_HEIGHT=$(showy_quota_uint "${SHOWY_QUOTA_SKETCHYBAR_PILL_HEIGHT}" 28 4096)
+SHOWY_QUOTA_SKETCHYBAR_BAR_WIDTH=$(showy_quota_uint "${SHOWY_QUOTA_SKETCHYBAR_BAR_WIDTH}" $((SHOWY_QUOTA_PNG_BAR_W + 3)) 4096)
+# ICON_SCALE is a float (sketchybar background.image.scale); fall back to the
+# default when it is not a plain decimal so the icon never gets a junk scale.
+[[ "${SHOWY_QUOTA_SKETCHYBAR_ICON_SCALE}" =~ ^[0-9]+([.][0-9]+)?$ ]] || SHOWY_QUOTA_SKETCHYBAR_ICON_SCALE=0.28
+
+# SketchyBar string knobs reach `sketchybar --set` as quoted single arguments
+# (so no extra-arg injection is possible), but a malformed value still yields a
+# broken item — clamp them to a known-good shape. PILL_COLOR must be an 8-digit
+# ARGB literal; the provider icon font is a `family:style:size` spec, so reject
+# only control characters / absurd length back to the default.
+[[ "${SHOWY_QUOTA_SKETCHYBAR_PILL_COLOR}" =~ ^0x[0-9a-fA-F]{8}$ ]] || SHOWY_QUOTA_SKETCHYBAR_PILL_COLOR=0xcc24273a
+[[ "${SHOWY_QUOTA_SKETCHYBAR_PROVIDER_ICON_FONT}" != *[$'\x01'-$'\x1f']* && ${#SHOWY_QUOTA_SKETCHYBAR_PROVIDER_ICON_FONT} -le 128 ]] || SHOWY_QUOTA_SKETCHYBAR_PROVIDER_ICON_FONT='sketchybar-app-font:Regular:14.0'
+
+# Zellij pipe identifiers are embedded in the zjstatus protocol string
+# (`zjstatus::pipe::<widget>::<output>`) and passed to `zellij pipe --name`.
+# Restrict them to short safe identifiers so a `::` in the widget cannot shift
+# the protocol field split (misrouting output to another widget), an overlong
+# identifier cannot bypass the renderer-output payload cap, and a stray
+# character in the pipe name cannot confuse the zellij CLI.
+[[ "${SHOWY_QUOTA_ZELLIJ_WIDGET}" =~ ^[A-Za-z0-9_.-]+$ && ${#SHOWY_QUOTA_ZELLIJ_WIDGET} -le 128 ]] || SHOWY_QUOTA_ZELLIJ_WIDGET=pipe_showy_quota
+[[ "${SHOWY_QUOTA_ZELLIJ_PIPE_NAME}" =~ ^[A-Za-z0-9_-]+$ && ${#SHOWY_QUOTA_ZELLIJ_PIPE_NAME} -le 128 ]] || SHOWY_QUOTA_ZELLIJ_PIPE_NAME=showy-quota
+
+# ── executable config validation ───────────────────────────────────────
+# The *_BIN knobs are exec'd directly; reject a value that is a shell snippet
+# or a non-runnable path back to its default so a poisoned env/config.env entry
+# cannot become an arbitrary-binary launch. FETCH_BIN is validated at its
+# point of use in the renderer entry points (its default is a sibling path).
+SHOWY_QUOTA_CODEXBAR_BIN=$(showy_quota_valid_bin "${SHOWY_QUOTA_CODEXBAR_BIN}") || SHOWY_QUOTA_CODEXBAR_BIN=codexbar
+SHOWY_QUOTA_ZELLIJ_BIN=$(showy_quota_valid_bin "${SHOWY_QUOTA_ZELLIJ_BIN}") || SHOWY_QUOTA_ZELLIJ_BIN=zellij
+
+# Status glyphs come from env/config and reach sketchybar/terminal output;
+# reject control characters or absurd lengths back to their defaults.
+SHOWY_QUOTA_STALE_GLYPH=$(showy_quota_valid_glyph "${SHOWY_QUOTA_STALE_GLYPH}") || SHOWY_QUOTA_STALE_GLYPH='⚠'
+SHOWY_QUOTA_DEGRADED_CLI_GLYPH=$(showy_quota_valid_glyph "${SHOWY_QUOTA_DEGRADED_CLI_GLYPH}") || SHOWY_QUOTA_DEGRADED_CLI_GLYPH='⚠cli'
 
 declare -gA SHOWY_QUOTA_ROLE_PALETTE_CACHE=()
 
@@ -230,6 +350,9 @@ showy_quota_parse_local_epoch() {
 showy_quota_reset_description_epoch() {
     local raw="$1"
     [[ -n "${raw}" && "${raw}" != "null" ]] || return 1
+    # CodexBar-supplied date text is handed to date/gdate -d; cap its length so a
+    # pathologically long payload field cannot stall the parser.
+    (( ${#raw} <= 64 )) || return 1
     local desc="${raw#Resets }"
     [[ "${desc}" != "${raw}" ]] || desc="${raw#resets }"
     [[ "${desc}" != "${raw}" ]] || return 1
@@ -261,6 +384,7 @@ showy_quota_reset_description_epoch() {
 showy_quota_reset_epoch() {
     local raw="$1"
     [[ -n "${raw}" && "${raw}" != "null" ]] || return 1
+    (( ${#raw} <= 64 )) || return 1
 
     # Normalize: strip fractional seconds (regardless of suffix style),
     # collapse +HH:MM → +HHMM, replace Z with +0000.

@@ -39,6 +39,30 @@ fn rust_renderer_matches_shell_zellij_renderer() {
             },
         },
         Case {
+            name: "codex forced mono4 four distinct windows no color",
+            fixture: "codexbar-codex-mono4-four.json",
+            color: false,
+            now_epoch: 4_070_908_800,
+            stale: false,
+            degraded_cli: false,
+            configure: |config| {
+                config.provider_modes = vec![("codex".into(), "mono4".into())];
+                config.zellij_bar_width = 12;
+            },
+        },
+        Case {
+            name: "codex forced mono4 three distinct windows collapses mono3",
+            fixture: "codexbar-codex-mono4-three.json",
+            color: false,
+            now_epoch: 4_070_908_800,
+            stale: false,
+            degraded_cli: false,
+            configure: |config| {
+                config.provider_modes = vec![("codex".into(), "mono4".into())];
+                config.zellij_bar_width = 12;
+            },
+        },
+        Case {
             name: "antigravity quad dual2 color",
             fixture: "codexbar-antigravity-quad.json",
             color: true,
@@ -425,7 +449,10 @@ fn apply_case_env(cmd: &mut Command, case: Case<'_>) {
         cmd.env("SHOWY_QUOTA_MONO_MARKERS", config.mono_markers.join(","));
     }
     if config.palette_elapsed_long != def.palette_elapsed_long {
-        cmd.env("SHOWY_QUOTA_PALETTE_ELAPSED_LONG", &config.palette_elapsed_long);
+        cmd.env(
+            "SHOWY_QUOTA_PALETTE_ELAPSED_LONG",
+            &config.palette_elapsed_long,
+        );
     }
     if config.dim_window_minutes != def.dim_window_minutes {
         cmd.env(

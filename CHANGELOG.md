@@ -6,6 +6,245 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.4.1] — 2026-07-03
+
+### Fixed
+- `bin/showy-quota-fetch` no longer leaks the `flock` lock descriptor (fd 9)
+  into the managed `codexbar serve` daemon. `start_managed_serve` runs under
+  `showy_quota_with_lock`, and `setsid`/`nohup` detach the session but still
+  inherit open descriptors, so a serve started while the lock was held kept fd 9
+  open for its whole life and pinned the advisory lock — every later fetch then
+  timed out on `flock -n` and fell back to stale cache (most visibly, the
+  build-version gate could never recycle a stale serve). The daemon now closes
+  fd 9 (`9>&-`). Only `flock` hosts (Linux) were affected; the `mkdir` lock
+  fallback (e.g. macOS without `flock`) has no descriptor to leak.
+
+## [0.4.0] — 2026-07-03
+
+### Added
+- `SHOWY_QUOTA_CODEXBAR_SERVE_USAGE_TIMEOUT_SECONDS` (default `30`) gives the
+  `/usage` probe its own budget, separate from the `/health` probe's
+  `SHOWY_QUOTA_CODEXBAR_SERVE_TIMEOUT_SECONDS` (default `10`). A healthy
+  `codexbar serve` bounds collection per provider and can take up to ~0.8x its
+  request deadline (~24s by default) to return the healthy providers when a slow
+  one degrades to an error row; the short health timeout previously abandoned
+  that usable partial response and dropped the bar to degraded CLI output
+  whenever any provider was briefly slow. This relies on CodexBar's per-provider
+  serve bounding, landed via
+  [steipete/CodexBar#1748](https://github.com/steipete/CodexBar/pull/1748).
+- The standalone Zellij plugin now expires a hung `/health` probe on a short
+  10s window while giving the `/usage` probe a 30s budget, mirroring the shell
+  fetcher's split. Previously both shared one 30s watchdog, so an unreachable
+  serve latched for 30s before the plugin fell back. Both surfaces now use the
+  same fast-health / patient-usage model.
+- The standalone Zellij plugin now staggers its degraded CLI fallback across
+  instances. On a serve outage, each per-tab plugin instance waits a distinct,
+  stable per-instance hold (`fallback_jitter_seconds`, default
+  `min(cli_interval_seconds, 60)`) — re-probing serve on a short cadence — before
+  spawning the first `codexbar usage --provider <id>` call. The offset is derived
+  from the Zellij plugin id, so N tabs no longer stampede `codexbar` at the same
+  instant when serve blips; because a fast managed-serve restart is usually seen
+  during the hold, most instances return to the HTTP path and spawn no CLI work
+  at all. Set `fallback_jitter_seconds 0` to restore the previous immediate
+  fallback.
+
+### Security
+- The bundled ImageMagick policy now denies all external delegates
+  (`delegate` domain, pattern `*`), and the SketchyBar plugin rasterizes
+  provider SVGs through the internal `MSVG:` decoder. Previously only the
+  URL/HTTP/HTTPS/FTP/MSL coders were denied, so a delegate-based SVG path
+  (librsvg/inkscape) could still resolve external references from a hostile
+  SVG — the SSRF/exfiltration hole the policy was meant to close.
+- The standalone Zellij plugin now validates `stale_glyph` and
+  `degraded_cli_glyph` from KDL/env config with the same rules as the shell
+  renderers (no control characters, length-capped); invalid glyphs keep the
+  defaults instead of flowing into raw ANSI output.
+- `SHOWY_QUOTA_ZELLIJ_WIDGET` and `SHOWY_QUOTA_ZELLIJ_PIPE_NAME` are now
+  length-capped (128 bytes); an overlong identifier previously bypassed the
+  4096-byte pipe payload cap via the `zjstatus::pipe::<widget>::` prefix.
+- `SHOWY_QUOTA_CODEXBAR_SERVE_TIMEOUT_SECONDS` and
+  `SHOWY_QUOTA_CODEXBAR_SERVE_USAGE_TIMEOUT_SECONDS` now reject non-positive
+  values and fall back to their defaults; `0` previously reached
+  `curl --max-time 0`, which disables the transfer timeout entirely and
+  reintroduced the unbounded `/usage` probe.
+
+### Fixed
+- The SketchyBar plugin no longer drops a model-pooled provider's whole family
+  when CodexBar transiently marks one family's windows `usageKnown:false` (e.g.
+  Antigravity's Claude/GPT pool during a collection hiccup). The pooled layout
+  previously rendered those placeholder windows as absent rows, so the
+  `has_t`/`has_q` lane gate collapsed and the bar dropped to just the measured
+  (Gemini) lanes. Such a window now keeps its lane drawn as an empty track (no
+  pacing marker), so a transiently-thin family stays visible — matching the
+  Zellij renderer, which keeps the `AGᶜ` lane.
+- Forced `mono4` again reaches the documented four-lane path: a non-pooled
+  provider with three positional slots plus a distinct `extraRateWindows`
+  entry renders four lanes instead of collapsing to `mono3`, and a
+  three-window shape under forced `mono4` falls back to `mono3` instead of
+  drawing an empty fourth row. Mode collapse and the `mono4` body are now
+  both gated on the distinct assembled render-window count, in the Rust core
+  and both shell renderers.
+- The standalone Zellij plugin now generation-tags `/health` and `/usage`
+  web requests and drops responses from expired probes; previously a
+  timed-out old `/usage` response could clear the in-flight flag for a newer
+  request and surface stale data.
+- The standalone Zellij plugin now schedules its short re-probe timer when
+  arming the degraded CLI-fallback hold; with a long `interval_seconds` the
+  promised fast serve re-probe cadence previously never fired and recovery
+  waited for the old normal timer.
+- Numeric config values with leading zeros (e.g. `SHOWY_QUOTA_PNG_BAR_W=09`)
+  no longer abort the renderers with an octal arithmetic error; unsigned
+  integer config is normalized to base-10 on load.
+- The pre-commit rustfmt hook now includes renamed Rust files
+  (`--diff-filter=ACMR`); a rename+edit previously skipped the local check
+  and failed in CI.
+- `bin/showy-quota-fetch` now matches the managed `codexbar serve` process by
+  splitting the `ps` command output with `read -ra` instead of an unquoted
+  expansion. The previous `for token in ${command}` glob-expanded the command
+  string against the working directory, so a cwd containing a file matching a
+  glob character in the command line could misclassify a healthy serve and
+  trigger an unnecessary restart (or miss a running serve).
+- `bin/showy-quota-fetch`'s cache publisher now checks each `mv` when promoting
+  the temporary `usage`/`usage-stamp`/`source` files and removes the leftover
+  temporaries on failure instead of leaking them into the cache directory.
+- The Rust renderer's pacing-marker math now computes in `u64` before narrowing
+  to `usize`, so a large `windowMinutes` no longer truncates or overflows on the
+  32-bit `usize` of the `wasm32` Zellij plugin (it already matched the shell's
+  64-bit arithmetic on native targets).
+- Palette dim-scaling widens to `u128` before multiplying, so a pathological
+  scale factor can no longer overflow (debug panic / release wrap); channels
+  clamp to `0xff` as before.
+- Numeric render config (`SHOWY_QUOTA_GOOD_MIN_REMAINING`, `…_WARN_MIN_REMAINING`,
+  `…_TIME_WARN_MINUTES`, `…_REFRESH_SECONDS`, `…_DIM_WINDOW_MINUTES`,
+  `…_LOCK_WAIT_TENTHS`) is validated at load: a non-numeric value — which bash
+  arithmetic silently evaluates to `0` — is replaced by the documented default
+  instead of, e.g., forcing every provider to render "good" or reporting the
+  cache as never stale. `LOCK_WAIT_TENTHS` is also clamped to a ceiling so a
+  pathological value cannot stall the cache wait loop.
+- The standalone Zellij plugin no longer latches in a permanent loading/broken
+  state when `codexbar serve` answers HTTP 200 with a corrupt body (captive
+  portal / proxy page): an unparseable payload now counts as a serve failure and
+  advances toward CLI fallback instead of resetting the failure counter.
+- The standalone Zellij plugin now expires a `/health` or `/usage` web request
+  that hangs without ever producing a result (Zellij reports no request
+  failure) after 30s, so a dropped connection no longer wedges the plugin — it
+  retries and falls back to the CLI exactly as a returned failure would.
+- `share/config.env.example` no longer documents removed knobs: the
+  `SHOWY_QUOTA_PALETTE_{SECONDARY,TERTIARY}_*`/`*_SCALE` entries (replaced by
+  `SHOWY_QUOTA_PALETTE_DIM_SCALE` + `SHOWY_QUOTA_DIM_WINDOW_MINUTES`) and the
+  `SHOWY_QUOTA_MONO3_*` entries (replaced by `SHOWY_QUOTA_PROVIDER_MODES`,
+  `SHOWY_QUOTA_MONO_COLOR_MODE`, `SHOWY_QUOTA_MONO_MARKERS`) are updated to the
+  live names so following the example no longer sets variables that have no
+  effect.
+- `bin/showy-quota-fetch` now build-version-gates `codexbar serve` reuse: when a
+  healthy serve's `/health` reports a `version`, it is reused only if that build
+  matches the installed `codexbar --version`. Both strings are reduced to a
+  comparable version token (matching glean's stale-serve detector), so a
+  `CodexBar`-prefixed `/health` value is not mistaken for a stale build. A
+  mismatch (e.g. after a CodexBar
+  update left a stale in-memory binary on the port) recycles the serve —
+  terminating a managed serve through its pidfile or freeing the configured
+  port of a foreign one — and starts a fresh build. A serve whose `/health`
+  omits `version` is reused unchanged, so the gate is a no-op for builds that
+  predate the field. This stops reuse of a stale serve binary, the trigger for
+  the post-update SecurityAgent keychain-prompt storm (see also the CodexBar-side
+  fix [steipete/CodexBar#1717](https://github.com/steipete/CodexBar/pull/1717)).
+  The configured `codexbar` binary is resolved to an absolute path before
+  `--version` and before launching a managed serve, because CodexBar reads its
+  version from the app bundle via `argv[0]`: a bare command name reports no
+  version (in `--version` or `/health`), which would otherwise leave the gate
+  inert and spawn version-less serves. This gate and the plugin's `build_marker`
+  below both depend on CodexBar reporting `version` on `/health`, landed via
+  [steipete/CodexBar#1703](https://github.com/steipete/CodexBar/pull/1703).
+- The standalone Zellij plugin can now detect a stale-build `codexbar serve` and
+  append a `⚠ver` marker, behind the opt-in `build_marker` config key (default
+  off). When enabled it parses the serve's `/health` `version`, compares it
+  against the installed `codexbar --version` (a periodic, absolute-path-
+  resolving, watchdog-bounded probe gated on `cli_fallback`), and flags a
+  mismatch using the same version-token normalization as the shell and glean.
+  Detection only — the plugin never kills or recycles a session serve (that
+  stays with `showy-quota-fetch`). With `build_marker` off the version probe
+  never runs; a serve or build that reports no version, or `cli_fallback "off"`,
+  is also a silent no-op.
+
+### Security
+- All GitHub Actions in `ci.yml` and `release.yml` are pinned to commit SHAs
+  (`actions/checkout`, `dtolnay/rust-toolchain`, `softprops/action-gh-release`)
+  instead of mutable floating tags, so a moved/compromised tag cannot alter the
+  build or the signed WASM release artifact.
+- The standalone Zellij plugin enforces the same loopback-only `serve_url`
+  contract as the shell data plane: a non-loopback URL is dropped (falling back
+  to the CLI) so Zellij's granted WebAccess cannot be turned into an
+  SSRF/exfiltration vector by a shared KDL layout.
+- `bin/showy-quota-tmux-bar` doubles any `#` in the user-configured
+  `SHOWY_QUOTA_CAP_LEFT`/`SHOWY_QUOTA_CAP_RIGHT` so cap text renders literally
+  instead of being parsed as a tmux format/expansion directive.
+- Terminal bar width (`SHOWY_QUOTA_TMUX_BAR_WIDTH` / `SHOWY_QUOTA_ZELLIJ_BAR_WIDTH`)
+  is clamped to `[8, 400]` across the shell renderers and the Rust core so an
+  unbounded value cannot drive a runaway render loop.
+- The `*_BIN` overrides (`SHOWY_QUOTA_FETCH_BIN`, `SHOWY_QUOTA_CODEXBAR_BIN`,
+  `SHOWY_QUOTA_ZELLIJ_BIN`) are validated before use across every renderer
+  entry point and `lib/common.sh`: a value carrying whitespace or shell
+  metacharacters (e.g. `/bin/sh -c …`) is rejected back to a trusted default
+  instead of being exec'd. A plain command name or path — including a
+  not-yet-installed one — is still honored, so cache-only and custom-path
+  installs are unaffected. The standalone Zellij plugin applies the same check
+  to the `serve_command`/`cli_command` KDL knobs.
+- Status glyphs (`SHOWY_QUOTA_STALE_GLYPH`, `SHOWY_QUOTA_DEGRADED_CLI_GLYPH`)
+  are rejected back to their defaults when they carry control characters or an
+  absurd length, so a poisoned env/config value cannot corrupt SketchyBar or
+  terminal-strip output.
+- `SHOWY_QUOTA_THEME` is validated against the same bare-name charset the CLI
+  enforces (`^[A-Za-z0-9._-]+$`) before `showy_quota_load_config` builds and
+  sources the theme `.env`, so a value like `../../../tmp/evil` can no longer
+  traverse out of the themes directory to source an arbitrary file. An invalid
+  name is ignored (defaults kept) rather than aborting the renderer.
+- CodexBar-supplied `resetsAt`/`resetDescription` date text is length-capped (64
+  chars) before it is handed to `date`/`gdate -d` in `showy_quota_reset_epoch`
+  and `showy_quota_reset_description_epoch`, so a pathologically long payload
+  field cannot stall the date parser.
+- The SketchyBar string knobs `SHOWY_QUOTA_SKETCHYBAR_PILL_COLOR` (must be an
+  8-digit `0xAARRGGBB` ARGB literal) and `SHOWY_QUOTA_SKETCHYBAR_PROVIDER_ICON_FONT`
+  (no control characters, ≤128 chars) are validated back to their defaults when
+  malformed, so a bad value yields the default item style instead of a broken
+  `sketchybar --set`. `share/config.env.example` now also documents that
+  `SHOWY_QUOTA_SKETCHYBAR_CLICK` is run by SketchyBar as a shell command on click.
+- `valid_provider_id` in `bin/showy-quota-fetch` now rejects the path components
+  `.` and `..` (which matched the existing `^[A-Za-z0-9_.-]+$` charset), so a
+  CodexBar payload with a provider id of `..` can no longer point the
+  per-provider failure-stamp path outside `SHOWY_QUOTA_PROVIDER_FAILURE_DIR`.
+- Zellij pipe identifiers are validated before use: `SHOWY_QUOTA_ZELLIJ_WIDGET`
+  must match `^[A-Za-z0-9_.-]+$` (so a `::` cannot shift the zjstatus
+  `pipe::<widget>::<output>` field split and misroute output to another widget)
+  and `SHOWY_QUOTA_ZELLIJ_PIPE_NAME` must match `^[A-Za-z0-9_-]+$`; both fall
+  back to their defaults otherwise. `bin/showy-quota-zellij-pipe` also caps the
+  rendered payload at 4096 chars so a pathological render can't silently exceed
+  the `zellij pipe` argument limit.
+- `showy-quota --grant-zellij` hardens the permissions.kdl write: the plugin
+  path is rejected if it contains a quote, backslash, or control character (so
+  it cannot break out of the KDL string literal and inject permission nodes),
+  and a `SHOWY_QUOTA_ZELLIJ_PERMISSIONS_FILE` override must be an absolute
+  `*.kdl` path (so an attacker-set env var cannot redirect the write to a shell
+  rc, LaunchAgent plist, `~/.ssh/authorized_keys`, or cron file).
+- `showy-quota-zellij-bar --json <file>` now requires a regular file and
+  validates it as quota JSON before rendering, so it can no longer be pointed at
+  a FIFO/device or an arbitrary non-quota file (e.g. `/etc/passwd`).
+- The SketchyBar plugin renders provider-icon SVGs under a bundled restrictive
+  ImageMagick policy (`adapters/sketchybar/imagemagick/policy.xml`, injected via
+  `MAGICK_CONFIGURE_PATH`) that denies the network coders, so a provider SVG
+  from `SHOWY_QUOTA_CODEXBAR_RESOURCES` cannot make `magick` fetch a remote
+  `href` (SSRF/data exfiltration) regardless of the system ImageMagick policy.
+- The serve/CLI timeout knobs in `bin/showy-quota-fetch` are now bounded above:
+  `SHOWY_QUOTA_CODEXBAR_SERVE_TIMEOUT_SECONDS` clamps to 60s (the `curl --max-time`
+  for the serve probe), the CLI and config-providers timeouts to 300s, and the
+  serve start-wait poll to 300s, so a pathological value cannot turn a fetch into
+  an effectively unbounded wait.
+- The release workflow now generates a signed build-provenance attestation for
+  the WASM plugin artifact (`actions/attest-build-provenance`), so a downloaded
+  `showy-quota-zellij.wasm` can be verified to have been built by this repo's
+  release workflow (`gh attestation verify showy-quota-zellij.wasm --repo
+  enieuwy/showy-quota`) rather than only checked against a recomputable sha256.
+
 ## [0.3.0] — 2026-06-20
 
 ### Fixed
@@ -332,7 +571,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `bin/showy-quota-fetch`: cache dir and files now persist as `0700`/`0600`
   instead of the user's default umask. CodexBar usage JSON stays user-only.
 
-[Unreleased]: https://github.com/enieuwy/showy-quota/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/enieuwy/showy-quota/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/enieuwy/showy-quota/compare/v0.4.0...v0.4.1
+[0.4.0]: https://github.com/enieuwy/showy-quota/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/enieuwy/showy-quota/compare/v0.2.5...v0.3.0
 [0.2.5]: https://github.com/enieuwy/showy-quota/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/enieuwy/showy-quota/compare/v0.2.3...v0.2.4
