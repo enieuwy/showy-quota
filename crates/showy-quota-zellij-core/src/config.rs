@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
 
+const GLYPH_MAX_CHARS: usize = 16;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct RenderConfig {
     pub providers: Vec<String>,
@@ -199,8 +201,8 @@ impl RenderConfig {
             "SHOWY_QUOTA_PALETTE_ELAPSED_LONG",
             &mut self.palette_elapsed_long,
         );
-        assign_string(&get, "SHOWY_QUOTA_STALE_GLYPH", &mut self.stale_glyph);
-        assign_string(
+        assign_glyph(&get, "SHOWY_QUOTA_STALE_GLYPH", &mut self.stale_glyph);
+        assign_glyph(
             &get,
             "SHOWY_QUOTA_DEGRADED_CLI_GLYPH",
             &mut self.degraded_cli_glyph,
@@ -295,6 +297,24 @@ where
     if let Some(value) = get(name) {
         *target = value;
     }
+}
+
+fn assign_glyph<F>(get: &F, name: &str, target: &mut String)
+where
+    F: Fn(&str) -> Option<String>,
+{
+    if let Some(value) = get(name) {
+        if valid_glyph(&value) {
+            *target = value;
+        }
+    }
+}
+
+fn valid_glyph(value: &str) -> bool {
+    value.chars().count() <= GLYPH_MAX_CHARS
+        && !value
+            .chars()
+            .any(|ch| matches!(ch, '\u{0001}'..='\u{001f}'))
 }
 
 fn assign_option<F>(get: &F, name: &str, target: &mut Option<String>)
@@ -449,6 +469,47 @@ mod tests {
         let config = RenderConfig::from_kdl_config(&kdl);
 
         assert_eq!(config.degraded_cli_glyph, "CLI");
+    }
+
+    #[test]
+    fn glyph_config_rejects_control_chars_and_long_values() {
+        let mut kdl = BTreeMap::new();
+        kdl.insert("stale_glyph".into(), "\u{1b}[31m!".into());
+        kdl.insert("degraded_cli_glyph".into(), "abcdefghijklmnopq".into());
+
+        let config = RenderConfig::from_kdl_config(&kdl);
+
+        assert_eq!(config.stale_glyph, RenderConfig::default().stale_glyph);
+        assert_eq!(
+            config.degraded_cli_glyph,
+            RenderConfig::default().degraded_cli_glyph
+        );
+    }
+
+    #[test]
+    fn glyph_config_accepts_shell_valid_empty_and_sixteen_char_values() {
+        let mut kdl = BTreeMap::new();
+        kdl.insert("stale_glyph".into(), String::new());
+        kdl.insert("degraded_cli_glyph".into(), "abcdefghijklmnop".into());
+
+        let config = RenderConfig::from_kdl_config(&kdl);
+
+        assert_eq!(config.stale_glyph, "");
+        assert_eq!(config.degraded_cli_glyph, "abcdefghijklmnop");
+    }
+
+    #[test]
+    fn env_glyph_config_falls_back_on_invalid_values() {
+        let key = "SHOWY_QUOTA_STALE_GLYPH";
+        let previous = std::env::var(key).ok();
+        std::env::set_var(key, "bad\n");
+        let config = RenderConfig::from_env();
+        match previous {
+            Some(value) => std::env::set_var(key, value),
+            None => std::env::remove_var(key),
+        }
+
+        assert_eq!(config.stale_glyph, RenderConfig::default().stale_glyph);
     }
 
     #[test]

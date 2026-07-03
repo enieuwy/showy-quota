@@ -13,6 +13,7 @@ use zellij_tile::prelude::*;
 
 const HEALTH_KIND: &str = "showy-quota-health";
 const USAGE_KIND: &str = "showy-quota-usage";
+const WEB_REQUEST_GENERATION_KEY: &str = "showy-quota-web-generation";
 const FALLBACK_DISCOVER_KIND: &str = "showy-quota-fallback-discover";
 const FALLBACK_DISCOVER_ATTEMPT_KEY: &str = "showy-quota-discover-attempt";
 const FALLBACK_PROVIDER_KIND: &str = "showy-quota-fallback-provider";
@@ -242,6 +243,10 @@ struct State {
     last_output: String,
     health_in_flight: bool,
     usage_in_flight: bool,
+    health_generation: u64,
+    usage_generation: u64,
+    active_health_generation: Option<u64>,
+    active_usage_generation: Option<u64>,
     // When the in-flight /health or /usage web request was started, so a hung
     // request can be expired (Zellij never reports request failure).
     web_flight_started_at: Option<f64>,
@@ -313,6 +318,10 @@ impl Default for State {
             last_output: " showy-quota: loading ".into(),
             health_in_flight: false,
             usage_in_flight: false,
+            health_generation: 0,
+            usage_generation: 0,
+            active_health_generation: None,
+            active_usage_generation: None,
             web_flight_started_at: None,
             permissions_granted: false,
             discovered_providers: Vec::new(),
@@ -447,6 +456,8 @@ impl ZellijPlugin for State {
                 self.permissions_granted = true;
                 self.health_in_flight = false;
                 self.usage_in_flight = false;
+                self.active_health_generation = None;
+                self.active_usage_generation = None;
                 self.web_flight_started_at = None;
                 self.discovery_in_flight = false;
                 self.discovery_attempt_token = None;
@@ -463,6 +474,8 @@ impl ZellijPlugin for State {
                 self.permissions_granted = false;
                 self.health_in_flight = false;
                 self.usage_in_flight = false;
+                self.active_health_generation = None;
+                self.active_usage_generation = None;
                 self.web_flight_started_at = None;
                 self.discovery_in_flight = false;
                 self.discovery_attempt_token = None;
@@ -486,7 +499,11 @@ impl ZellijPlugin for State {
                 let previous_output = self.last_output.clone();
                 match context.get("kind").map(String::as_str) {
                     Some(HEALTH_KIND) => {
+                        if !self.web_response_matches(HEALTH_KIND, &context) {
+                            return false;
+                        }
                         self.health_in_flight = false;
+                        self.active_health_generation = None;
                         self.web_flight_started_at = None;
                         if status == 200 {
                             self.update_serve_build_version(&body);
@@ -497,7 +514,11 @@ impl ZellijPlugin for State {
                         self.last_output != previous_output
                     }
                     Some(USAGE_KIND) => {
+                        if !self.web_response_matches(USAGE_KIND, &context) {
+                            return false;
+                        }
                         self.usage_in_flight = false;
+                        self.active_usage_generation = None;
                         self.web_flight_started_at = None;
                         if status == 200 && self.accept_payload(body, Source::Serve) {
                             self.consecutive_serve_failures = 0;
@@ -599,6 +620,23 @@ impl State {
         self.interval_seconds
     }
 
+    fn web_response_matches(&self, kind: &str, context: &BTreeMap<String, String>) -> bool {
+        let generation = context
+            .get(WEB_REQUEST_GENERATION_KEY)
+            .and_then(|value| value.parse::<u64>().ok());
+        match kind {
+            HEALTH_KIND => matches!(
+                (generation, self.active_health_generation),
+                (Some(response), Some(active)) if self.health_in_flight && response == active
+            ),
+            USAGE_KIND => matches!(
+                (generation, self.active_usage_generation),
+                (Some(response), Some(active)) if self.usage_in_flight && response == active
+            ),
+            _ => false,
+        }
+    }
+
     /// Whether a serve->CLI transition should first wait out a per-instance
     /// jittered hold (re-probing serve) instead of immediately stampeding the
     /// per-provider CLI. Gated to genuine outage transitions: never delays a
@@ -661,8 +699,13 @@ impl State {
             return false;
         }
         let was_usage = self.usage_in_flight;
-        self.health_in_flight = false;
-        self.usage_in_flight = false;
+        if was_usage {
+            self.usage_in_flight = false;
+            self.active_usage_generation = None;
+        } else {
+            self.health_in_flight = false;
+            self.active_health_generation = None;
+        }
         self.web_flight_started_at = None;
         if was_usage {
             self.handle_usage_failure();
@@ -727,6 +770,9 @@ impl State {
             self.kick_cli_fallback_or_render_failure();
             return;
         }
+        self.health_generation = self.health_generation.saturating_add(1);
+        let generation = self.health_generation;
+        self.active_health_generation = Some(generation);
         self.health_in_flight = true;
         self.web_flight_started_at = Some(now_seconds());
         if self.source != Source::Cli {
@@ -736,6 +782,10 @@ impl State {
         headers.insert("Accept".to_string(), "application/json".to_string());
         let mut context = BTreeMap::new();
         context.insert("kind".to_string(), HEALTH_KIND.to_string());
+        context.insert(
+            WEB_REQUEST_GENERATION_KEY.to_string(),
+            generation.to_string(),
+        );
         let url = format!("{}/health", self.serve_url.trim_end_matches('/'));
         shim_web_request(url, HttpVerb::Get, headers, Vec::new(), context);
     }
@@ -754,12 +804,19 @@ impl State {
             self.kick_discovery();
             return;
         }
+        self.usage_generation = self.usage_generation.saturating_add(1);
+        let generation = self.usage_generation;
+        self.active_usage_generation = Some(generation);
         self.usage_in_flight = true;
         self.web_flight_started_at = Some(now_seconds());
         let mut headers = BTreeMap::new();
         headers.insert("Accept".to_string(), "application/json".to_string());
         let mut context = BTreeMap::new();
         context.insert("kind".to_string(), USAGE_KIND.to_string());
+        context.insert(
+            WEB_REQUEST_GENERATION_KEY.to_string(),
+            generation.to_string(),
+        );
         let url = format!("{}/usage", self.serve_url.trim_end_matches('/'));
         shim_web_request(url, HttpVerb::Get, headers, Vec::new(), context);
     }
@@ -850,6 +907,7 @@ impl State {
                     let delay = self.hold_delay_seconds();
                     if delay > 0.0 {
                         self.cli_hold_until = Some(now + delay);
+                        self.schedule_timer();
                         self.kick_health_probe();
                         return;
                     }
@@ -1839,6 +1897,37 @@ mod tests {
         context
     }
 
+    fn web_context(kind: &str, generation: u64) -> BTreeMap<String, String> {
+        let mut context = event_context(kind);
+        context.insert(
+            WEB_REQUEST_GENERATION_KEY.to_string(),
+            generation.to_string(),
+        );
+        context
+    }
+
+    fn current_web_context(state: &State, kind: &str) -> BTreeMap<String, String> {
+        let generation = match kind {
+            HEALTH_KIND => state.active_health_generation,
+            USAGE_KIND => state.active_usage_generation,
+            _ => None,
+        }
+        .expect("active web request generation");
+        web_context(kind, generation)
+    }
+
+    fn arm_health_probe(state: &mut State, generation: u64) {
+        state.health_generation = generation;
+        state.active_health_generation = Some(generation);
+        state.health_in_flight = true;
+    }
+
+    fn arm_usage_probe(state: &mut State, generation: u64) {
+        state.usage_generation = generation;
+        state.active_usage_generation = Some(generation);
+        state.usage_in_flight = true;
+    }
+
     fn provider_fallback_context(provider: &str) -> BTreeMap<String, String> {
         let mut context = event_context(FALLBACK_PROVIDER_KIND);
         context.insert(
@@ -1965,21 +2054,24 @@ mod tests {
         };
         assert!(state.refresh_output());
         assert!(state.last_output.contains("⚠cli"));
+        arm_health_probe(&mut state, 1);
+        let health_context = current_web_context(&state, HEALTH_KIND);
 
         assert!(!state.update(Event::WebRequestResult(
             200,
             BTreeMap::new(),
             Vec::new(),
-            event_context(HEALTH_KIND),
+            health_context,
         )));
         assert_eq!(state.source, Source::Cli);
 
-        state.usage_in_flight = true;
+        arm_usage_probe(&mut state, 1);
+        let usage_context = current_web_context(&state, USAGE_KIND);
         assert!(!state.update(Event::WebRequestResult(
             503,
             BTreeMap::new(),
             Vec::new(),
-            event_context(USAGE_KIND),
+            usage_context,
         )));
         assert_eq!(state.source, Source::Cli);
         assert!(state.last_output.contains("⚠cli"));
@@ -2009,12 +2101,14 @@ mod tests {
         };
         assert!(state.refresh_output());
         let output = state.last_output.clone();
+        arm_usage_probe(&mut state, 1);
+        let usage_context = current_web_context(&state, USAGE_KIND);
 
         assert!(!state.update(Event::WebRequestResult(
             200,
             BTreeMap::new(),
             mixed_payload(),
-            event_context(USAGE_KIND),
+            usage_context,
         )));
 
         assert_eq!(state.consecutive_serve_failures, 0);
@@ -2033,12 +2127,14 @@ mod tests {
             cli_fallback: CliFallback::Off,
             ..State::default()
         };
+        arm_usage_probe(&mut state, 1);
+        let usage_context = current_web_context(&state, USAGE_KIND);
         let before = state.consecutive_serve_failures;
         state.update(Event::WebRequestResult(
             200,
             BTreeMap::new(),
             b"not-json".to_vec(),
-            event_context(USAGE_KIND),
+            usage_context,
         ));
         assert_eq!(state.consecutive_serve_failures, before + 1);
     }
@@ -2060,6 +2156,64 @@ mod tests {
         assert_eq!(state.consecutive_serve_failures, before + 1);
     }
 
+    #[test]
+    fn stale_usage_response_after_timeout_does_not_clear_newer_flight() {
+        let mut state = State {
+            permissions_granted: true,
+            source: Source::Serve,
+            cli_fallback: CliFallback::Off,
+            usage_in_flight: true,
+            usage_generation: 1,
+            active_usage_generation: Some(1),
+            web_flight_started_at: Some(now_seconds() - (SERVE_USAGE_TIMEOUT_SECONDS + 1.0)),
+            ..State::default()
+        };
+
+        assert!(state.expire_stale_web_flight());
+        assert!(!state.usage_in_flight);
+        state.kick_usage();
+        assert_eq!(state.active_usage_generation, Some(2));
+
+        assert!(!state.update(Event::WebRequestResult(
+            200,
+            BTreeMap::new(),
+            mixed_payload(),
+            web_context(USAGE_KIND, 1),
+        )));
+        assert!(state.usage_in_flight);
+        assert_eq!(state.active_usage_generation, Some(2));
+        assert!(state.last_payload.is_none());
+    }
+
+    #[test]
+    fn stale_health_response_after_timeout_does_not_clear_newer_probe() {
+        let mut state = State {
+            permissions_granted: true,
+            source: Source::Probing,
+            manage_serve: false,
+            cli_fallback: CliFallback::Off,
+            health_in_flight: true,
+            health_generation: 1,
+            active_health_generation: Some(1),
+            web_flight_started_at: Some(now_seconds() - (SERVE_HEALTH_TIMEOUT_SECONDS + 1.0)),
+            ..State::default()
+        };
+
+        assert!(state.expire_stale_web_flight());
+        assert!(!state.health_in_flight);
+        state.kick_health_probe();
+        assert_eq!(state.active_health_generation, Some(2));
+
+        assert!(!state.update(Event::WebRequestResult(
+            200,
+            BTreeMap::new(),
+            br#"{"status":"ok","version":"0.37.2"}"#.to_vec(),
+            web_context(HEALTH_KIND, 1),
+        )));
+        assert!(state.health_in_flight);
+        assert_eq!(state.active_health_generation, Some(2));
+        assert!(state.serve_build_version.is_none());
+    }
     #[test]
     fn fresh_usage_web_request_is_not_expired() {
         let mut state = State {
@@ -2355,12 +2509,15 @@ mod tests {
             health_in_flight: true,
             ..State::default()
         };
+        state.active_health_generation = Some(1);
+        state.health_generation = 1;
+        let health_context = current_web_context(&state, HEALTH_KIND);
 
         assert!(!state.update(Event::WebRequestResult(
             200,
             BTreeMap::new(),
             Vec::new(),
-            event_context(HEALTH_KIND),
+            health_context,
         )));
 
         assert!(state.discovery_in_flight);
@@ -3017,11 +3174,13 @@ mod tests {
             last_payload: Some(mixed_payload()),
             ..State::default()
         };
+        arm_health_probe(&mut state, 1);
+        let health_context = current_web_context(&state, HEALTH_KIND);
         state.update(Event::WebRequestResult(
             200,
             BTreeMap::new(),
             br#"{"status":"ok","version":"0.37.2"}"#.to_vec(),
-            event_context(HEALTH_KIND),
+            health_context,
         ));
         assert_eq!(state.serve_build_version.as_deref(), Some("0.37.2"));
         assert_eq!(state.source, Source::Serve);
@@ -3413,18 +3572,20 @@ mod tests {
         assert!(s.cli_hold_until.is_some());
         assert!(!s.has_provider_work_in_flight());
 
+        let health_context = current_web_context(&s, HEALTH_KIND);
         // Serve recovers mid-hold: /health 200 kicks /usage, /usage 200 accepts.
         s.update(Event::WebRequestResult(
             200,
             BTreeMap::new(),
             b"{}".to_vec(),
-            event_context(HEALTH_KIND),
+            health_context,
         ));
+        let usage_context = current_web_context(&s, USAGE_KIND);
         s.update(Event::WebRequestResult(
             200,
             BTreeMap::new(),
             mixed_payload(),
-            event_context(USAGE_KIND),
+            usage_context,
         ));
 
         assert_eq!(s.source, Source::Serve, "recovered to the serve HTTP path");

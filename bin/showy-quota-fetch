@@ -346,13 +346,21 @@ serve_base_url() {
     printf '%s\n' "${base}"
 }
 
-serve_timeout() {
-    local timeout="${SHOWY_QUOTA_CODEXBAR_SERVE_TIMEOUT_SECONDS}"
-    [[ "${timeout}" =~ ^[0-9]+([.][0-9]+)?$ ]] || timeout=0.5
-    # Clamp to a sane ceiling so a huge value cannot turn the serve HTTP probe
-    # (curl --max-time) into an effectively unbounded wait.
-    (( ${timeout%%.*} > 60 )) && timeout=60
+serve_positive_timeout_or_default() {
+    local timeout="$1" default="$2" whole
+    if [[ "${timeout}" =~ ^[0-9]+([.][0-9]+)?$ && ! "${timeout}" =~ ^0+([.]0+)?$ ]]; then
+        whole="${timeout%%.*}"
+        # Clamp to a sane ceiling so a huge value cannot turn the serve HTTP
+        # probe (curl --max-time) into an effectively unbounded wait.
+        (( 10#${whole} > 60 )) && timeout=60
+    else
+        timeout="${default}"
+    fi
     printf '%s\n' "${timeout}"
+}
+
+serve_timeout() {
+    serve_positive_timeout_or_default "${SHOWY_QUOTA_CODEXBAR_SERVE_TIMEOUT_SECONDS}" 0.5
 }
 
 serve_usage_timeout() {
@@ -362,12 +370,7 @@ serve_usage_timeout() {
     # slow one degrades to an error row. Using the short health timeout here
     # would abandon that usable partial response and fall back to degraded CLI
     # whenever any provider is briefly slow.
-    local timeout="${SHOWY_QUOTA_CODEXBAR_SERVE_USAGE_TIMEOUT_SECONDS}"
-    [[ "${timeout}" =~ ^[0-9]+([.][0-9]+)?$ ]] || timeout=30
-    # Clamp to a sane ceiling so a huge value cannot turn the serve HTTP probe
-    # (curl --max-time) into an effectively unbounded wait.
-    (( ${timeout%%.*} > 60 )) && timeout=60
-    printf '%s\n' "${timeout}"
+    serve_positive_timeout_or_default "${SHOWY_QUOTA_CODEXBAR_SERVE_USAGE_TIMEOUT_SECONDS}" 30
 }
 
 positive_integer_or_default() {

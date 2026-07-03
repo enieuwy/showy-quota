@@ -330,10 +330,11 @@ showy_quota_mode_for_provider() {
 
 # Resolve a provider's terminal body. Args: provider, has_tertiary (1/0),
 # pooled (1/0 — auto-detected model-pooled provider whose extras carry every
-# positional slot). mono3 collapses to dual without a tertiary slot; the family
-# bodies (dual2/mono4) pass through and adapt to the pool count at render.
+# positional slot), assembled_window_count. mono3 collapses to dual without a
+# tertiary slot; mono4 renders only with four distinct assembled windows and
+# collapses through mono3 for exactly three.
 showy_quota_terminal_mode_for_provider() {
-    local provider="$1" has_tertiary="${2:-0}" pooled="${3:-0}"
+    local provider="$1" has_tertiary="${2:-0}" pooled="${3:-0}" assembled_count="${4:-0}"
     local requested
     case "${SHOWY_QUOTA_TERMINAL_BAR_MODE:-auto}" in
         dual) requested=dual ;;
@@ -351,7 +352,7 @@ showy_quota_terminal_mode_for_provider() {
     local mode=dual
     case "${requested}" in
         mono3) [[ "${has_tertiary}" == "1" ]] && mode=mono3 || mode=dual ;;
-        mono4) if (( ! pooled )) && [[ "${has_tertiary}" == "1" ]]; then mode=mono3; else mode=mono4; fi ;;
+        mono4) if (( assembled_count >= 4 )); then mode=mono4; elif (( assembled_count == 3 )); then mode=mono3; else mode=dual; fi ;;
         dual2) mode=dual2 ;;
         *) mode=dual ;;
     esac

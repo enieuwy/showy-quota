@@ -598,8 +598,11 @@ out=$(run_common_eval 'showy_quota_color_key 50' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_Q
 assert_equals "valid coloring threshold is still honored" "warn" "${out}"
 
 # shellcheck disable=SC2016
-out=$(run_common_eval 'printf "%s|%s|%s" "$(showy_quota_uint 42 7)" "$(showy_quota_uint abc 7)" "$(showy_quota_uint 99999 7 100)"' SHOWY_QUOTA_NO_CONFIG=1)
-assert_equals "uint helper validates and clamps" "42|7|100" "${out}"
+out=$(run_common_eval 'printf "%s|%s|%s|%s" "$(showy_quota_uint 42 7)" "$(showy_quota_uint abc 7)" "$(showy_quota_uint 99999 7 100)" "$(showy_quota_uint 09 7)"' SHOWY_QUOTA_NO_CONFIG=1)
+assert_equals "uint helper validates, clamps, and decimal-normalizes" "42|7|100|9" "${out}"
+
+out=$(run_renderer showy-quota-zellij-bar codexbar-mixed.json SHOWY_QUOTA_PNG_BAR_W=09 NO_COLOR=1 SHOWY_QUOTA_FORCE_COLOR=0)
+assert_contains "leading-zero numeric config renders without octal abort" "CL" "${out}"
 
 # shellcheck disable=SC2016
 out=$(run_common_eval 'printf "%s" "${SHOWY_QUOTA_LOCK_WAIT_TENTHS}"' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_LOCK_WAIT_TENTHS=99999999)
@@ -708,6 +711,15 @@ assert_equals "valid widget name is honored" "my.widget-1" "${out}"
 # shellcheck disable=SC2016
 out=$(run_common_eval 'printf "%s" "${SHOWY_QUOTA_ZELLIJ_PIPE_NAME}"' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_ZELLIJ_PIPE_NAME='bad name')
 assert_equals "pipe name with space falls back to default" "showy-quota" "${out}"
+
+long_zellij_identifier="$(printf 'x%.0s' {1..129})"
+# shellcheck disable=SC2016
+out=$(run_common_eval 'printf "%s" "${SHOWY_QUOTA_ZELLIJ_WIDGET}"' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_ZELLIJ_WIDGET="${long_zellij_identifier}")
+assert_equals "overlong widget falls back to default" "pipe_showy_quota" "${out}"
+
+# shellcheck disable=SC2016
+out=$(run_common_eval 'printf "%s" "${SHOWY_QUOTA_ZELLIJ_PIPE_NAME}"' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_ZELLIJ_PIPE_NAME="${long_zellij_identifier}")
+assert_equals "overlong pipe name falls back to default" "showy-quota" "${out}"
 
 # ── countdown formatting ──────────────────────────────────────────────
 printf '\ncountdown formatting\n'
@@ -1070,6 +1082,13 @@ assert_contains "zellij mono4 draws two configured pacing markers" "AG▕𜷝�
 
 out=$(run_renderer showy-quota-zellij-bar codexbar-no-tertiary.json SHOWY_QUOTA_PROVIDER_MODES=antigravity=mono4 SHOWY_QUOTA_ZELLIJ_BAR_WIDTH=8 SHOWY_QUOTA_REFRESH_SECONDS=9999999999 SHOWY_QUOTA_NOW_EPOCH=4070908800 NO_COLOR=1 SHOWY_QUOTA_FORCE_COLOR=0)
 assert_contains "zellij mono4 collapses to dual without four windows" "AG▕▀▀▀▀▀▀▀▀▏" "${out}"
+
+out=$(run_renderer showy-quota-zellij-bar codexbar-codex-mono4-four.json SHOWY_QUOTA_PROVIDER_MODES=codex=mono4 SHOWY_QUOTA_ZELLIJ_BAR_WIDTH=12 SHOWY_QUOTA_REFRESH_SECONDS=9999999999 SHOWY_QUOTA_NOW_EPOCH=4070908800 NO_COLOR=1 SHOWY_QUOTA_FORCE_COLOR=0)
+assert_contains "zellij forced mono4 keeps three positional plus one extra as four lanes" "CX▕█🮅🮅▀▀▀🮂│🮂   ▏" "${out}"
+
+out=$(run_renderer showy-quota-zellij-bar codexbar-codex-mono4-three.json SHOWY_QUOTA_PROVIDER_MODES=codex=mono4 SHOWY_QUOTA_ZELLIJ_BAR_WIDTH=12 SHOWY_QUOTA_REFRESH_SECONDS=9999999999 SHOWY_QUOTA_NOW_EPOCH=4070908800 NO_COLOR=1 SHOWY_QUOTA_FORCE_COLOR=0)
+assert_contains "zellij forced mono4 collapses three assembled windows to mono3" "CX▕███🬎🬎🬎🬂│🬂   ▏" "${out}"
+assert_not_contains "zellij forced mono4 three-window fallback omits octant-only cells" "🮅" "${out}"
 
 # dual2: a model-pooled provider splits into one standalone per-family dual each
 # (AGᴳ, AGᶜ), rendered through the normal dual path — half-blocks, every terminal.
@@ -1641,7 +1660,21 @@ else
     fail "plugin runs magick under the bundled restrictive policy" "env log: $(cat "${mp_env_log}" 2>/dev/null)"
 fi
 
+if grep -qF '<policy domain="delegate" rights="none" pattern="*" />' "${REPO_ROOT}/adapters/sketchybar/imagemagick/policy.xml"; then
+    ok "ImageMagick policy disables external delegates"
+else
+    fail "ImageMagick policy disables external delegates"
+fi
+
 if command -v magick >/dev/null 2>&1; then
+    policy_dir="${REPO_ROOT}/adapters/sketchybar/imagemagick"
+    policy_listing="$(MAGICK_CONFIGURE_PATH="${policy_dir}" magick -list policy 2>/dev/null || true)"
+    if [[ "${policy_listing}" == *"${policy_dir}/policy.xml"* && "${policy_listing}" == *"Policy: Delegate"* && "${policy_listing}" == *"pattern: *"* ]]; then
+        ok "ImageMagick loads bundled delegate-deny policy"
+    else
+        fail "ImageMagick loads bundled delegate-deny policy" "${policy_listing}"
+    fi
+
     cache=$(mk_cache)
     log="${TMP}/sb-status.log"
     run_sketchybar_plugin codexbar-status-major.json "${cache}" "${log}"
@@ -1661,6 +1694,77 @@ if command -v magick >/dev/null 2>&1; then
     resource_dir="${TMP}/opencode-resources"
     mkdir -p "${resource_dir}"
     printf '%s\n' '<svg width="100" height="100" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg"><path fill-rule="evenodd" clip-rule="evenodd" d="M80 88H20V12H80V88ZM35 27H65V72H35V27Z" fill="#211E1E"/></svg>' > "${resource_dir}/ProviderIcon-opencode.svg"
+
+    policy_svg_png="${TMP}/policy-opencode.png"
+    if MAGICK_CONFIGURE_PATH="${policy_dir}" magick -background none -density 300 "MSVG:${resource_dir}/ProviderIcon-opencode.svg" \
+            -resize 64x64 "PNG32:${policy_svg_png}" >/dev/null 2>&1 && [[ -s "${policy_svg_png}" ]]; then
+        ok "restrictive ImageMagick policy still rasterizes provider SVGs"
+    else
+        fail "restrictive ImageMagick policy still rasterizes provider SVGs"
+    fi
+
+    policy_http_server="${TMP}/policy-http-server.py"
+    policy_http_port_file="${TMP}/policy-http-port"
+    policy_http_log="${TMP}/policy-http-requests.log"
+    cat > "${policy_http_server}" <<'PY'
+import sys
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+port_file, request_log = sys.argv[1], sys.argv[2]
+
+class Handler(BaseHTTPRequestHandler):
+    def _record(self):
+        with open(request_log, "a", encoding="utf-8") as fh:
+            fh.write(f"{self.command} {self.path}\n")
+        self.send_response(404)
+        self.end_headers()
+
+    def do_GET(self):
+        self._record()
+
+    def do_HEAD(self):
+        self._record()
+
+    def log_message(self, fmt, *args):
+        pass
+
+server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+with open(port_file, "w", encoding="utf-8") as fh:
+    fh.write(str(server.server_address[1]))
+server.serve_forever()
+PY
+    : > "${policy_http_log}"
+    python3 "${policy_http_server}" "${policy_http_port_file}" "${policy_http_log}" &
+    policy_http_pid=$!
+    for _ in {1..50}; do
+        [[ -s "${policy_http_port_file}" ]] && break
+        sleep 0.1
+    done
+    if [[ ! -s "${policy_http_port_file}" ]]; then
+        kill "${policy_http_pid}" 2>/dev/null || true
+        wait "${policy_http_pid}" 2>/dev/null || true
+        fail "restricted policy test HTTP server starts"
+    else
+        ok "restricted policy test HTTP server starts"
+        policy_http_port="$(< "${policy_http_port_file}")"
+        policy_hostile_svg="${TMP}/policy-hostile.svg"
+        policy_hostile_png="${TMP}/policy-hostile.png"
+        cat > "${policy_hostile_svg}" <<EOF
+<svg width="64" height="64" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+  <rect width="64" height="64" fill="#211e1e"/>
+  <image width="32" height="32" href="http://127.0.0.1:${policy_http_port}/href.png" xlink:href="http://127.0.0.1:${policy_http_port}/xlink.png"/>
+</svg>
+EOF
+        MAGICK_CONFIGURE_PATH="${policy_dir}" magick -background none -density 300 "MSVG:${policy_hostile_svg}" \
+            -resize 64x64 "PNG32:${policy_hostile_png}" >/dev/null 2>&1 || true
+        kill "${policy_http_pid}" 2>/dev/null || true
+        wait "${policy_http_pid}" 2>/dev/null || true
+        if [[ ! -s "${policy_http_log}" ]]; then
+            ok "hostile SVG under restrictive ImageMagick policy does not fetch external resources"
+        else
+            fail "hostile SVG under restrictive ImageMagick policy does not fetch external resources" "$(cat "${policy_http_log}")"
+        fi
+    fi
     cache=$(mk_cache)
     log="${TMP}/sb-opencode.log"
     run_sketchybar_plugin "${opencode_fixture}" "${cache}" "${log}" SHOWY_QUOTA_CODEXBAR_RESOURCES="${resource_dir}"
@@ -2095,6 +2199,20 @@ env \
     SHOWY_QUOTA_CODEXBAR_SERVE_USAGE_TIMEOUT_SECONDS=999999999 \
     "${REPO_ROOT}/bin/showy-quota-fetch" >/dev/null 2>&1 || true
 assert_equals "fetcher clamps a pathological usage probe timeout" "60" "$(< "${clamp_cache}/curl-max-time")"
+
+zero_timeout_cache=$(mk_cache)
+env \
+    PATH="${stub_dir}:${PATH}" \
+    SHOWY_QUOTA_NO_CONFIG=1 \
+    SHOWY_QUOTA_CACHE_DIR="${zero_timeout_cache}" \
+    SHOWY_QUOTA_CODEXBAR_BIN="${missing_bin}" \
+    SHOWY_QUOTA_CODEXBAR_SERVE_URL="${serve_url}" \
+    SHOWY_QUOTA_TEST_SERVE_URL="${serve_url}" \
+    SHOWY_QUOTA_TEST_SERVE_FIXTURE="${FIXTURE_DIR}/codexbar-realistic.json" \
+    SHOWY_QUOTA_TEST_CURL_MAX_TIME_FILE="${zero_timeout_cache}/curl-max-time" \
+    SHOWY_QUOTA_CODEXBAR_SERVE_USAGE_TIMEOUT_SECONDS=0 \
+    "${REPO_ROOT}/bin/showy-quota-fetch" >/dev/null 2>&1 || true
+assert_equals "fetcher rejects zero usage probe timeout back to default" "30" "$(< "${zero_timeout_cache}/curl-max-time")"
 
 large_payload_fixture="${TMP}/codexbar-large-payload.json"
 python3 -c '

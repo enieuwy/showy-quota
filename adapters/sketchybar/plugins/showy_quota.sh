@@ -603,7 +603,7 @@ provider_icon_png() {
             rm -f "${normal_tmp}"; return 1
         fi
     else
-        if ! magick -background none -density 300 "${svg}" \
+        if ! magick -background none -density 300 "MSVG:${svg}" \
                     -resize 64x64 "PNG32:${normal_tmp}" >/dev/null 2>&1; then
             if ! render_fallback_icon_png "${pid}" "${normal_tmp}"; then
                 rm -f "${normal_tmp}"; return 1

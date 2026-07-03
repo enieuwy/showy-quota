@@ -31,6 +31,26 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   at all. Set `fallback_jitter_seconds 0` to restore the previous immediate
   fallback.
 
+### Security
+- The bundled ImageMagick policy now denies all external delegates
+  (`delegate` domain, pattern `*`), and the SketchyBar plugin rasterizes
+  provider SVGs through the internal `MSVG:` decoder. Previously only the
+  URL/HTTP/HTTPS/FTP/MSL coders were denied, so a delegate-based SVG path
+  (librsvg/inkscape) could still resolve external references from a hostile
+  SVG — the SSRF/exfiltration hole the policy was meant to close.
+- The standalone Zellij plugin now validates `stale_glyph` and
+  `degraded_cli_glyph` from KDL/env config with the same rules as the shell
+  renderers (no control characters, length-capped); invalid glyphs keep the
+  defaults instead of flowing into raw ANSI output.
+- `SHOWY_QUOTA_ZELLIJ_WIDGET` and `SHOWY_QUOTA_ZELLIJ_PIPE_NAME` are now
+  length-capped (128 bytes); an overlong identifier previously bypassed the
+  4096-byte pipe payload cap via the `zjstatus::pipe::<widget>::` prefix.
+- `SHOWY_QUOTA_CODEXBAR_SERVE_TIMEOUT_SECONDS` and
+  `SHOWY_QUOTA_CODEXBAR_SERVE_USAGE_TIMEOUT_SECONDS` now reject non-positive
+  values and fall back to their defaults; `0` previously reached
+  `curl --max-time 0`, which disables the transfer timeout entirely and
+  reintroduced the unbounded `/usage` probe.
+
 ### Fixed
 - The SketchyBar plugin no longer drops a model-pooled provider's whole family
   when CodexBar transiently marks one family's windows `usageKnown:false` (e.g.
@@ -40,6 +60,27 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   (Gemini) lanes. Such a window now keeps its lane drawn as an empty track (no
   pacing marker), so a transiently-thin family stays visible — matching the
   Zellij renderer, which keeps the `AGᶜ` lane.
+- Forced `mono4` again reaches the documented four-lane path: a non-pooled
+  provider with three positional slots plus a distinct `extraRateWindows`
+  entry renders four lanes instead of collapsing to `mono3`, and a
+  three-window shape under forced `mono4` falls back to `mono3` instead of
+  drawing an empty fourth row. Mode collapse and the `mono4` body are now
+  both gated on the distinct assembled render-window count, in the Rust core
+  and both shell renderers.
+- The standalone Zellij plugin now generation-tags `/health` and `/usage`
+  web requests and drops responses from expired probes; previously a
+  timed-out old `/usage` response could clear the in-flight flag for a newer
+  request and surface stale data.
+- The standalone Zellij plugin now schedules its short re-probe timer when
+  arming the degraded CLI-fallback hold; with a long `interval_seconds` the
+  promised fast serve re-probe cadence previously never fired and recovery
+  waited for the old normal timer.
+- Numeric config values with leading zeros (e.g. `SHOWY_QUOTA_PNG_BAR_W=09`)
+  no longer abort the renderers with an octal arithmetic error; unsigned
+  integer config is normalized to base-10 on load.
+- The pre-commit rustfmt hook now includes renamed Rust files
+  (`--diff-filter=ACMR`); a rename+edit previously skipped the local check
+  and failed in CI.
 - `bin/showy-quota-fetch` now matches the managed `codexbar serve` process by
   splitting the `ps` command output with `read -ra` instead of an unquoted
   expansion. The previous `for token in ${command}` glob-expanded the command

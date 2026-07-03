@@ -14,14 +14,17 @@ set -uo pipefail
 
 # Echo $1 when it is a base-10 unsigned integer (optionally clamped to <= $3);
 # otherwise echo the fallback $2. Keeps malformed numeric config out of bash
-# arithmetic, where a non-numeric value silently evaluates to 0.
+# arithmetic, where a non-numeric value silently evaluates to 0. Returned valid
+# values are canonicalized to decimal so leading zeroes cannot become octal in a
+# later arithmetic context.
 showy_quota_uint() {
-    local raw="$1" fallback="$2" max="${3:-}"
+    local raw="$1" fallback="$2" max="${3:-}" value
     [[ "${raw}" =~ ^[0-9]+$ ]] || { printf '%s' "${fallback}"; return; }
-    if [[ -n "${max}" ]] && (( raw > max )); then
+    value=$((10#${raw}))
+    if [[ -n "${max}" ]] && (( value > max )); then
         printf '%s' "${max}"
     else
-        printf '%s' "${raw}"
+        printf '%s' "${value}"
     fi
 }
 
@@ -232,11 +235,12 @@ SHOWY_QUOTA_SKETCHYBAR_BAR_WIDTH=$(showy_quota_uint "${SHOWY_QUOTA_SKETCHYBAR_BA
 
 # Zellij pipe identifiers are embedded in the zjstatus protocol string
 # (`zjstatus::pipe::<widget>::<output>`) and passed to `zellij pipe --name`.
-# Restrict them to safe identifiers so a `::` in the widget cannot shift the
-# protocol field split (misrouting output to another widget) and a stray
+# Restrict them to short safe identifiers so a `::` in the widget cannot shift
+# the protocol field split (misrouting output to another widget), an overlong
+# identifier cannot bypass the renderer-output payload cap, and a stray
 # character in the pipe name cannot confuse the zellij CLI.
-[[ "${SHOWY_QUOTA_ZELLIJ_WIDGET}" =~ ^[A-Za-z0-9_.-]+$ ]] || SHOWY_QUOTA_ZELLIJ_WIDGET=pipe_showy_quota
-[[ "${SHOWY_QUOTA_ZELLIJ_PIPE_NAME}" =~ ^[A-Za-z0-9_-]+$ ]] || SHOWY_QUOTA_ZELLIJ_PIPE_NAME=showy-quota
+[[ "${SHOWY_QUOTA_ZELLIJ_WIDGET}" =~ ^[A-Za-z0-9_.-]+$ && ${#SHOWY_QUOTA_ZELLIJ_WIDGET} -le 128 ]] || SHOWY_QUOTA_ZELLIJ_WIDGET=pipe_showy_quota
+[[ "${SHOWY_QUOTA_ZELLIJ_PIPE_NAME}" =~ ^[A-Za-z0-9_-]+$ && ${#SHOWY_QUOTA_ZELLIJ_PIPE_NAME} -le 128 ]] || SHOWY_QUOTA_ZELLIJ_PIPE_NAME=showy-quota
 
 # ── executable config validation ───────────────────────────────────────
 # The *_BIN knobs are exec'd directly; reject a value that is a shell snippet

@@ -217,11 +217,13 @@ fn render_provider(
     let p_long = !shared && is_long_window(primary, config.dim_window_minutes);
     let s_long = !shared && is_long_window(secondary, config.dim_window_minutes);
     let slots = [primary, secondary, tertiary];
+    let assembled_windows = distinct_render_windows(&slots, &usage.extra_rate_windows, 4);
     let bar_mode = terminal_mode_for_provider(
         config,
         &record.provider,
         tertiary.is_some(),
         pooled_auto(&slots, &usage.extra_rate_windows),
+        assembled_windows.len(),
     );
     // Only mono4 still assembles per-pool family lanes here; dual2 pooled
     // providers are pre-expanded into standalone dual records upstream.
@@ -237,10 +239,26 @@ fn render_provider(
     // slots (absent slots stay empty and never shift up); mono4 uses the
     // assembled per-pool windows.
     let mut mono_lanes: Vec<Lane> = match bar_mode.as_str() {
-        "mono4" if families.len() >= 2 => families
+        "mono4" if assembled_windows.len() >= 4 => {
+            let family_lanes: Vec<Lane> = families
+                .iter()
+                .take(2)
+                .flat_map(|family| [family.top, family.bottom])
+                .collect();
+            if family_lanes.iter().filter(|lane| lane.present).count() >= 4 {
+                family_lanes
+            } else {
+                assembled_windows
+                    .iter()
+                    .take(4)
+                    .map(|window| Lane::from_window(window, config, options.stale))
+                    .collect()
+            }
+        }
+        "mono3" if tertiary.is_none() && assembled_windows.len() >= 3 => assembled_windows
             .iter()
-            .take(2)
-            .flat_map(|family| [family.top, family.bottom])
+            .take(3)
+            .map(|window| Lane::from_window(window, config, options.stale))
             .collect(),
         "mono3" => [primary, secondary, tertiary]
             .into_iter()
@@ -763,6 +781,47 @@ fn main_family<'a>(
     })
 }
 
+/// Up to `max` distinct renderable windows for collapse decisions and non-pooled
+/// mono4/mono3 fallback lanes: positional slots first, then extra rate windows
+/// with known usage, deduped by the render-window key (windowMinutes + resetsAt).
+fn distinct_render_windows<'a>(
+    slots: &[Option<&'a UsageWindow>; 3],
+    extras: &'a [NamedWindow],
+    max: usize,
+) -> Vec<&'a UsageWindow> {
+    let mut out: Vec<&'a UsageWindow> = Vec::new();
+    let mut seen: Vec<(Option<i64>, Option<&'a str>)> = Vec::new();
+    for window in slots.iter().copied().flatten() {
+        let key = (window.window_minutes(), window.resets_at.as_deref());
+        if seen.contains(&key) {
+            continue;
+        }
+        seen.push(key);
+        out.push(window);
+        if out.len() >= max {
+            return out;
+        }
+    }
+    for named in extras {
+        let Some(window) = named.window.as_ref() else {
+            continue;
+        };
+        if window.used_percent.is_none() || named.usage_known == Some(false) {
+            continue;
+        }
+        let key = (window.window_minutes(), window.resets_at.as_deref());
+        if seen.contains(&key) {
+            continue;
+        }
+        seen.push(key);
+        out.push(window);
+        if out.len() >= max {
+            return out;
+        }
+    }
+    out
+}
+
 /// A provider is model-pooled in `auto` mode when its `extraRateWindows` carry
 /// every present positional slot (matched on windowMinutes + resetsAt): the
 /// extras are then the canonical, complete dataset, so per-pool families drive
@@ -902,7 +961,13 @@ fn expand_pooled(
         semantic_slot(&usage.tertiary),
     ];
     let pooled = pooled_auto(&slots, &usage.extra_rate_windows);
-    let mode = terminal_mode_for_provider(config, &record.provider, slots[2].is_some(), pooled);
+    let mode = terminal_mode_for_provider(
+        config,
+        &record.provider,
+        slots[2].is_some(),
+        pooled,
+        distinct_render_windows(&slots, &usage.extra_rate_windows, 4).len(),
+    );
     if mode != "dual2" {
         return None;
     }
@@ -986,6 +1051,7 @@ fn terminal_mode_for_provider(
     provider: &str,
     has_tertiary: bool,
     pooled: bool,
+    assembled_window_count: usize,
 ) -> String {
     let requested = match config.terminal_bar_mode.as_str() {
         "dual" => "dual",
@@ -998,17 +1064,16 @@ fn terminal_mode_for_provider(
             .mode_for(provider)
             .unwrap_or(if pooled { "dual2" } else { "dual" }),
     };
-    // mono3 collapses to dual without its third positional slot; the family
-    // bodies (dual2/mono4) pass through and adapt to the pool count at render.
+    // mono4 is an explicit four-lane body: render it only when the assembled
+    // distinct-window set has all four lanes. With three assembled windows,
+    // collapse to mono3; with fewer, follow the existing mono3→dual chain.
     let mode = match requested {
+        "mono4" if assembled_window_count >= 4 => "mono4",
+        "mono4" if assembled_window_count == 3 => "mono3",
+        "mono4" => "dual",
         "mono3" if has_tertiary => "mono3",
         "mono3" => "dual",
         "dual2" => "dual2",
-        // mono4 on a non-pooled provider with a third positional slot has no
-        // family to fill four lanes; keep the old collapse to mono3 so all
-        // three windows stay visible instead of dropping to a 2-window dual.
-        "mono4" if !pooled && has_tertiary => "mono3",
-        "mono4" => "mono4",
         _ => "dual",
     };
     mode.to_string()

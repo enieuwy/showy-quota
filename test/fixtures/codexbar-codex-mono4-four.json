@@ -1,0 +1,13 @@
+[
+  {
+    "provider": "codex",
+    "usage": {
+      "primary": { "usedPercent": 25, "windowMinutes": 300, "resetsAt": "2099-01-01T03:00:00Z" },
+      "secondary": { "usedPercent": 50, "windowMinutes": 1440, "resetsAt": "2099-01-02T00:00:00Z" },
+      "tertiary": { "usedPercent": 75, "windowMinutes": 10080, "resetsAt": "2099-01-08T00:00:00Z" },
+      "extraRateWindows": [
+        { "id": "codex-extra-monthly", "title": "Codex Monthly", "window": { "usedPercent": 90, "windowMinutes": 43200, "resetsAt": "2099-02-01T00:00:00Z" } }
+      ]
+    }
+  }
+]
