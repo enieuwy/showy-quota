@@ -1191,10 +1191,15 @@ start_managed_serve() {
     port=$(serve_port_from_base_url) || return 1
     [[ "${refresh_interval}" =~ ^[0-9]+$ ]] || refresh_interval=60
 
+    # Close the flock descriptor (fd 9, opened by showy_quota_with_lock) in the
+    # long-lived daemon: setsid/nohup detach the session but still inherit open
+    # fds, so a serve started while we hold the lock would keep fd 9 open and
+    # pin the advisory lock for its whole life, starving every later fetch
+    # (the mkdir fallback path has no fd to leak, so this only bit flock hosts).
     if showy_quota_have setsid; then
-        setsid "${bin}" serve --port "${port}" --refresh-interval "${refresh_interval}" >/dev/null 2>&1 &
+        setsid "${bin}" serve --port "${port}" --refresh-interval "${refresh_interval}" >/dev/null 2>&1 9>&- &
     else
-        nohup "${bin}" serve --port "${port}" --refresh-interval "${refresh_interval}" >/dev/null 2>&1 &
+        nohup "${bin}" serve --port "${port}" --refresh-interval "${refresh_interval}" >/dev/null 2>&1 9>&- &
     fi
     local pid=$! start_epoch=""
     start_epoch=$(managed_serve_pid_start_epoch_for_record "${pid}")
