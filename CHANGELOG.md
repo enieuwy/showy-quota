@@ -6,6 +6,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.4.1] — 2026-07-03
+
+### Fixed
+- `bin/showy-quota-fetch` no longer leaks the `flock` lock descriptor (fd 9)
+  into the managed `codexbar serve` daemon. `start_managed_serve` runs under
+  `showy_quota_with_lock`, and `setsid`/`nohup` detach the session but still
+  inherit open descriptors, so a serve started while the lock was held kept fd 9
+  open for its whole life and pinned the advisory lock — every later fetch then
+  timed out on `flock -n` and fell back to stale cache (most visibly, the
+  build-version gate could never recycle a stale serve). The daemon now closes
+  fd 9 (`9>&-`). Only `flock` hosts (Linux) were affected; the `mkdir` lock
+  fallback (e.g. macOS without `flock`) has no descriptor to leak.
+
 ## [0.4.0] — 2026-07-03
 
 ### Added
@@ -558,7 +571,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `bin/showy-quota-fetch`: cache dir and files now persist as `0700`/`0600`
   instead of the user's default umask. CodexBar usage JSON stays user-only.
 
-[Unreleased]: https://github.com/enieuwy/showy-quota/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/enieuwy/showy-quota/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/enieuwy/showy-quota/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/enieuwy/showy-quota/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/enieuwy/showy-quota/compare/v0.2.5...v0.3.0
 [0.2.5]: https://github.com/enieuwy/showy-quota/compare/v0.2.4...v0.2.5
