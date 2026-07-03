@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-07-03
+
 ### Added
 - `SHOWY_QUOTA_CODEXBAR_SERVE_USAGE_TIMEOUT_SECONDS` (default `30`) gives the
   `/usage` probe its own budget, separate from the `/health` probe's
@@ -14,7 +16,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   request deadline (~24s by default) to return the healthy providers when a slow
   one degrades to an error row; the short health timeout previously abandoned
   that usable partial response and dropped the bar to degraded CLI output
-  whenever any provider was briefly slow.
+  whenever any provider was briefly slow. This relies on CodexBar's per-provider
+  serve bounding, landed via
+  [steipete/CodexBar#1748](https://github.com/steipete/CodexBar/pull/1748).
 - The standalone Zellij plugin now expires a hung `/health` probe on a short
   10s window while giving the `/usage` probe a 30s budget, mirroring the shell
   fetcher's split. Previously both shared one 30s watchdog, so an unreachable
@@ -130,12 +134,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   port of a foreign one — and starts a fresh build. A serve whose `/health`
   omits `version` is reused unchanged, so the gate is a no-op for builds that
   predate the field. This stops reuse of a stale serve binary, the trigger for
-  the post-update SecurityAgent keychain-prompt storm.
+  the post-update SecurityAgent keychain-prompt storm (see also the CodexBar-side
+  fix [steipete/CodexBar#1717](https://github.com/steipete/CodexBar/pull/1717)).
   The configured `codexbar` binary is resolved to an absolute path before
   `--version` and before launching a managed serve, because CodexBar reads its
   version from the app bundle via `argv[0]`: a bare command name reports no
   version (in `--version` or `/health`), which would otherwise leave the gate
-  inert and spawn version-less serves.
+  inert and spawn version-less serves. This gate and the plugin's `build_marker`
+  below both depend on CodexBar reporting `version` on `/health`, landed via
+  [steipete/CodexBar#1703](https://github.com/steipete/CodexBar/pull/1703).
 - The standalone Zellij plugin can now detect a stale-build `codexbar serve` and
   append a `⚠ver` marker, behind the opt-in `build_marker` config key (default
   off). When enabled it parses the serve's `/health` `version`, compares it
@@ -551,7 +558,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `bin/showy-quota-fetch`: cache dir and files now persist as `0700`/`0600`
   instead of the user's default umask. CodexBar usage JSON stays user-only.
 
-[Unreleased]: https://github.com/enieuwy/showy-quota/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/enieuwy/showy-quota/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/enieuwy/showy-quota/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/enieuwy/showy-quota/compare/v0.2.5...v0.3.0
 [0.2.5]: https://github.com/enieuwy/showy-quota/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/enieuwy/showy-quota/compare/v0.2.3...v0.2.4
