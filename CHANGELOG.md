@@ -6,6 +6,30 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- Shell pacing-marker math (`showy_quota_elapsed_marker_cell` in `lib/strip.sh`
+  and `elapsed_marker_x` in the SketchyBar plugin) no longer divides by zero
+  when an absurd `windowMinutes` (e.g. `2^62`) wraps 64-bit arithmetic to a
+  zero duration. The wrap is detected and no marker is drawn, mirroring the
+  Rust core's `checked_mul`.
+- `showy_quota_age_seconds` now reports the absolute distance from the file
+  mtime, so a future-dated cache (clock skew, restored backup) ages out and
+  triggers refresh/stale handling instead of being treated as pinned-fresh
+  forever.
+- The SketchyBar render lock recovers ownerless `render.lock` directories with
+  a future-dated mtime; previously the negative age never crossed the
+  ownerless threshold and rendering wedged until the lock was removed by hand.
+- `discover_providers` validates every discovered provider id with the shell
+  `valid_provider_id` predicate, so path-component ids (`.`, `..`) are
+  rejected as invalid inventory instead of being counted valid — an all-dot
+  inventory can no longer clear the cache to a canonical-empty `[]`.
+  Payload-derived provider ids get the same `.`/`..` rejection.
+- Stale-serve recycling only signals port listeners it can verify as CodexBar
+  serve processes (basename + `serve` argument check via `ps`), and the blind
+  `pkill -f 'codexbar serve'` fallback is removed: an unrelated service on the
+  configured port — or another session's serve on a different port — is never
+  killed. When no listener can be verified, the stale serve is reused instead.
+
 ## [0.4.1] — 2026-07-03
 
 ### Fixed

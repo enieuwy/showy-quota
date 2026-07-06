@@ -98,7 +98,11 @@ acquire_render_lock() {
         return 1
     fi
 
-    if lock_age=$(render_lock_age_seconds) && (( lock_age >= max_ownerless_age )); then
+    # A future-dated lock mtime (clock skew, hand-touched dir) yields a
+    # negative age that would never satisfy the threshold and wedge rendering
+    # forever; judge staleness by absolute distance from now instead.
+    if lock_age=$(render_lock_age_seconds) \
+        && { (( lock_age >= max_ownerless_age )) || (( lock_age <= -max_ownerless_age )); }; then
         rmdir -- "${RENDER_LOCK_DIR}" 2>/dev/null || true
         acquire_render_lock
         return $?
@@ -704,6 +708,9 @@ elapsed_marker_x() {
     local reset_epoch duration start_epoch now elapsed marker
     reset_epoch=$(showy_quota_reset_epoch "${reset_at}") || return 1
     duration=$((window_minutes * 60))
+    # An absurd windowMinutes can wrap 64-bit arithmetic (2^62 * 60 ≡ 0) and
+    # divide by zero below; mirror the Rust core's checked_mul: no marker.
+    (( duration / 60 == window_minutes )) || return 1
     start_epoch=$((reset_epoch - duration))
     now=$(date +%s)
     elapsed=$((now - start_epoch))

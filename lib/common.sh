@@ -280,15 +280,22 @@ showy_quota_now_epoch() {
 }
 
 showy_quota_age_seconds() {
-    # Seconds since file mtime; prints '999999999' when missing.
+    # Seconds since file mtime; prints '999999999' when missing. A future
+    # mtime (clock skew, restored backup, hand-touched file) is as
+    # untrustworthy as an old one, so print the absolute distance: freshness
+    # gates and stale markers then degrade and refresh instead of treating the
+    # file as pinned-fresh forever. Small NTP skew self-heals as the clock
+    # catches up; a refresh republishes the cache with a current mtime.
     local path="$1"
     [[ -f "${path}" ]] || { printf '999999999\n'; return; }
-    local now mtime
+    local now mtime age
     now=$(showy_quota_now_epoch)
     if mtime=$(stat -f %m "${path}" 2>/dev/null); then :
     elif mtime=$(stat -c %Y "${path}" 2>/dev/null); then :
     else mtime="${now}"; fi
-    printf '%s\n' $((now - mtime))
+    age=$((now - mtime))
+    (( age < 0 )) && age=$((-age))
+    printf '%s\n' "${age}"
 }
 
 showy_quota_cache_source() {
@@ -308,7 +315,8 @@ showy_quota_cache_degraded_cli() {
 
 # Emit provider ids (one per line, deduplicated, original order preserved) from
 # a CodexBar usage payload. Validates each id with the same regex as the JSON
-# schema check so unsafe ids never leak into argv.
+# schema check — plus the '.'/'..' path-component rejection from
+# valid_provider_id — so unsafe ids never leak into argv or stamp paths.
 showy_quota_provider_ids_from_payload() {
     local file="$1"
     [[ -s "${file}" ]] || return 1
@@ -319,6 +327,7 @@ showy_quota_provider_ids_from_payload() {
                 [];
                 if ($r.provider? | type == "string")
                    and ($r.provider | test("^[A-Za-z0-9_.-]+$"))
+                   and ($r.provider != "." and $r.provider != "..")
                    and (index($r.provider) == null)
                 then . + [$r.provider]
                 else .

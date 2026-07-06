@@ -298,6 +298,9 @@ showy_quota_elapsed_marker_cell() {
     local reset_epoch duration start_epoch now elapsed marker
     reset_epoch=$(showy_quota_reset_epoch "${reset_at}") || return 1
     duration=$((window_minutes * 60))
+    # An absurd windowMinutes can wrap 64-bit arithmetic (2^62 * 60 ≡ 0) and
+    # divide by zero below; mirror the Rust core's checked_mul: no marker.
+    (( duration / 60 == window_minutes )) || return 1
     start_epoch=$((reset_epoch - duration))
     now=$(showy_quota_now_epoch)
     elapsed=$((now - start_epoch))

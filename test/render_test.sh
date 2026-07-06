@@ -2116,14 +2116,15 @@ out=$(
     SHOWY_QUOTA_TEST_FIXTURE="${dotdot_provider}" \
     "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
 ) || rc=$?
-# '..' is a path component that would escape the failure-stamp dir; it must be
-# dropped (valid_provider_id), while the legitimate provider still renders.
-if (( rc == 0 )) \
-    && printf '%s' "${out}" | jq -e 'any(.provider == "codex")' >/dev/null 2>&1 \
-    && ! printf '%s' "${out}" | jq -e 'any(.provider == "..")' >/dev/null 2>&1; then
-    ok "fetcher drops '..' provider id (no path traversal)"
+# '..' is a path component that would escape the failure-stamp dir. A mismatch
+# between enabled-record count (2) and valid-id count (1: only codex) is invalid
+# inventory: discovery fails and the fetcher refuses to publish, rather than
+# silently dropping '..' or emitting a canonical-empty cache.
+if (( rc != 0 )) && [[ -z "${out}" ]] && ! [[ -f "${cache}/usage.json" ]] \
+    && [[ -r "${cache}/config-providers-failed-at" ]]; then
+    ok "fetcher rejects '..' provider id as invalid inventory (no path traversal)"
 else
-    fail "fetcher drops '..' provider id (no path traversal)" "rc=${rc}; out=${out}"
+    fail "fetcher rejects '..' provider id as invalid inventory (no path traversal)" "rc=${rc}; out=${out}"
 fi
 
 # 4. Missing codexbar binary, no cache → fetcher fails with diagnostic.
@@ -4472,6 +4473,219 @@ if (( rc == 0 )) && [[ "${out}" == "${expected_stale}" ]]; then
 else
     fail "forced refresh timeout falls back to stale cache" "rc=${rc}; out=${out}"
 fi
+# ── marker overflow guard (showy-quota-marker-overflow) ─────────────────
+# An absurd windowMinutes (2^62) previously wrapped 64-bit duration to 0 and
+# crashed the elapsed-marker math with a divide-by-zero. The checked-mul guard
+# must now yield no marker (non-zero return, empty output) without aborting the
+# eval shell, while a sane window still produces a marker (no over-clamping).
+printf '\nmarker overflow guard\n'
+
+marker_rc=0
+marker_out=$(run_strip_eval 'showy_quota_elapsed_marker_cell "2026-07-06T20:00:00Z" 4611686018427387904 40' SHOWY_QUOTA_NO_CONFIG=1 2>&1) || marker_rc=$?
+# Empty (merged stdout+stderr) pins both no-marker AND no "division by 0" crash:
+# a reintroduced wrap would print a div-by-zero diagnostic here.
+assert_equals "overflow windowMinutes yields empty marker (no div-by-zero crash)" "" "${marker_out}"
+if (( marker_rc != 0 )); then
+    ok "overflow windowMinutes returns non-zero (no marker)"
+else
+    fail "overflow windowMinutes returns non-zero (no marker)" "rc=${marker_rc}"
+fi
+
+marker_out=$(run_strip_eval 'showy_quota_elapsed_marker_cell "2099-01-01T01:40:00Z" 100 40' SHOWY_QUOTA_NO_CONFIG=1 2>&1) || marker_out=""
+if [[ "${marker_out}" =~ ^[0-9]+$ ]]; then
+    ok "sane windowMinutes still yields a numeric marker cell"
+else
+    fail "sane windowMinutes still yields a numeric marker cell" "out=${marker_out}"
+fi
+
+# ── cache age with future mtime (showy-quota-future-mtime) ──────────────
+# A future-dated cache file (clock skew, restored backup, hand-touched file)
+# must be treated as aged, not pinned-fresh forever: showy_quota_age_seconds
+# reports the absolute distance |now - mtime|, and showy_quota_cache_stale_for
+# flags it stale. A freshly-written file still reads as a small age.
+printf '\ncache age with future mtime\n'
+
+future_cache="${TMP}/future-mtime-cache.json"
+: > "${future_cache}"
+touch -t 401201010000 "${future_cache}"
+future_age=$(run_common_eval "showy_quota_age_seconds \"${future_cache}\"" SHOWY_QUOTA_NO_CONFIG=1)
+if [[ "${future_age}" =~ ^[0-9]+$ ]] && (( future_age > 1000000000 )); then
+    ok "future-dated cache reports a large positive age (absolute distance)"
+else
+    fail "future-dated cache reports a large positive age (absolute distance)" "age=${future_age}"
+fi
+
+future_stale_rc=0
+run_common_eval "showy_quota_cache_stale_for \"${future_cache}\"" SHOWY_QUOTA_NO_CONFIG=1 || future_stale_rc=$?
+assert_equals "future-dated cache is flagged stale" "0" "${future_stale_rc}"
+
+fresh_cache="${TMP}/fresh-mtime-cache.json"
+: > "${fresh_cache}"
+fresh_age=$(run_common_eval "showy_quota_age_seconds \"${fresh_cache}\"" SHOWY_QUOTA_NO_CONFIG=1)
+if [[ "${fresh_age}" =~ ^[0-9]+$ ]] && (( fresh_age < 60 )); then
+    ok "freshly-written cache reports a small age"
+else
+    fail "freshly-written cache reports a small age" "age=${fresh_age}"
+fi
+
+# ── future-dated ownerless render lock (showy-quota-future-render-lock) ──
+# An ownerless render.lock dir with a far-future mtime yields a negative age
+# that would never satisfy the ownerless-reclaim threshold and would wedge
+# SketchyBar rendering forever. It must be reclaimed by absolute distance
+# (|age| >= 30) so rendering proceeds (sketchybar receives --set) without the
+# "render lock is ownerless; skipping" bail-out.
+printf '\nfuture-dated render lock\n'
+
+cache=$(mk_cache)
+future_lock_dir="${cache}/sb/render.lock"
+mkdir -p "${future_lock_dir}"
+touch -t 401201010000 "${future_lock_dir}"
+log="${TMP}/sb-future-lock.log"
+future_lock_err="${TMP}/sb-future-lock.err"
+run_sketchybar_plugin codexbar-mixed.json "${cache}" "${log}" SHOWY_QUOTA_DEBUG=1 2>"${future_lock_err}"
+plugin_log="$(< "${log}")"
+assert_contains "future-dated ownerless render lock is reclaimed and rendering proceeds" "--set" "${plugin_log}"
+assert_not_contains "future-dated ownerless render lock does not wedge rendering" "render lock is ownerless; skipping" "$(< "${future_lock_err}")"
+
+# ── dot provider discovery preserves cache (showy-quota-dot-provider) ────
+# `codexbar config providers` reporting a single '.' provider is invalid
+# inventory (valid_provider_id rejects '.'), not a canonical-empty inventory:
+# enabled-record count (1) != valid-id count (0) => discovery fails and the
+# fetcher must fall back to the existing cache rather than clobbering it with
+# the canonical-empty `[]` payload.
+printf '\ndot provider discovery\n'
+
+dot_inv_dir="${TMP}/dot-inv"
+mkdir -p "${dot_inv_dir}"
+cat > "${dot_inv_dir}/codexbar" <<'EOF'
+#!/bin/sh
+if [ "${1:-}" = "config" ] && [ "${2:-}" = "providers" ]; then
+    printf '%s' '[{"provider":".","enabled":true}]'
+    exit 0
+fi
+exit 99
+EOF
+chmod +x "${dot_inv_dir}/codexbar"
+
+cache=$(mk_cache)
+cp "${FIXTURE_DIR}/codexbar-mixed.json" "${cache}/usage.json"
+touch -t 198801010000 "${cache}/usage.json"
+rc=0
+out=$(
+    SHOWY_QUOTA_NO_CONFIG=1 \
+    SHOWY_QUOTA_CACHE_DIR="${cache}" \
+    SHOWY_QUOTA_CODEXBAR_BIN="${dot_inv_dir}/codexbar" \
+    SHOWY_QUOTA_CODEXBAR_SERVE_URL='' \
+    SHOWY_QUOTA_REFRESH_SECONDS=0 \
+    "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
+) || rc=$?
+dot_cache_after="missing"
+[[ -r "${cache}/usage.json" ]] && dot_cache_after="$(< "${cache}/usage.json")"
+assert_equals "dot-only inventory fetch succeeds (falls back to cache)" "0" "${rc}"
+if [[ "${dot_cache_after}" != "[]" ]] \
+    && printf '%s' "${dot_cache_after}" | jq -e 'type == "array" and any(.provider == "codex")' >/dev/null 2>&1; then
+    ok "dot-only inventory preserves last-known-good cache (never publishes [])"
+else
+    fail "dot-only inventory preserves last-known-good cache (never publishes [])" "cache=${dot_cache_after:0:80}"
+fi
+
+# ── serve recycle refuses foreign listeners (showy-quota-ba81839102504781) ──
+# A stale-build serve on our port that is NOT a codexbar serve (a foreign
+# process merely holding the port) must never be signaled: serve_recycle_stale
+# only kills lsof listeners it verifies as a codexbar serve. The fetcher keeps
+# using the stale serve rather than killing an unrelated process — the removed
+# blind `pkill -f 'codexbar serve'` fallback could kill other sessions' serves.
+printf '\nserve recycle refuses foreign listeners\n'
+
+recycle_bin_dir="${TMP}/serve-recycle-foreign-bin"
+mkdir -p "${recycle_bin_dir}"
+cat > "${recycle_bin_dir}/codexbar" <<'EOF'
+#!/usr/bin/env bash
+set -eu
+if [[ "${1:-}" == "--version" ]]; then
+    printf 'CodexBar %s\n' "${SHOWY_QUOTA_TEST_ONDISK_VERSION:-2.0.0}"
+    exit 0
+fi
+# A `serve` (or any other) invocation must NOT grab the port; the foreign
+# listener owns it. Exit non-zero so a reintroduced start path fails loudly.
+exit 90
+EOF
+chmod +x "${recycle_bin_dir}/codexbar"
+
+recycle_cache=$(mk_cache)
+recycle_usage="${TMP}/serve-recycle-usage.json"
+cp "${FIXTURE_DIR}/codexbar-realistic.json" "${recycle_usage}"
+recycle_port=$(unused_tcp_port)
+recycle_url="http://127.0.0.1:${recycle_port}"
+# A plain python HTTP server: its command's first-word basename is the python
+# interpreter, never the codexbar bin basename, so serve_listener_is_codexbar
+# rejects it and serve_recycle_stale must leave it untouched.
+python3 - "${recycle_port}" "${recycle_usage}" <<'PY' &
+import http.server
+import json
+import sys
+
+port = int(sys.argv[1])
+fixture = sys.argv[2]
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/health":
+            body = json.dumps({"status": "ok", "version": "1.0.0"}).encode()
+        elif self.path == "/usage":
+            with open(fixture, "rb") as fh:
+                body = fh.read()
+        else:
+            self.send_response(404)
+            self.end_headers()
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, _format, *args):
+        return
+
+http.server.ThreadingHTTPServer.allow_reuse_address = True
+http.server.ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()
+PY
+recycle_listener_pid=$!
+
+recycle_ready=0
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30; do
+    if curl -fsS --max-time 1 "${recycle_url}/health" >/dev/null 2>&1; then
+        recycle_ready=1
+        break
+    fi
+    sleep 0.1
+done
+if (( recycle_ready )); then
+    ok "foreign listener is up on the serve port"
+else
+    fail "foreign listener is up on the serve port" "port=${recycle_port}"
+fi
+
+# Stale build (serve /health 1.0.0 vs on-disk 2.0.0) forces the recycle path.
+# The fetch rc is irrelevant here; the contract is that the foreign listener
+# survives.
+run_with_test_timeout 15 env \
+    PATH="${recycle_bin_dir}:${PATH}" \
+    SHOWY_QUOTA_NO_CONFIG=1 \
+    SHOWY_QUOTA_MANAGE_SERVE=1 \
+    SHOWY_QUOTA_CACHE_DIR="${recycle_cache}" \
+    SHOWY_QUOTA_CODEXBAR_BIN="${recycle_bin_dir}/codexbar" \
+    SHOWY_QUOTA_CODEXBAR_SERVE_URL="${recycle_url}" \
+    SHOWY_QUOTA_CODEXBAR_SERVE_START_WAIT_TENTHS=10 \
+    "${REPO_ROOT}/bin/showy-quota-fetch" --refresh >/dev/null 2>&1 || true
+
+recycle_listener_state="dead"
+kill -0 "${recycle_listener_pid}" 2>/dev/null && recycle_listener_state="alive"
+kill "${recycle_listener_pid}" 2>/dev/null || true
+wait "${recycle_listener_pid}" 2>/dev/null || true
+assert_equals "serve recycle leaves an unverified foreign listener alive" "alive" "${recycle_listener_state}"
+
 # ── summary ──────────────────────────────────────────────────────────
 
 printf '\n%d passed, %d failed\n' "${PASSED}" "${FAILED}"

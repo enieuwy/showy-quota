@@ -601,11 +601,19 @@ discover_providers() {
         | select(.enabled == true)
         | .provider
         | select(type == "string")
-        | select(test("^[A-Za-z0-9_.-]+$"))
     ' 2>/dev/null) || ids=""
+    # Keep only ids the shell predicate accepts: the jq regex alone would
+    # still pass '.'/'..', which are path components that escape the
+    # per-provider failure-stamp directory. A record whose id fails the
+    # predicate drops valid_count below enabled_count and is rejected as
+    # invalid inventory rather than published as canonical-empty.
+    local validated_ids=""
     if [[ -n "${ids}" ]]; then
         while IFS= read -r id_line; do
-            [[ -n "${id_line}" ]] && valid_count=$((valid_count + 1))
+            [[ -n "${id_line}" ]] || continue
+            valid_provider_id "${id_line}" || continue
+            validated_ids+="${id_line}"$'\n'
+            valid_count=$((valid_count + 1))
         done < <(printf '%s\n' "${ids}")
     fi
     if (( enabled_count != valid_count )); then
@@ -614,7 +622,7 @@ discover_providers() {
         return 1
     fi
     clear_config_providers_failure
-    [[ -n "${ids}" ]] && printf '%s\n' "${ids}"
+    [[ -n "${validated_ids}" ]] && printf '%s' "${validated_ids}"
     return 0
 }
 canonical_empty_inventory_payload() {
@@ -1006,10 +1014,16 @@ serve_ondisk_version() {
 
 # Free the configured serve port so ensure_serve_running can start a fresh
 # serve. A serve we manage is terminated via its pidfile (waits for exit so the
-# port is released before restart); a foreign serve holding our port is killed
-# by listener PID (surgical) and only then by name as a last resort. Returns
-# non-zero when no recycle mechanism is available so the caller keeps the
-# stale serve rather than failing to rebind.
+# port is released before restart). Without a pidfile we inspect the listeners
+# holding our port (lsof) and signal ONLY those verified as a codexbar serve
+# (serve_listener_is_codexbar); foreign listeners are never touched. Returns 0
+# only when the port was actually freed (managed terminate, or every listener
+# verified and killed). Returns non-zero when a foreign/unverified listener is
+# present, when lsof (or the port) is unavailable, or when nothing verified
+# could be freed, so the caller keeps the stale serve rather than killing an
+# unrelated process. The old name-based `pkill -f 'codexbar serve'` fallback is
+# gone: it could kill serves belonging to other sessions that never held our
+# port.
 serve_recycle_stale() {
     local pid="" start_epoch="" basename_rec=""
     if managed_serve_valid_pidfile pid start_epoch basename_rec; then
@@ -1018,22 +1032,64 @@ serve_recycle_stale() {
         rm -f -- "${SHOWY_QUOTA_CODEXBAR_SERVE_PID_FILE}"
         return 0
     fi
-    local port="" listeners=""
-    if port=$(serve_port_from_base_url) && showy_quota_have lsof; then
-        listeners=$(lsof -ti "tcp:${port}" -sTCP:LISTEN 2>/dev/null) || listeners=""
-        if [[ -n "${listeners}" ]]; then
-            # shellcheck disable=SC2086 # word-split listener PIDs into kill args
-            kill ${listeners} 2>/dev/null || true
-            showy_quota_log "recycled foreign codexbar serve on port ${port} (${listeners//$'\n'/ })"
-            return 0
+
+    local port=""
+    if ! port=$(serve_port_from_base_url); then
+        showy_quota_log "cannot recycle foreign codexbar serve: no serve port; reusing"
+        return 1
+    fi
+    if ! showy_quota_have lsof; then
+        showy_quota_log "cannot recycle foreign codexbar serve on port ${port}: no lsof; reusing"
+        return 1
+    fi
+
+    local listeners=""
+    listeners=$(lsof -ti "tcp:${port}" -sTCP:LISTEN 2>/dev/null) || listeners=""
+    if [[ -z "${listeners}" ]]; then
+        showy_quota_log "cannot recycle foreign codexbar serve on port ${port}: no listeners; reusing"
+        return 1
+    fi
+
+    local listener_pid="" killed=0 unverified=0
+    while IFS= read -r listener_pid; do
+        [[ -n "${listener_pid}" ]] || continue
+        if serve_listener_is_codexbar "${listener_pid}"; then
+            kill "${listener_pid}" 2>/dev/null || true
+            killed=$(( killed + 1 ))
+        else
+            showy_quota_log "refusing to recycle foreign listener pid ${listener_pid} on port ${port} (not a codexbar serve)"
+            unverified=1
         fi
+    done <<<"${listeners}"
+
+    if (( unverified || killed == 0 )); then
+        showy_quota_log "cannot recycle foreign codexbar serve on port ${port}: no verified codexbar listener freed; reusing"
+        return 1
     fi
-    if showy_quota_have pkill; then
-        pkill -f 'codexbar serve' 2>/dev/null || true
-        showy_quota_log "recycled foreign codexbar serve via pkill"
-        return 0
-    fi
-    showy_quota_log "cannot recycle foreign codexbar serve: no lsof/pkill; reusing"
+    showy_quota_log "recycled foreign codexbar serve on port ${port} (${listeners//$'\n'/ })"
+    return 0
+}
+
+# Predicate: is the listening PID a codexbar serve we may recycle? The first
+# word of its command line must have the configured codexbar bin basename AND a
+# standalone `serve` argument must appear. Anything else (a foreign process that
+# happens to hold our port) fails and is never signaled.
+serve_listener_is_codexbar() {
+    local pid="$1" expected="" command="" token=""
+    local -a tokens=()
+    expected=$(managed_serve_expected_basename)
+    [[ -n "${expected}" ]] || return 1
+    command=$(ps -p "${pid}" -o command= 2>/dev/null) || return 1
+    command="${command#"${command%%[![:space:]]*}"}"
+    [[ -n "${command}" ]] || return 1
+    # Split on whitespace without pathname expansion: an unquoted ${command}
+    # would glob ps output (e.g. a literal `*`) against the working directory.
+    read -ra tokens <<<"${command}"
+    (( ${#tokens[@]} > 0 )) || return 1
+    [[ "${tokens[0]##*/}" == "${expected}" ]] || return 1
+    for token in "${tokens[@]:1}"; do
+        [[ "${token}" == "serve" ]] && return 0
+    done
     return 1
 }
 
