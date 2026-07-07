@@ -37,6 +37,7 @@ pub struct RenderConfig {
     pub dim_window_minutes: i64,
 
     pub zellij_bar_width: usize,
+    pub tmux_bar_width: Option<usize>,
     pub terminal_bar_mode: String,
     pub provider_modes: Vec<(String, String)>,
     pub mono_color_mode: String,
@@ -78,6 +79,7 @@ impl Default for RenderConfig {
             time_warn_minutes: 30,
             dim_window_minutes: 10080,
             zellij_bar_width: 12,
+            tmux_bar_width: None,
             terminal_bar_mode: "auto".into(),
             provider_modes: vec![
                 ("gemini".into(), "mono3".into()),
@@ -93,9 +95,13 @@ impl Default for RenderConfig {
 
 impl RenderConfig {
     pub fn from_env() -> Self {
+        let env: BTreeMap<String, String> = std::env::vars().collect();
+        Self::from_env_map(&env)
+    }
+
+    pub fn from_env_map(env: &BTreeMap<String, String>) -> Self {
         let mut config = Self::default();
-        let get = |name: &str| std::env::var(name).ok();
-        config.apply_getter(|name| get(name));
+        config.apply_getter(|name| env.get(name).cloned());
         config
     }
 
@@ -236,6 +242,9 @@ impl RenderConfig {
 
         self.zellij_bar_width =
             get_usize(&get, "SHOWY_QUOTA_ZELLIJ_BAR_WIDTH", self.zellij_bar_width);
+        self.tmux_bar_width = get("SHOWY_QUOTA_TMUX_BAR_WIDTH")
+            .and_then(|value| value.parse().ok())
+            .or(self.tmux_bar_width);
         assign_string(
             &get,
             "SHOWY_QUOTA_TERMINAL_BAR_MODE",
@@ -573,5 +582,32 @@ mod tests {
         let mut kdl = BTreeMap::new();
         kdl.insert(key.to_string(), "77".to_string());
         assert_eq!(RenderConfig::from_kdl_config(&kdl).good_min_remaining, 77);
+    }
+
+    #[test]
+    fn from_env_map_reads_terminal_renderer_overrides() {
+        let mut env = BTreeMap::new();
+        env.insert("SHOWY_QUOTA_ZELLIJ_BAR_WIDTH".into(), "9".into());
+        env.insert("SHOWY_QUOTA_TMUX_BAR_WIDTH".into(), "17".into());
+        env.insert(
+            "SHOWY_QUOTA_PROVIDER_MODES".into(),
+            "codex=dual2,claude=mono4".into(),
+        );
+        env.insert("SHOWY_QUOTA_CAP_LEFT".into(), "#".into());
+        env.insert("SHOWY_QUOTA_CAP_RIGHT".into(), String::new());
+
+        let config = RenderConfig::from_env_map(&env);
+
+        assert_eq!(config.zellij_bar_width, 9);
+        assert_eq!(config.tmux_bar_width, Some(17));
+        assert_eq!(
+            config.provider_modes,
+            vec![
+                ("codex".to_string(), "dual2".to_string()),
+                ("claude".to_string(), "mono4".to_string()),
+            ]
+        );
+        assert_eq!(config.cap_left, "#");
+        assert_eq!(config.cap_right, "");
     }
 }

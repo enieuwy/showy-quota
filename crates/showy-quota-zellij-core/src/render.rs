@@ -19,6 +19,22 @@ pub struct RenderOptions {
     pub now_epoch: i64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputFormat {
+    Zellij,
+    Tmux,
+}
+
+impl OutputFormat {
+    fn bar_width(self, config: &RenderConfig) -> usize {
+        match self {
+            OutputFormat::Zellij => config.zellij_bar_width,
+            OutputFormat::Tmux => config.tmux_bar_width.unwrap_or(config.zellij_bar_width),
+        }
+        .clamp(8, 400)
+    }
+}
+
 #[derive(Debug)]
 pub enum RenderError {
     InvalidPayload,
@@ -29,14 +45,32 @@ pub fn render_zellij(
     config: &RenderConfig,
     options: RenderOptions,
 ) -> Result<String, RenderError> {
+    render_with_format(payload, config, options, OutputFormat::Zellij)
+}
+
+pub fn render_tmux(
+    payload: &[u8],
+    config: &RenderConfig,
+    options: RenderOptions,
+) -> Result<String, RenderError> {
+    render_with_format(payload, config, options, OutputFormat::Tmux)
+}
+
+fn render_with_format(
+    payload: &[u8],
+    config: &RenderConfig,
+    options: RenderOptions,
+    output_format: OutputFormat,
+) -> Result<String, RenderError> {
     let records = parse_usage_payload(payload).map_err(|_| RenderError::InvalidPayload)?;
-    Ok(render_records(&records, config, options))
+    Ok(render_records(&records, config, options, output_format))
 }
 
 fn render_records(
     records: &[ProviderRecord],
     config: &RenderConfig,
     options: RenderOptions,
+    output_format: OutputFormat,
 ) -> String {
     let mut records: Vec<&ProviderRecord> = records
         .iter()
@@ -50,9 +84,25 @@ fn render_records(
     let mut out = String::new();
 
     if records.is_empty() {
-        dim(&mut out, options.color);
-        out.push_str("AI idle");
-        reset(&mut out, options.color);
+        dim(&mut out, output_format, options.color);
+        match output_format {
+            OutputFormat::Zellij => {
+                out.push_str("AI idle");
+                reset(&mut out, output_format, options.color);
+            }
+            OutputFormat::Tmux => {
+                style_text(
+                    &mut out,
+                    "AI idle",
+                    Some(&config.palette_primary_unknown),
+                    None,
+                    Weight::Normal,
+                    output_format,
+                    options.color,
+                );
+                return out;
+            }
+        }
     } else {
         // Model-pooled providers (auto-detected `dual2`) are split into one
         // synthetic per-family `dual` provider each (`AGᴳ`, `AGᶜ`); everything
@@ -70,7 +120,7 @@ fn render_records(
         }
         for (idx, (record, sigil)) in units.iter().enumerate() {
             if idx > 0 {
-                out.push(' ');
+                separator_space(&mut out, output_format, chunk_bg, options.color);
             }
             render_provider(
                 &mut out,
@@ -78,6 +128,7 @@ fn render_records(
                 sigil,
                 config,
                 options,
+                output_format,
                 chunk_bg,
                 stale_color,
             );
@@ -85,28 +136,32 @@ fn render_records(
     }
 
     if options.stale {
-        out.push(' ');
+        separator_space(&mut out, output_format, chunk_bg, options.color);
         style_text(
             &mut out,
             &config.stale_glyph,
             Some(countdown_warn),
             Some(chunk_bg),
             Weight::Bold,
+            output_format,
             options.color,
         );
     }
     if options.degraded_cli {
-        out.push(' ');
+        separator_space(&mut out, output_format, chunk_bg, options.color);
         style_text(
             &mut out,
             &config.degraded_cli_glyph,
             Some(countdown_warn),
             Some(chunk_bg),
             Weight::Bold,
+            output_format,
             options.color,
         );
     }
-    out.push('\n');
+    if output_format == OutputFormat::Zellij {
+        out.push('\n');
+    }
     out
 }
 
@@ -148,6 +203,7 @@ fn render_provider(
     sigil: &str,
     config: &RenderConfig,
     options: RenderOptions,
+    output_format: OutputFormat,
     chunk_bg: &str,
     stale_color: &str,
 ) {
@@ -255,10 +311,12 @@ fn render_provider(
                     .collect()
             }
         }
+        // The shell mono3 fallback refreshes its assembled-window reset fields
+        // after the stale marker-clearing branch; preserve that byte contract.
         "mono3" if tertiary.is_none() && assembled_windows.len() >= 3 => assembled_windows
             .iter()
             .take(3)
-            .map(|window| Lane::from_window(window, config, options.stale))
+            .map(|window| Lane::from_window(window, config, false))
             .collect(),
         "mono3" => [primary, secondary, tertiary]
             .into_iter()
@@ -286,12 +344,14 @@ fn render_provider(
 
     let separator_fg = chunk_bg;
     let separator_bg = &primary_color;
+    let cap_left = cap_text(output_format, &config.cap_left);
     style_text(
         out,
-        &config.cap_left,
+        cap_left.as_ref(),
         Some(&primary_color),
         Some(chunk_bg),
         Weight::Normal,
+        output_format,
         options.color,
     );
     style_text(
@@ -300,6 +360,7 @@ fn render_provider(
         Some(chunk_bg),
         Some(&primary_color),
         Weight::Bold,
+        output_format,
         options.color,
     );
     style_text(
@@ -308,6 +369,7 @@ fn render_provider(
         Some(separator_fg),
         Some(separator_bg),
         Weight::Normal,
+        output_format,
         options.color,
     );
 
@@ -327,15 +389,28 @@ fn render_provider(
     } else {
         secondary.and_then(UsageWindow::window_minutes)
     };
-    let width = config.zellij_bar_width.clamp(8, 400);
     if !mono_lanes.is_empty() {
-        let markers = mono_marker_cells(config, &mono_lanes, width, options.now_epoch);
-        mono_lane_bar(out, config, options, &mono_lanes, &mono_color, &markers);
+        let markers = mono_marker_cells(
+            config,
+            &mono_lanes,
+            output_format.bar_width(config),
+            options.now_epoch,
+        );
+        mono_lane_bar(
+            out,
+            config,
+            options,
+            output_format,
+            &mono_lanes,
+            &mono_color,
+            &markers,
+        );
     } else {
         dual_metric_bar(
             out,
             config,
             options,
+            output_format,
             DualArgs {
                 p_remaining,
                 s_remaining,
@@ -355,14 +430,17 @@ fn render_provider(
         Some(time_color),
         Some(surface_color),
         Weight::Bold,
+        output_format,
         options.color,
     );
+    let cap_right = cap_text(output_format, &config.cap_right);
     style_text(
         out,
-        &config.cap_right,
+        cap_right.as_ref(),
         Some(surface_color),
         Some(chunk_bg),
         Weight::Normal,
+        output_format,
         options.color,
     );
 }
@@ -422,9 +500,10 @@ fn dual_metric_bar(
     out: &mut String,
     config: &RenderConfig,
     options: RenderOptions,
+    output_format: OutputFormat,
     args: DualArgs<'_>,
 ) {
-    let width = config.zellij_bar_width.clamp(8, 400);
+    let width = output_format.bar_width(config);
     let surface_color = &config.palette_surface;
     let elapsed_color = &config.palette_elapsed;
     let p_fill = filled_cells(args.p_remaining, width);
@@ -468,6 +547,7 @@ fn dual_metric_bar(
             Some(top_color),
             Some(bottom_color),
             Weight::Normal,
+            output_format,
             options.color,
         );
     }
@@ -477,6 +557,7 @@ fn dual_metric_bar(
         Some(&config.palette_bg),
         Some(surface_color),
         Weight::Normal,
+        output_format,
         options.color,
     );
 }
@@ -612,11 +693,12 @@ fn mono_lane_bar(
     out: &mut String,
     config: &RenderConfig,
     options: RenderOptions,
+    output_format: OutputFormat,
     lanes: &[Lane<'_>],
     mono_color: &str,
     markers: &[(usize, &str)],
 ) {
-    let width = config.zellij_bar_width.clamp(8, 400);
+    let width = output_format.bar_width(config);
     let surface_color = &config.palette_surface;
     let fills: Vec<usize> = lanes
         .iter()
@@ -631,6 +713,7 @@ fn mono_lane_bar(
                 Some(color),
                 Some(surface_color),
                 Weight::Normal,
+                output_format,
                 options.color,
             );
             continue;
@@ -653,6 +736,7 @@ fn mono_lane_bar(
             Some(cell_color),
             Some(surface_color),
             Weight::Normal,
+            output_format,
             options.color,
         );
     }
@@ -662,6 +746,7 @@ fn mono_lane_bar(
         Some(&config.palette_bg),
         Some(surface_color),
         Weight::Normal,
+        output_format,
         options.color,
     );
 }
@@ -781,22 +866,17 @@ fn main_family<'a>(
     })
 }
 
-/// Up to `max` distinct renderable windows for collapse decisions and non-pooled
+/// Up to `max` renderable windows for collapse decisions and non-pooled
 /// mono4/mono3 fallback lanes: positional slots first, then extra rate windows
-/// with known usage, deduped by the render-window key (windowMinutes + resetsAt).
+/// with known usage. This mirrors the shell jq row builder byte-for-byte,
+/// including preserving duplicate render-window keys.
 fn distinct_render_windows<'a>(
     slots: &[Option<&'a UsageWindow>; 3],
     extras: &'a [NamedWindow],
     max: usize,
 ) -> Vec<&'a UsageWindow> {
     let mut out: Vec<&'a UsageWindow> = Vec::new();
-    let mut seen: Vec<(Option<i64>, Option<&'a str>)> = Vec::new();
     for window in slots.iter().copied().flatten() {
-        let key = (window.window_minutes(), window.resets_at.as_deref());
-        if seen.contains(&key) {
-            continue;
-        }
-        seen.push(key);
         out.push(window);
         if out.len() >= max {
             return out;
@@ -809,11 +889,6 @@ fn distinct_render_windows<'a>(
         if window.used_percent.is_none() || named.usage_known == Some(false) {
             continue;
         }
-        let key = (window.window_minutes(), window.resets_at.as_deref());
-        if seen.contains(&key) {
-            continue;
-        }
-        seen.push(key);
         out.push(window);
         if out.len() >= max {
             return out;
@@ -1308,42 +1383,95 @@ fn style_text(
     fg_hex: Option<&str>,
     bg_hex: Option<&str>,
     weight: Weight,
+    output_format: OutputFormat,
     color: bool,
 ) {
-    if color {
-        if weight == Weight::Bold {
-            out.push_str("\x1b[1m");
+    match output_format {
+        OutputFormat::Zellij => {
+            if color {
+                if weight == Weight::Bold {
+                    out.push_str("\x1b[1m");
+                }
+                if let Some(hex) = fg_hex {
+                    ansi_fg(out, hex);
+                }
+                if let Some(hex) = bg_hex {
+                    ansi_bg(out, hex);
+                }
+            }
+            out.push_str(text);
+            reset(out, output_format, color);
         }
-        if let Some(hex) = fg_hex {
-            fg(out, hex);
-        }
-        if let Some(hex) = bg_hex {
-            bg(out, hex);
+        OutputFormat::Tmux => {
+            let mut sep = "";
+            out.push_str("#[");
+            if let Some(hex) = fg_hex {
+                out.push_str("fg=#");
+                out.push_str(hex);
+                sep = ",";
+            }
+            if let Some(hex) = bg_hex {
+                out.push_str(sep);
+                out.push_str("bg=#");
+                out.push_str(hex);
+                sep = ",";
+            }
+            if weight == Weight::Bold {
+                out.push_str(sep);
+                out.push_str("bold");
+            }
+            out.push(']');
+            out.push_str(text);
+            reset(out, output_format, color);
         }
     }
-    out.push_str(text);
-    reset(out, color);
 }
 
-fn fg(out: &mut String, hex: &str) {
+fn separator_space(out: &mut String, output_format: OutputFormat, bg_hex: &str, color: bool) {
+    match output_format {
+        OutputFormat::Zellij => out.push(' '),
+        OutputFormat::Tmux => style_text(
+            out,
+            " ",
+            Some(bg_hex),
+            Some(bg_hex),
+            Weight::Normal,
+            output_format,
+            color,
+        ),
+    }
+}
+
+fn cap_text(output_format: OutputFormat, text: &str) -> Cow<'_, str> {
+    match output_format {
+        OutputFormat::Zellij => Cow::Borrowed(text),
+        OutputFormat::Tmux => Cow::Owned(text.replace('#', "##")),
+    }
+}
+
+fn ansi_fg(out: &mut String, hex: &str) {
     let (r, g, b) = hex_to_rgb(hex);
     out.push_str(&format!("\x1b[38;2;{r};{g};{b}m"));
 }
 
-fn bg(out: &mut String, hex: &str) {
+fn ansi_bg(out: &mut String, hex: &str) {
     let (r, g, b) = hex_to_rgb(hex);
     out.push_str(&format!("\x1b[48;2;{r};{g};{b}m"));
 }
 
-fn reset(out: &mut String, color: bool) {
-    if color {
-        out.push_str("\x1b[0m");
+fn reset(out: &mut String, output_format: OutputFormat, color: bool) {
+    match output_format {
+        OutputFormat::Zellij if color => out.push_str("\x1b[0m"),
+        OutputFormat::Tmux => out.push_str("#[default]"),
+        OutputFormat::Zellij => {}
     }
 }
 
-fn dim(out: &mut String, color: bool) {
-    if color {
-        out.push_str("\x1b[2m");
+fn dim(out: &mut String, output_format: OutputFormat, color: bool) {
+    match output_format {
+        OutputFormat::Zellij if color => out.push_str("\x1b[2m"),
+        OutputFormat::Tmux => out.push_str("#[dim]"),
+        OutputFormat::Zellij => {}
     }
 }
 
@@ -1362,6 +1490,62 @@ mod tests {
             },
         )
         .expect("rendered idle fixture")
+    }
+
+    #[test]
+    fn tmux_style_text_emits_markup_chunk() {
+        let mut out = String::new();
+
+        style_text(
+            &mut out,
+            "CL",
+            Some("161616"),
+            Some("25be6a"),
+            Weight::Bold,
+            OutputFormat::Tmux,
+            false,
+        );
+
+        assert_eq!(out, "#[fg=#161616,bg=#25be6a,bold]CL#[default]");
+    }
+
+    #[test]
+    fn tmux_idle_is_dim_unknown_and_omits_trailing_markers() {
+        let output = render_tmux(
+            include_bytes!("../../../test/fixtures/codexbar-empty.json"),
+            &RenderConfig::default(),
+            RenderOptions {
+                color: false,
+                stale: true,
+                degraded_cli: true,
+                now_epoch: 4_070_908_800,
+            },
+        )
+        .expect("rendered tmux idle fixture");
+
+        assert_eq!(output, "#[dim]#[fg=#6c7086]AI idle#[default]");
+    }
+
+    #[test]
+    fn tmux_gap_and_cap_hash_escaping_match_shell_markup() {
+        let mut out = String::new();
+
+        separator_space(&mut out, OutputFormat::Tmux, "161616", false);
+        let cap = cap_text(OutputFormat::Tmux, "#R#");
+        style_text(
+            &mut out,
+            cap.as_ref(),
+            Some("25be6a"),
+            Some("161616"),
+            Weight::Normal,
+            OutputFormat::Tmux,
+            false,
+        );
+
+        assert_eq!(
+            out,
+            "#[fg=#161616,bg=#161616] #[default]#[fg=#25be6a,bg=#161616]##R###[default]"
+        );
     }
 
     #[test]

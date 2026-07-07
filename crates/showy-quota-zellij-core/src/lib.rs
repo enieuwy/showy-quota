@@ -8,4 +8,4 @@ pub use codexbar::{
     provider_ids_from_records, valid_provider_id, ProviderConfigError, ProviderRecord,
 };
 pub use config::RenderConfig;
-pub use render::{render_zellij, RenderError, RenderOptions};
+pub use render::{render_tmux, render_zellij, OutputFormat, RenderError, RenderOptions};

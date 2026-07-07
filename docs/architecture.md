@@ -147,15 +147,21 @@ CodexBar discovers providers; this repo discovers them via the cache content. En
 
 ## External layout managers
 
-`bin/showy-quota-state` is the public bridge for configs that need CodexBar's filtered provider count without duplicating CodexBar or renderer internals. It honors `SHOWY_QUOTA_PROVIDERS` / `SHOWY_QUOTA_PROVIDERS_EXCLUDE` and emits:
+`bin/showy-quota-state` is the public bridge for configs that need CodexBar's filtered provider/layout state without duplicating CodexBar or renderer internals. It honors `SHOWY_QUOTA_PROVIDERS` / `SHOWY_QUOTA_PROVIDERS_EXCLUDE`, preserves renderer order, and emits:
 
-- `available`: whether a valid cache was read.
-- `stale`: whether cache age exceeds `SHOWY_QUOTA_REFRESH_SECONDS * 2`.
-- `cacheAgeSeconds`: seconds since usage cache mtime, or `null` when absent.
-- `staleAfterSeconds`: numeric stale threshold.
-- `providers`: filtered provider ids in render order.
-- `providerCount`: `providers | length`.
-- `sketchybar.compactRecommended`: `providerCount >= SHOWY_QUOTA_SKETCHYBAR_COMPACT_PROVIDER_COUNT`.
+| Field | Meaning |
+|---|---|
+| `available` | Whether a valid cache was read. |
+| `stale` | Whether cache age exceeds `SHOWY_QUOTA_REFRESH_SECONDS * 2`. |
+| `cache.source`, `cache.degraded` | Cache source marker (`serve`, `cli`, or `unknown`) and whether CLI fallback is visible. |
+| `cacheAgeSeconds` | Seconds since usage cache mtime, or `null` when absent. |
+| `staleAfterSeconds` | Numeric stale threshold. |
+| `providers[]` | Filtered provider id strings in render order (for example, `"codex"`). This is the stable flat list external layout managers use for item reconciliation. |
+| `providerMetrics[]` | Filtered provider metrics in the same render order. Each element is `{ "provider": "codex", "windows": { "primary": W|null, "secondary": W|null, "tertiary": W|null }, "extraRateWindows": [E...] }`. |
+| `providerMetrics[].windows.*` | Positional window slots; missing or non-numeric `usedPercent` slots are `null` and never shifted up. `W` contains `usedPercent`, `remainingPercent`, `resetsAt`, `resetDescription`, `windowMinutes`, and `minutesUntilReset`. |
+| `providerMetrics[].extraRateWindows[]` | Extra rate windows from CodexBar. `E` adds `title` and `usageKnown` to the same usage fields as `W`; unknown usage keeps usage fields `null`. |
+| `providerCount` | `providers | length`. |
+| `sketchybar.compactRecommended` | `providerCount >= SHOWY_QUOTA_SKETCHYBAR_COMPACT_PROVIDER_COUNT`. |
 
 Consumers should treat `available=false` as "leave the current layout alone"; it means no last-known-good cache exists yet.
 

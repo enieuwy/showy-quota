@@ -54,6 +54,37 @@ if [[ ! "${threshold}" =~ ^[0-9]+$ ]]; then
     threshold=5
 fi
 
+showy_quota_state_minutes_json() {
+    local filtered_json="$1"
+    local minutes_json='{}'
+    local reset_raw minutes value
+
+    while IFS= read -r reset_raw; do
+        [[ -n "${reset_raw}" ]] || continue
+        minutes=$(showy_quota_minutes_until "${reset_raw}" || true)
+        if [[ "${minutes}" =~ ^[0-9]+$ ]]; then
+            value="${minutes}"
+        else
+            value="null"
+        fi
+        minutes_json=$(printf '%s' "${minutes_json}" | jq -c --arg reset "${reset_raw}" --argjson value "${value}" '. + {($reset): $value}')
+    done < <(printf '%s' "${filtered_json}" | jq -r '
+        .[]
+        | [
+            .usage.primary,
+            .usage.secondary,
+            .usage.tertiary,
+            ((.usage.extraRateWindows // []) | if type == "array" then .[]?.window else empty end)
+        ][]
+        | select(. != null)
+        | (.resetsAt // .resetDescription // empty)
+        | select(type == "string" and length > 0)
+    ' | sort -u)
+
+    printf '%s' "${minutes_json}"
+}
+
+
 data=""
 available=false
 if data=$("${FETCH}" 2>/dev/null) && [[ -n "${data}" ]]; then
@@ -61,9 +92,70 @@ if data=$("${FETCH}" 2>/dev/null) && [[ -n "${data}" ]]; then
 fi
 
 if [[ "${available}" == true ]]; then
-    providers_json=$(printf '%s' "${data}" | showy_quota_filter_renderable | jq -c '[ .[].provider ]')
+    filtered_json=$(printf '%s' "${data}" | showy_quota_filter_renderable | jq -c '.')
+    provider_ids_json=$(printf '%s' "${filtered_json}" | jq -c '[ .[].provider ]')
+    reset_minutes_json=$(showy_quota_state_minutes_json "${filtered_json}")
+    provider_metrics_json=$(printf '%s' "${filtered_json}" | jq -c --argjson reset_minutes "${reset_minutes_json}" '
+        def pct($x):
+            if ($x | type) == "number" then [0, ([100, ($x | floor)] | min)] | max else null end;
+        def nonneg_int($x):
+            if (($x | type) == "number") and $x >= 0 then ($x | floor) else null end;
+        def string_or_null($x):
+            if $x == null then null elif ($x | type) == "string" then $x else null end;
+        def reset_key($w):
+            string_or_null($w.resetsAt) // string_or_null($w.resetDescription);
+        def minutes_until_reset($w):
+            (reset_key($w)) as $raw
+            | if $raw == null then null else ($reset_minutes[$raw] // null) end;
+        def window_state($w):
+            if $w != null and (($w.usedPercent | type) == "number") then
+                (pct($w.usedPercent)) as $used
+                | {
+                    usedPercent: $used,
+                    remainingPercent: (100 - $used),
+                    resetsAt: string_or_null($w.resetsAt),
+                    resetDescription: string_or_null($w.resetDescription),
+                    windowMinutes: nonneg_int($w.windowMinutes),
+                    minutesUntilReset: minutes_until_reset($w)
+                }
+            else null end;
+        def extra_window_state($extra):
+            (($extra.usageKnown != false) and ($extra.window != null) and (($extra.window.usedPercent | type) == "number")) as $known
+            | (if $known then window_state($extra.window) else {
+                usedPercent: null,
+                remainingPercent: null,
+                resetsAt: null,
+                resetDescription: null,
+                windowMinutes: null,
+                minutesUntilReset: null
+            } end) as $window
+            | {
+                title: string_or_null($extra.title),
+                usageKnown: $known,
+                usedPercent: $window.usedPercent,
+                remainingPercent: $window.remainingPercent,
+                resetsAt: $window.resetsAt,
+                resetDescription: $window.resetDescription,
+                windowMinutes: $window.windowMinutes,
+                minutesUntilReset: $window.minutesUntilReset
+            };
+        [
+            .[]
+            | {
+                provider: .provider,
+                windows: {
+                    primary: window_state(.usage.primary),
+                    secondary: window_state(.usage.secondary),
+                    tertiary: window_state(.usage.tertiary)
+                },
+                extraRateWindows: ((.usage.extraRateWindows // []) | if type == "array" then map(extra_window_state(.)) else [] end)
+            }
+        ]
+    ')
 else
-    providers_json='[]'
+    filtered_json='[]'
+    provider_ids_json='[]'
+    provider_metrics_json='[]'
 fi
 
 cache_age="null"
@@ -92,14 +184,15 @@ fi
 
 case "${mode}" in
     count)
-        printf '%s\n' "${providers_json}" | jq 'length'
+        printf '%s\n' "${provider_ids_json}" | jq 'length'
         ;;
     providers)
-        printf '%s\n' "${providers_json}" | jq -r '.[]'
+        printf '%s\n' "${provider_ids_json}" | jq -r '.[]'
         ;;
     json)
         jq -n \
-            --argjson providers "${providers_json}" \
+            --argjson providers "${provider_ids_json}" \
+            --argjson providerMetrics "${provider_metrics_json}" \
             --argjson available "${available}" \
             --argjson stale "${stale_flag}" \
             --argjson degraded "${degraded_flag}" \
@@ -118,6 +211,7 @@ case "${mode}" in
                 cacheAgeSeconds: (if $cache_age == "null" then null else ($cache_age | tonumber) end),
                 staleAfterSeconds: ($stale_after | tonumber),
                 providers: $providers,
+                providerMetrics: $providerMetrics,
                 providerCount: ($providers | length),
                 sketchybar: {
                     itemPrefix: "showy_quota",

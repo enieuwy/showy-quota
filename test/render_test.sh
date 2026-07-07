@@ -1337,13 +1337,24 @@ assert_equals "allow-list order overrides provider order" "gemini,claude" "$(pri
 # ── state surface ─────────────────────────────────────────────────────
 printf '\ncodexbar state\n'
 
-out=$(run_state codexbar-mixed.json)
+out=$(run_state codexbar-mixed.json SHOWY_QUOTA_NOW_EPOCH=4070908800)
 assert_equals "state marks cache available" "true" "$(printf '%s' "${out}" | jq -r '.available')"
 assert_equals "state provider count honors renderable filter" "3" "$(printf '%s' "${out}" | jq -r '.providerCount')"
 assert_equals "state provider order matches render order" "codex,claude,gemini" "$(printf '%s' "${out}" | jq -r '.providers | join(",")')"
+assert_equals "state providerMetrics length matches provider count" "true" "$(printf '%s' "${out}" | jq -r '(.providerMetrics | length) == .providerCount')"
+assert_equals "state claude primary window exposes normalized usage" "17|83|300|340" "$(printf '%s' "${out}" | jq -r '.providerMetrics[] | select(.provider == "claude") | .windows.primary | [.usedPercent, .remainingPercent, .windowMinutes, .minutesUntilReset] | map(tostring) | join("|")')"
+assert_equals "state missing tertiary window stays null" "true" "$(printf '%s' "${out}" | jq -r '.providerMetrics[] | select(.provider == "codex") | .windows.tertiary == null')"
+assert_equals "state top-level contract is unchanged apart from providerMetrics" '{"available":true,"cache":{"degraded":true,"source":"cli"},"cacheAgeSeconds":"number","providerCount":3,"providers":["codex","claude","gemini"],"sketchybar":{"bracket":"showy_quota_bracket","compactProviderThreshold":5,"compactRecommended":false,"itemPrefix":"showy_quota"},"stale":true,"staleAfterSeconds":240}' "$(printf '%s' "${out}" | jq -cS 'del(.providerMetrics) | .cacheAgeSeconds = (.cacheAgeSeconds | type)')"
+assert_equals "state providers stay string array" "true" "$(printf '%s' "${out}" | jq -r '.providers | type == "array" and all(.[]; type == "string")')"
 assert_equals "state compact recommendation defaults below threshold" "false" "$(printf '%s' "${out}" | jq -r '.sketchybar.compactRecommended')"
 assert_equals "state exposes degraded CLI source" "cli" "$(printf '%s' "${out}" | jq -r '.cache.source')"
 assert_equals "state exposes degraded flag" "true" "$(printf '%s' "${out}" | jq -r '.cache.degraded')"
+
+out=$(run_state codexbar-antigravity-quad.json SHOWY_QUOTA_NOW_EPOCH=4070908800)
+assert_equals "state extraRateWindows exposes known window metrics" "Gemini Session|true|35|65|300|180" "$(printf '%s' "${out}" | jq -r '.providerMetrics[] | select(.provider == "antigravity") | .extraRateWindows[0] | [.title, .usageKnown, .usedPercent, .remainingPercent, .windowMinutes, .minutesUntilReset] | map(tostring) | join("|")')"
+
+out=$(run_state codexbar-antigravity-degraded-family.json SHOWY_QUOTA_NOW_EPOCH=4070908800)
+assert_equals "state unknown extraRateWindows keep usage fields null" "Claude + GPT Session|false|true" "$(printf '%s' "${out}" | jq -r '.providerMetrics[] | select(.provider == "antigravity") | .extraRateWindows[] | select(.title == "Claude + GPT Session") | [.title, .usageKnown, ([.usedPercent, .remainingPercent, .resetsAt, .resetDescription, .windowMinutes, .minutesUntilReset] | all(. == null))] | map(tostring) | join("|")')"
 
 state_usage_cache=$(mk_cache)
 state_usage_file="${state_usage_cache}/usage-explicit.json"
