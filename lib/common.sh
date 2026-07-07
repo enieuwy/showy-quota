@@ -373,12 +373,19 @@ showy_quota_reset_description_epoch() {
     [[ "${desc}" != "${raw}" ]] || return 1
 
     local epoch
-    for fmt in '%b %d, %Y %I:%M %p' '%B %d, %Y %I:%M %p'; do
-        if epoch=$(showy_quota_parse_local_epoch "${fmt}" "${desc}"); then
-            printf '%s\n' "${epoch}"
-            return 0
-        fi
-    done
+    # Only attempt full-date parsing when the description carries a 4-digit
+    # year. A bare time like "11:59 PM" must fall through to the today-relative
+    # branch below: GNU `date -d` (unlike BSD `date -j -f`) ignores the
+    # strptime format and leniently fills the missing date from the real clock,
+    # which would both mis-parse and ignore SHOWY_QUOTA_NOW_EPOCH.
+    if [[ "${desc}" == *[0-9][0-9][0-9][0-9]* ]]; then
+        for fmt in '%b %d, %Y %I:%M %p' '%B %d, %Y %I:%M %p'; do
+            if epoch=$(showy_quota_parse_local_epoch "${fmt}" "${desc}"); then
+                printf '%s\n' "${epoch}"
+                return 0
+            fi
+        done
+    fi
 
     local today now
     now=$(showy_quota_now_epoch)
