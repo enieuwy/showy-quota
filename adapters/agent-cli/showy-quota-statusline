@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+# showy-quota — agent-CLI statusline adapter.
+#
+# Wraps bin/showy-quota-zellij-bar so an agent CLI (Claude Code, Codex,
+# opencode, …) can paint the quota strip in its status line. The agent CLI is
+# the tool spending the quota, so showing it there closes the loop. Whatever the
+# bar prints — an ANSI-styled one-line strip — is what the agent CLI renders.
+#
+# Statusline defaults differ from the terminal/Zellij driver:
+#   - width defaults to SHOWY_QUOTA_STATUSLINE_WIDTH (fallback 8), narrower than
+#     the 12-cell terminal strip because status lines are cramped;
+#   - Powerline-Extra end caps (U+E0B6/U+E0B4) are OFF by default because agent
+#     CLIs often render in a plain font that lacks Nerd Font glyphs and would
+#     show tofu. Set SHOWY_QUOTA_STATUSLINE_CAPS=1 to restore them.
+#
+# It never hard-fails: if the bar cannot be found it prints `AI ?` and exits 0,
+# because a status-line segment must never break the shell/harness that runs it.
+#
+# See docs/statusline.md.
+
+set -euo pipefail
+
+# Drain stdin. Claude Code (and Claude-Code-compatible harnesses) pipe a session
+# JSON blob here; we do not need any of it, but leaving a pipe unread can wedge
+# the writer, so consume it to EOF before doing anything else.
+cat >/dev/null 2>&1 || true
+
+# Resolve this script through any symlink chain so a dotfile-managed or
+# hand-symlinked install still finds its sibling bin/ directory.
+SCRIPT_PATH="${BASH_SOURCE[0]}"
+while [[ -L "${SCRIPT_PATH}" ]]; do
+    link=$(readlink "${SCRIPT_PATH}")
+    if [[ "${link}" == /* ]]; then
+        SCRIPT_PATH="${link}"
+    else
+        SCRIPT_PATH="$(cd -- "$(dirname -- "${SCRIPT_PATH}")" && pwd -P)/${link}"
+    fi
+done
+SCRIPT_DIR="$(cd -- "$(dirname -- "${SCRIPT_PATH}")" && pwd -P)"
+
+# Never-break fallback: one plain line, success exit.
+print_fallback() {
+    printf 'AI ?\n'
+    exit 0
+}
+
+# Resolve showy-quota-zellij-bar the way the other adapters resolve their tools:
+# explicit env override, then the sibling bin/ (this adapter lives at
+# adapters/agent-cli, so a checkout or copied/release tree keeps the bar two
+# levels up in bin/), then PATH.
+resolve_bar_bin() {
+    local candidate resolved
+    if [[ -n "${SHOWY_QUOTA_BAR_BIN:-}" ]]; then
+        if [[ "${SHOWY_QUOTA_BAR_BIN}" == */* ]]; then
+            if [[ -x "${SHOWY_QUOTA_BAR_BIN}" ]]; then
+                printf '%s\n' "${SHOWY_QUOTA_BAR_BIN}"
+                return 0
+            fi
+        elif resolved="$(command -v "${SHOWY_QUOTA_BAR_BIN}" 2>/dev/null)"; then
+            printf '%s\n' "${resolved}"
+            return 0
+        fi
+    fi
+
+    candidate="${SCRIPT_DIR}/../../bin/showy-quota-zellij-bar"
+    if [[ -x "${candidate}" ]]; then
+        printf '%s\n' "${candidate}"
+        return 0
+    fi
+
+    if resolved="$(command -v showy-quota-zellij-bar 2>/dev/null)"; then
+        printf '%s\n' "${resolved}"
+        return 0
+    fi
+
+    return 1
+}
+
+if ! BAR_BIN="$(resolve_bar_bin)"; then
+    print_fallback
+fi
+
+# Statusline width: an explicit SHOWY_QUOTA_ZELLIJ_BAR_WIDTH still wins; else the
+# statusline-specific knob; else 8 cells.
+export SHOWY_QUOTA_ZELLIJ_BAR_WIDTH="${SHOWY_QUOTA_ZELLIJ_BAR_WIDTH:-${SHOWY_QUOTA_STATUSLINE_WIDTH:-8}}"
+
+# Powerline caps off unless explicitly re-enabled. When re-enabled we leave the
+# bar's own cap defaults (or the user's SHOWY_QUOTA_CAP_* config) untouched.
+if [[ "${SHOWY_QUOTA_STATUSLINE_CAPS:-0}" != "1" ]]; then
+    export SHOWY_QUOTA_CAP_LEFT=""
+    export SHOWY_QUOTA_CAP_RIGHT=""
+fi
+
+exec "${BAR_BIN}"

@@ -9,6 +9,7 @@
 #   --json       Default. Print the full state JSON.
 #   --count      Print only the filtered provider count.
 #   --providers  Print filtered provider ids, one per line.
+#   --no-fetch   Report the cache as-is; skip the internal refresh (cache-only).
 
 set -euo pipefail
 
@@ -28,16 +29,20 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${SCRIPT_PATH}")" && pwd -P)"
 . "${SCRIPT_DIR}/../lib/strip.sh"
 
 mode="json"
+no_fetch=0
 while (($#)); do
     case "$1" in
         --json)      mode="json" ;;
         --count)     mode="count" ;;
         --providers) mode="providers" ;;
+        --no-fetch)  no_fetch=1 ;;
         -h|--help)
             printf '%s\n' \
-                'Usage: showy-quota-state [--json|--count|--providers]' \
+                'Usage: showy-quota-state [--json|--count|--providers] [--no-fetch]' \
                 '' \
-                'Emits filtered CodexBar provider state for external layout managers.'
+                'Emits filtered CodexBar provider state for external layout managers.' \
+                '' \
+                '  --no-fetch  Report the cache as-is; skip the internal refresh (cache-only).'
             exit 0
             ;;
         *) showy_quota_die "unknown argument: $1" ;;
@@ -234,7 +239,11 @@ showy_quota_state_provider_metrics_json() {
 
 data=""
 available=false
-if data=$("${FETCH}" 2>/dev/null) && [[ -n "${data}" ]]; then
+if (( no_fetch )); then
+    if data=$("${FETCH}" --cache-only 2>/dev/null) && [[ -n "${data}" ]]; then
+        available=true
+    fi
+elif data=$("${FETCH}" 2>/dev/null) && [[ -n "${data}" ]]; then
     available=true
 fi
 

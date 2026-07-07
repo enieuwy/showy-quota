@@ -35,7 +35,7 @@ RENDER_CRATE  := showy-quota-zellij-core
 RENDER_BIN    := $(REPO)/target/release/showy-quota-render
 RENDER_TARGET := $(BIN_DIR)/showy-quota-render
 
-.PHONY: help doctor diagnose install install-bin install-copy install-copy-sketchybar install-sketchybar plugin render-bin install-plugin grant-zellij-permissions install-all uninstall test lint hooks clean
+.PHONY: help doctor diagnose install install-bin install-copy install-copy-sketchybar install-sketchybar plugin render-bin install-plugin grant-zellij-permissions install-all uninstall test lint ci-gates hooks clean
 
 help: ## Show this help.
 	@awk 'BEGIN{FS=":.*##"}/^[a-zA-Z_-]+:.*##/{printf "  \033[36m%-20s\033[0m %s\n",$$1,$$2}' $(MAKEFILE_LIST)
@@ -372,6 +372,29 @@ lint: ## Run shellcheck if available.
 	else \
 		printf 'shellcheck not installed; skipping\n'; \
 	fi
+
+ci-gates: ## Run every CI gate locally; run before tagging a release.
+	@printf '\n== ci-gates 1/8: make lint ==\n'
+	@$(MAKE_COMMAND) --no-print-directory lint
+	@printf '\n== ci-gates 2/8: make test ==\n'
+	@$(MAKE_COMMAND) --no-print-directory test
+	@printf '\n== ci-gates 3/8: cargo fmt --all -- --check ==\n'
+	@$(CARGO) fmt --all -- --check
+	@printf '\n== ci-gates 4/8: cargo clippy --workspace --all-targets -- -D warnings ==\n'
+	@$(CARGO) clippy --workspace --all-targets -- -D warnings
+	@printf '\n== ci-gates 5/8: cargo test --workspace ==\n'
+	@$(CARGO) test --workspace
+	@printf '\n== ci-gates 6/8: cargo audit ==\n'
+	@command -v cargo-audit >/dev/null 2>&1 || { \
+		printf 'cargo-audit not installed; run: cargo install cargo-audit --locked\n' >&2; \
+		exit 1; \
+	}
+	@$(CARGO) audit
+	@printf '\n== ci-gates 7/8: make plugin ==\n'
+	@$(MAKE_COMMAND) --no-print-directory plugin
+	@printf '\n== ci-gates 8/8: check plugin exports ==\n'
+	@python3 scripts/check_plugin_exports.py
+	@printf '\nci-gates: PASS (8/8 gates)\n'
 
 hooks: ## Install the git pre-commit hook (rustfmt check via .githooks).
 	@git config core.hooksPath .githooks

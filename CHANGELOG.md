@@ -6,6 +6,33 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- `showy-quota guard`: scriptable quota gate for automation (CI pre-flight,
+  agent hooks, cron). Selects providers/windows (`--provider`, `--window
+  primary|secondary|tertiary|worst`), evaluates `--min-remaining`/`--max-used`
+  thresholds with a strict-breach/inclusive-pass boundary, and exits with a
+  stable code: 0 pass, 1 breach, 2 unusable data (stale without
+  `--allow-stale`, unknown/errored provider, empty cache), 3 usage error.
+  `--json` emits a machine-readable verdict; `--wait-max` sleeps through a
+  known reset and re-evaluates once. See `docs/automation.md`.
+- `showy-quota prompt`: one-segment quota readout for shell prompts
+  (`CX 59% 7d` — worst-remaining provider/window), cache-only by default so
+  a prompt never blocks on CodexBar collection (`SHOWY_QUOTA_PROMPT_FETCH=1`
+  opts into refreshing); `--ansi` severity color honoring `NO_COLOR`.
+  Starship, powerlevel10k, and plain-PS1 snippets in `docs/automation.md`.
+- `showy-quota-state --no-fetch`: additive flag reporting the cache as-is
+  (no refresh-window fetch) for hot-path consumers.
+- Agent-CLI statusline adapter (`adapters/agent-cli/showy-quota-statusline`):
+  renders the quota strip inside Claude Code (`statusLine` command) and any
+  tool that displays a command's one-line ANSI output. Powerline caps are
+  off by default for non-Nerd-Font hosts (`SHOWY_QUOTA_STATUSLINE_CAPS=1`
+  restores), width defaults to 8 cells via `SHOWY_QUOTA_STATUSLINE_WIDTH`.
+  See `docs/statusline.md`.
+- `make ci-gates`: runs every CI gate locally (lint, shell suite, rustfmt,
+  clippy `-D warnings`, workspace tests, cargo audit, plugin build, WASM
+  export check) — run before tagging a release. The WASM export check moved
+  to `scripts/check_plugin_exports.py`, shared by CI and the make target.
+
 ## [0.5.0] — 2026-07-07
 
 ### Added

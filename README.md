@@ -34,7 +34,8 @@ bin/showy-quota-fetch     ←  shared cache + source marker + flock + last-known
        ├──► bin/showy-quota-state                 (stable provider/layout state JSON)
        ├──► adapters/sketchybar/plugins/showy_quota.sh    (native SketchyBar rows + icons)
        ├──► bin/showy-quota-tmux-bar             (tmux #[…] markup for status-right)
-       └──► bin/showy-quota-zellij-bar           (advanced zjstatus pipe segment)
+       ├──► bin/showy-quota-zellij-bar           (advanced zjstatus pipe segment)
+       └──► adapters/agent-cli/showy-quota-statusline  (agent-CLI status line strip)
 ```
 
 ### Features
@@ -100,6 +101,9 @@ bin/showy-quota-fetch     ←  shared cache + source marker + flock + last-known
      [tmux wiring](#tmux-wiring) into `~/.tmux.conf`.
    - **Zellij:** install `showy-quota-zellij.wasm`, paste the layout fragment.
      See [`docs/zellij.md`](docs/zellij.md) and [`docs/plugin.md`](docs/plugin.md).
+   - **Agent CLI statusline:** point Claude Code (or any command-backed status
+     line) at `adapters/agent-cli/showy-quota-statusline`; see
+     [`docs/statusline.md`](docs/statusline.md).
 
 ### SketchyBar wiring
 
@@ -200,6 +204,35 @@ For per-provider auto-mode selection and marker behavior, use
 Stuck? `bin/showy-quota --diagnose` (or `make diagnose`) prints exactly the
 state a bug report needs; `bin/showy-quota --diagnose --json` emits the same
 diagnostic surface as stable machine-readable JSON.
+
+## Automation & prompts
+
+Two subcommands read the same provider metrics the bars use — see
+[`docs/automation.md`](docs/automation.md) for the full reference (exit codes,
+`--json` schema, hook/cron recipes, and prompt snippets for starship,
+powerlevel10k, and plain `PS1`).
+
+- **`showy-quota guard`** gates CI, cron, and agent hooks on quota thresholds
+  with stable exit codes (`0` pass, `1` breach, `2` unusable data, `3` usage):
+
+  ```sh
+  # Fail (exit 1) if codex or claude drops below 15% remaining
+  showy-quota guard --provider codex,claude --min-remaining 15
+  ```
+
+- **`showy-quota prompt`** prints a one-line segment (`CX 92% 3:02`) for the
+  worst-remaining provider. It reads the cache as-is, so it never blocks a
+  shell. In starship:
+
+  ```toml
+  # ~/.config/starship.toml
+  [custom.showy_quota]
+  command = 'showy-quota prompt'
+  when = true
+  shell = ['bash', '--noprofile', '--norc']
+  format = '[$output]($style) '
+  style = 'bold yellow'
+  ```
 
 ## Requirements
 

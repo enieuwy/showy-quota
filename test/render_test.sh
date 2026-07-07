@@ -4800,6 +4800,320 @@ kill "${recycle_listener_pid}" 2>/dev/null || true
 wait "${recycle_listener_pid}" 2>/dev/null || true
 assert_equals "serve recycle leaves an unverified foreign listener alive" "alive" "${recycle_listener_state}"
 
+# ── automation: quota guard ─────────────────────────────────────────────
+# guard evaluates showy-quota-state provider metrics for CI/automation. Each
+# case seeds a fresh cache from a fixture and disables codexbar (missing bin +
+# empty SERVE_URL, MANAGE_SERVE off), so the internal refresh is a no-op and the
+# seeded metrics are evaluated as-is. The huge refresh knob keeps the
+# just-written cache non-stale. codexbar-mixed: codex primary 95% remaining
+# (5% used), codex secondary 41% remaining (59% used).
+printf '\nquota guard\n'
+
+run_guard() {
+    local fixture="$1"; shift
+    local cache; cache=$(mk_cache)
+    cp "$(fixture_path "${fixture}")" "${cache}/usage.json"
+    printf 'cli\n' > "${cache}/source"
+    env \
+        SHOWY_QUOTA_NO_CONFIG=1 \
+        SHOWY_QUOTA_MANAGE_SERVE=0 \
+        SHOWY_QUOTA_CACHE_DIR="${cache}" \
+        SHOWY_QUOTA_CODEXBAR_BIN="${TMP}/no-such-codexbar-guard" \
+        SHOWY_QUOTA_CODEXBAR_SERVE_URL='' \
+        SHOWY_QUOTA_REFRESH_SECONDS=9999999999 \
+        "${REPO_ROOT}/bin/showy-quota" guard "$@"
+}
+
+# Pass: codex/primary has 95% remaining, well above a 5% floor.
+rc=0
+out=$(run_guard codexbar-mixed.json --provider codex --window primary --min-remaining 5 2>&1) || rc=$?
+assert_equals "guard passes when remaining clears the floor" "0" "${rc}"
+assert_contains "guard pass names codex/primary window" "codex/primary" "${out}"
+
+# Breach: 95% remaining is below a 96% floor; human line names codex/primary.
+rc=0
+out=$(run_guard codexbar-mixed.json --provider codex --window primary --min-remaining 96 2>&1) || rc=$?
+assert_equals "guard breaches when remaining is below the floor" "1" "${rc}"
+assert_contains "guard breach names codex/primary window" "codex/primary" "${out}"
+assert_contains "guard breach human line reads BREACH" "BREACH" "${out}"
+
+# Inclusive-pass boundary: remaining == floor passes (catches a <= regression).
+rc=0
+out=$(run_guard codexbar-mixed.json --provider codex --window primary --min-remaining 95 2>&1) || rc=$?
+assert_equals "guard boundary remaining == floor passes (inclusive)" "0" "${rc}"
+
+# --json breach object exposes the decision fields.
+rc=0
+guard_json=$(run_guard codexbar-mixed.json --provider codex --window primary --min-remaining 96 --json) || rc=$?
+assert_equals "guard --json breach exit code is 1" "1" "${rc}"
+assert_equals "guard --json breach exit field" "1" "$(printf '%s' "${guard_json}" | jq -r '.exit')"
+assert_equals "guard --json breach ok is false" "false" "$(printf '%s' "${guard_json}" | jq -r '.ok')"
+assert_equals "guard --json breach reason is breach" "breach" "$(printf '%s' "${guard_json}" | jq -r '.reason')"
+assert_equals "guard --json breach worst provider" "codex" "$(printf '%s' "${guard_json}" | jq -r '.worst.provider')"
+assert_equals "guard --json breach worst window" "primary" "$(printf '%s' "${guard_json}" | jq -r '.worst.window')"
+
+# Default worst window: codex primary (95) vs secondary (41) => the
+# least-remaining slot (secondary) is chosen.
+guard_json=$(run_guard codexbar-mixed.json --provider codex --json)
+assert_equals "guard default window picks the least-remaining slot" "secondary" "$(printf '%s' "${guard_json}" | jq -r '.worst.window')"
+assert_equals "guard default worst reports the low remaining" "41" "$(printf '%s' "${guard_json}" | jq -r '.worst.remainingPercent')"
+
+# Default across all present providers: three are evaluated and the overall
+# worst is codex/secondary (41), still passing the default 10% floor.
+guard_json=$(run_guard codexbar-mixed.json --json)
+assert_equals "guard default evaluates every present provider" "3" "$(printf '%s' "${guard_json}" | jq -r '.evaluated')"
+assert_equals "guard default worst provider across providers" "codex" "$(printf '%s' "${guard_json}" | jq -r '.worst.provider')"
+
+# Unknown provider is unusable (exit 2).
+rc=0
+out=$(run_guard codexbar-mixed.json --provider nope 2>&1) || rc=$?
+assert_equals "guard unknown provider exits 2" "2" "${rc}"
+assert_contains "guard unknown provider names the reason" "unknown-provider" "${out}"
+
+# Errored provider is unusable (exit 2) with a provider-error reason.
+rc=0
+out=$(run_guard codexbar-error-only.json --provider cursor 2>&1) || rc=$?
+assert_equals "guard errored provider exits 2" "2" "${rc}"
+assert_contains "guard errored provider reports provider-error" "provider-error" "${out}"
+
+# Mutually-exclusive thresholds are a usage error (exit 3).
+rc=0
+out=$(run_guard codexbar-mixed.json --min-remaining 10 --max-used 20 2>&1) || rc=$?
+assert_equals "guard rejects both thresholds with usage exit 3" "3" "${rc}"
+assert_contains "guard both-thresholds error explains the conflict" "mutually exclusive" "${out}"
+
+# --wait-max 0 never sleeps: an immediate breach exits 1 straight away
+# (timing-based waits are intentionally not exercised).
+rc=0
+out=$(run_guard codexbar-mixed.json --provider codex --window primary --min-remaining 96 --wait-max 0 2>&1) || rc=$?
+assert_equals "guard --wait-max 0 immediate breach exits 1" "1" "${rc}"
+
+# Stale cache: an old-mtime cache under the default refresh window is unusable
+# without --allow-stale, and evaluable with it. (Old mtime + missing codexbar =>
+# the fetch cannot refresh, so the stale cache is what gets evaluated.)
+guard_stale_cache=$(mk_cache)
+cp "${FIXTURE_DIR}/codexbar-mixed.json" "${guard_stale_cache}/usage.json"
+printf 'cli\n' > "${guard_stale_cache}/source"
+touch -t 198801010000 "${guard_stale_cache}/usage.json"
+rc=0
+out=$(
+    env SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_MANAGE_SERVE=0 \
+        SHOWY_QUOTA_CACHE_DIR="${guard_stale_cache}" \
+        SHOWY_QUOTA_CODEXBAR_BIN="${TMP}/no-such-codexbar-guard-stale" \
+        SHOWY_QUOTA_CODEXBAR_SERVE_URL='' \
+        "${REPO_ROOT}/bin/showy-quota" guard --provider codex --window primary --min-remaining 5 2>&1
+) || rc=$?
+assert_equals "guard stale cache without --allow-stale exits 2" "2" "${rc}"
+assert_contains "guard stale cache reports the stale reason" "stale" "${out}"
+rc=0
+out=$(
+    env SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_MANAGE_SERVE=0 \
+        SHOWY_QUOTA_CACHE_DIR="${guard_stale_cache}" \
+        SHOWY_QUOTA_CODEXBAR_BIN="${TMP}/no-such-codexbar-guard-stale" \
+        SHOWY_QUOTA_CODEXBAR_SERVE_URL='' \
+        "${REPO_ROOT}/bin/showy-quota" guard --provider codex --window primary --min-remaining 5 --allow-stale 2>&1
+) || rc=$?
+assert_equals "guard stale cache with --allow-stale evaluates (exit 0)" "0" "${rc}"
+
+# ── automation: quota prompt segment ────────────────────────────────────
+# prompt prints "<SIGIL> <used>% <countdown>" for the worst-remaining window,
+# reading the cache as-is via `showy-quota-state --no-fetch` (never refreshing).
+# NOW_EPOCH pins the 2099-dated resets to deterministic countdowns and the huge
+# refresh knob keeps the seeded cache non-stale.
+printf '\nquota prompt segment\n'
+
+run_prompt() {
+    local cache="$1"; shift
+    env \
+        SHOWY_QUOTA_NO_CONFIG=1 \
+        SHOWY_QUOTA_MANAGE_SERVE=0 \
+        SHOWY_QUOTA_CACHE_DIR="${cache}" \
+        SHOWY_QUOTA_CODEXBAR_BIN="${TMP}/no-such-codexbar-prompt" \
+        SHOWY_QUOTA_CODEXBAR_SERVE_URL='' \
+        SHOWY_QUOTA_NOW_EPOCH=4070908800 \
+        SHOWY_QUOTA_REFRESH_SECONDS=9999999999 \
+        "${REPO_ROOT}/bin/showy-quota" prompt "$@"
+}
+
+prompt_cache=$(mk_cache)
+cp "${FIXTURE_DIR}/codexbar-mixed.json" "${prompt_cache}/usage.json"
+printf 'cli\n' > "${prompt_cache}/source"
+
+# Worst window on the mixed fixture is codex/secondary: 59% used, ~7 days out.
+rc=0
+out=$(run_prompt "${prompt_cache}") || rc=$?
+assert_equals "prompt exits 0 on a healthy cache" "0" "${rc}"
+assert_equals "prompt renders the worst window segment" "CX 59% 7d" "${out}"
+
+# --provider narrows to claude: its worst window is secondary (19% used, ~5d).
+assert_equals "prompt --provider selects the requested provider" "CL 19% 5d" "$(run_prompt "${prompt_cache}" --provider claude)"
+
+# Empty cache degrades to the neutral segment, still exit 0.
+prompt_empty_cache=$(mk_cache)
+rc=0
+out=$(run_prompt "${prompt_empty_cache}") || rc=$?
+assert_equals "prompt empty cache exits 0" "0" "${rc}"
+assert_equals "prompt empty cache prints the neutral segment" "AI ?" "${out}"
+
+# --ansi wraps the segment in a CSI severity color; NO_COLOR suppresses it.
+prompt_ansi_bytes=$(
+    env -u NO_COLOR SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_MANAGE_SERVE=0 \
+        SHOWY_QUOTA_CACHE_DIR="${prompt_cache}" \
+        SHOWY_QUOTA_CODEXBAR_BIN="${TMP}/no-such-codexbar-prompt" \
+        SHOWY_QUOTA_CODEXBAR_SERVE_URL='' \
+        SHOWY_QUOTA_NOW_EPOCH=4070908800 SHOWY_QUOTA_REFRESH_SECONDS=9999999999 \
+        "${REPO_ROOT}/bin/showy-quota" prompt --ansi | od -An -tx1 | tr -d ' \n'
+)
+assert_contains "prompt --ansi emits a CSI escape" "1b5b" "${prompt_ansi_bytes}"
+prompt_noansi_bytes=$(
+    env NO_COLOR=1 SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_MANAGE_SERVE=0 \
+        SHOWY_QUOTA_CACHE_DIR="${prompt_cache}" \
+        SHOWY_QUOTA_CODEXBAR_BIN="${TMP}/no-such-codexbar-prompt" \
+        SHOWY_QUOTA_CODEXBAR_SERVE_URL='' \
+        SHOWY_QUOTA_NOW_EPOCH=4070908800 SHOWY_QUOTA_REFRESH_SECONDS=9999999999 \
+        "${REPO_ROOT}/bin/showy-quota" prompt --ansi | od -An -tx1 | tr -d ' \n'
+)
+assert_not_contains "prompt --ansi with NO_COLOR emits no escape" "1b5b" "${prompt_noansi_bytes}"
+
+# prompt must never refresh: point codexbar at a marker-writing stub and confirm
+# the default (cache-only) path never executes it.
+prompt_marker_cache=$(mk_cache)
+cp "${FIXTURE_DIR}/codexbar-mixed.json" "${prompt_marker_cache}/usage.json"
+printf 'cli\n' > "${prompt_marker_cache}/source"
+prompt_marker="${TMP}/prompt-no-refresh.marker"
+prompt_stub="${TMP}/prompt-codexbar-stub"
+cat > "${prompt_stub}" <<EOF
+#!/bin/sh
+: > "${prompt_marker}"
+exit 1
+EOF
+chmod +x "${prompt_stub}"
+rm -f "${prompt_marker}"
+out=$(
+    env SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_MANAGE_SERVE=0 \
+        SHOWY_QUOTA_CACHE_DIR="${prompt_marker_cache}" \
+        SHOWY_QUOTA_CODEXBAR_BIN="${prompt_stub}" \
+        SHOWY_QUOTA_CODEXBAR_SERVE_URL='' \
+        SHOWY_QUOTA_NOW_EPOCH=4070908800 SHOWY_QUOTA_REFRESH_SECONDS=9999999999 \
+        "${REPO_ROOT}/bin/showy-quota" prompt
+)
+assert_contains "prompt cache-only path still renders" "CX" "${out}"
+if [[ -e "${prompt_marker}" ]]; then
+    fail "prompt does not refresh the cache (no codexbar collection)" "marker present"
+else
+    ok "prompt does not refresh the cache (no codexbar collection)"
+fi
+
+# ── state --no-fetch (cache-only) ───────────────────────────────────────
+# --no-fetch reports the cache as-is (fetch --cache-only), never collecting from
+# codexbar. Seed an aged cache, prove the state surface reflects it, and prove
+# no provider collection runs via the same marker-stub technique.
+printf '\nstate --no-fetch\n'
+
+state_nf_cache=$(mk_cache)
+cp "${FIXTURE_DIR}/codexbar-mixed.json" "${state_nf_cache}/usage.json"
+printf 'cli\n' > "${state_nf_cache}/source"
+touch -t 198801010000 "${state_nf_cache}/usage.json"
+state_nf_marker="${TMP}/state-no-fetch.marker"
+state_nf_stub="${TMP}/state-codexbar-stub"
+cat > "${state_nf_stub}" <<EOF
+#!/bin/sh
+: > "${state_nf_marker}"
+exit 1
+EOF
+chmod +x "${state_nf_stub}"
+rm -f "${state_nf_marker}"
+state_nf_json=$(
+    env SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_MANAGE_SERVE=0 \
+        SHOWY_QUOTA_CACHE_DIR="${state_nf_cache}" \
+        SHOWY_QUOTA_CODEXBAR_BIN="${state_nf_stub}" \
+        SHOWY_QUOTA_CODEXBAR_SERVE_URL='' \
+        "${REPO_ROOT}/bin/showy-quota-state" --no-fetch --json
+)
+assert_equals "state --no-fetch reports the seeded cache as available" "true" "$(printf '%s' "${state_nf_json}" | jq -r '.available')"
+assert_equals "state --no-fetch exposes cache source" "cli" "$(printf '%s' "${state_nf_json}" | jq -r '.cache.source')"
+assert_equals "state --no-fetch exposes cache degraded flag" "true" "$(printf '%s' "${state_nf_json}" | jq -r '.cache.degraded')"
+assert_equals "state --no-fetch exposes numeric cache age" "number" "$(printf '%s' "${state_nf_json}" | jq -r '.cacheAgeSeconds | type')"
+assert_equals "state --no-fetch surfaces the cached providers" "codex,claude,gemini" "$(printf '%s' "${state_nf_json}" | jq -r '.providers | join(",")')"
+if [[ -e "${state_nf_marker}" ]]; then
+    fail "state --no-fetch runs no provider collection" "marker present"
+else
+    ok "state --no-fetch runs no provider collection"
+fi
+
+# ── agent-CLI statusline adapter ─────────────────────────────────────────
+# The adapter drains stdin, wraps showy-quota-zellij-bar with statusline
+# defaults (width 8, Powerline caps off), resolves the bar via SHOWY_QUOTA_BAR_BIN
+# and degrades to "AI ?" when no bar can be found. It never hard-fails.
+printf '\nagent-CLI statusline adapter\n'
+
+STATUSLINE_BIN="${REPO_ROOT}/adapters/agent-cli/showy-quota-statusline"
+
+run_statusline() {
+    local cache; cache=$(mk_cache)
+    cp "${FIXTURE_DIR}/codexbar-mixed.json" "${cache}/usage.json"
+    printf 'cli\n' > "${cache}/source"
+    printf '%s' '{"session_id":"showy-quota-test"}' | env \
+        SHOWY_QUOTA_NO_CONFIG=1 \
+        SHOWY_QUOTA_MANAGE_SERVE=0 \
+        SHOWY_QUOTA_CACHE_DIR="${cache}" \
+        SHOWY_QUOTA_CODEXBAR_BIN="${TMP}/no-such-codexbar-statusline" \
+        SHOWY_QUOTA_CODEXBAR_SERVE_URL='' \
+        SHOWY_QUOTA_REFRESH_SECONDS=9999999999 \
+        SHOWY_QUOTA_NOW_EPOCH=4070908800 \
+        SHOWY_QUOTA_DEGRADED_CLI=0 \
+        SHOWY_QUOTA_FORCE_COLOR=1 \
+        "$@" \
+        "${STATUSLINE_BIN}"
+}
+
+# Piped stdin JSON is drained and the seeded cache renders a real strip.
+rc=0
+out=$(run_statusline) || rc=$?
+assert_equals "statusline exits 0 with a seeded cache" "0" "${rc}"
+assert_contains "statusline renders the provider strip from stdin+cache" "CX" "${out}"
+
+# Powerline end caps (U+E0B6 = ee82b6, U+E0B4 = ee82b4) are off by default and
+# restored by SHOWY_QUOTA_STATUSLINE_CAPS=1.
+statusline_default_bytes=$(run_statusline | od -An -tx1 | tr -d ' \n')
+assert_not_contains "statusline omits the left powerline cap by default" "ee82b6" "${statusline_default_bytes}"
+assert_not_contains "statusline omits the right powerline cap by default" "ee82b4" "${statusline_default_bytes}"
+statusline_caps_bytes=$(run_statusline SHOWY_QUOTA_STATUSLINE_CAPS=1 | od -An -tx1 | tr -d ' \n')
+assert_contains "statusline caps=1 restores the left powerline cap" "ee82b6" "${statusline_caps_bytes}"
+assert_contains "statusline caps=1 restores the right powerline cap" "ee82b4" "${statusline_caps_bytes}"
+
+# Width/caps env contract, isolated from the renderer via a reporting bar stub
+# that echoes the env the adapter hands it (proving SHOWY_QUOTA_BAR_BIN resolution).
+statusline_stub="${TMP}/statusline-bar-stub"
+cat > "${statusline_stub}" <<'EOF'
+#!/bin/sh
+cat >/dev/null 2>&1 || true
+printf 'width=%s capL=[%s] capR=[%s]\n' "${SHOWY_QUOTA_ZELLIJ_BAR_WIDTH:-unset}" "${SHOWY_QUOTA_CAP_LEFT-UNSET}" "${SHOWY_QUOTA_CAP_RIGHT-UNSET}"
+EOF
+chmod +x "${statusline_stub}"
+run_statusline_stub() {
+    printf '%s' '{}' | env \
+        SHOWY_QUOTA_NO_CONFIG=1 \
+        SHOWY_QUOTA_BAR_BIN="${statusline_stub}" \
+        "$@" \
+        "${STATUSLINE_BIN}"
+}
+assert_equals "statusline defaults width to 8 and caps off" "width=8 capL=[] capR=[]" "$(run_statusline_stub)"
+assert_equals "statusline width knob overrides the default" "width=5 capL=[] capR=[]" "$(run_statusline_stub SHOWY_QUOTA_STATUSLINE_WIDTH=5)"
+assert_equals "statusline explicit bar width wins over the knob" "width=11 capL=[] capR=[]" "$(run_statusline_stub SHOWY_QUOTA_ZELLIJ_BAR_WIDTH=11 SHOWY_QUOTA_STATUSLINE_WIDTH=5)"
+assert_equals "statusline caps=1 leaves the bar cap defaults untouched" "width=8 capL=[UNSET] capR=[UNSET]" "$(run_statusline_stub SHOWY_QUOTA_STATUSLINE_CAPS=1)"
+
+# Unresolvable bar => neutral "AI ?" segment, exit 0. Isolate a copy of the
+# adapter from its sibling bin/ and clear PATH so no bar can be found.
+statusline_iso_dir="${TMP}/statusline-isolated"
+mkdir -p "${statusline_iso_dir}"
+cp "${STATUSLINE_BIN}" "${statusline_iso_dir}/showy-quota-statusline"
+chmod +x "${statusline_iso_dir}/showy-quota-statusline"
+rc=0
+out=$(printf '%s' '{}' | env -i PATH="/usr/bin:/bin" SHOWY_QUOTA_BAR_BIN=/nonexistent "${statusline_iso_dir}/showy-quota-statusline") || rc=$?
+assert_equals "statusline missing bar exits 0" "0" "${rc}"
+assert_equals "statusline missing bar prints the neutral segment" "AI ?" "${out}"
+
 # ── summary ──────────────────────────────────────────────────────────
 
 printf '\n%d passed, %d failed\n' "${PASSED}" "${FAILED}"

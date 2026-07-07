@@ -27,6 +27,7 @@ THEME_NAME_RE='^[A-Za-z0-9._-]+$'
 usage() {
     printf '%s\n' \
         'Usage: showy-quota [--set <name>|--unset|--current|--list|--preview <name>|--diagnose [--json]|--grant-zellij [path]]' \
+        '       showy-quota guard [opts]   |   showy-quota prompt [opts]   (run either with -h for details)' \
         '' \
         'With no flags, opens an interactive theme selector when fzf and a TTY are available.' \
         'Without fzf or a TTY, prints a deterministic theme list and exact set/unset commands.' \
@@ -39,6 +40,8 @@ usage() {
         '  --preview <name>  Print one ANSI preview strip for a theme' \
         '  --diagnose        Print runtime state useful for bug reports (--json for machines)' \
         '  --grant-zellij [p] Pre-grant Zellij plugin permissions (writes permissions.kdl)' \
+        '  guard [opts]      Evaluate quota thresholds for automation (exit 0/1/2/3); "guard -h" for options' \
+        '  prompt [opts]     Print a one-line quota segment for shell prompts; "prompt -h" for options' \
         '  -h, --help        Show this help'
 }
 
@@ -340,6 +343,7 @@ diagnose_env_vars() {
         SHOWY_QUOTA_PROVIDERS_EXCLUDE \
         SHOWY_QUOTA_PROVIDER_ORDER \
         SHOWY_QUOTA_INCLUDE_STATUS \
+        SHOWY_QUOTA_PROMPT_FETCH \
         SHOWY_QUOTA_THEME \
         SHOWY_QUOTA_TIME_WARN_MINUTES \
         SHOWY_QUOTA_DEBUG \
@@ -697,6 +701,411 @@ grant_zellij() {
     printf 'Open a new Zellij tab (or restart Zellij) for the grant to take effect.\n'
 }
 
+# ── automation: quota guard + prompt segment ───────────────────────────
+# guard and prompt consume the same provider metrics every bar renderer uses,
+# via showy-quota-state, so they never re-parse CodexBar's JSON schema. Both
+# lazily source the shared libs (common.sh sets `set -uo pipefail`, so -e is
+# off inside these handlers — every step below checks errors explicitly).
+
+SHOWY_QUOTA_STATE_LIBS_LOADED=0
+load_state_libs() {
+    (( SHOWY_QUOTA_STATE_LIBS_LOADED )) && return 0
+    # shellcheck disable=SC1091
+    . "${REPO_ROOT}/lib/common.sh"
+    # shellcheck disable=SC1091
+    . "${REPO_ROOT}/lib/strip.sh"
+    SHOWY_QUOTA_STATE_LIBS_LOADED=1
+}
+
+# Resolve showy-quota-fetch the same way the bar drivers do, honoring a custom
+# SHOWY_QUOTA_FETCH_BIN or a copied install tree.
+automation_fetch_bin() {
+    local fetch="${SHOWY_QUOTA_FETCH_BIN:-${SCRIPT_DIR}/showy-quota-fetch}"
+    fetch="$(showy_quota_valid_bin "${fetch}")" || fetch="${SCRIPT_DIR}/showy-quota-fetch"
+    printf '%s' "${fetch}"
+}
+
+# Split a comma-separated provider list into PROVIDER_IDS[]. Rejects ids outside
+# CodexBar's id charset so a malformed flag is a usage error, not "unknown".
+parse_provider_list() {
+    local raw="$1" part
+    PROVIDER_IDS=()
+    local IFS=','
+    for part in ${raw}; do
+        part="${part#"${part%%[![:space:]]*}"}"
+        part="${part%"${part##*[![:space:]]}"}"
+        [[ -n "${part}" ]] || continue
+        [[ "${part}" =~ ^[A-Za-z0-9_.-]+$ ]] || return 1
+        PROVIDER_IDS+=("${part}")
+    done
+    (( ${#PROVIDER_IDS[@]} > 0 )) || return 1
+    return 0
+}
+
+# PROVIDER_IDS[] as a compact JSON array (empty array when none selected).
+providers_json() {
+    (( ${#PROVIDER_IDS[@]} )) || { printf '[]'; return; }
+    printf '%s\n' "${PROVIDER_IDS[@]}" | jq -Rsc 'split("\n") | map(select(length > 0))'
+}
+
+# jq: reduce state.providerMetrics to the facts guard needs. For each selected
+# provider pick a window (explicit slot, or the worst = lowest-remaining slot),
+# and partition into unknown / errored / null-window / evaluable.
+# shellcheck disable=SC2016  # jq program: $-names are jq variables, not shell
+GUARD_JQ='
+def slots($m):
+  [ {name:"primary",   w:$m.windows.primary},
+    {name:"secondary", w:$m.windows.secondary},
+    {name:"tertiary",  w:$m.windows.tertiary} ];
+def usable($w): ($w != null) and (($w.remainingPercent|type) == "number");
+def pick($m):
+  if $window == "worst" then
+    ( slots($m) | map(select(usable(.w))) )
+    | if length == 0 then null else min_by(.w.remainingPercent) end
+  else
+    ( slots($m) | map(select(.name == $window)) | (.[0] // null) )
+    | if (. == null) or (usable(.w) | not) then null else . end
+  end;
+def entry($pid; $slot):
+  { provider: $pid, window: $slot.name,
+    usedPercent: $slot.w.usedPercent,
+    remainingPercent: $slot.w.remainingPercent,
+    minutesUntilReset: $slot.w.minutesUntilReset,
+    resetsAt: $slot.w.resetsAt };
+(.available) as $available
+| (.stale) as $stale
+| (.providerMetrics // []) as $pm
+| ($pm | map(.provider)) as $present
+| (if ($requested|length) > 0 then $requested else $present end) as $targets
+| (if ($requested|length) > 0 then ($requested - $present) else [] end) as $unknown
+| [ $targets[] as $pid
+    | ($pm[] | select(.provider == $pid)) as $m
+    | { provider: $pid, error: ($m.error), slot: (pick($m)) }
+  ] as $classified
+| { available: $available,
+    stale: $stale,
+    unknown: $unknown,
+    errored: [ $classified[] | select(.error != null) | {provider: .provider, kind: (.error.kind), message: (.error.message)} ],
+    nullWindow: [ $classified[] | select((.error == null) and (.slot == null)) | .provider ],
+    evaluated: [ $classified[] | select((.error == null) and (.slot != null)) | entry(.provider; .slot) ]
+  }
+| .worst = (if (.evaluated|length) > 0 then (.evaluated | min_by(.remainingPercent)) else null end)
+'
+
+# jq: worst-remaining window across the selected providers, as TSV
+# "provider\tused\tremaining\tminutes" (minutes empty when reset unknown).
+# shellcheck disable=SC2016  # jq program: $-names are jq variables, not shell
+PROMPT_JQ='
+(.providerMetrics // []) as $pm
+| [ $pm[] as $m
+    | select(($requested|length) == 0 or (($requested|index($m.provider)) != null))
+    | ($m.windows.primary, $m.windows.secondary, $m.windows.tertiary)
+    | select(. != null and ((.remainingPercent|type) == "number"))
+    | {provider: $m.provider, used: .usedPercent, remaining: .remainingPercent, minutes: .minutesUntilReset}
+  ]
+| if length == 0 then empty
+  else (min_by(.remaining))
+    | [ .provider, (.used|tostring), (.remaining|tostring), (if .minutes == null then "" else (.minutes|tostring) end) ]
+    | @tsv
+  end
+'
+
+guard_help() {
+    printf '%s\n' \
+        'Usage: showy-quota guard [--provider ID[,ID...]] [--window primary|secondary|tertiary|worst]' \
+        '                         [--min-remaining PCT | --max-used PCT] [--allow-stale]' \
+        '                         [--wait-max SECONDS] [--json] [--quiet]' \
+        '' \
+        'Runs a refresh-window fetch, then evaluates provider metrics.' \
+        'Window default "worst" = the non-null slot with the least remaining per provider.' \
+        'Default threshold: --min-remaining 10. The boundary is inclusive-pass:' \
+        '  --min-remaining N passes when remaining >= N (breach when remaining < N);' \
+        '  --max-used N       passes when used <= N      (breach when used > N).' \
+        'Exit codes: 0 pass, 1 breach, 2 unusable data, 3 usage error.'
+}
+
+guard_usage_error() {
+    printf 'showy-quota guard: %s\n\n' "$1" >&2
+    guard_help >&2
+    exit 3
+}
+
+guard_valid_pct() { [[ "$1" =~ ^[0-9]+$ ]] && (( 10#$1 <= 100 )); }
+guard_valid_uint() { [[ "$1" =~ ^[0-9]+$ ]]; }
+
+# Evaluate once against showy-quota-state --json. Reads globals G_WIN, G_TK,
+# G_TV, G_AS, REQUESTED_JSON, PROVIDER_IDS, STATE_BIN; sets G_EXIT, G_REASON,
+# G_STALE, G_EVALUATED, G_WORST_JSON, G_BREACH.
+guard_evaluate() {
+    G_BREACH=0
+    local state_json facts
+    state_json="$("${STATE_BIN}" --json 2>/dev/null)" || state_json=""
+    if [[ -z "${state_json}" ]] || ! printf '%s' "${state_json}" | jq -e 'type == "object"' >/dev/null 2>&1; then
+        G_EXIT=2; G_REASON="no-cache"; G_STALE=false; G_EVALUATED=0; G_WORST_JSON=null; return
+    fi
+    if ! facts="$(printf '%s' "${state_json}" | jq -c --argjson requested "${REQUESTED_JSON}" --arg window "${G_WIN}" "${GUARD_JQ}")"; then
+        G_EXIT=2; G_REASON="state-error"; G_STALE=false; G_EVALUATED=0; G_WORST_JSON=null; return
+    fi
+
+    # One jq pass extracts every scalar the decision needs (one line each, so
+    # empty joins survive as empty elements); worst stays a JSON object.
+    local -a F=()
+    mapfile -t F < <(printf '%s' "${facts}" | jq -r '
+        [ (.available | tostring),
+          (.stale | tostring),
+          (.unknown | length | tostring),
+          (.errored | length | tostring),
+          (.nullWindow | length | tostring),
+          (.evaluated | length | tostring),
+          (.unknown | join(",")),
+          ([.errored[] | "\(.provider)(\(.kind // "unknown"))"] | join(",")),
+          (.nullWindow | join(",")),
+          (((.worst.remainingPercent) // "null") | tostring),
+          (((.worst.usedPercent) // "null") | tostring)
+        ] | .[]')
+    G_WORST_JSON="$(printf '%s' "${facts}" | jq -c '.worst')"
+
+    local available="${F[0]}" errored_join="${F[7]}"
+    G_STALE="${F[1]}"
+    local unknown_n="${F[2]}" errored_n="${F[3]}" nullw_n="${F[4]}"
+    G_EVALUATED="${F[5]}"
+    local unknown_join="${F[6]}" nullw_join="${F[8]}"
+    local wr="${F[9]}" wu="${F[10]}"
+
+    if [[ "${available}" != "true" ]]; then
+        G_EXIT=2; G_REASON="no-cache"; return
+    fi
+    if (( ${#PROVIDER_IDS[@]} > 0 )); then
+        if (( unknown_n > 0 )); then
+            G_EXIT=2; G_REASON="unknown-provider: ${unknown_join}"; return
+        fi
+        if (( errored_n > 0 )); then
+            G_EXIT=2; G_REASON="provider-error: ${errored_join}"; return
+        fi
+        if (( nullw_n > 0 )); then
+            G_EXIT=2; G_REASON="null-window: ${nullw_join}/${G_WIN}"; return
+        fi
+    fi
+    if (( G_EVALUATED == 0 )); then
+        if (( errored_n > 0 )); then
+            G_EXIT=2; G_REASON="provider-error: ${errored_join}"; return
+        fi
+        G_EXIT=2; G_REASON="no-usable-data"; return
+    fi
+    if [[ "${G_STALE}" == "true" && "${G_AS}" != "1" ]]; then
+        G_EXIT=2; G_REASON="stale"; return
+    fi
+
+    if [[ "${G_TK}" == "max-used" ]]; then
+        (( wu > G_TV )) && G_BREACH=1
+    else
+        (( wr < G_TV )) && G_BREACH=1
+    fi
+    if (( G_BREACH )); then G_EXIT=1; G_REASON="breach"; else G_EXIT=0; G_REASON="pass"; fi
+}
+
+guard_emit_json() {
+    jq -cn \
+        --argjson exitc "${G_EXIT}" \
+        --arg reason "${G_REASON}" \
+        --argjson stale "${G_STALE}" \
+        --argjson evaluated "${G_EVALUATED}" \
+        --argjson worst "${G_WORST_JSON}" \
+        '{exit: $exitc, ok: ($exitc == 0), reason: $reason, stale: $stale, evaluated: $evaluated, worst: $worst}'
+}
+
+guard_emit_human() {
+    local clause
+    if [[ "${G_TK}" == "max-used" ]]; then clause="max-used ${G_TV}%"; else clause="min-remaining ${G_TV}%"; fi
+    if (( G_EXIT == 2 )); then
+        printf 'showy-quota guard: unusable — %s\n' "${G_REASON}"
+        return
+    fi
+    if [[ "${G_WORST_JSON}" == "null" ]]; then
+        printf 'showy-quota guard: ok\n'
+        return
+    fi
+    local -a W=()
+    mapfile -t W < <(printf '%s' "${G_WORST_JSON}" | jq -r '[.provider, .window, (.remainingPercent|tostring), (.usedPercent|tostring)] | .[]')
+    local p="${W[0]}" w="${W[1]}" r="${W[2]}" u="${W[3]}"
+    if (( G_EXIT == 1 )); then
+        if [[ "${G_TK}" == "max-used" ]]; then
+            printf 'showy-quota guard: BREACH — %s/%s %s%% used > %s%% (%s)\n' "${p}" "${w}" "${u}" "${G_TV}" "${clause}"
+        else
+            printf 'showy-quota guard: BREACH — %s/%s %s%% remaining < %s%% (%s)\n' "${p}" "${w}" "${r}" "${G_TV}" "${clause}"
+        fi
+    else
+        if [[ "${G_TK}" == "max-used" ]]; then
+            printf 'showy-quota guard: ok — %s/%s %s%% used <= %s%% (%s)\n' "${p}" "${w}" "${u}" "${G_TV}" "${clause}"
+        else
+            printf 'showy-quota guard: ok — %s/%s %s%% remaining >= %s%% (%s)\n' "${p}" "${w}" "${r}" "${G_TV}" "${clause}"
+        fi
+    fi
+}
+
+cmd_guard() {
+    load_state_libs
+    showy_quota_have jq || { printf 'showy-quota guard: jq is required\n' >&2; exit 3; }
+
+    PROVIDER_IDS=()
+    local window="worst" threshold_kind="" threshold_value=""
+    local allow_stale=0 wait_max=0 json_mode=0 quiet=0
+
+    while (($#)); do
+        case "$1" in
+            --provider)
+                (($# >= 2)) || guard_usage_error '--provider requires a value'
+                parse_provider_list "$2" || guard_usage_error "invalid --provider value: $2"
+                shift 2 ;;
+            --window)
+                (($# >= 2)) || guard_usage_error '--window requires a value'
+                case "$2" in
+                    primary|secondary|tertiary|worst) window="$2" ;;
+                    *) guard_usage_error "invalid --window (primary|secondary|tertiary|worst): $2" ;;
+                esac
+                shift 2 ;;
+            --min-remaining)
+                (($# >= 2)) || guard_usage_error '--min-remaining requires a value'
+                [[ -z "${threshold_kind}" ]] || guard_usage_error '--min-remaining and --max-used are mutually exclusive'
+                guard_valid_pct "$2" || guard_usage_error "invalid --min-remaining (0-100): $2"
+                threshold_kind="min-remaining"; threshold_value=$((10#$2))
+                shift 2 ;;
+            --max-used)
+                (($# >= 2)) || guard_usage_error '--max-used requires a value'
+                [[ -z "${threshold_kind}" ]] || guard_usage_error '--min-remaining and --max-used are mutually exclusive'
+                guard_valid_pct "$2" || guard_usage_error "invalid --max-used (0-100): $2"
+                threshold_kind="max-used"; threshold_value=$((10#$2))
+                shift 2 ;;
+            --allow-stale) allow_stale=1; shift ;;
+            --wait-max)
+                (($# >= 2)) || guard_usage_error '--wait-max requires a value'
+                guard_valid_uint "$2" || guard_usage_error "invalid --wait-max (seconds): $2"
+                wait_max=$((10#$2)); shift 2 ;;
+            --json)  json_mode=1; shift ;;
+            --quiet) quiet=1; shift ;;
+            -h|--help) guard_help; return 0 ;;
+            *) guard_usage_error "unknown argument: $1" ;;
+        esac
+    done
+
+    if [[ -z "${threshold_kind}" ]]; then
+        threshold_kind="min-remaining"; threshold_value=10
+    fi
+
+    STATE_BIN="${SCRIPT_DIR}/showy-quota-state"
+    local fetch; fetch="$(automation_fetch_bin)"
+    REQUESTED_JSON="$(providers_json)"
+    G_WIN="${window}"; G_TK="${threshold_kind}"; G_TV="${threshold_value}"; G_AS="${allow_stale}"
+
+    # Guard always fetches (automation wants current data): refresh-window
+    # semantics; a fetch failure is non-fatal when a cache exists.
+    "${fetch}" >/dev/null 2>&1 || true
+    guard_evaluate
+
+    # --wait-max: if breaching and the worst window's reset is known and lands
+    # within the budget, sleep past it (+30s grace), force one refresh, retry once.
+    if (( G_BREACH )) && (( wait_max > 0 )); then
+        local wmin wsecs
+        wmin="$(printf '%s' "${G_WORST_JSON}" | jq -r '.minutesUntilReset // "null"')"
+        if [[ "${wmin}" =~ ^[0-9]+$ ]]; then
+            wsecs=$(( wmin * 60 ))
+            if (( wsecs <= wait_max )); then
+                sleep $(( wsecs + 30 ))
+                "${fetch}" --refresh >/dev/null 2>&1 || true
+                guard_evaluate
+            fi
+        fi
+    fi
+
+    if (( json_mode )); then
+        guard_emit_json
+    elif (( quiet )); then
+        (( G_EXIT != 0 )) && guard_emit_human
+    else
+        guard_emit_human
+    fi
+    exit "${G_EXIT}"
+}
+
+prompt_usage_error() {
+    printf 'showy-quota prompt: %s\n' "$1" >&2
+    printf 'Usage: showy-quota prompt [--ansi] [--provider ID]\n' >&2
+    exit 3
+}
+
+cmd_prompt() {
+    load_state_libs
+    # A prompt segment must never break a shell: any environment failure prints
+    # the neutral "AI ?" and exits 0. Only argument errors exit non-zero.
+    showy_quota_have jq || { printf 'AI ?\n'; exit 0; }
+
+    PROVIDER_IDS=()
+    local ansi=0
+    while (($#)); do
+        case "$1" in
+            --ansi) ansi=1; shift ;;
+            --provider)
+                (($# >= 2)) || prompt_usage_error '--provider requires a value'
+                parse_provider_list "$2" || prompt_usage_error "invalid --provider value: $2"
+                shift 2 ;;
+            -h|--help)
+                printf '%s\n' \
+                    'Usage: showy-quota prompt [--ansi] [--provider ID]' \
+                    '' \
+                    'Prints "<SIGIL> <used>% <countdown>" for the worst-remaining provider window.' \
+                    'Reads the cache as-is; set SHOWY_QUOTA_PROMPT_FETCH=1 to refresh first.' \
+                    '--ansi adds severity color (suppressed by NO_COLOR). Always exits 0 (usage errors aside).'
+                return 0 ;;
+            *) prompt_usage_error "unknown argument: $1" ;;
+        esac
+    done
+
+    local state_bin="${SCRIPT_DIR}/showy-quota-state" state_json
+    if [[ "${SHOWY_QUOTA_PROMPT_FETCH:-}" == "1" ]]; then
+        state_json="$("${state_bin}" --json 2>/dev/null)" || state_json=""
+    else
+        state_json="$("${state_bin}" --no-fetch --json 2>/dev/null)" || state_json=""
+    fi
+    if [[ -z "${state_json}" ]] || ! printf '%s' "${state_json}" | jq -e 'type == "object"' >/dev/null 2>&1; then
+        printf 'AI ?\n'; exit 0
+    fi
+
+    local requested_json stale worst
+    requested_json="$(providers_json)"
+    stale="$(printf '%s' "${state_json}" | jq -r '.stale')"
+    worst="$(printf '%s' "${state_json}" | jq -r --argjson requested "${requested_json}" "${PROMPT_JQ}")" || worst=""
+    if [[ -z "${worst}" ]]; then
+        printf 'AI ?\n'; exit 0
+    fi
+
+    local provider used remaining minutes
+    IFS=$'\t' read -r provider used remaining minutes < <(printf '%s\n' "${worst}")
+
+    local sigil countdown seg
+    sigil="$(showy_quota_provider_sigil "${provider}")"
+    countdown=""
+    [[ -n "${minutes}" ]] && countdown="$(showy_quota_format_countdown "${minutes}")"
+    seg="${sigil} ${used}%"
+    [[ -n "${countdown}" ]] && seg="${seg} ${countdown}"
+
+    local color_on=0
+    if (( ansi )) && [[ -z "${NO_COLOR:-}" ]]; then color_on=1; fi
+
+    local out
+    if (( color_on )); then
+        local code=31
+        if (( remaining >= 50 )); then code=32
+        elif (( remaining >= 20 )); then code=33
+        fi
+        out=$'\033['"${code}"'m'"${seg}"$'\033[0m'
+    else
+        out="${seg}"
+    fi
+    [[ "${stale}" == "true" ]] && out="${out} ${SHOWY_QUOTA_STALE_GLYPH}"
+    printf '%s\n' "${out}"
+    exit 0
+}
+
 main() {
     if (($# == 0)); then
         run_selector
@@ -740,6 +1149,14 @@ main() {
                 (($# == 1)) || usage_error '--grant-zellij accepts at most one plugin path'
                 grant_zellij ""
             fi
+            ;;
+        guard)
+            shift
+            cmd_guard "$@"
+            ;;
+        prompt)
+            shift
+            cmd_prompt "$@"
             ;;
         -h|--help)
             (($# == 1)) || usage_error '--help does not accept arguments'
