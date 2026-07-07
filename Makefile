@@ -28,8 +28,11 @@ BIN_NAMES     := showy-quota-fetch showy-quota-state showy-quota showy-quota-tmu
 PLUGIN_CRATE  := showy-quota-zellij
 PLUGIN_WASM   := $(REPO)/target/wasm32-wasip1/release/showy-quota-zellij.wasm
 PLUGIN_TARGET := $(ZELLIJ_PLUGINS)/showy-quota-zellij.wasm
+RENDER_CRATE  := showy-quota-zellij-core
+RENDER_BIN    := $(REPO)/target/release/showy-quota-render
+RENDER_TARGET := $(BIN_DIR)/showy-quota-render
 
-.PHONY: help doctor diagnose install install-bin install-sketchybar plugin install-plugin grant-zellij-permissions install-all uninstall test lint hooks clean
+.PHONY: help doctor diagnose install install-bin install-sketchybar plugin render-bin install-plugin grant-zellij-permissions install-all uninstall test lint hooks clean
 
 help: ## Show this help.
 	@awk 'BEGIN{FS=":.*##"}/^[a-zA-Z_-]+:.*##/{printf "  \033[36m%-20s\033[0m %s\n",$$1,$$2}' $(MAKEFILE_LIST)
@@ -42,7 +45,7 @@ install: doctor install-bin ## Check prerequisites, then symlink shared scripts.
 	@printf '  cat adapters/tmux/status-line.tmux.fragment\n'
 	@printf '  cat adapters/zellij/layout-pane.kdl.fragment  # advanced zjstatus path also documented\n'
 
-install-bin:
+install-bin: render-bin
 	@mkdir -p "$(BIN_DIR)"
 	@for name in $(BIN_NAMES); do \
 		src="$(REPO)/bin/$$name"; \
@@ -66,6 +69,27 @@ install-bin:
 		ln -sfn "$$src" "$$target" || { printf 'ln failed: %s\n' "$$target" >&2; exit 1; }; \
 		printf 'linked %s -> %s\n' "$$target" "$$src"; \
 	done
+	@src="$(RENDER_BIN)"; \
+	target="$(RENDER_TARGET)"; \
+	if [ -L "$$target" ]; then \
+		cur=$$(readlink "$$target"); \
+		if [ "$$cur" = "$$src" ]; then \
+			printf 'noop  %s -> %s (already current)\n' "$$target" "$$src"; \
+		elif [ "$(FORCE)" != "1" ]; then \
+			printf 'refusing to retarget %s\n  was: %s\n  now: %s\n  set FORCE=1 to adopt this symlink\n' "$$target" "$$cur" "$$src" >&2; \
+			exit 1; \
+		else \
+			printf 'retarget %s\n  was: %s\n  now: %s\n' "$$target" "$$cur" "$$src" >&2; \
+			ln -sfn "$$src" "$$target" || { printf 'ln failed: %s\n' "$$target" >&2; exit 1; }; \
+			printf 'linked %s -> %s\n' "$$target" "$$src"; \
+		fi; \
+	elif [ -e "$$target" ]; then \
+		printf 'refusing to clobber %s (not a symlink)\n' "$$target" >&2; \
+		exit 1; \
+	else \
+		ln -sfn "$$src" "$$target" || { printf 'ln failed: %s\n' "$$target" >&2; exit 1; }; \
+		printf 'linked %s -> %s\n' "$$target" "$$src"; \
+	fi
 
 install-sketchybar:
 	@mkdir -p "$(SBAR_ITEMS)" "$(SBAR_PLUGINS)"
@@ -94,6 +118,10 @@ install-sketchybar:
 		ln -sfn "$$src" "$$target" || { printf 'ln failed: %s\n' "$$target" >&2; exit 1; }; \
 		printf 'linked %s\n' "$$target"; \
 	done
+
+render-bin: ## Build the native terminal strip renderer.
+	@RUSTC="$(RUSTC)" $(CARGO) build --release -p $(RENDER_CRATE)
+	@printf 'built %s\n' "$(RENDER_BIN)"
 
 plugin: ## Build the standalone Zellij WASM plugin.
 	@$(PLUGIN_TARGET_ADD) >/dev/null
@@ -129,6 +157,16 @@ uninstall: ## Remove symlinks that this Makefile created.
 			fi; \
 		fi; \
 	done
+	@target="$(RENDER_TARGET)"; \
+	src="$(RENDER_BIN)"; \
+	if [ -L "$$target" ]; then \
+		cur=$$(readlink "$$target"); \
+		if [ "$$cur" = "$$src" ]; then \
+			rm -f "$$target"; printf 'removed %s\n' "$$target"; \
+		else \
+			printf 'skip %s (points to %s)\n' "$$target" "$$cur" >&2; \
+		fi; \
+	fi
 	@for pair in \
 		"$(REPO)/adapters/sketchybar/items/showy_quota.sh:$(REPO)/sketchybar/items/showy_quota.sh:$(SBAR_ITEMS)/showy_quota.sh" \
 		"$(REPO)/adapters/sketchybar/plugins/showy_quota.sh:$(REPO)/sketchybar/plugins/showy_quota.sh:$(SBAR_PLUGINS)/showy_quota.sh"; do \
@@ -158,6 +196,13 @@ doctor: ## Check runtime prerequisites without touching the system.
 		printf 'showy-quota: bash 4+ required. macOS /bin/bash is 3.2; install Homebrew bash.\n' >&2; exit 1; }
 	@command -v jq >/dev/null || { \
 		printf 'showy-quota: jq is required (brew install jq / apt-get install jq).\n' >&2; exit 1; }
+	@if [ -x "$(RENDER_BIN)" ]; then \
+		printf 'doctor: render binary found: %s\n' "$(RENDER_BIN)"; \
+	elif command -v showy-quota-render >/dev/null 2>&1; then \
+		printf 'doctor: render binary found on PATH: %s\n' "$$(command -v showy-quota-render)"; \
+	else \
+		printf 'doctor: render binary missing; run make render-bin\n' >&2; \
+	fi
 	@serve_url="$${SHOWY_QUOTA_CODEXBAR_SERVE_URL:-http://127.0.0.1:8080}"; \
 	source_desc=""; \
 	if command -v codexbar >/dev/null; then \

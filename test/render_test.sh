@@ -25,6 +25,22 @@ trap 'rm -rf "${TMP}"' EXIT
 export SHOWY_QUOTA_MANAGE_SERVE=0
 export SHOWY_QUOTA_CODEXBAR_SERVE_URL=
 
+
+# Build the native renderer only when the suite cannot use the repository
+# fallback path. In CI this is normally already present via the preceding cargo
+# phase or make target, so the guard stays a cheap file check.
+RENDER_BIN="${REPO_ROOT}/target/release/showy-quota-render"
+if [[ ! -x "${RENDER_BIN}" ]]; then
+    if command -v cargo >/dev/null 2>&1; then
+        if ! (cd "${REPO_ROOT}" && cargo build --release -p showy-quota-zellij-core); then
+            printf 'failed to build showy-quota-render\n' >&2
+            exit 1
+        fi
+    else
+        printf 'showy-quota-render missing and cargo is unavailable; run make render-bin\n' >&2
+        exit 1
+    fi
+fi
 # ── stub codexbar that validates fetcher argv and prints the fixture ──
 
 stub_dir="${TMP}/bin"
@@ -522,21 +538,6 @@ run_common_eval() {
         '
 }
 
-run_strip_eval() {
-    local code="$1"
-    shift
-    # shellcheck disable=SC2016
-    env \
-        SHOWY_QUOTA_TEST_CODE="${code}" \
-        SHOWY_QUOTA_TEST_REPO_ROOT="${REPO_ROOT}" \
-        "$@" \
-        bash -lc '
-            set -euo pipefail
-            . "${SHOWY_QUOTA_TEST_REPO_ROOT}/lib/common.sh"
-            . "${SHOWY_QUOTA_TEST_REPO_ROOT}/lib/strip.sh"
-            eval "${SHOWY_QUOTA_TEST_CODE}"
-        '
-}
 
 
 hex_to_rgb_csv() {
@@ -1189,11 +1190,11 @@ else
     fail "zellij --json rejects non-quota JSON file" "rc=${json_bad_rc}"
 fi
 
-printf '\nrust zellij parity\n'
-if (cd "${REPO_ROOT}" && cargo test -p showy-quota-zellij-core --test shell_parity); then
-    ok "rust zellij renderer matches shell golden fixtures"
+printf '\nrender CLI integration\n'
+if (cd "${REPO_ROOT}" && cargo test -p showy-quota-zellij-core --test render_cli); then
+    ok "render CLI matches in-process renderer"
 else
-    fail "rust zellij renderer matches shell golden fixtures"
+    fail "render CLI matches in-process renderer"
 fi
 
 # ── tmux renderer ────────────────────────────────────────────────────
@@ -4486,28 +4487,33 @@ else
 fi
 # ── marker overflow guard (showy-quota-marker-overflow) ─────────────────
 # An absurd windowMinutes (2^62) previously wrapped 64-bit duration to 0 and
-# crashed the elapsed-marker math with a divide-by-zero. The checked-mul guard
-# must now yield no marker (non-zero return, empty output) without aborting the
-# eval shell, while a sane window still produces a marker (no over-clamping).
+# crashed the elapsed-marker math with a divide-by-zero. Pin the guard through
+# the zellij driver/native renderer path: the strip must render successfully,
+# with the provider visible, but with no elapsed marker column.
 printf '\nmarker overflow guard\n'
 
+marker_overflow_fixture="${TMP}/marker-overflow.json"
+cat > "${marker_overflow_fixture}" <<'JSON'
+[{"provider":"claude","usage":{"primary":{"usedPercent":50,"windowMinutes":4611686018427387904,"resetsAt":"2026-07-06T20:00:00Z"},"secondary":{"usedPercent":50,"windowMinutes":100,"resetsAt":"2099-01-01T01:40:00Z"},"tertiary":{"usedPercent":50,"windowMinutes":100,"resetsAt":"2099-01-01T01:40:00Z"}}}]
+JSON
 marker_rc=0
-marker_out=$(run_strip_eval 'showy_quota_elapsed_marker_cell "2026-07-06T20:00:00Z" 4611686018427387904 40' SHOWY_QUOTA_NO_CONFIG=1 2>&1) || marker_rc=$?
-# Empty (merged stdout+stderr) pins both no-marker AND no "division by 0" crash:
-# a reintroduced wrap would print a div-by-zero diagnostic here.
-assert_equals "overflow windowMinutes yields empty marker (no div-by-zero crash)" "" "${marker_out}"
-if (( marker_rc != 0 )); then
-    ok "overflow windowMinutes returns non-zero (no marker)"
-else
-    fail "overflow windowMinutes returns non-zero (no marker)" "rc=${marker_rc}"
-fi
+marker_out=$(
+    env SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_TERMINAL_BAR_MODE=mono3 SHOWY_QUOTA_ZELLIJ_BAR_WIDTH=8 SHOWY_QUOTA_NOW_EPOCH=4070908800 SHOWY_QUOTA_FORCE_COLOR=0 NO_COLOR=1 \
+        "${REPO_ROOT}/bin/showy-quota-zellij-bar" --json - < "${marker_overflow_fixture}" 2>&1
+) || marker_rc=$?
+assert_equals "overflow windowMinutes renders successfully" "0" "${marker_rc}"
+assert_contains "overflow windowMinutes keeps provider visible" "CL" "${marker_out}"
+assert_not_contains "overflow windowMinutes yields no elapsed marker" "│" "${marker_out}"
 
-marker_out=$(run_strip_eval 'showy_quota_elapsed_marker_cell "2099-01-01T01:40:00Z" 100 40' SHOWY_QUOTA_NO_CONFIG=1 2>&1) || marker_out=""
-if [[ "${marker_out}" =~ ^[0-9]+$ ]]; then
-    ok "sane windowMinutes still yields a numeric marker cell"
-else
-    fail "sane windowMinutes still yields a numeric marker cell" "out=${marker_out}"
-fi
+marker_sane_fixture="${TMP}/marker-sane.json"
+cat > "${marker_sane_fixture}" <<'JSON'
+[{"provider":"claude","usage":{"primary":{"usedPercent":50,"windowMinutes":100,"resetsAt":"2099-01-01T01:40:00Z"},"secondary":{"usedPercent":50,"windowMinutes":100,"resetsAt":"2099-01-01T01:40:00Z"},"tertiary":{"usedPercent":50,"windowMinutes":100,"resetsAt":"2099-01-01T01:40:00Z"}}}]
+JSON
+marker_out=$(
+    env SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_TERMINAL_BAR_MODE=mono3 SHOWY_QUOTA_ZELLIJ_BAR_WIDTH=8 SHOWY_QUOTA_NOW_EPOCH=4070908800 SHOWY_QUOTA_FORCE_COLOR=0 NO_COLOR=1 \
+        "${REPO_ROOT}/bin/showy-quota-zellij-bar" --json - < "${marker_sane_fixture}" 2>&1
+) || marker_out=""
+assert_contains "sane windowMinutes still renders elapsed marker" "│" "${marker_out}"
 
 # ── cache age with future mtime (showy-quota-future-mtime) ──────────────
 # A future-dated cache file (clock skew, restored backup, hand-touched file)

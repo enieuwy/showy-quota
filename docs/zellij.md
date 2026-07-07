@@ -137,7 +137,7 @@ If you do not pre-grant, reveal floating panes once, focus the pending permissio
 
 ## Output shape
 
-The plugin renders the same styled terminal strip geometry as `bin/showy-quota-zellij-bar`:
+The plugin and the advanced `bin/showy-quota-zellij-bar` path render the same styled terminal strip geometry:
 
 ```text
 <SIGIL>▕<12-cell bar body>▏<countdown>
@@ -156,6 +156,8 @@ fresh:    CL▕▀▀▀▀▀▀▀▀▀▀▀▀▏12m
 stale:    CL▕▀▀▀▀▀▀▀▀▀▀▀▀▏12m ⚠
 fallback: CL▕▀▀▀▀▀▀▀▀▀▀▀▀▏12m ⚠cli
 ```
+
+For the advanced zjstatus path, `bin/showy-quota-zellij-bar` is a thin shell driver around the native `showy-quota-render` binary. `make install-bin` installs both; if you keep a custom build somewhere else, set `SHOWY_QUOTA_RENDER_BIN=/absolute/path/to/showy-quota-render`.
 
 ## Plugin configuration
 
@@ -213,7 +215,7 @@ Use this only when you already own a multi-widget zjstatus row and want showy-qu
 This path still requires:
 
 - `zjstatus.wasm`
-- installed showy-quota shell scripts
+- installed showy-quota shell scripts plus the `showy-quota-render` binary
 - one `showy-quota-zellij-pipe` feeder per Zellij session
 
 Example zjstatus pane:

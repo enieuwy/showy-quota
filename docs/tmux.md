@@ -2,7 +2,8 @@
 
 ## Output shape
 
-`bin/showy-quota-tmux-bar` emits tmux-format markup with the same visible
+`bin/showy-quota-tmux-bar` is a thin shell driver around the native
+`showy-quota-render` binary. It emits tmux-format markup with the same visible
 provider chunks as the Zellij strip:
 
 ```text
@@ -55,6 +56,12 @@ fresh:    #[…]CL▕▀▀▀▀▀▀▀▀▀▀▀▀▏12m
 stale:    #[…]CL▕▀▀▀▀▀▀▀▀▀▀▀▀▏12m #[…]⚠     # data-bearing colors greyed
 fallback: #[…]CL▕▀▀▀▀▀▀▀▀▀▀▀▀▏12m #[…]⚠cli
 ```
+
+`make install-bin` installs `showy-quota-render` beside the tmux driver. If you
+keep a custom renderer build somewhere else, set
+`SHOWY_QUOTA_RENDER_BIN=/absolute/path/to/showy-quota-render`; otherwise the
+driver looks for `showy-quota-render` on PATH and then in the repo's
+`target/release/` directory.
 
 ## Font requirements
 
@@ -115,8 +122,10 @@ if -F '#{m:*showy-quota-tmux-bar*,#{status-right}}' '' 'set -ag status-right " #
 ```
 
 Use the absolute path to `showy-quota-tmux-bar`; tmux's startup PATH often
-does not include `~/.local/bin`. The guard prevents duplicate segments
-when `.tmux.conf` is sourced repeatedly.
+does not include `~/.local/bin`. The driver also needs `showy-quota-render`
+(installed beside it by `make install-bin`, or supplied with
+`SHOWY_QUOTA_RENDER_BIN=/absolute/path/to/showy-quota-render`). The guard
+prevents duplicate segments when `.tmux.conf` is sourced repeatedly.
 
 For a clean standalone preview, remove tmux's default green status styling:
 

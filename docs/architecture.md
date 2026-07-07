@@ -2,7 +2,7 @@
 
 `showy-quota` has two integration families:
 
-1. **Shell integrations for host bars.** tmux, SketchyBar, and the advanced zjstatus path use the existing shell data plane and renderers.
+1. **Shell integrations for host bars.** tmux and the advanced zjstatus path use the existing shell data plane plus a shared native terminal-strip renderer; SketchyBar keeps its native shell row/icon renderer.
 2. **Standalone Zellij plugin.** Zellij's recommended path is a Rust/WASM plugin that fetches CodexBar serve directly and renders the same ANSI-styled terminal strip in-process.
 
 ```text
@@ -29,8 +29,8 @@ codexbar serve /health + /usage  or  codexbar usage --format json
 bin/showy-quota-fetch  ← shared cache + source marker + flock + atomic publish
         ├──► bin/showy-quota-state                 (stable provider/layout state JSON)
         ├──► adapters/sketchybar/plugins/showy_quota.sh    (native SketchyBar rows + icons)
-        ├──► bin/showy-quota-tmux-bar             (tmux #[…] markup)
-        └──► bin/showy-quota-zellij-bar           (advanced zjstatus ANSI segment)
+        ├──► bin/showy-quota-tmux-bar             (thin driver → native tmux #[…] renderer)
+        └──► bin/showy-quota-zellij-bar           (thin driver → native ANSI renderer for advanced zjstatus)
 ```
 
 ## Shell cache contract
@@ -50,7 +50,7 @@ The shell data plane is still the reliability boundary for tmux, SketchyBar, and
 
 The fetcher prints the cache content to stdout regardless of whether it just refreshed or served stale bytes. Callers must not differentiate; if they want freshness data they read `--age`. During non-forced lock contention, a caller with an existing valid cache may emit that snapshot immediately while the lock holder refreshes. Forced refresh callers wait for the holder and retry recovery first, but still fall back to an existing valid cache if no refreshed cache is published; this preserves the fetcher's last-known-good output contract.
 
-Freshness is a shared render concern. A shell cache is stale when `showy_quota_age_seconds "${SHOWY_QUOTA_USAGE_FILE}"` is greater than `SHOWY_QUOTA_REFRESH_SECONDS * 2`. Shell renderers show one trailing stale indicator, grey frozen data, and hide elapsed markers; `showy-quota-state` reports the boolean and threshold.
+Freshness is a shared render concern. A shell cache is stale when `showy_quota_age_seconds "${SHOWY_QUOTA_USAGE_FILE}"` is greater than `SHOWY_QUOTA_REFRESH_SECONDS * 2`. Shell bar drivers pass stale/degraded flags to the native renderer so tmux and advanced zjstatus show one trailing stale indicator, grey frozen data, and hide elapsed markers; `showy-quota-state` reports the boolean and threshold.
 
 Refreshes prefer `${SHOWY_QUOTA_CODEXBAR_SERVE_URL%/}/usage` with `curl`; the default base URL is `http://127.0.0.1:8080`. The `/health` probe uses `SHOWY_QUOTA_CODEXBAR_SERVE_TIMEOUT_SECONDS` (default `10`) for fast liveness detection, while the `/usage` probe uses the larger `SHOWY_QUOTA_CODEXBAR_SERVE_USAGE_TIMEOUT_SECONDS` (default `30`): a healthy `codexbar serve` bounds collection per provider and can take up to ~0.8x its request deadline (~24s by default) to return the healthy providers when a slow one degrades to an error row, so reusing the short health timeout here would abandon that usable partial response and fall back to visibly degraded CLI data whenever any provider is briefly slow. Before falling back to CLI, `showy-quota-fetch` probes `/health` and, with `SHOWY_QUOTA_MANAGE_SERVE=1` (default), starts `codexbar serve` on the port implied by `SHOWY_QUOTA_CODEXBAR_SERVE_URL` (default `8080`) in the background with a pidfile. `SHOWY_QUOTA_CODEXBAR_SERVE_PORT` is now a compatibility override; when both are set and disagree, the fetcher logs a warning and prefers the URL port. Set `SHOWY_QUOTA_MANAGE_SERVE=0` to disable managed startup, or `SHOWY_QUOTA_CODEXBAR_SERVE_URL=` to skip HTTP entirely. When an existing cache is still fresh under `SHOWY_QUOTA_REFRESH_SECONDS`, the fetcher may still refresh from `codexbar serve` every `SHOWY_QUOTA_CODEXBAR_SERVE_REFRESH_SECONDS` so bars repaint shortly after the server's own response cache changes. Failed HTTP probes keep serving the existing cache; they do not invoke the slower CLI fallback until the normal refresh interval expires.
 
@@ -71,7 +71,7 @@ It always requests `WebAccess`, then requests `OpenTerminalsOrPlugins` only when
 
 The plugin keeps last-known-good JSON in memory for the pane/session. If refreshes fail after a success, it continues rendering the previous data and marks it stale at `2 × interval_seconds`. That preserves the user-visible last-known-good behavior without requiring `FullHdAccess` or a disk cache.
 
-The Rust renderer intentionally duplicates only the terminal strip logic. Golden tests compare its output to `bin/showy-quota-zellij-bar` over the fixture set so tmux/SketchyBar can stay shell-based without visual drift in Zellij.
+Terminal-strip rendering is centralized in the native `showy-quota-render` binary. The tmux and advanced zjstatus shell bars now only fetch/load JSON, detect stale or degraded cache state, and stream the payload to that binary with `--format tmux` or `--format zellij`; the standalone Zellij plugin uses the same Rust rendering core in-process. SketchyBar remains shell-native because it renders separate rows and icons instead of the compact terminal strip.
 
 ## Terminal rendering modes
 
@@ -127,9 +127,9 @@ The stacked modes collapse to the densest body the data supports: `mono4` needs 
 
 ## Why bash and Rust, not Python/Go
 
-The old `ai-quota` predecessor was Python with a daemon, sidecar, and `--client-defaults` indirection. That stack made sense when it also had to talk to providers. CodexBar removed that need for host bars: bash + `jq` + ImageMagick remains the lowest-friction glue for tmux and SketchyBar.
+The old `ai-quota` predecessor was Python with a daemon, sidecar, and `--client-defaults` indirection. That stack made sense when it also had to talk to providers. CodexBar removed that need for host bars: bash + `jq` remains the lowest-friction data-plane glue for tmux and SketchyBar, while the compact terminal strip is small and deterministic enough to centralize in Rust.
 
-Zellij is different. A high-value Zellij integration must be a standalone WASM plugin so users can install one artifact and avoid `zjstatus`, feeder loops, and shell-script setup. Zellij officially supports Rust plugins, so the Zellij renderer is Rust. The project is not a full Rust port: SketchyBar and tmux stay on the shell path, with parity enforced by tests.
+Zellij is different at the integration boundary. A high-value Zellij integration must be a standalone WASM plugin so users can install one artifact and avoid `zjstatus`, feeder loops, and shell-script setup. Zellij officially supports Rust plugins, so the standalone pane uses Rust in-process; tmux and advanced zjstatus keep shell drivers but delegate the compact strip to `showy-quota-render`. The project is not a full Rust port: SketchyBar stays on the shell-native row/icon path, and the shell cache remains the host-bar reliability boundary.
 
 Go is not used because the Zellij plugin API is Rust-first. TinyGo/community bindings would add WASI/API risk, and a Go CLI plus Rust plugin would split compiled logic across two languages.
 
