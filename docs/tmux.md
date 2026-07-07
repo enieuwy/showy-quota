@@ -57,8 +57,9 @@ stale:    #[…]CL▕▀▀▀▀▀▀▀▀▀▀▀▀▏12m #[…]⚠ 
 fallback: #[…]CL▕▀▀▀▀▀▀▀▀▀▀▀▀▏12m #[…]⚠cli
 ```
 
-`make install-bin` installs `showy-quota-render` beside the tmux driver. If you
-keep a custom renderer build somewhere else, set
+`make install-copy` installs `showy-quota-render` beside the copied tmux driver
+when you use a release tarball, and `make install-bin` builds/links it for
+source installs. If you keep a custom renderer build somewhere else, set
 `SHOWY_QUOTA_RENDER_BIN=/absolute/path/to/showy-quota-render`; otherwise the
 driver looks for `showy-quota-render` on PATH and then in the repo's
 `target/release/` directory.
@@ -123,7 +124,8 @@ if -F '#{m:*showy-quota-tmux-bar*,#{status-right}}' '' 'set -ag status-right " #
 
 Use the absolute path to `showy-quota-tmux-bar`; tmux's startup PATH often
 does not include `~/.local/bin`. The driver also needs `showy-quota-render`
-(installed beside it by `make install-bin`, or supplied with
+(installed by `make install-copy` from release tarballs, by `make install-bin`
+from source, or supplied with
 `SHOWY_QUOTA_RENDER_BIN=/absolute/path/to/showy-quota-render`). The guard
 prevents duplicate segments when `.tmux.conf` is sourced repeatedly.
 

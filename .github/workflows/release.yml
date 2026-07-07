@@ -89,3 +89,122 @@ jobs:
           files: |
             showy-quota-zellij.wasm
             showy-quota-zellij.wasm.sha256
+
+  package:
+    name: package (${{ matrix.package_target }})
+    needs: zellij-plugin
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            package_target: macos-arm64
+            cargo_target: ''
+            render_bin: target/release/showy-quota-render
+          - os: macos-14
+            package_target: macos-x86_64
+            cargo_target: x86_64-apple-darwin
+            render_bin: target/x86_64-apple-darwin/release/showy-quota-render
+          - os: ubuntu-latest
+            package_target: linux-x86_64
+            cargo_target: ''
+            render_bin: target/release/showy-quota-render
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable as of 2026-03-27
+        with:
+          toolchain: stable
+      - name: Add Rust target
+        if: matrix.cargo_target != ''
+        run: rustup target add "${{ matrix.cargo_target }}"
+      - name: Build render binary
+        env:
+          CARGO_TARGET: ${{ matrix.cargo_target }}
+        run: |
+          if [ -n "${CARGO_TARGET}" ]; then
+            cargo build --release --target "${CARGO_TARGET}" -p showy-quota-zellij-core --bin showy-quota-render
+          else
+            cargo build --release -p showy-quota-zellij-core --bin showy-quota-render
+          fi
+      - name: Derive package version
+        id: version
+        run: printf 'version=%s\n' "${GITHUB_REF_NAME#v}" >> "${GITHUB_OUTPUT}"
+      - name: Package release tarball
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          TARGET: ${{ matrix.package_target }}
+          RENDER_BIN: ${{ matrix.render_bin }}
+          OUT_DIR: dist
+        run: scripts/package-release.sh
+      - name: Upload package artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-package-${{ matrix.package_target }}
+          if-no-files-found: error
+          path: |
+            dist/showy-quota-${{ steps.version.outputs.version }}-${{ matrix.package_target }}.tar.gz
+            dist/showy-quota-${{ steps.version.outputs.version }}-${{ matrix.package_target }}.tar.gz.sha256
+      - name: Attach package artifact
+        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
+        with:
+          fail_on_unmatched_files: true
+          files: |
+            dist/showy-quota-${{ steps.version.outputs.version }}-${{ matrix.package_target }}.tar.gz
+            dist/showy-quota-${{ steps.version.outputs.version }}-${{ matrix.package_target }}.tar.gz.sha256
+
+  smoke:
+    name: smoke (${{ matrix.package_target }})
+    needs: package
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            package_target: macos-arm64
+          - os: ubuntu-latest
+            package_target: linux-x86_64
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Install smoke dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bash jq
+      - name: Install smoke dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install bash jq
+          echo "$(brew --prefix)/bin" >> "${GITHUB_PATH}"
+      - name: Derive package version
+        id: version
+        run: printf 'version=%s\n' "${GITHUB_REF_NAME#v}" >> "${GITHUB_OUTPUT}"
+      - name: Download package artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-package-${{ matrix.package_target }}
+          path: "${{ runner.temp }}/package"
+      - name: Install copied tree and smoke test
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          TARGET: ${{ matrix.package_target }}
+        run: |
+          set -euo pipefail
+          archive="${RUNNER_TEMP}/package/showy-quota-${VERSION}-${TARGET}.tar.gz"
+          extract_dir="${RUNNER_TEMP}/extract"
+          prefix="${RUNNER_TEMP}/prefix"
+          mkdir -p "${extract_dir}" "${prefix}/bin"
+          tar -xzf "${archive}" -C "${extract_dir}"
+          package_dir="${extract_dir}/showy-quota-${VERSION}"
+          make -C "${package_dir}" install-copy \
+            PREFIX="${prefix}" \
+            BIN_DIR="${prefix}/bin" \
+            DATA_DIR="${prefix}/share/showy-quota"
+          rm -rf "${package_dir}"
+          export PATH="${prefix}/bin:${PATH}"
+          SHOWY_QUOTA_NO_CONFIG=1 \
+            "${prefix}/bin/showy-quota-zellij-bar" \
+            --json "${GITHUB_WORKSPACE}/test/fixtures/codexbar-realistic.json" \
+            > "${RUNNER_TEMP}/showy-quota-smoke.out"
+          test -s "${RUNNER_TEMP}/showy-quota-smoke.out"

@@ -9,12 +9,14 @@
 
 PREFIX        ?= $(HOME)/.local
 BIN_DIR       ?= $(PREFIX)/bin
+DATA_DIR      ?= $(PREFIX)/share/showy-quota
 SKETCHYBAR    ?= $(HOME)/.config/sketchybar
 ZELLIJ_PLUGINS ?= $(HOME)/.config/zellij/plugins
 SBAR_ITEMS    ?= $(SKETCHYBAR)/items
 SBAR_PLUGINS  ?= $(SKETCHYBAR)/plugins
 FORCE         ?= 0
 CARGO         ?= cargo
+MAKE_COMMAND  ?= $(MAKE)
 RUSTC         ?= rustc
 PLUGIN_TARGET_ADD := true
 ifeq ($(shell command -v rustup >/dev/null 2>&1 && echo yes),yes)
@@ -25,6 +27,7 @@ endif
 
 REPO          := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
 BIN_NAMES     := showy-quota-fetch showy-quota-state showy-quota showy-quota-tmux-bar showy-quota-zellij-bar showy-quota-zellij-pipe
+COPY_BIN_NAMES := $(BIN_NAMES) showy-quota-render
 PLUGIN_CRATE  := showy-quota-zellij
 PLUGIN_WASM   := $(REPO)/target/wasm32-wasip1/release/showy-quota-zellij.wasm
 PLUGIN_TARGET := $(ZELLIJ_PLUGINS)/showy-quota-zellij.wasm
@@ -32,7 +35,7 @@ RENDER_CRATE  := showy-quota-zellij-core
 RENDER_BIN    := $(REPO)/target/release/showy-quota-render
 RENDER_TARGET := $(BIN_DIR)/showy-quota-render
 
-.PHONY: help doctor diagnose install install-bin install-sketchybar plugin render-bin install-plugin grant-zellij-permissions install-all uninstall test lint hooks clean
+.PHONY: help doctor diagnose install install-bin install-copy install-copy-sketchybar install-sketchybar plugin render-bin install-plugin grant-zellij-permissions install-all uninstall test lint hooks clean
 
 help: ## Show this help.
 	@awk 'BEGIN{FS=":.*##"}/^[a-zA-Z_-]+:.*##/{printf "  \033[36m%-20s\033[0m %s\n",$$1,$$2}' $(MAKEFILE_LIST)
@@ -91,6 +94,92 @@ install-bin: render-bin
 		printf 'linked %s -> %s\n' "$$target" "$$src"; \
 	fi
 
+install-copy: ## Copy runtime tree into DATA_DIR and link commands into BIN_DIR.
+	@set -e; \
+	if [ -e "$(DATA_DIR)" ] && [ ! -d "$(DATA_DIR)" ]; then \
+		printf 'refusing to install into %s (not a directory)\n' "$(DATA_DIR)" >&2; \
+		exit 1; \
+	fi; \
+	mkdir -p "$(DATA_DIR)" "$(BIN_DIR)"; \
+	for path in bin lib adapters share; do \
+		rm -rf "$(DATA_DIR)/$$path"; \
+		cp -R "$(REPO)/$$path" "$(DATA_DIR)/$$path"; \
+	done; \
+	cp "$(REPO)/showy-quota.tmux" "$(DATA_DIR)/showy-quota.tmux"; \
+	if [ -f "$(REPO)/bin/showy-quota-render" ]; then \
+		chmod +x "$(DATA_DIR)/bin/showy-quota-render"; \
+		printf 'using prebuilt %s\n' "$(DATA_DIR)/bin/showy-quota-render"; \
+	elif command -v cargo >/dev/null 2>&1 || command -v rustup >/dev/null 2>&1; then \
+		$(MAKE_COMMAND) --no-print-directory render-bin; \
+		cp "$(RENDER_BIN)" "$(DATA_DIR)/bin/showy-quota-render"; \
+		chmod +x "$(DATA_DIR)/bin/showy-quota-render"; \
+		printf 'installed built %s\n' "$(DATA_DIR)/bin/showy-quota-render"; \
+	else \
+		rm -f "$(DATA_DIR)/bin/showy-quota-render"; \
+		printf 'warning: showy-quota-render not installed; terminal strips will show "AI ?" with a hint until you run make render-bin or install a release tarball with bin/showy-quota-render\n' >&2; \
+	fi; \
+	if [ -x "$(DATA_DIR)/bin/showy-quota-render" ]; then \
+		mkdir -p "$(DATA_DIR)/target/release"; \
+		ln -sfn "../../bin/showy-quota-render" "$(DATA_DIR)/target/release/showy-quota-render"; \
+	else \
+		rm -f "$(DATA_DIR)/target/release/showy-quota-render"; \
+	fi; \
+	for name in $(BIN_NAMES); do chmod +x "$(DATA_DIR)/bin/$$name"; done; \
+	printf 'copied runtime tree to %s\n' "$(DATA_DIR)"
+	@for name in $(COPY_BIN_NAMES); do \
+		src="$(DATA_DIR)/bin/$$name"; \
+		target="$(BIN_DIR)/$$name"; \
+		if [ ! -e "$$src" ]; then \
+			printf 'skip  %s (not installed)\n' "$$src" >&2; \
+			continue; \
+		fi; \
+		if [ -L "$$target" ]; then \
+			cur=$$(readlink "$$target"); \
+			if [ "$$cur" = "$$src" ]; then \
+				printf 'noop  %s -> %s (already current)\n' "$$target" "$$src"; \
+				continue; \
+			fi; \
+			if [ "$(FORCE)" != "1" ]; then \
+				printf 'refusing to retarget %s\n  was: %s\n  now: %s\n  set FORCE=1 to adopt this symlink\n' "$$target" "$$cur" "$$src" >&2; \
+				exit 1; \
+			fi; \
+			printf 'retarget %s\n  was: %s\n  now: %s\n' "$$target" "$$cur" "$$src" >&2; \
+		elif [ -e "$$target" ]; then \
+			printf 'refusing to clobber %s (not a symlink)\n' "$$target" >&2; \
+			exit 1; \
+		fi; \
+		ln -sfn "$$src" "$$target" || { printf 'ln failed: %s\n' "$$target" >&2; exit 1; }; \
+		printf 'linked %s -> %s\n' "$$target" "$$src"; \
+	done
+
+install-copy-sketchybar: install-copy ## Link SketchyBar integration from copied DATA_DIR.
+	@mkdir -p "$(SBAR_ITEMS)" "$(SBAR_PLUGINS)"
+	@for pair in \
+		"$(DATA_DIR)/adapters/sketchybar/items/showy_quota.sh:$(REPO)/sketchybar/items/showy_quota.sh:$(SBAR_ITEMS)/showy_quota.sh" \
+		"$(DATA_DIR)/adapters/sketchybar/plugins/showy_quota.sh:$(REPO)/sketchybar/plugins/showy_quota.sh:$(SBAR_PLUGINS)/showy_quota.sh"; do \
+		src=$${pair%%:*}; rest=$${pair#*:}; legacy_src=$${rest%%:*}; target=$${rest#*:}; \
+		chmod +x "$$src"; \
+		if [ -L "$$target" ]; then \
+			cur=$$(readlink "$$target"); \
+			if [ "$$cur" = "$$src" ]; then \
+				printf 'noop  %s -> %s (already current)\n' "$$target" "$$src"; \
+				continue; \
+			fi; \
+			if [ "$$cur" = "$$legacy_src" ]; then \
+				printf 'retarget legacy %s\n  was: %s\n  now: %s\n' "$$target" "$$cur" "$$src"; \
+			elif [ "$(FORCE)" != "1" ]; then \
+				printf 'refusing to retarget %s\n  was: %s\n  now: %s\n  set FORCE=1 to adopt this symlink\n' "$$target" "$$cur" "$$src" >&2; \
+				exit 1; \
+			else \
+				printf 'retarget %s\n  was: %s\n  now: %s\n' "$$target" "$$cur" "$$src" >&2; \
+			fi; \
+		elif [ -e "$$target" ]; then \
+			printf 'refusing to clobber %s\n' "$$target" >&2; exit 1; \
+		fi; \
+		ln -sfn "$$src" "$$target" || { printf 'ln failed: %s\n' "$$target" >&2; exit 1; }; \
+		printf 'linked %s\n' "$$target"; \
+	done
+
 install-sketchybar:
 	@mkdir -p "$(SBAR_ITEMS)" "$(SBAR_PLUGINS)"
 	@for pair in \
@@ -144,7 +233,7 @@ grant-zellij-permissions: ## Pre-grant Zellij plugin permissions (override path 
 	@ZELLIJ_PLUGINS="$(ZELLIJ_PLUGINS)" "$(REPO)/bin/showy-quota" --grant-zellij $(PLUGIN)
 
 install-all: install-bin install-sketchybar install-plugin ## Install shared scripts and every optional integration.
-uninstall: ## Remove symlinks that this Makefile created.
+uninstall: ## Remove symlinks and copied DATA_DIR that this Makefile created.
 	@for name in $(BIN_NAMES); do \
 		src="$(REPO)/bin/$$name"; \
 		target="$(BIN_DIR)/$$name"; \
@@ -180,6 +269,42 @@ uninstall: ## Remove symlinks that this Makefile created.
 			fi; \
 		fi; \
 	done
+	@for name in $(COPY_BIN_NAMES); do \
+		src="$(DATA_DIR)/bin/$$name"; \
+		target="$(BIN_DIR)/$$name"; \
+		if [ -L "$$target" ]; then \
+			cur=$$(readlink "$$target"); \
+			if [ "$$cur" = "$$src" ]; then \
+				rm -f "$$target"; printf 'removed %s\n' "$$target"; \
+			else \
+				printf 'skip %s (points to %s)\n' "$$target" "$$cur" >&2; \
+			fi; \
+		fi; \
+	done
+	@for pair in \
+		"$(DATA_DIR)/adapters/sketchybar/items/showy_quota.sh:$(REPO)/sketchybar/items/showy_quota.sh:$(SBAR_ITEMS)/showy_quota.sh" \
+		"$(DATA_DIR)/adapters/sketchybar/plugins/showy_quota.sh:$(REPO)/sketchybar/plugins/showy_quota.sh:$(SBAR_PLUGINS)/showy_quota.sh"; do \
+		src=$${pair%%:*}; rest=$${pair#*:}; legacy_src=$${rest%%:*}; target=$${rest#*:}; \
+		if [ -L "$$target" ]; then \
+			cur=$$(readlink "$$target"); \
+			if [ "$$cur" = "$$src" ] || [ "$$cur" = "$$legacy_src" ]; then \
+				rm -f "$$target"; printf 'removed %s\n' "$$target"; \
+			else \
+				printf 'skip %s (points to %s)\n' "$$target" "$$cur" >&2; \
+			fi; \
+		fi; \
+	done
+	@data_dir="$(DATA_DIR)"; \
+	home_dir="$${HOME:-$(HOME)}"; \
+	case "$$data_dir" in ""|"/"|"/."|"$$home_dir"|"$$home_dir"/) \
+		printf 'refusing to remove unsafe DATA_DIR: %s\n' "$$data_dir" >&2; \
+		exit 1; \
+		;; \
+	esac; \
+	if [ -d "$$data_dir" ]; then \
+		rm -rf "$$data_dir"; \
+		printf 'removed %s\n' "$$data_dir"; \
+	fi
 	@if [ -f "$(PLUGIN_TARGET)" ]; then \
 		if [ -f "$(PLUGIN_WASM)" ] && cmp -s "$(PLUGIN_WASM)" "$(PLUGIN_TARGET)"; then \
 			rm -f "$(PLUGIN_TARGET)"; printf 'removed %s\n' "$(PLUGIN_TARGET)"; \

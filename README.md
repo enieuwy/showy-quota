@@ -58,31 +58,43 @@ bin/showy-quota-fetch     ←  shared cache + source marker + flock + last-known
    **System Settings → Privacy & Security**. If `jq length` prints `0`, fix
    CodexBar before continuing — showy-quota has nothing to paint without it.
 
-2. **Install showy-quota for the UI you use.**
+2. **Install showy-quota.**
 
-   Shell integrations (SketchyBar/tmux):
+   Recommended release tarball path for shell integrations (SketchyBar, tmux,
+   and the advanced Zellij/zjstatus driver):
+
+   ```sh
+   # Pick the asset for your platform: macos-arm64, macos-x86_64, or linux-x86_64.
+   VERSION=$(curl -fsSL https://api.github.com/repos/enieuwy/showy-quota/releases/latest | jq -r '.tag_name | sub("^v"; "")')
+   TARGET=macos-arm64
+   curl -LO "https://github.com/enieuwy/showy-quota/releases/download/v${VERSION}/showy-quota-${VERSION}-${TARGET}.tar.gz"
+   tar xzf "showy-quota-${VERSION}-${TARGET}.tar.gz"
+   cd "showy-quota-${VERSION}"
+   make install-copy             # copies runtime files into ~/.local/share/showy-quota
+   ```
+
+   Per-platform tarballs include the prebuilt native `showy-quota-render`
+   binary beside the shell entry points, so installing from a release does not
+   require Rust or Cargo.
+
+   Developer/source mode keeps symlinks into your checkout:
 
    ```sh
    git clone https://github.com/enieuwy/showy-quota && cd showy-quota
-   make doctor                    # bash 4+, jq, codexbar present
-   make install                   # symlinks bin/* into ~/.local/bin
+   make doctor                   # bash 4+, jq, codexbar present
+   make install                  # symlinks bin/* into ~/.local/bin
    ```
 
-   Zellij plugin from source:
-
-   ```sh
-   git clone https://github.com/enieuwy/showy-quota && cd showy-quota
-   make install-plugin            # builds + installs showy-quota-zellij.wasm
-   ```
-
-   For Zellij-only installs from a release, you can skip the clone and download
-   `showy-quota-zellij.wasm`; see [`docs/plugin.md`](docs/plugin.md).
-   `make install` and `make install-plugin` refuse to clobber existing files
+   Zellij's standalone plugin can still be installed by downloading
+   `showy-quota-zellij.wasm`; see [`docs/plugin.md`](docs/plugin.md). From
+   source, `make install-plugin` builds and installs it. `make install-copy`,
+   `make install`, and `make install-plugin` refuse to clobber existing files
    unless you run with `FORCE=1`.
 
 3. **Wire a UI.** Pick the UI(s) you use:
 
-   - **SketchyBar:** `make install-sketchybar`, then add
+   - **SketchyBar:** `make install-copy-sketchybar` for a release/copy install
+     (or `make install-sketchybar` for dev symlinks), then add
      `source "$ITEM_DIR/showy_quota.sh"` to your `sketchybarrc` and reload.
    - **tmux:** use the TPM wrapper or paste the snippet in
      [tmux wiring](#tmux-wiring) into `~/.tmux.conf`.

@@ -157,7 +157,7 @@ stale:    CL▕▀▀▀▀▀▀▀▀▀▀▀▀▏12m ⚠
 fallback: CL▕▀▀▀▀▀▀▀▀▀▀▀▀▏12m ⚠cli
 ```
 
-For the advanced zjstatus path, `bin/showy-quota-zellij-bar` is a thin shell driver around the native `showy-quota-render` binary. `make install-bin` installs both; if you keep a custom build somewhere else, set `SHOWY_QUOTA_RENDER_BIN=/absolute/path/to/showy-quota-render`.
+For the advanced zjstatus path, `bin/showy-quota-zellij-bar` is a thin shell driver around the native `showy-quota-render` binary. Release tarballs install both with `make install-copy`; source checkouts can use `make install-bin`. If you keep a custom build somewhere else, set `SHOWY_QUOTA_RENDER_BIN=/absolute/path/to/showy-quota-render`.
 
 ## Plugin configuration
 
