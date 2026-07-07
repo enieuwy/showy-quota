@@ -6,6 +6,47 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- Native `showy-quota-render` binary (built from the core crate): renders the
+  terminal strip from CodexBar JSON on stdin or `--json <path|->` in zellij
+  ANSI (`--format zellij`, default) or tmux markup (`--format tmux`), takes
+  its configuration from the same `SHOWY_QUOTA_*` environment variables the
+  shell uses, and honors `SHOWY_QUOTA_NOW_EPOCH` for deterministic output.
+  `make render-bin` builds it; `make install-bin` installs it.
+- `showy-quota-state --json` grows a `providerMetrics` array: normalized
+  per-provider positional windows and `extraRateWindows` with `usedPercent`,
+  `remainingPercent`, `resetsAt`, `resetDescription`, `windowMinutes`, and
+  `minutesUntilReset`. The stable `providers` id array is unchanged.
+- Provider errors are surfaced instead of hidden: errored providers render a
+  compact `⚠err` chunk (new `SHOWY_QUOTA_ERROR_GLYPH`/`error_glyph` knob) in
+  the zellij/tmux strips, all-error payloads are no longer rendered as
+  `AI idle`, `providerMetrics` entries carry a sanitized
+  `error {kind, message}` (kind bucketed auth/cookies/network/unknown,
+  message stripped and truncated to 160 chars), and `make diagnose` prints
+  per-provider error lines. Raw provider messages never reach the strip.
+- Per-platform release tarballs (`macos-arm64`, `macos-x86_64`,
+  `linux-x86_64`) packaging the full runtime tree plus the prebuilt native
+  renderer, with sha256 sidecars and a CI smoke job that installs each
+  tarball into a temp prefix and renders a fixture without the checkout.
+- `make install-copy` / `make install-copy-sketchybar`: checkout-independent
+  copied install into `DATA_DIR` (default `PREFIX/share/showy-quota`) with
+  `BIN_DIR` links into the copied tree; `make uninstall` cleans both modes.
+
+### Changed
+- `bin/showy-quota-zellij-bar` and `bin/showy-quota-tmux-bar` are now thin
+  drivers: fetch, stale/degraded detection, and the `AI ?` fallback stay in
+  shell while rendering delegates to `showy-quota-render` (resolution:
+  `SHOWY_QUOTA_RENDER_BIN`, then `PATH`, then the repo `target/release`;
+  a missing binary degrades to `AI ?` with a `make render-bin` hint). The
+  tmux driver gains `--json <path|->`. Byte parity with the retired shell
+  renderers was verified over a 2,814-case fixture/env sweep before cutover.
+
+### Removed
+- The duplicated shell strip renderers: `lib/strip.sh` keeps only shared
+  data helpers with live callers; the Rust-vs-shell `shell_parity.rs`
+  harness is replaced by `render_cli.rs`, which pins the CLI's env parsing
+  and flag wiring against the in-process renderer.
+
 ### Fixed
 - Shell pacing-marker math (`showy_quota_elapsed_marker_cell` in `lib/strip.sh`
   and `elapsed_marker_x` in the SketchyBar plugin) no longer divides by zero
