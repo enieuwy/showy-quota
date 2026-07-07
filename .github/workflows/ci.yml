@@ -29,12 +29,32 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y bash jq shellcheck
+          sudo apt-get install -y bash jq
 
       - name: Install dependencies (macOS)
         if: runner.os == 'macOS'
         run: |
-          brew install bash jq shellcheck
+          brew install bash jq
+
+      # Pin shellcheck to a fixed version so the lint gate is identical on
+      # every leg and matches a local `make lint`. Distro packages drift
+      # (Ubuntu's apt shellcheck lagged and flagged SC2015 where newer
+      # releases do not), which let lint pass locally but fail in CI.
+      - name: Install shellcheck (pinned)
+        env:
+          SHELLCHECK_VERSION: "0.11.0"
+        run: |
+          set -euo pipefail
+          case "${RUNNER_OS}-${RUNNER_ARCH}" in
+            Linux-X64)   asset="linux.x86_64" ;;
+            macOS-ARM64) asset="darwin.aarch64" ;;
+            macOS-X64)   asset="darwin.x86_64" ;;
+            *) echo "unsupported runner: ${RUNNER_OS}-${RUNNER_ARCH}"; exit 1 ;;
+          esac
+          url="https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_VERSION}/shellcheck-v${SHELLCHECK_VERSION}.${asset}.tar.xz"
+          curl -fsSL "$url" -o /tmp/shellcheck.tar.xz
+          tar -xJf /tmp/shellcheck.tar.xz -C /tmp
+          sudo install -m 0755 "/tmp/shellcheck-v${SHELLCHECK_VERSION}/shellcheck" /usr/local/bin/shellcheck
 
       - name: Print versions
         run: |
