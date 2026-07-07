@@ -1,5 +1,5 @@
 use std::fs;
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::process;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -44,7 +44,15 @@ fn run() -> Result<(), String> {
     }
     .map_err(render_error)?;
 
-    print!("{rendered}");
+    // A consumer that stops reading early (e.g. `... | head`) closes the
+    // pipe; that is not an error for a status renderer — exit quietly
+    // instead of panicking on EPIPE like the default print! path would.
+    if let Err(err) = io::stdout().write_all(rendered.as_bytes()) {
+        if err.kind() == io::ErrorKind::BrokenPipe {
+            return Ok(());
+        }
+        return Err(format!("failed writing output: {err}"));
+    }
     Ok(())
 }
 
