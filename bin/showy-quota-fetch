@@ -56,7 +56,7 @@ while (($#)); do
     shift
 done
 
-mkdir -p "${SHOWY_QUOTA_CACHE_DIR}"
+(umask 077 && mkdir -p "${SHOWY_QUOTA_CACHE_DIR}")
 chmod 700 "${SHOWY_QUOTA_CACHE_DIR}" 2>/dev/null || true
 SHOWY_QUOTA_MANAGED_SERVE_RESTART_ATTEMPTED=0
 
@@ -94,13 +94,14 @@ fi
 #   2 = lock was held by another worker; caller may wait for cache;
 #   3 = mkdir lock owner is ambiguous; caller should wait then retry recovery.
 SHOWY_QUOTA_HELD_LOCK_DIR=""
+SHOWY_QUOTA_CACHE_TMP_FILES=()
 
 showy_quota_release_mkdir_lock() {
     if [[ -n "${SHOWY_QUOTA_HELD_LOCK_DIR:-}" ]]; then
         local owner_file="${SHOWY_QUOTA_HELD_LOCK_DIR}/owner.pid"
         local owner_pid=""
         if [[ ! -e "${owner_file}" ]]; then
-            rmdir -- "${SHOWY_QUOTA_HELD_LOCK_DIR}" 2>/dev/null || true
+            showy_quota_log "not releasing mkdir lock without owner.pid"
         elif [[ -r "${owner_file}" ]] && IFS= read -r owner_pid < "${owner_file}" && [[ "${owner_pid}" == "$$" ]]; then
             rm -f -- "${owner_file}"
             rmdir -- "${SHOWY_QUOTA_HELD_LOCK_DIR}" 2>/dev/null || true
@@ -110,6 +111,23 @@ showy_quota_release_mkdir_lock() {
         SHOWY_QUOTA_HELD_LOCK_DIR=""
     fi
 }
+
+showy_quota_cleanup_cache_temps() {
+    local tmp_file
+    for tmp_file in "${SHOWY_QUOTA_CACHE_TMP_FILES[@]}"; do
+        [[ -n "${tmp_file}" ]] && rm -f -- "${tmp_file}" 2>/dev/null || true
+    done
+    SHOWY_QUOTA_CACHE_TMP_FILES=()
+}
+
+showy_quota_exit_cleanup() {
+    showy_quota_cleanup_cache_temps
+    showy_quota_release_mkdir_lock
+}
+
+trap showy_quota_exit_cleanup EXIT
+trap 'showy_quota_exit_cleanup; exit 130' INT
+trap 'showy_quota_exit_cleanup; exit 143' TERM
 
 showy_quota_process_state() {
     local pid="$1"
@@ -139,16 +157,14 @@ showy_quota_lock_age_seconds() {
 showy_quota_run_with_mkdir_lock() {
     local lock_dir="$1"
     shift
-    SHOWY_QUOTA_HELD_LOCK_DIR="${lock_dir}"
     if ! printf '%s\n' "$$" > "${lock_dir}/owner.pid"; then
-        showy_quota_release_mkdir_lock
+        rmdir -- "${lock_dir}" 2>/dev/null || true
         return 1
     fi
-    trap showy_quota_release_mkdir_lock EXIT
+    SHOWY_QUOTA_HELD_LOCK_DIR="${lock_dir}"
     local rc=0
     "$@" || rc=$?
     showy_quota_release_mkdir_lock
-    trap - EXIT
     return "${rc}"
 }
 
@@ -557,9 +573,11 @@ clear_provider_failure() {
 
 valid_provider_id() {
     local id="$1"
-    # '.' and '..' match the charset below but are path components that would
-    # let a provider id escape the per-provider failure-stamp directory.
-    [[ "${id}" == "." || "${id}" == ".." ]] && return 1
+    [[ -n "${id}" ]] || return 1
+    # '.', '..', and leading '-' match the charset below but are not safe ids:
+    # path components can escape per-provider stamp directories, and leading
+    # '-' can be interpreted as an argv flag by downstream CLIs.
+    [[ "${id}" == "." || "${id}" == ".." || "${id}" == -* ]] && return 1
     [[ "${id}" =~ ^[A-Za-z0-9_.-]+$ ]]
 }
 
@@ -603,10 +621,10 @@ discover_providers() {
         | select(type == "string")
     ' 2>/dev/null) || ids=""
     # Keep only ids the shell predicate accepts: the jq regex alone would
-    # still pass '.'/'..', which are path components that escape the
-    # per-provider failure-stamp directory. A record whose id fails the
-    # predicate drops valid_count below enabled_count and is rejected as
-    # invalid inventory rather than published as canonical-empty.
+    # still pass '.'/'..' and leading-dash ids; those escape the
+    # per-provider failure-stamp directory or can be interpreted as CLI flags.
+    # A record whose id fails the predicate drops valid_count below
+    # enabled_count and is rejected as invalid inventory, not canonical-empty.
     local validated_ids=""
     if [[ -n "${ids}" ]]; then
         while IFS= read -r id_line; do
@@ -939,21 +957,22 @@ run_codexbar_cli_per_provider() {
 
 
 serve_port_from_base_url() {
-    local base="" url_port="8080" configured_port="${SHOWY_QUOTA_CODEXBAR_SERVE_PORT:-}"
+    local base="" url_port="" configured_port="${SHOWY_QUOTA_CODEXBAR_SERVE_PORT:-}" scheme_default="8080"
     base=$(serve_base_url) || return 1
+    if [[ "${base}" =~ ^http:// ]]; then
+        scheme_default="80"
+    fi
     if [[ "${base}" =~ :([0-9]+)$ ]]; then
         url_port="${BASH_REMATCH[1]}"
     fi
     if [[ -n "${configured_port}" ]]; then
         if [[ "${configured_port}" =~ ^[0-9]+$ ]]; then
-            if [[ "${configured_port}" != "${url_port}" ]]; then
-                showy_quota_log "SHOWY_QUOTA_CODEXBAR_SERVE_PORT=${configured_port} ignored; using port ${url_port} from SHOWY_QUOTA_CODEXBAR_SERVE_URL"
-            fi
-        else
-            showy_quota_log "ignoring invalid SHOWY_QUOTA_CODEXBAR_SERVE_PORT: ${configured_port}"
+            printf '%s\n' "${configured_port}"
+            return 0
         fi
+        showy_quota_log "ignoring invalid SHOWY_QUOTA_CODEXBAR_SERVE_PORT: ${configured_port}"
     fi
-    printf '%s\n' "${url_port}"
+    printf '%s\n' "${url_port:-${scheme_default}}"
 }
 
 serve_health_ok() {
@@ -1253,13 +1272,14 @@ start_managed_serve() {
     # pin the advisory lock for its whole life, starving every later fetch
     # (the mkdir fallback path has no fd to leak, so this only bit flock hosts).
     if showy_quota_have setsid; then
-        setsid "${bin}" serve --port "${port}" --refresh-interval "${refresh_interval}" >/dev/null 2>&1 9>&- &
+        setsid "${bin}" serve --port "${port}" --refresh-interval "${refresh_interval}" </dev/null >/dev/null 2>&1 9>&- &
     else
-        nohup "${bin}" serve --port "${port}" --refresh-interval "${refresh_interval}" >/dev/null 2>&1 9>&- &
+        nohup "${bin}" serve --port "${port}" --refresh-interval "${refresh_interval}" </dev/null >/dev/null 2>&1 9>&- &
     fi
     local pid=$! start_epoch=""
     start_epoch=$(managed_serve_pid_start_epoch_for_record "${pid}")
-    printf '%s:%s:%s\n' "${pid}" "${start_epoch}" "$(managed_serve_expected_basename)" > "${SHOWY_QUOTA_CODEXBAR_SERVE_PID_FILE}"
+    rm -f -- "${SHOWY_QUOTA_CODEXBAR_SERVE_PID_FILE}"
+    (umask 077 && printf '%s:%s:%s\n' "${pid}" "${start_epoch}" "$(managed_serve_expected_basename)" > "${SHOWY_QUOTA_CODEXBAR_SERVE_PID_FILE}")
     chmod 600 "${SHOWY_QUOTA_CODEXBAR_SERVE_PID_FILE}" 2>/dev/null || true
     disown "${pid}" 2>/dev/null || true
     showy_quota_log "started managed codexbar serve pid ${pid} on port ${port}"
@@ -1340,11 +1360,12 @@ run_codexbar_serve() {
         return 127
     }
 
-    curl --fail --silent --show-error --max-time "$(serve_usage_timeout)" "${base}/usage" 2>/dev/null
+    curl --fail --silent --show-error --max-time "$(serve_usage_timeout)" --max-filesize 5242880 "${base}/usage" 2>/dev/null
 }
 
 serve_payload_is_publishable() {
-    printf '%s' "$1" | jq -e '
+    local payload="$1" ids="" id
+    printf '%s' "${payload}" | jq -e '
         type == "array"
         and all(.[]; type == "object"
             and (.provider | type == "string" and test("^[A-Za-z0-9_.-]+$"))
@@ -1365,11 +1386,18 @@ serve_payload_is_publishable() {
                 . != null and (.usedPercent? | type == "number")
             )
         )
-    ' >/dev/null 2>&1
+    ' >/dev/null 2>&1 || return 1
+    ids=$(printf '%s' "${payload}" | jq -r '.[] | .provider' 2>/dev/null) || return 1
+    while IFS= read -r id; do
+        [[ -n "${id}" ]] || continue
+        valid_provider_id "${id}" || return 1
+    done < <(printf '%s\n' "${ids}")
+    return 0
 }
 
 serve_payload_inventory() {
-    printf '%s' "$1" | jq -r '
+    local ids="" id
+    ids=$(printf '%s' "$1" | jq -r '
         if type == "array" then
             .[]
             | .provider?
@@ -1378,7 +1406,12 @@ serve_payload_inventory() {
         else
             error("not an array")
         end
-    ' 2>/dev/null | sort -u
+    ' 2>/dev/null) || return 1
+    while IFS= read -r id; do
+        [[ -n "${id}" ]] || continue
+        valid_provider_id "${id}" || continue
+        printf '%s\n' "${id}"
+    done < <(printf '%s\n' "${ids}") | sort -u
 }
 
 run_codexbar_serve_with_recovery() {
@@ -1535,7 +1568,7 @@ except subprocess.TimeoutExpired:
     fi
 
     if showy_quota_have timeout; then
-        timeout "${timeout_seconds}" "$@" 2>/dev/null
+        timeout --kill-after=5s "${timeout_seconds}" "$@" 2>/dev/null
         return $?
     fi
 
@@ -1593,10 +1626,15 @@ run_codexbar() {
 
 publish_cache_payload() {
     local out="$1" source="${2:-unknown}" tmp stamp_tmp source_tmp
+    SHOWY_QUOTA_CACHE_TMP_FILES=()
+    trap showy_quota_exit_cleanup EXIT
+    trap 'showy_quota_exit_cleanup; exit 130' INT
+    trap 'showy_quota_exit_cleanup; exit 143' TERM
     if ! tmp=$(mktemp "${SHOWY_QUOTA_CACHE_DIR}/usage.XXXXXX"); then
         showy_quota_log "could not create temporary cache file"
         return 1
     fi
+    SHOWY_QUOTA_CACHE_TMP_FILES=("${tmp}")
 
     if [[ -z "${out}" || "${out:0:1}" != '[' ]]; then
         rm -f "${tmp}"
@@ -1611,11 +1649,13 @@ publish_cache_payload() {
             showy_quota_log "could not create temporary stamp file"
             return 1
         fi
+        SHOWY_QUOTA_CACHE_TMP_FILES+=("${stamp_tmp}")
         if ! source_tmp=$(mktemp "${SHOWY_QUOTA_CACHE_DIR}/source.XXXXXX"); then
             rm -f "${tmp}" "${stamp_tmp}"
             showy_quota_log "could not create temporary source file"
             return 1
         fi
+        SHOWY_QUOTA_CACHE_TMP_FILES+=("${source_tmp}")
         printf '%s.%s.%s\n' "$(date +%s)" "$$" "${RANDOM}" > "${stamp_tmp}" || {
             rm -f "${tmp}" "${stamp_tmp}" "${source_tmp}"
             showy_quota_log "could not write temporary stamp file"
@@ -1642,6 +1682,7 @@ publish_cache_payload() {
             return 1
         }
         chmod 600 "${SHOWY_QUOTA_USAGE_FILE}" "${SHOWY_QUOTA_USAGE_STAMP}" "${SHOWY_QUOTA_SOURCE_FILE}" 2>/dev/null || true
+        SHOWY_QUOTA_CACHE_TMP_FILES=()
         showy_quota_log "cache refreshed from ${source} (${#out} bytes)"
         return 0
     fi

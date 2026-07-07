@@ -313,7 +313,10 @@ fn render_provider(
     // single monthly budget, not a live tier over a longer cap. Keep them at
     // full brightness and draw a single pacing marker instead of dimming every
     // row and repeating the identical marker.
-    let shared = shared_cycle(&[primary, secondary, tertiary]);
+    let slots = [primary, secondary, tertiary];
+    let assembled_windows = distinct_render_windows(&slots, &usage.extra_rate_windows, 4);
+    let quaternary = assembled_windows.get(3).copied();
+    let shared = shared_cycle(&[primary, secondary, tertiary, quaternary]);
 
     let p_used = primary.map_or(-1, UsageWindow::used_pct_floor);
     let s_used = secondary.map_or(-1, UsageWindow::used_pct_floor);
@@ -361,8 +364,6 @@ fn render_provider(
     let surface_color = &config.palette_surface;
     let p_long = !shared && is_long_window(primary, config.dim_window_minutes);
     let s_long = !shared && is_long_window(secondary, config.dim_window_minutes);
-    let slots = [primary, secondary, tertiary];
-    let assembled_windows = distinct_render_windows(&slots, &usage.extra_rate_windows, 4);
     let bar_mode = terminal_mode_for_provider(
         config,
         &record.provider,
@@ -551,7 +552,7 @@ fn is_long_window(window: Option<&UsageWindow>, dim_window_minutes: i64) -> bool
         .is_some_and(|minutes| minutes >= dim_window_minutes)
 }
 
-/// True when at least two present positional slots share one billing cycle:
+/// True when at least two present render slots share one billing cycle:
 /// identical non-null resetsAt/resetDescription and windowMinutes. Cursor's
 /// Total/Auto/API pools are parallel usage categories inside a single monthly
 /// budget rather than a live tier over a longer cap, so renderers keep them at
@@ -748,7 +749,8 @@ fn mono_marker_cells<'a>(
         config.palette_elapsed_long.as_str(),
     ];
     let mut cells = Vec::new();
-    for (rank, name) in config.mono_markers.iter().enumerate() {
+    let mut emitted = 0usize;
+    for name in &config.mono_markers {
         let index = match name.as_str() {
             "primary" => 0,
             "secondary" => 1,
@@ -771,7 +773,8 @@ fn mono_marker_cells<'a>(
         ) else {
             continue;
         };
-        cells.push((col, colors[rank.min(colors.len() - 1)]));
+        cells.push((col, colors[emitted.min(colors.len() - 1)]));
+        emitted += 1;
     }
     cells
 }
@@ -1510,7 +1513,7 @@ fn style_text(
                 out.push_str("bold");
             }
             out.push(']');
-            out.push_str(text);
+            push_tmux_text(out, text);
             reset(out, output_format, color);
         }
     }
@@ -1531,11 +1534,20 @@ fn separator_space(out: &mut String, output_format: OutputFormat, bg_hex: &str, 
     }
 }
 
-fn cap_text(output_format: OutputFormat, text: &str) -> Cow<'_, str> {
-    match output_format {
-        OutputFormat::Zellij => Cow::Borrowed(text),
-        OutputFormat::Tmux => Cow::Owned(text.replace('#', "##")),
+fn cap_text(_output_format: OutputFormat, text: &str) -> Cow<'_, str> {
+    Cow::Borrowed(text)
+}
+
+fn push_tmux_text(out: &mut String, text: &str) {
+    let mut start = 0usize;
+    for (index, byte) in text.bytes().enumerate() {
+        if byte == b'#' {
+            out.push_str(&text[start..index]);
+            out.push_str("##");
+            start = index + 1;
+        }
     }
+    out.push_str(&text[start..]);
 }
 
 fn ansi_fg(out: &mut String, hex: &str) {
@@ -1721,6 +1733,23 @@ mod tests {
     }
 
     #[test]
+    fn tmux_style_text_doubles_hash_in_text() {
+        let mut out = String::new();
+
+        style_text(
+            &mut out,
+            "#(",
+            Some("161616"),
+            Some("25be6a"),
+            Weight::Normal,
+            OutputFormat::Tmux,
+            false,
+        );
+
+        assert_eq!(out, "#[fg=#161616,bg=#25be6a]##(#[default]");
+    }
+
+    #[test]
     fn tmux_idle_is_dim_unknown_and_omits_trailing_markers() {
         let output = render_tmux(
             include_bytes!("../../../test/fixtures/codexbar-empty.json"),
@@ -1757,6 +1786,29 @@ mod tests {
             out,
             "#[fg=#161616,bg=#161616] #[default]#[fg=#25be6a,bg=#161616]##R###[default]"
         );
+    }
+
+    #[test]
+    fn mono_marker_colors_use_visible_rank_after_gap() {
+        let config = RenderConfig {
+            mono_markers: vec!["primary".into(), "secondary".into()],
+            ..RenderConfig::default()
+        };
+        let lanes = [
+            Lane::empty(),
+            Lane {
+                remaining: 90,
+                reset: Some("2024-01-01T02:00:00Z"),
+                window: Some(120),
+                is_long: false,
+                present: true,
+            },
+        ];
+
+        let cells = mono_marker_cells(&config, &lanes, 8, 1_704_067_200);
+
+        assert_eq!(cells.len(), 1);
+        assert_eq!(cells[0].1, config.palette_elapsed.as_str());
     }
 
     #[test]
@@ -1946,6 +1998,60 @@ mod tests {
             window_minutes: None,
         };
         assert!(!shared_cycle(&[Some(&a), Some(&bare)]));
+    }
+
+    #[test]
+    fn shared_cycle_false_when_fourth_lane_reset_differs() {
+        let config = RenderConfig {
+            terminal_bar_mode: "mono4".into(),
+            zellij_bar_width: 8,
+            palette_dim_good: Some("010203".into()),
+            mono_markers: Vec::new(),
+            ..RenderConfig::default()
+        };
+        let output = render_zellij(
+            br#"[
+                {
+                    "provider": "codex",
+                    "usage": {
+                        "primary": {
+                            "usedPercent": 10,
+                            "resetsAt": "2099-01-15T00:00:00Z",
+                            "windowMinutes": 43200
+                        },
+                        "secondary": {
+                            "usedPercent": 10,
+                            "resetsAt": "2099-01-15T00:00:00Z",
+                            "windowMinutes": 43200
+                        },
+                        "tertiary": {
+                            "usedPercent": 10,
+                            "resetsAt": "2099-01-15T00:00:00Z",
+                            "windowMinutes": 43200
+                        },
+                        "extraRateWindows": [
+                            {
+                                "window": {
+                                    "usedPercent": 10,
+                                    "resetsAt": "2099-01-16T00:00:00Z",
+                                    "windowMinutes": 43200
+                                }
+                            }
+                        ]
+                    }
+                }
+            ]"#,
+            &config,
+            RenderOptions {
+                color: true,
+                stale: false,
+                degraded_cli: false,
+                now_epoch: 4_070_908_800,
+            },
+        )
+        .expect("rendered mono4 fixture");
+
+        assert!(output.contains("38;2;1;2;3"), "{output}");
     }
 
     #[test]

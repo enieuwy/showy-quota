@@ -224,7 +224,7 @@ install-plugin: plugin ## Install the standalone Zellij WASM plugin (pre-grants 
 	@ZELLIJ_PLUGINS="$(ZELLIJ_PLUGINS)" "$(REPO)/bin/showy-quota" --grant-zellij "$(PLUGIN_TARGET)" || printf 'warning: could not pre-grant Zellij permissions; run `make grant-zellij-permissions` to retry\n' >&2
 
 grant-zellij-permissions: ## Pre-grant Zellij plugin permissions (override path with PLUGIN=/abs/plugin.wasm).
-	@ZELLIJ_PLUGINS="$(ZELLIJ_PLUGINS)" "$(REPO)/bin/showy-quota" --grant-zellij $(PLUGIN)
+	@ZELLIJ_PLUGINS="$(ZELLIJ_PLUGINS)" "$(REPO)/bin/showy-quota" --grant-zellij "$(PLUGIN)"
 
 install-all: install-bin install-sketchybar install-plugin ## Install shared scripts and every optional integration.
 uninstall: ## Remove symlinks and copied DATA_DIR that this Makefile created.

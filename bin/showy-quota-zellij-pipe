@@ -54,6 +54,52 @@ reap_timed_out_pipe() {
     wait "${child}" >/dev/null 2>&1 || true
 }
 
+ansi_suffix_complete() {
+    local suffix="$1" esc=$'\033' csi_re=$'^\033\\[[0-?]*[ -/]*[@-~]'
+    case "${suffix}" in
+        "${esc}") return 1 ;;
+        "${esc}["*) [[ "${suffix}" =~ ${csi_re} ]] ;;
+        "${esc}]"*) [[ "${suffix}" == *$'\a'* ]] ;;
+        "${esc}P"*|"${esc}^"*|"${esc}_"*|"${esc}X"*) return 1 ;;
+        *) ((${#suffix} >= 2)) ;;
+    esac
+}
+
+drop_trailing_partial_ansi() {
+    local value="$1" esc=$'\033' prefix suffix
+    while [[ "${value}" == *"${esc}"* ]]; do
+        prefix="${value%"${esc}"*}"
+        suffix="${value:${#prefix}}"
+        ansi_suffix_complete "${suffix}" && break
+        value="${prefix}"
+    done
+    printf '%s' "${value}"
+}
+
+drop_trailing_non_ascii_bytes() {
+    local value="$1" last byte
+    while [[ -n "${value}" ]]; do
+        last="${value: -1}"
+        LC_ALL=C printf -v byte '%d' "'${last}"
+        (( byte >= 128 )) || break
+        value="${value:0:${#value}-1}"
+    done
+    printf '%s' "${value}"
+}
+
+
+truncate_pipe_output() {
+    local value="${1:0:4096}"
+    if command -v iconv >/dev/null 2>&1; then
+        value=$(printf '%s' "${value}" | iconv -f UTF-8 -t UTF-8 -c 2>/dev/null || :)
+    else
+        value="$(drop_trailing_non_ascii_bytes "${value}")"
+    fi
+    value="$(drop_trailing_partial_ansi "${value}")"
+    printf '%s\033[0m' "${value}"
+}
+
+
 send_pipe() {
     local payload="$1" child waited=0
     local args=(pipe --name "${pipe_name}")
@@ -84,7 +130,7 @@ while :; do
     if output=$("${BAR}" 2>/dev/null) && [[ -n "${output}" ]]; then
         # Cap the payload well under OS ARG_MAX so a pathologically long render
         # (e.g. a giant cache) cannot make the `zellij pipe` call fail silently.
-        (( ${#output} <= 4096 )) || output="${output:0:4096}"
+        ((${#output} <= 4096)) || output="$(truncate_pipe_output "${output}")"
         send_pipe "zjstatus::pipe::${widget}::${output}" || true
     fi
     sleep "${interval}"

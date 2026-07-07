@@ -130,6 +130,14 @@ while [ "$#" -gt 0 ]; do
                 printf '%s\n' "$1" > "${SHOWY_QUOTA_TEST_CURL_MAX_TIME_FILE}"
             fi
             ;;
+        --max-filesize)
+            shift
+            case "${1:-}" in
+                ""|*[!0-9]*)
+                    exit 89
+                    ;;
+            esac
+            ;;
         http://*)
             url="$1"
             ;;
@@ -557,6 +565,38 @@ run_common_eval() {
         '
 }
 
+run_strip_filter() {
+    local payload="$1"
+    # shellcheck disable=SC2016  # body runs in a sub-bash; $-vars expand there
+    env \
+        SHOWY_QUOTA_TEST_PAYLOAD="${payload}" \
+        SHOWY_QUOTA_TEST_REPO_ROOT="${REPO_ROOT}" \
+        SHOWY_QUOTA_NO_CONFIG=1 \
+        bash -lc '
+            set -euo pipefail
+            . "${SHOWY_QUOTA_TEST_REPO_ROOT}/lib/common.sh"
+            . "${SHOWY_QUOTA_TEST_REPO_ROOT}/lib/strip.sh"
+            printf "%s" "${SHOWY_QUOTA_TEST_PAYLOAD}" | showy_quota_filter_renderable
+        '
+}
+
+expected_reset_description_epoch() {
+    local now="$1" desc="$2"
+    python3 - "${now}" "${desc}" <<'PY'
+import datetime
+import sys
+
+now = int(sys.argv[1])
+desc = sys.argv[2]
+today = datetime.datetime.fromtimestamp(now).date()
+candidate = datetime.datetime.strptime(f"{today.isoformat()} {desc}", "%Y-%m-%d %I:%M %p")
+epoch = int(candidate.timestamp())
+if epoch < now:
+    epoch += 86400
+print(epoch)
+PY
+}
+
 
 
 hex_to_rgb_csv() {
@@ -651,6 +691,48 @@ assert_equals "config env overrides themed primary palette" "010203" "${out}"
 out=$(run_common_eval 'printf "%s|%s|%s" "$(showy_quota_palette icon_text)" "$(showy_quota_palette countdown)" "$(showy_quota_palette countdown_warn)"' SHOWY_QUOTA_NO_CONFIG= XDG_CONFIG_HOME="${theme_xdg}")
 assert_equals "config env overrides themed text role palettes" "020304|030405|040506" "${out}"
 
+# ── regular-file source guard ─────────────────────────────────────────
+printf '\nregular-file source guard\n'
+
+fifo_config_xdg="${TMP}/xdg-fifo-config"
+mkdir -p "${fifo_config_xdg}/showy-quota"
+mkfifo "${fifo_config_xdg}/showy-quota/config.env"
+rc=0
+out=$(
+    run_with_test_timeout 2 \
+        env \
+        PATH="${stub_dir}:${PATH}" \
+        XDG_CONFIG_HOME="${fifo_config_xdg}" \
+        SHOWY_QUOTA_CACHE_DIR="$(mk_cache)" \
+        SHOWY_QUOTA_TEST_FIXTURE="${FIXTURE_DIR}/codexbar-mixed.json" \
+        SHOWY_QUOTA_DEGRADED_CLI=0 \
+        SHOWY_QUOTA_FORCE_COLOR=0 \
+        NO_COLOR=1 \
+        "${REPO_ROOT}/bin/showy-quota-zellij-bar" 2>&1
+) || rc=$?
+assert_equals "config FIFO source guard completes" "0" "${rc}"
+assert_contains "config FIFO source guard still renders" "CL" "${out}"
+
+fifo_theme_xdg="${TMP}/xdg-fifo-theme"
+mkdir -p "${fifo_theme_xdg}/showy-quota/themes"
+printf '%s\n' 'SHOWY_QUOTA_THEME=default' > "${fifo_theme_xdg}/showy-quota/config.env"
+mkfifo "${fifo_theme_xdg}/showy-quota/themes/default.env"
+rc=0
+out=$(
+    run_with_test_timeout 2 \
+        env \
+        PATH="${stub_dir}:${PATH}" \
+        XDG_CONFIG_HOME="${fifo_theme_xdg}" \
+        SHOWY_QUOTA_CACHE_DIR="$(mk_cache)" \
+        SHOWY_QUOTA_TEST_FIXTURE="${FIXTURE_DIR}/codexbar-mixed.json" \
+        SHOWY_QUOTA_DEGRADED_CLI=0 \
+        SHOWY_QUOTA_FORCE_COLOR=0 \
+        NO_COLOR=1 \
+        "${REPO_ROOT}/bin/showy-quota-zellij-bar" 2>&1
+) || rc=$?
+assert_equals "theme FIFO source guard completes" "0" "${rc}"
+assert_contains "theme FIFO source guard still renders" "CL" "${out}"
+
 # ── executable & glyph config validation ──────────────────────────────
 printf '\nexecutable & glyph config validation\n'
 
@@ -701,6 +783,48 @@ assert_equals "reset_epoch rejects an overlong date string" "reject" "${out}"
 # shellcheck disable=SC2016
 out=$(run_common_eval 'showy_quota_reset_description_epoch "Resets $(printf "x%.0s" {1..100})" >/dev/null && printf accept || printf reject' SHOWY_QUOTA_NO_CONFIG=1)
 assert_equals "reset_description_epoch rejects an overlong fragment" "reject" "${out}"
+
+# ── pinned time regressions ───────────────────────────────────────────
+printf '\npinned time regressions\n'
+
+reset_now_a=4070908800
+reset_now_b=$((reset_now_a + 86400))
+expected_reset_a=$(expected_reset_description_epoch "${reset_now_a}" "11:59 PM")
+expected_reset_b=$(expected_reset_description_epoch "${reset_now_b}" "11:59 PM")
+actual_reset_a=$(run_common_eval 'showy_quota_reset_description_epoch "Resets 11:59 PM"' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_NOW_EPOCH="${reset_now_a}")
+actual_reset_b=$(run_common_eval 'showy_quota_reset_description_epoch "Resets 11:59 PM"' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_NOW_EPOCH="${reset_now_b}")
+if (( actual_reset_a / 60 == expected_reset_a / 60 && actual_reset_b / 60 == expected_reset_b / 60 && actual_reset_b - actual_reset_a == 86400 )); then
+    ok "reset_description_epoch honors pinned now"
+else
+    fail "reset_description_epoch honors pinned now" "expected minutes ${expected_reset_a}|${expected_reset_b}; got ${actual_reset_a}|${actual_reset_b}"
+fi
+
+marker_fixture="${TMP}/codexbar-marker-pinned.json"
+printf '%s\n' \
+    '[{"provider":"codex","usage":{"primary":{"usedPercent":50,"windowMinutes":60,"resetsAt":"2099-01-01T01:00:00Z"},"secondary":null,"tertiary":null}}]' \
+    > "${marker_fixture}"
+marker_reset_epoch=4070912400
+marker_now_a=4070910600
+marker_now_b=4070911500
+marker_x_a=$(( (marker_reset_epoch - marker_now_a) * 80 / (60 * 60) ))
+marker_x_b=$(( (marker_reset_epoch - marker_now_b) * 80 / (60 * 60) ))
+expected_marker_pct_a=$(( (marker_x_a * 100 + (80 - 1) / 2) / (80 - 1) ))
+expected_marker_pct_b=$(( (marker_x_b * 100 + (80 - 1) / 2) / (80 - 1) ))
+cache=$(mk_cache)
+log="${TMP}/sb-marker-a.log"
+run_sketchybar_plugin_without_magick "${marker_fixture}" "${cache}" "${log}" SHOWY_QUOTA_SKETCHYBAR_PROVIDER_ICON_MODE=font SHOWY_QUOTA_NOW_EPOCH="${marker_now_a}" SHOWY_QUOTA_REFRESH_SECONDS=9999999999
+marker_log_a="$(< "${log}")"
+cache=$(mk_cache)
+log="${TMP}/sb-marker-b.log"
+run_sketchybar_plugin_without_magick "${marker_fixture}" "${cache}" "${log}" SHOWY_QUOTA_SKETCHYBAR_PROVIDER_ICON_MODE=font SHOWY_QUOTA_NOW_EPOCH="${marker_now_b}" SHOWY_QUOTA_REFRESH_SECONDS=9999999999
+marker_log_b="$(< "${log}")"
+if [[ "${marker_log_a}" == *"showy_quota.codex.primary_marker drawing=on slider.percentage=${expected_marker_pct_a}"* \
+      && "${marker_log_b}" == *"showy_quota.codex.primary_marker drawing=on slider.percentage=${expected_marker_pct_b}"* \
+      && "${expected_marker_pct_a}" != "${expected_marker_pct_b}" ]]; then
+    ok "sketchybar elapsed marker honors pinned now"
+else
+    fail "sketchybar elapsed marker honors pinned now" "expected ${expected_marker_pct_a}|${expected_marker_pct_b}"
+fi
 
 # SketchyBar string knobs are clamped to a known-good shape.
 # shellcheck disable=SC2016
@@ -1377,6 +1501,72 @@ tmux_wrapper_log="$(< "${tmux_log}")"
 assert_contains "tmux wrapper warns when renderer is not executable" "display-message showy-quota: renderer is not executable: ${tmux_missing_bar}" "${tmux_wrapper_log}"
 assert_not_contains "tmux wrapper does not append broken status command" "#(\"${tmux_missing_bar}\")" "${tmux_wrapper_log}"
 
+# ── tmux wrapper injection guard ──────────────────────────────────────
+printf '\ntmux wrapper injection guard\n'
+
+tmux_injection_stub_dir="${TMP}/tmux-injection-bin"
+mkdir -p "${tmux_injection_stub_dir}"
+cat > "${tmux_injection_stub_dir}/tmux" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "tmux $*" >> "${SHOWY_QUOTA_TEST_TMUX_LOG}"
+option="${*: -1}"
+case "$1" in
+    show-options)
+        case "${SHOWY_QUOTA_TEST_TMUX_MODE}" in
+            escape)
+                printf '%s\n' '@showy-quota-separator' '@showy-quota-popup-key' '@showy-quota-popup-title'
+                ;;
+            bad-bin)
+                printf '%s\n' '@showy-quota-bin'
+                ;;
+        esac
+        ;;
+    show-option)
+        case "${option}" in
+            @showy-quota-separator) printf '%s\n' 'x#(id)' ;;
+            @showy-quota-popup-key) printf '%s\n' 'Q' ;;
+            @showy-quota-popup-title) printf '%s\n' 'x#(id)' ;;
+            @showy-quota-bin) printf '%s\n' '$(id)' ;;
+            status-right|status-left) printf '\n' ;;
+            *) printf '0\n' ;;
+        esac
+        ;;
+    display-message|set-option|bind-key|refresh-client)
+        ;;
+esac
+EOF
+chmod +x "${tmux_injection_stub_dir}/tmux"
+
+tmux_escape_log="${TMP}/tmux-wrapper-escape.log"
+: > "${tmux_escape_log}"
+out=$(
+    env \
+        PATH="${tmux_injection_stub_dir}:${PATH}" \
+        SHOWY_QUOTA_TEST_TMUX_LOG="${tmux_escape_log}" \
+        SHOWY_QUOTA_TEST_TMUX_MODE=escape \
+        "${REPO_ROOT}/showy-quota.tmux" 2>&1
+)
+tmux_wrapper_log="$(< "${tmux_escape_log}")"
+assert_contains "tmux wrapper escapes separator format command" "set-option -gq -a status-right x##(id)#(" "${tmux_wrapper_log}"
+assert_not_contains "tmux wrapper does not keep raw separator format command" "set-option -gq -a status-right x#(id)#(" "${tmux_wrapper_log}"
+assert_contains "tmux wrapper escapes popup title format command" "bind-key Q display-popup -E -h 36 -w 92 -T x##(id)" "${tmux_wrapper_log}"
+assert_not_contains "tmux wrapper does not keep raw popup title format command" " -T x#(id) " "${tmux_wrapper_log}"
+
+tmux_bad_bin_log="${TMP}/tmux-wrapper-bad-bin.log"
+: > "${tmux_bad_bin_log}"
+out=$(
+    env \
+        PATH="${tmux_injection_stub_dir}:${PATH}" \
+        SHOWY_QUOTA_TEST_TMUX_LOG="${tmux_bad_bin_log}" \
+        SHOWY_QUOTA_TEST_TMUX_MODE=bad-bin \
+        "${REPO_ROOT}/showy-quota.tmux" 2>&1
+)
+tmux_wrapper_log="$(< "${tmux_bad_bin_log}")"
+# shellcheck disable=SC2016  # literal $(id) is the injection payload being asserted
+assert_contains "tmux wrapper rejects command-substitution renderer path" 'display-message showy-quota: renderer path contains shell metacharacters: $(id)' "${tmux_wrapper_log}"
+# shellcheck disable=SC2016  # literal $(id) is the injection payload being asserted
+assert_not_contains "tmux wrapper does not embed command-substitution renderer path" 'set-option -gq -a status-right $(id)#(' "${tmux_wrapper_log}"
+
 # ── filter ───────────────────────────────────────────────────────────
 
 printf '\nprovider filter\n'
@@ -1415,6 +1605,26 @@ assert_equals "provider order skips missing providers without filtering" "gemini
 
 out=$(run_state codexbar-mixed.json SHOWY_QUOTA_PROVIDER_ORDER=codex,claude,gemini SHOWY_QUOTA_PROVIDERS=gemini,claude)
 assert_equals "allow-list order overrides provider order" "gemini,claude" "$(printf '%s' "${out}" | jq -r '.providers | join(",")')"
+
+# ── provider id validator hardening ───────────────────────────────────
+printf '\nprovider id validator hardening\n'
+
+unsafe_json_results=()
+unsafe_filter_results=()
+for unsafe_provider_id in "." ".." "-foo"; do
+    unsafe_provider_file="${TMP}/codexbar-unsafe-${unsafe_provider_id//[^A-Za-z0-9]/_}.json"
+    printf '[{"provider":"%s","usage":{"primary":{"usedPercent":1}}}]\n' "${unsafe_provider_id}" > "${unsafe_provider_file}"
+    # shellcheck disable=SC2016  # eval body; $-vars expand in run_common_eval's sub-shell
+    unsafe_json_results+=("$(run_common_eval 'showy_quota_json_valid "${SHOWY_QUOTA_TEST_FILE}" && printf valid || printf reject' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_TEST_FILE="${unsafe_provider_file}")")
+    unsafe_filter_results+=("$(run_strip_filter "$(< "${unsafe_provider_file}")" | jq -r 'length')")
+done
+assert_equals "json_valid rejects unsafe provider ids" "reject,reject,reject" "$(IFS=,; printf '%s' "${unsafe_json_results[*]}")"
+assert_equals "filter_renderable rejects unsafe provider ids" "0,0,0" "$(IFS=,; printf '%s' "${unsafe_filter_results[*]}")"
+
+safe_provider_file="${TMP}/codexbar-safe-provider-id.json"
+printf '%s\n' '[{"provider":"codex","usage":{"primary":{"usedPercent":1}}}]' > "${safe_provider_file}"
+out=$(run_renderer showy-quota-zellij-bar "${safe_provider_file}" NO_COLOR=1 SHOWY_QUOTA_FORCE_COLOR=0)
+assert_contains "provider id validator still renders normal id" "CX" "${out}"
 
 # ── state surface ─────────────────────────────────────────────────────
 printf '\ncodexbar state\n'
@@ -1622,6 +1832,34 @@ assert_contains "plugin pooled provider draws gemini weekly row" "--set showy_qu
 assert_contains "plugin pooled provider draws claude session row" "--set showy_quota.antigravity.tertiary drawing=on slider.percentage=90" "${plugin_log}"
 assert_contains "plugin pooled provider draws claude weekly row in fourth lane" "--set showy_quota.antigravity.quaternary drawing=on slider.percentage=18" "${plugin_log}"
 
+# ── sketchybar shared-cycle fourth lane ───────────────────────────────
+printf '\nsketchybar shared-cycle fourth lane\n'
+
+shared_fourth_fixture="${TMP}/codexbar-shared-fourth-diff.json"
+printf '%s\n' \
+    '[' \
+    '{"provider":"antigravity","usage":{' \
+    '"primary":{"usedPercent":10,"windowMinutes":10080,"resetsAt":"2099-01-08T00:00:00Z"},' \
+    '"secondary":{"usedPercent":20,"windowMinutes":10080,"resetsAt":"2099-01-08T00:00:00Z"},' \
+    '"tertiary":{"usedPercent":30,"windowMinutes":10080,"resetsAt":"2099-01-08T00:00:00Z"},' \
+    '"extraRateWindows":[' \
+    '{"title":"One","window":{"usedPercent":10,"windowMinutes":10080,"resetsAt":"2099-01-08T00:00:00Z"}},' \
+    '{"title":"Two","window":{"usedPercent":20,"windowMinutes":10080,"resetsAt":"2099-01-08T00:00:00Z"}},' \
+    '{"title":"Three","window":{"usedPercent":30,"windowMinutes":10080,"resetsAt":"2099-01-08T00:00:00Z"}},' \
+    '{"title":"Four","window":{"usedPercent":20,"windowMinutes":10080,"resetsAt":"2099-01-07T00:00:00Z"}}' \
+    ']}}' \
+    ']' > "${shared_fourth_fixture}"
+shared_fourth_now=4070908800
+shared_fourth_reset=$((shared_fourth_now + 6 * 86400))
+shared_fourth_marker_x=$(( (shared_fourth_reset - shared_fourth_now) * 80 / (10080 * 60) ))
+shared_fourth_marker_pct=$(( (shared_fourth_marker_x * 100 + (80 - 1) / 2) / (80 - 1) ))
+cache=$(mk_cache)
+log="${TMP}/sb-shared-fourth-diff.log"
+run_sketchybar_plugin "${shared_fourth_fixture}" "${cache}" "${log}" SHOWY_QUOTA_NOW_EPOCH="${shared_fourth_now}" SHOWY_QUOTA_REFRESH_SECONDS=9999999999
+plugin_log="$(< "${log}")"
+assert_contains "plugin shared-cycle checks differing fourth reset for dimming" "showy_quota.antigravity.quaternary drawing=on slider.percentage=80 slider.highlight_color=0xff14683a" "${plugin_log}"
+assert_contains "plugin shared-cycle checks differing fourth reset for marker" "showy_quota.antigravity.quaternary_marker drawing=on slider.percentage=${shared_fourth_marker_pct}" "${plugin_log}"
+
 # Regression: when CodexBar transiently marks a pooled family's windows
 # `usageKnown:false` (e.g. Antigravity's Claude/GPT pool during a collection
 # hiccup), the lanes must stay drawn as empty tracks rather than collapsing —
@@ -1724,6 +1962,30 @@ font_status_log="$(< "${log}")"
 assert_contains "font icon mode colors degraded providers without magick" "showy_quota.codex.icon drawing=on icon.drawing=on icon=:codex: icon.font=sketchybar-app-font:Regular:14.0 icon.color=0xffee5396" "${font_status_log}"
 assert_contains "font icon mode preserves degraded provider status click without magick" "click_script=open 'https://status.openai.com/'" "${font_status_log}"
 assert_not_contains "font icon mode skips status PNG for mapped provider without magick" "icon-v3-codex-" "${font_status_log}"
+
+# ── sketchybar status URL guard ───────────────────────────────────────
+printf '\nsketchybar status URL guard\n'
+
+status_good_fixture="${TMP}/codexbar-status-good-url.json"
+printf '%s\n' \
+    '[{"provider":"codex","status":{"indicator":"major","url":"https://status.example.com"},"usage":{"primary":{"usedPercent":6,"windowMinutes":300}}}]' \
+    > "${status_good_fixture}"
+cache=$(mk_cache)
+log="${TMP}/sb-status-good-url.log"
+run_sketchybar_plugin_without_magick "${status_good_fixture}" "${cache}" "${log}" SHOWY_QUOTA_SKETCHYBAR_PROVIDER_ICON_MODE=font SHOWY_QUOTA_SKETCHYBAR_CLICK=true
+status_url_log="$(< "${log}")"
+assert_contains "status URL guard allows normal https click" "click_script=open 'https://status.example.com'" "${status_url_log}"
+
+status_loopback_fixture="${TMP}/codexbar-status-loopback-url.json"
+printf '%s\n' \
+    '[{"provider":"codex","status":{"indicator":"major","url":"http://127.0.0.1:8080"},"usage":{"primary":{"usedPercent":6,"windowMinutes":300}}}]' \
+    > "${status_loopback_fixture}"
+cache=$(mk_cache)
+log="${TMP}/sb-status-loopback-url.log"
+run_sketchybar_plugin_without_magick "${status_loopback_fixture}" "${cache}" "${log}" SHOWY_QUOTA_SKETCHYBAR_PROVIDER_ICON_MODE=font SHOWY_QUOTA_SKETCHYBAR_CLICK=true
+status_url_log="$(< "${log}")"
+assert_not_contains "status URL guard rejects loopback status click" "click_script=open 'http://127.0.0.1:8080'" "${status_url_log}"
+assert_contains "status URL guard falls back for rejected URL" "click_script=true" "${status_url_log}"
 
 # When magick is present, the plugin points MAGICK_CONFIGURE_PATH at the bundled
 # restrictive policy (SSRF defense) before any magick invocation.

@@ -6,7 +6,32 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Security
+- Hardening pass across the shell and Rust surfaces: cap glyphs now go through
+  the glyph validator (rejecting NUL/C0/C1/DEL bytes) and tmux glyph output is
+  `#`-escaped, closing terminal-escape/`#(...)` injection via renderer config;
+  the tmux wrapper escapes `@showy-quota-separator`/`@showy-quota-popup-title`
+  and rejects a `@showy-quota-bin` containing shell metacharacters; provider-id
+  validation is now consistent everywhere (rejecting `.`, `..`, and leading-dash
+  ids) in `showy_quota_json_valid`, `showy_quota_filter_renderable`, the serve
+  payload validators, and the core predicate; SketchyBar refuses to `open` a
+  `status.url` on a loopback/link-local/non-http(s) host; config/theme files are
+  sourced only when regular (a readable FIFO no longer blocks); `config.env`,
+  the cache dir, and the serve pidfile are created with restrictive modes by
+  construction; the `/usage` fetch is bounded with `--max-filesize`; the
+  `timeout` fallback escalates with `--kill-after`; the release workflow runs
+  `cargo audit` before publishing artifacts; and the documented plugin install
+  verifies the published `.sha256`.
+
 ### Fixed
+- `showy_quota_uint` and the palette dim-scale parser clamp oversized/overflowing
+  values instead of wrapping negative; the native renderer colors pacing markers
+  by visible rank and includes the fourth mono4 lane in shared-cycle detection
+  (mirrored in SketchyBar); `showy_quota_reset_description_epoch` and the
+  SketchyBar elapsed marker honor `SHOWY_QUOTA_NOW_EPOCH`; shell serve port
+  precedence now matches the plugin (explicit port, then URL, then default); the
+  mkdir-lock ownerless window and the zjstatus pipe truncation (partial
+  UTF-8/ANSI) are closed.
 - The Zellij plugin rejects late per-provider CLI results whose attempt token
   no longer matches the live attempt, using the same strict rule as discovery.
   Previously a delayed result from a superseded attempt (its token cleared by

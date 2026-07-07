@@ -52,11 +52,29 @@ showy_quota_expand_user_path() {
     esac
 }
 
-showy_quota_escape_double_quotes() {
+showy_quota_escape_shell_quoted_tmux_format() {
     local value="$1"
     value="${value//\\/\\\\}"
     value="${value//\"/\\\"}"
+    value="${value//#/##}"
     printf '%s\n' "${value}"
+}
+
+showy_quota_escape_tmux_format() {
+    local value="$1"
+    value="${value//#/##}"
+    printf '%s\n' "${value}"
+}
+
+showy_quota_has_shell_metacharacter() {
+    case "$1" in
+        *'$'*|*'`'*|*'"'*|*"'"*|*\\*|*';'*|*'&'*|*'|'*|*'<'*|*'>'*|*'('*|*')'*|*$'\n'*|*$'\r'*|*$'\t'*|*" "*)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
 }
 
 showy_quota_min_status_length() {
@@ -97,14 +115,17 @@ case "${status_side}" in
 esac
 
 if [[ -n "${status_option}" ]]; then
-    if [[ ! -x "${bar_bin}" ]]; then
+    if showy_quota_has_shell_metacharacter "${bar_bin}"; then
+        showy_quota_tmux_message "showy-quota: renderer path contains shell metacharacters: ${bar_bin}"
+    elif [[ ! -x "${bar_bin}" ]]; then
         showy_quota_tmux_message "showy-quota: renderer is not executable: ${bar_bin}"
     else
         showy_quota_min_status_length "${status_length_option}" "${status_length}"
         current_status="$(tmux show-option -gqv "${status_option}" 2>/dev/null || true)"
         if [[ "${current_status}" != *"showy-quota-tmux-bar"* && "${current_status}" != *"${bar_bin}"* ]]; then
-            escaped_bar_bin="$(showy_quota_escape_double_quotes "${bar_bin}")"
-            tmux set-option -gq -a "${status_option}" "${separator}#(\"${escaped_bar_bin}\")"
+            escaped_bar_bin="$(showy_quota_escape_shell_quoted_tmux_format "${bar_bin}")"
+            escaped_separator="$(showy_quota_escape_tmux_format "${separator}")"
+            tmux set-option -gq -a "${status_option}" "${escaped_separator}#(\"${escaped_bar_bin}\")"
         fi
     fi
 fi
@@ -118,6 +139,7 @@ case "${popup_key}" in
         popup_width="$(showy_quota_tmux_option '@showy-quota-popup-width' '92')"
         popup_interval="$(showy_quota_tmux_option '@showy-quota-popup-interval' '30')"
         popup_title="$(showy_quota_tmux_option '@showy-quota-popup-title' 'CodexBar usage')"
+        popup_title="$(showy_quota_escape_tmux_format "${popup_title}")"
         [[ "${popup_interval}" =~ ^[0-9]+$ ]] || popup_interval=30
 
         # shellcheck disable=SC2016

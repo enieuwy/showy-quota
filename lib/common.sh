@@ -20,7 +20,9 @@ set -uo pipefail
 showy_quota_uint() {
     local raw="$1" fallback="$2" max="${3:-}" value
     [[ "${raw}" =~ ^[0-9]+$ ]] || { printf '%s' "${fallback}"; return; }
+    (( ${#raw} <= 18 )) || { printf '%s' "${fallback}"; return; }
     value=$((10#${raw}))
+    (( value >= 0 )) || { printf '%s' "${fallback}"; return; }
     if [[ -n "${max}" ]] && (( value > max )); then
         printf '%s' "${max}"
     else
@@ -64,7 +66,7 @@ showy_quota_load_config() {
     local theme_path=""
     local repo_root
 
-    if [[ -z "${SHOWY_QUOTA_NO_CONFIG:-}" && -r "${config_file}" ]]; then
+    if [[ -z "${SHOWY_QUOTA_NO_CONFIG:-}" && -f "${config_file}" && -r "${config_file}" ]]; then
         # shellcheck disable=SC1090
         . "${config_file}"
     fi
@@ -87,7 +89,7 @@ showy_quota_load_config() {
         "${config_dir}/themes/${theme}.env" \
         "${repo_root}/share/themes/${theme}.env"
     do
-        if [[ -r "${theme_path}" ]]; then
+        if [[ -f "${theme_path}" && -r "${theme_path}" ]]; then
             # shellcheck disable=SC1090
             . "${theme_path}"
             return 0
@@ -314,20 +316,24 @@ showy_quota_cache_degraded_cli() {
 }
 
 # Emit provider ids (one per line, deduplicated, original order preserved) from
-# a CodexBar usage payload. Validates each id with the same regex as the JSON
-# schema check — plus the '.'/'..' path-component rejection from
-# valid_provider_id — so unsafe ids never leak into argv or stamp paths.
+# a CodexBar usage payload. Validates each id with the provider-id rule
+# (nonempty [A-Za-z0-9_.-]+, not '.'/'..', no leading dash) so unsafe ids
+# never leak into argv or stamp paths.
 showy_quota_provider_ids_from_payload() {
     local file="$1"
     [[ -s "${file}" ]] || return 1
     showy_quota_have jq || return 1
     jq -r '
+        def valid_provider_id:
+            type == "string"
+            and test("^[A-Za-z0-9_.-]+$")
+            and . != "."
+            and . != ".."
+            and (startswith("-") | not);
         if type == "array" then
             reduce .[] as $r (
                 [];
-                if ($r.provider? | type == "string")
-                   and ($r.provider | test("^[A-Za-z0-9_.-]+$"))
-                   and ($r.provider != "." and $r.provider != "..")
+                if ($r.provider? | valid_provider_id)
                    and (index($r.provider) == null)
                 then . + [$r.provider]
                 else .
@@ -375,9 +381,12 @@ showy_quota_reset_description_epoch() {
     done
 
     local today now
-    today=$(date '+%Y-%m-%d')
+    now=$(showy_quota_now_epoch)
+    if today=$(date -r "${now}" '+%Y-%m-%d' 2>/dev/null); then :
+    elif showy_quota_have gdate && today=$(gdate -d "@${now}" '+%Y-%m-%d' 2>/dev/null); then :
+    elif today=$(date -d "@${now}" '+%Y-%m-%d' 2>/dev/null); then :
+    else return 1; fi
     if epoch=$(showy_quota_parse_local_epoch '%Y-%m-%d %I:%M %p' "${today} ${desc}"); then
-        now=$(date +%s)
         if (( epoch < now )); then
             epoch=$((epoch + 86400))
         fi
@@ -496,11 +505,13 @@ showy_quota_scale_hex() {
     hex="$(showy_quota_normalize_hex "${hex}")"
     [[ "${factor}" =~ ^([0-9]+([.][0-9]+)?|[.][0-9]+)$ ]] || showy_quota_die "invalid palette scale: ${factor}"
 
-    local factor_num factor_den=1 factor_int factor_frac
+    local factor_num factor_den=1 factor_int factor_frac max_scale=1000
     if [[ "${factor}" == *.* ]]; then
         factor_int="${factor%%.*}"
         factor_frac="${factor#*.}"
         [[ -n "${factor_int}" ]] || factor_int=0
+        (( ${#factor_frac} <= 4 )) || showy_quota_die "invalid palette scale: ${factor}"
+        factor_int=$(showy_quota_uint "${factor_int}" "${max_scale}" "${max_scale}")
         factor_num=$((10#${factor_int}${factor_frac}))
         factor_den=1
         local i
@@ -508,7 +519,11 @@ showy_quota_scale_hex() {
             factor_den=$((factor_den * 10))
         done
     else
-        factor_num=$((10#${factor}))
+        factor_num=$(showy_quota_uint "${factor}" "${max_scale}" "${max_scale}")
+    fi
+    if (( factor_num > max_scale * factor_den )); then
+        factor_num="${max_scale}"
+        factor_den=1
     fi
 
     local r=$((16#${hex:0:2}))
@@ -637,9 +652,15 @@ showy_quota_json_valid() {
     [[ -s "${file}" ]] || return 1
     showy_quota_have jq || return 1
     jq -e '
+        def valid_provider_id:
+            type == "string"
+            and test("^[A-Za-z0-9_.-]+$")
+            and . != "."
+            and . != ".."
+            and (startswith("-") | not);
         type == "array" and
         all(.[]; type == "object"
-            and (.provider | type == "string" and test("^[A-Za-z0-9_.-]+$"))
+            and (.provider | valid_provider_id)
             and (
                 (.usage // null) == null
                 or (

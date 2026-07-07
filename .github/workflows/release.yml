@@ -19,6 +19,10 @@ jobs:
         with:
           toolchain: stable
           targets: wasm32-wasip1
+      - name: cargo audit
+        run: |
+          cargo install cargo-audit --locked
+          cargo audit
       - name: Build Zellij plugin
         run: |
           cargo build --release --target wasm32-wasip1 -p showy-quota-zellij

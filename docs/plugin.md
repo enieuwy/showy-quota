@@ -29,10 +29,21 @@ rest. The merged result is marked with `⚠cli`.
 Download the release artifact into Zellij's plugin directory:
 
 ```sh
-mkdir -p ~/.config/zellij/plugins
+tmpdir=$(mktemp -d)
+trap 'rm -rf "$tmpdir"' EXIT
+
 curl -L \
-  -o ~/.config/zellij/plugins/showy-quota-zellij.wasm \
+  -o "$tmpdir/showy-quota-zellij.wasm" \
   https://github.com/enieuwy/showy-quota/releases/latest/download/showy-quota-zellij.wasm
+curl -L \
+  -o "$tmpdir/showy-quota-zellij.wasm.sha256" \
+  https://github.com/enieuwy/showy-quota/releases/latest/download/showy-quota-zellij.wasm.sha256
+(cd "$tmpdir" && shasum -a 256 -c showy-quota-zellij.wasm.sha256)
+# If your system uses GNU coreutils, use:
+# (cd "$tmpdir" && sha256sum -c showy-quota-zellij.wasm.sha256)
+
+mkdir -p ~/.config/zellij/plugins
+mv "$tmpdir/showy-quota-zellij.wasm" ~/.config/zellij/plugins/showy-quota-zellij.wasm
 ```
 
 Then paste `adapters/zellij/layout-pane.kdl.fragment` into your layout, usually inside `default_tab_template` after `children`.

@@ -83,19 +83,22 @@ acquire_render_lock() {
         return 0
     fi
 
-    local owner_pid="" lock_age="" max_ownerless_age=30
+    local owner_pid="" lock_age="" max_ownerless_age=30 malformed_owner=0
     if [[ -r "${RENDER_LOCK_OWNER}" ]]; then
         IFS= read -r owner_pid < "${RENDER_LOCK_OWNER}" || owner_pid=""
-        if [[ "${owner_pid}" =~ ^[0-9]+$ ]] && kill -0 "${owner_pid}" 2>/dev/null; then
-            showy_quota_log "sketchybar render already in flight (pid ${owner_pid}); skipping"
+        if [[ "${owner_pid}" =~ ^[0-9]+$ ]]; then
+            if kill -0 "${owner_pid}" 2>/dev/null; then
+                showy_quota_log "sketchybar render already in flight (pid ${owner_pid}); skipping"
+                return 1
+            fi
+            rm -f -- "${RENDER_LOCK_OWNER}"
+            if rmdir -- "${RENDER_LOCK_DIR}" 2>/dev/null; then
+                acquire_render_lock
+                return $?
+            fi
             return 1
         fi
-        rm -f -- "${RENDER_LOCK_OWNER}"
-        if rmdir -- "${RENDER_LOCK_DIR}" 2>/dev/null; then
-            acquire_render_lock
-            return $?
-        fi
-        return 1
+        malformed_owner=1
     fi
 
     # A future-dated lock mtime (clock skew, hand-touched dir) yields a
@@ -103,6 +106,9 @@ acquire_render_lock() {
     # forever; judge staleness by absolute distance from now instead.
     if lock_age=$(render_lock_age_seconds) \
         && { (( lock_age >= max_ownerless_age )) || (( lock_age <= -max_ownerless_age )); }; then
+        if (( malformed_owner )); then
+            rm -f -- "${RENDER_LOCK_OWNER}"
+        fi
         rmdir -- "${RENDER_LOCK_DIR}" 2>/dev/null || true
         acquire_render_lock
         return $?
@@ -113,7 +119,7 @@ acquire_render_lock() {
 }
 
 start_background_refresh() {
-    ( "${FETCH}" >/dev/null 2>&1 ) &
+    ( "${FETCH}" </dev/null >/dev/null 2>&1 ) &
     disown "$!" 2>/dev/null || true
 }
 
@@ -135,14 +141,23 @@ provider_list_contains() {
 }
 
 write_state_providers() {
-    local providers="${1-}" state_tmp
+    local providers="${1-}" state_tmp mv_status
     state_tmp=$(mktemp "${CACHE_DIR}/.providers.XXXXXX") || return 1
+    trap 'rm -f -- "${state_tmp}"; trap - HUP INT TERM; exit 129' HUP
+    trap 'rm -f -- "${state_tmp}"; trap - HUP INT TERM; exit 130' INT
+    trap 'rm -f -- "${state_tmp}"; trap - HUP INT TERM; exit 143' TERM
     if [[ -n "${providers}" ]]; then
         printf '%s\n' "${providers}" > "${state_tmp}"
     else
         : > "${state_tmp}"
     fi
     mv -f "${state_tmp}" "${STATE_FILE}"
+    mv_status=$?
+    if (( mv_status != 0 )); then
+        rm -f -- "${state_tmp}"
+    fi
+    trap - HUP INT TERM
+    return "${mv_status}"
 }
 
 remove_provider_items() {
@@ -503,9 +518,27 @@ shell_quote() {
 }
 
 status_url_is_openable() {
-    case "${1:-}" in
-        http://*|https://*) return 0 ;;
+    local url="${1:-}" rest authority host lower_host
+    case "${url}" in
+        http://*|https://*) ;;
         *)                  return 1 ;;
+    esac
+
+    rest="${url#*://}"
+    authority="${rest%%[/?#]*}"
+    [[ -n "${authority}" ]] || return 1
+    host="${authority##*@}"
+    if [[ "${host}" == \[*\]* ]]; then
+        host="${host#\[}"
+        host="${host%%\]*}"
+    else
+        host="${host%%:*}"
+    fi
+    lower_host="${host,,}"
+    [[ -n "${lower_host}" ]] || return 1
+    case "${lower_host}" in
+        localhost|localhost.|*.localhost|*.localhost.|127.*|0.0.0.0|169.254.*|::1|fe80:*) return 1 ;;
+        *) return 0 ;;
     esac
 }
 
@@ -712,7 +745,7 @@ elapsed_marker_x() {
     # divide by zero below; mirror the Rust core's checked_mul: no marker.
     (( duration / 60 == window_minutes )) || return 1
     start_epoch=$((reset_epoch - duration))
-    now=$(date +%s)
+    now=$(showy_quota_now_epoch)
     elapsed=$((now - start_epoch))
     (( elapsed < 0 )) && elapsed=0
     (( elapsed > duration )) && elapsed="${duration}"
@@ -876,11 +909,13 @@ while IFS=$'\x1f' read -r pid rem_p p_reset p_window rem_s s_reset s_window rem_
     p_present=0; [[ -n "${rem_p}" ]] && p_present=1
     s_present=0; [[ -n "${rem_s}" ]] && s_present=1
     t_present=0; [[ -n "${rem_t}" ]] && t_present=1
+    q_present=0; [[ -n "${rem_q}" ]] && q_present=1
     shared_cycle=0
     if showy_quota_shared_cycle \
         "${p_present}" "${p_reset}" "${p_window}" \
         "${s_present}" "${s_reset}" "${s_window}" \
-        "${t_present}" "${t_reset}" "${t_window}"; then
+        "${t_present}" "${t_reset}" "${t_window}" \
+        "${q_present}" "${q_reset}" "${q_window}"; then
         # Parallel pools on one billing cycle (e.g. Cursor Total/Auto/API):
         # keep only the primary pacing marker and undim every row.
         shared_cycle=1

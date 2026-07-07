@@ -50,6 +50,12 @@ showy_quota_filter_renderable() {
     local exclude="${SHOWY_QUOTA_PROVIDERS_EXCLUDE:-}"
     local order="${SHOWY_QUOTA_PROVIDER_ORDER:-}"
     jq --arg allow "${allow}" --arg exclude "${exclude}" --arg order "${order}" '
+        def valid_provider_id:
+            type == "string"
+            and test("^[A-Za-z0-9_.-]+$")
+            and . != "."
+            and . != ".."
+            and (startswith("-") | not);
         def list($raw):
             $raw
             | split(",")
@@ -63,7 +69,7 @@ showy_quota_filter_renderable() {
         | (list($order)) as $order_list
         | [ .[] | select(
             (.error // null) == null
-            and (.provider | type == "string" and test("^[A-Za-z0-9_.-]+$"))
+            and (.provider | valid_provider_id)
             and ([
                 .usage.primary,
                 .usage.secondary,

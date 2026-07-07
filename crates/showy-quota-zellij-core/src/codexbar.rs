@@ -113,11 +113,12 @@ pub(crate) fn is_renderable(record: &ProviderRecord) -> bool {
 }
 
 /// Shared provider-id predicate, byte-for-byte with the shell's
-/// `valid_provider_id`: the character-class check plus rejection of the
-/// path components `.` and `..`, which would escape per-provider stamp
-/// paths in the shell data plane.
+/// `valid_provider_id`: the character-class check plus rejection of leading
+/// dashes (argv flag injection) and the path components `.` and `..`, which
+/// would escape per-provider stamp paths in the shell data plane.
 pub fn valid_provider_id(provider: &str) -> bool {
     !provider.is_empty()
+        && !provider.starts_with('-')
         && provider != "."
         && provider != ".."
         && provider
@@ -396,6 +397,11 @@ mod tests {
         assert!(!valid_provider_id("bang!"));
         // Non-ASCII bytes are rejected even when alphabetic.
         assert!(!valid_provider_id("café"));
+    }
+
+    #[test]
+    fn valid_provider_id_rejects_leading_dash() {
+        assert!(!valid_provider_id("-codex"));
     }
 
     #[test]

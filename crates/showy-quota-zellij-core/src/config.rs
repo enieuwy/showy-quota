@@ -261,8 +261,8 @@ impl RenderConfig {
             &mut self.mono_color_mode,
         );
         self.mono_markers = get_csv(&get, "SHOWY_QUOTA_MONO_MARKERS", &self.mono_markers);
-        assign_string(&get, "SHOWY_QUOTA_CAP_LEFT", &mut self.cap_left);
-        assign_string(&get, "SHOWY_QUOTA_CAP_RIGHT", &mut self.cap_right);
+        assign_glyph(&get, "SHOWY_QUOTA_CAP_LEFT", &mut self.cap_left);
+        assign_glyph(&get, "SHOWY_QUOTA_CAP_RIGHT", &mut self.cap_right);
     }
 
     /// Explicit per-provider terminal body override, if any.
@@ -327,7 +327,7 @@ fn valid_glyph(value: &str) -> bool {
     value.chars().count() <= GLYPH_MAX_CHARS
         && !value
             .chars()
-            .any(|ch| matches!(ch, '\u{0001}'..='\u{001f}'))
+            .any(|ch| matches!(ch, '\u{0000}'..='\u{001f}' | '\u{007f}'..='\u{009f}'))
 }
 
 fn assign_option<F>(get: &F, name: &str, target: &mut Option<String>)
@@ -510,6 +510,18 @@ mod tests {
             RenderConfig::default().degraded_cli_glyph
         );
         assert_eq!(config.error_glyph, RenderConfig::default().error_glyph);
+    }
+
+    #[test]
+    fn cap_glyph_rejects_esc_byte() {
+        let mut env = BTreeMap::new();
+        env.insert("SHOWY_QUOTA_CAP_LEFT".into(), "\u{1b}[".into());
+        env.insert("SHOWY_QUOTA_CAP_RIGHT".into(), "\u{80}".into());
+
+        let config = RenderConfig::from_env_map(&env);
+
+        assert_eq!(config.cap_left, RenderConfig::default().cap_left);
+        assert_eq!(config.cap_right, RenderConfig::default().cap_right);
     }
 
     #[test]

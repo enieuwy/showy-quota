@@ -56,6 +56,24 @@ die() {
     exit 1
 }
 
+TEMP_FILES=()
+
+cleanup_temp_files() {
+    local file
+    for file in "${TEMP_FILES[@]}"; do
+        [[ -n "${file}" ]] && rm -f -- "${file}"
+    done
+}
+
+trap cleanup_temp_files EXIT
+trap 'cleanup_temp_files; exit 130' INT
+trap 'cleanup_temp_files; exit 143' TERM
+
+track_temp_file() {
+    TEMP_FILES+=("$1")
+}
+
+
 list_theme_names() {
     local dir path name
     local -a names=()
@@ -182,7 +200,8 @@ write_config_lines() {
         return 0
     fi
 
-    tmp=$(mktemp "${CONFIG_FILE}.tmp.XXXXXX") || die "cannot create temporary config next to ${CONFIG_FILE}"
+    tmp=$(umask 077 && mktemp "${CONFIG_FILE}.tmp.XXXXXX") || die "cannot create temporary config next to ${CONFIG_FILE}"
+    track_temp_file "${tmp}"
     if ! {
         for i in "${!lines[@]}"; do
             line="${lines[$i]}"
@@ -204,19 +223,18 @@ write_config_lines() {
             printf 'SHOWY_QUOTA_THEME=%s\n' "${theme}"
         fi
     } > "${tmp}"; then
-        rm -f -- "${tmp}"
         die "cannot write temporary config next to ${CONFIG_FILE}"
     fi
 
     if ! mv -f -- "${tmp}" "${CONFIG_FILE}"; then
-        die "cannot replace ${CONFIG_FILE}; temporary file left at ${tmp}"
+        die "cannot replace ${CONFIG_FILE}"
     fi
 }
 
 set_theme() {
     local name="$1"
     validate_theme_or_die "${name}"
-    mkdir -p -- "${CONFIG_DIR}" || die "cannot create ${CONFIG_DIR}"
+    (umask 077 && mkdir -p -- "${CONFIG_DIR}") || die "cannot create ${CONFIG_DIR}"
     write_config_lines set "${name}"
 }
 
@@ -678,19 +696,18 @@ grant_zellij() {
     done
 
     local tmp
-    tmp="$(mktemp "${perms_file}.tmp.XXXXXX")" || die "cannot create temporary file next to ${perms_file}"
+    tmp="$(umask 077 && mktemp "${perms_file}.tmp.XXXXXX")" || die "cannot create temporary file next to ${perms_file}"
+    track_temp_file "${tmp}"
     if ! {
         if ((${#kept[@]})); then printf '%s\n' "${kept[@]}"; fi
         for key in "${keys[@]}"; do
             printf '"%s" {\n    WebAccess\n    OpenTerminalsOrPlugins\n    RunCommands\n}\n' "${key}"
         done
     } > "${tmp}"; then
-        rm -f -- "${tmp}"
         die "cannot write temporary file next to ${perms_file}"
     fi
     if ! mv -f -- "${tmp}" "${perms_file}"; then
-        rm -f -- "${tmp}"
-        die "cannot replace ${perms_file}; temporary file left behind"
+        die "cannot replace ${perms_file}"
     fi
 
     printf 'showy-quota: pre-granted Zellij plugin permissions\n'
