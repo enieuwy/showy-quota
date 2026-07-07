@@ -89,7 +89,7 @@ fn valid_render_window(window: Option<&UsageWindow>) -> bool {
 }
 
 enum RenderUnit<'a> {
-    Provider(Cow<'a, ProviderRecord>, String),
+    Provider(Box<Cow<'a, ProviderRecord>>, String),
     Error(&'a ProviderRecord, String),
 }
 
@@ -106,7 +106,6 @@ fn render_records(
     filter_and_sort(&mut records, config);
 
     let chunk_bg = &config.palette_bg;
-    let stale_color = &config.palette_stale;
     let countdown_warn = &config.palette_countdown_warn;
     let mut out = String::new();
 
@@ -143,11 +142,11 @@ fn render_records(
             match expand_pooled(record, config) {
                 Some(families) => {
                     for (sigil, synthetic) in families {
-                        units.push(RenderUnit::Provider(Cow::Owned(synthetic), sigil));
+                        units.push(RenderUnit::Provider(Box::new(Cow::Owned(synthetic)), sigil));
                     }
                 }
                 None => units.push(RenderUnit::Provider(
-                    Cow::Borrowed(record),
+                    Box::new(Cow::Borrowed(record)),
                     provider_sigil(&record.provider),
                 )),
             }
@@ -157,16 +156,9 @@ fn render_records(
                 separator_space(&mut out, output_format, chunk_bg, options.color);
             }
             match unit {
-                RenderUnit::Provider(record, sigil) => render_provider(
-                    &mut out,
-                    record,
-                    sigil,
-                    config,
-                    options,
-                    output_format,
-                    chunk_bg,
-                    stale_color,
-                ),
+                RenderUnit::Provider(record, sigil) => {
+                    render_provider(&mut out, record, sigil, config, options, output_format)
+                }
                 RenderUnit::Error(record, sigil) => render_error_provider(
                     &mut out,
                     record,
@@ -301,9 +293,9 @@ fn render_provider(
     config: &RenderConfig,
     options: RenderOptions,
     output_format: OutputFormat,
-    chunk_bg: &str,
-    stale_color: &str,
 ) {
+    let chunk_bg = &config.palette_bg;
+    let stale_color = &config.palette_stale;
     let usage = record
         .usage
         .as_ref()
