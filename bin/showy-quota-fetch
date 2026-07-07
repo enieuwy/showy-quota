@@ -115,7 +115,9 @@ showy_quota_release_mkdir_lock() {
 showy_quota_cleanup_cache_temps() {
     local tmp_file
     for tmp_file in "${SHOWY_QUOTA_CACHE_TMP_FILES[@]}"; do
-        [[ -n "${tmp_file}" ]] && rm -f -- "${tmp_file}" 2>/dev/null || true
+        if [[ -n "${tmp_file}" ]]; then
+            rm -f -- "${tmp_file}" 2>/dev/null || true
+        fi
     done
     SHOWY_QUOTA_CACHE_TMP_FILES=()
 }
