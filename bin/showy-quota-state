@@ -84,18 +84,34 @@ showy_quota_state_minutes_json() {
     printf '%s' "${minutes_json}"
 }
 
+showy_quota_state_provider_metrics_json() {
+    local raw_json="$1"
+    local reset_minutes_json="$2"
+    local allow="${SHOWY_QUOTA_PROVIDERS:-}"
+    local exclude="${SHOWY_QUOTA_PROVIDERS_EXCLUDE:-}"
+    local order="${SHOWY_QUOTA_PROVIDER_ORDER:-}"
 
-data=""
-available=false
-if data=$("${FETCH}" 2>/dev/null) && [[ -n "${data}" ]]; then
-    available=true
-fi
-
-if [[ "${available}" == true ]]; then
-    filtered_json=$(printf '%s' "${data}" | showy_quota_filter_renderable | jq -c '.')
-    provider_ids_json=$(printf '%s' "${filtered_json}" | jq -c '[ .[].provider ]')
-    reset_minutes_json=$(showy_quota_state_minutes_json "${filtered_json}")
-    provider_metrics_json=$(printf '%s' "${filtered_json}" | jq -c --argjson reset_minutes "${reset_minutes_json}" '
+    printf '%s' "${raw_json}" | jq -c \
+        --arg allow "${allow}" \
+        --arg exclude "${exclude}" \
+        --arg order "${order}" \
+        --argjson reset_minutes "${reset_minutes_json}" '
+        def list($raw):
+            $raw
+            | split(",")
+            | map(gsub("^\\s+|\\s+$"; ""))
+            | map(select(length > 0));
+        def pos($items; $provider):
+            ($items | index($provider)) as $idx
+            | if $idx == null then 1000000 else $idx end;
+        def valid_provider:
+            (.provider | type == "string" and test("^[A-Za-z0-9_.-]+$"));
+        def has_renderable_window:
+            ([
+                .usage.primary,
+                .usage.secondary,
+                .usage.tertiary
+            ] | any(. != null and (.usedPercent | type == "number")));
         def pct($x):
             if ($x | type) == "number" then [0, ([100, ($x | floor)] | min)] | max else null end;
         def nonneg_int($x):
@@ -139,19 +155,94 @@ if [[ "${available}" == true ]]; then
                 windowMinutes: $window.windowMinutes,
                 minutesUntilReset: $window.minutesUntilReset
             };
-        [
-            .[]
-            | {
+        def sanitize_error_message($raw):
+            (if $raw == null then "" elif ($raw | type) == "string" then $raw else ($raw | tostring) end)
+            | gsub("[[:cntrl:]]"; "")
+            | gsub("\\s+"; " ")
+            | gsub("^\\s+|\\s+$"; "")
+            | .[0:160];
+        def error_raw:
+            if (.error | type) == "object" then
+                (.error.message // .error.error // .error.reason // .error.description // .error)
+            else
+                .error
+            end;
+        def error_kind($message):
+            ($message | ascii_downcase) as $m
+            | if ($m | contains("auth") or contains("login") or contains("session") or contains("token")) then "auth"
+              elif ($m | contains("cookie")) then "cookies"
+              elif ($m | contains("timeout") or contains("connect") or contains("network") or contains("refused")) then "network"
+              else "unknown" end;
+        def renderable_metric:
+            {
                 provider: .provider,
                 windows: {
                     primary: window_state(.usage.primary),
                     secondary: window_state(.usage.secondary),
                     tertiary: window_state(.usage.tertiary)
                 },
-                extraRateWindows: ((.usage.extraRateWindows // []) | if type == "array" then map(extra_window_state(.)) else [] end)
+                extraRateWindows: ((.usage.extraRateWindows // []) | if type == "array" then map(extra_window_state(.)) else [] end),
+                error: null
+            };
+        def error_metric:
+            (sanitize_error_message(error_raw)) as $message
+            | {
+                provider: .provider,
+                windows: {
+                    primary: null,
+                    secondary: null,
+                    tertiary: null
+                },
+                extraRateWindows: [],
+                error: {
+                    kind: error_kind($message),
+                    message: $message
+                }
+            };
+        (list($allow)) as $allow_list
+        | (list($exclude)) as $exclude_list
+        | (list($order)) as $order_list
+        | [
+            .[]?
+            | select(type == "object")
+            | select(
+                valid_provider
+                and (.provider as $p | (($allow_list | length) == 0 or ($allow_list | index($p) != null)))
+                and (.provider as $p | ($exclude_list | index($p) == null))
+                and (
+                    (((.error // null) == null) and has_renderable_window)
+                    or ((.error != null) and (has_renderable_window | not))
+                )
+            )
+            | {
+                provider: .provider,
+                metric: (if (((.error // null) == null) and has_renderable_window) then renderable_metric else error_metric end)
             }
-        ]
-    ')
+        ] as $filtered
+        | (if ($allow_list | length) > 0 then
+            $filtered | sort_by([(.provider as $p | pos($allow_list; $p)), .provider])
+          elif ($order_list | length) > 0 then
+            $filtered | sort_by([(.provider as $p | pos($order_list; $p)), .provider])
+          else
+            $filtered
+          end)
+        | map(.metric)
+    '
+}
+
+
+
+data=""
+available=false
+if data=$("${FETCH}" 2>/dev/null) && [[ -n "${data}" ]]; then
+    available=true
+fi
+
+if [[ "${available}" == true ]]; then
+    filtered_json=$(printf '%s' "${data}" | showy_quota_filter_renderable | jq -c '.')
+    provider_ids_json=$(printf '%s' "${filtered_json}" | jq -c '[ .[].provider ]')
+    reset_minutes_json=$(showy_quota_state_minutes_json "${filtered_json}")
+    provider_metrics_json=$(showy_quota_state_provider_metrics_json "${data}" "${reset_minutes_json}")
 else
     filtered_json='[]'
     provider_ids_json='[]'

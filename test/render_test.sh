@@ -287,6 +287,25 @@ run_renderer() {
     printf '%s' "${out}"
 }
 
+run_renderer_json() {
+    local renderer="$1" fixture="$2"
+    shift 2
+    local cache; cache=$(mk_cache)
+    local fixture_file out
+    fixture_file=$(fixture_path "${fixture}")
+    out=$(
+        env \
+            PATH="${stub_dir}:${PATH}" \
+            SHOWY_QUOTA_NO_CONFIG=1 \
+            SHOWY_QUOTA_CACHE_DIR="${cache}" \
+            SHOWY_QUOTA_DEGRADED_CLI=0 \
+            SHOWY_QUOTA_FORCE_COLOR=1 \
+            "$@" \
+            "${REPO_ROOT}/bin/${renderer}" --json "${fixture_file}" 2>&1
+    )
+    printf '%s' "${out}"
+}
+
 run_state() {
     local fixture="$1"
     shift
@@ -982,6 +1001,21 @@ printf '%s\n' \
     '{"provider":"claude","usage":{"primary":{"usedPercent":25,"windowMinutes":100,"resetsAt":"2099-01-01T01:40:00Z"},"secondary":{"usedPercent":50,"windowMinutes":200,"resetsAt":"2099-01-01T03:20:00Z"},"tertiary":{"usedPercent":75,"windowMinutes":300,"resetsAt":"2099-01-01T05:00:00Z"}}}' \
     ']' > "${mono_claude_fixture}"
 
+mixed_error_fixture="${TMP}/codexbar-mixed-error.json"
+jq '
+    [.[] | select(.error == null)]
+    + [{"provider":"cursor","error":{"code":1,"kind":"provider","message":"No Cursor session found."}}]
+' "$(fixture_path codexbar-mixed.json)" > "${mixed_error_fixture}"
+
+sanitized_error_fixture="${TMP}/codexbar-error-sanitize.json"
+sanitized_padding=$(printf '%*s' 200 '')
+sanitized_padding="${sanitized_padding// /x}"
+sanitized_raw_message=$'Token\x01bad  '"${sanitized_padding}"
+jq -n --arg message "${sanitized_raw_message}" \
+    '[{"provider":"cursor","error":{"code":1,"kind":"provider","message":$message}}]' \
+    > "${sanitized_error_fixture}"
+
+
 
 
 
@@ -989,7 +1023,9 @@ out=$(run_renderer showy-quota-zellij-bar codexbar-mixed.json)
 assert_contains "renders CL sigil for claude"          "CL"  "${out}"
 assert_contains "renders CX sigil for codex"           "CX"  "${out}"
 assert_contains "renders GE sigil for gemini"          "GE"  "${out}"
-assert_not_contains "skips errored provider (cursor)"  "CR"  "${out}"
+assert_contains "renders CR sigil for errored cursor"   "CR"  "${out}"
+assert_contains "renders provider error label"          "⚠err" "${out}"
+assert_not_contains "strip hides raw cursor error text" "No Cursor session found." "${out}"
 assert_contains "zellij weekly hint uses derived secondary color" "20;104;58m" "${out}"
 assert_contains "zellij uses ai-quota powerline left cap" "" "${out}"
 assert_contains "zellij uses ai-quota half-block cells" "▀" "${out}"
@@ -1126,10 +1162,34 @@ assert_not_contains "zellij dual weekly window is not bright-good fill" "48;2;37
 
 
 out=$(run_renderer showy-quota-zellij-bar codexbar-empty.json)
-assert_contains "empty fixture renders 'AI idle'"      "AI idle" "${out}"
+assert_contains "empty provider array still renders 'AI idle'" "AI idle" "${out}"
 
 out=$(run_renderer showy-quota-zellij-bar codexbar-error-only.json)
-assert_contains "all-error fixture renders 'AI idle'"  "AI idle" "${out}"
+assert_contains "zellij all-error fixture renders cursor sigil" "CR" "${out}"
+assert_contains "zellij all-error fixture renders factory sigil" "FA" "${out}"
+assert_contains "zellij all-error fixture renders provider error label" "⚠err" "${out}"
+assert_not_contains "zellij all-error fixture does not render 'AI idle'" "AI idle" "${out}"
+assert_not_contains "zellij all-error strip hides cursor error text" "No Cursor session found." "${out}"
+assert_not_contains "zellij all-error strip hides factory error text" "Safari cookies not readable." "${out}"
+
+out=$(run_renderer showy-quota-zellij-bar "${mixed_error_fixture}" SHOWY_QUOTA_PROVIDER_ORDER=codex,cursor,claude,gemini NO_COLOR=1 SHOWY_QUOTA_FORCE_COLOR=0)
+assert_contains "zellij mixed error fixture keeps codex chunk" "CX▕" "${out}"
+assert_contains "zellij mixed error fixture keeps claude chunk" "CL▕" "${out}"
+assert_contains "zellij mixed error fixture keeps gemini chunk" "GE▕" "${out}"
+assert_contains "zellij mixed error fixture renders cursor error chunk" "CR⚠err" "${out}"
+if [[ "${out}" == *CX*CR⚠err*CL*GE* ]]; then
+    ok "zellij mixed error fixture follows provider order"
+else
+    fail "zellij mixed error fixture follows provider order" "${out}"
+fi
+
+out=$(run_renderer showy-quota-zellij-bar codexbar-error-only.json SHOWY_QUOTA_ERROR_GLYPH='!' NO_COLOR=1 SHOWY_QUOTA_FORCE_COLOR=0)
+assert_contains "custom error glyph renders bang error label" "!err" "${out}"
+assert_not_contains "custom error glyph replaces warning label" "⚠err" "${out}"
+
+out=$(run_renderer showy-quota-zellij-bar codexbar-error-only.json SHOWY_QUOTA_PROVIDERS_EXCLUDE=cursor NO_COLOR=1 SHOWY_QUOTA_FORCE_COLOR=0)
+assert_not_contains "exclude drops cursor error chunk from strip" "CR" "${out}"
+assert_contains "exclude keeps factory error chunk in strip" "FA⚠err" "${out}"
 
 out=$(run_renderer showy-quota-zellij-bar codexbar-empty.json SHOWY_QUOTA_DEGRADED_CLI=1 NO_COLOR=1 SHOWY_QUOTA_FORCE_COLOR=0)
 assert_contains "empty degraded fixture renders trailing CLI marker" "AI idle ⚠cli" "${out}"
@@ -1250,6 +1310,27 @@ assert_not_contains "tmux mono3 collapse omits shared separator" "│" "${visibl
 out=$(run_renderer showy-quota-tmux-bar codexbar-empty.json)
 assert_contains "tmux empty fixture renders 'AI idle'" "AI idle" "${out}"
 
+out=$(run_renderer_json showy-quota-tmux-bar codexbar-error-only.json)
+visible=$(strip_tmux_markup "${out}")
+assert_contains "tmux --json all-error fixture renders cursor sigil" "CR" "${visible}"
+assert_contains "tmux --json all-error fixture renders factory sigil" "FA" "${visible}"
+assert_contains "tmux --json all-error fixture renders provider error label" "⚠err" "${visible}"
+assert_not_contains "tmux --json all-error fixture does not render 'AI idle'" "AI idle" "${visible}"
+assert_not_contains "tmux --json all-error strip hides cursor error text" "No Cursor session found." "${visible}"
+assert_not_contains "tmux --json all-error strip hides factory error text" "Safari cookies not readable." "${visible}"
+
+out=$(run_renderer showy-quota-tmux-bar "${mixed_error_fixture}" SHOWY_QUOTA_PROVIDER_ORDER=codex,cursor,claude,gemini)
+visible=$(strip_tmux_markup "${out}")
+assert_contains "tmux mixed error fixture keeps codex chunk" "CX▕" "${visible}"
+assert_contains "tmux mixed error fixture keeps claude chunk" "CL▕" "${visible}"
+assert_contains "tmux mixed error fixture keeps gemini chunk" "GE▕" "${visible}"
+assert_contains "tmux mixed error fixture renders cursor error chunk" "CR⚠err" "${visible}"
+if [[ "${visible}" == *CX*CR⚠err*CL*GE* ]]; then
+    ok "tmux mixed error fixture follows provider order"
+else
+    fail "tmux mixed error fixture follows provider order" "${visible}"
+fi
+
 install_bin="${TMP}/install/bin"
 mkdir -p "${install_bin}"
 ln -s "${REPO_ROOT}/bin/showy-quota-tmux-bar" "${install_bin}/showy-quota-tmux-bar"
@@ -1342,14 +1423,30 @@ out=$(run_state codexbar-mixed.json SHOWY_QUOTA_NOW_EPOCH=4070908800)
 assert_equals "state marks cache available" "true" "$(printf '%s' "${out}" | jq -r '.available')"
 assert_equals "state provider count honors renderable filter" "3" "$(printf '%s' "${out}" | jq -r '.providerCount')"
 assert_equals "state provider order matches render order" "codex,claude,gemini" "$(printf '%s' "${out}" | jq -r '.providers | join(",")')"
-assert_equals "state providerMetrics length matches provider count" "true" "$(printf '%s' "${out}" | jq -r '(.providerMetrics | length) == .providerCount')"
+assert_equals "state providerMetrics includes renderable and errored providers" "4" "$(printf '%s' "${out}" | jq -r '.providerMetrics | length')"
 assert_equals "state claude primary window exposes normalized usage" "17|83|300|340" "$(printf '%s' "${out}" | jq -r '.providerMetrics[] | select(.provider == "claude") | .windows.primary | [.usedPercent, .remainingPercent, .windowMinutes, .minutesUntilReset] | map(tostring) | join("|")')"
 assert_equals "state missing tertiary window stays null" "true" "$(printf '%s' "${out}" | jq -r '.providerMetrics[] | select(.provider == "codex") | .windows.tertiary == null')"
+assert_equals "state renderable provider error field stays null" "true" "$(printf '%s' "${out}" | jq -r '.providerMetrics[] | select(.provider == "codex") | .error == null')"
 assert_equals "state top-level contract is unchanged apart from providerMetrics" '{"available":true,"cache":{"degraded":true,"source":"cli"},"cacheAgeSeconds":"number","providerCount":3,"providers":["codex","claude","gemini"],"sketchybar":{"bracket":"showy_quota_bracket","compactProviderThreshold":5,"compactRecommended":false,"itemPrefix":"showy_quota"},"stale":true,"staleAfterSeconds":240}' "$(printf '%s' "${out}" | jq -cS 'del(.providerMetrics) | .cacheAgeSeconds = (.cacheAgeSeconds | type)')"
 assert_equals "state providers stay string array" "true" "$(printf '%s' "${out}" | jq -r '.providers | type == "array" and all(.[]; type == "string")')"
 assert_equals "state compact recommendation defaults below threshold" "false" "$(printf '%s' "${out}" | jq -r '.sketchybar.compactRecommended')"
 assert_equals "state exposes degraded CLI source" "cli" "$(printf '%s' "${out}" | jq -r '.cache.source')"
 assert_equals "state exposes degraded flag" "true" "$(printf '%s' "${out}" | jq -r '.cache.degraded')"
+
+out=$(run_state codexbar-error-only.json)
+assert_equals "state error-only providers stay renderable-only empty" "[]" "$(printf '%s' "${out}" | jq -c '.providers')"
+assert_equals "state error-only provider count stays renderable-only zero" "0" "$(printf '%s' "${out}" | jq -r '.providerCount')"
+assert_equals "state error-only providerMetrics includes errored providers" "cursor,factory" "$(printf '%s' "${out}" | jq -r '.providerMetrics | map(.provider) | join(",")')"
+assert_equals "state cursor error is auth bucket with sanitized message" "auth|No Cursor session found." "$(printf '%s' "${out}" | jq -r '.providerMetrics[] | select(.provider == "cursor") | [.error.kind, .error.message] | join("|")')"
+assert_equals "state factory error is cookies bucket with sanitized message" "cookies|Safari cookies not readable." "$(printf '%s' "${out}" | jq -r '.providerMetrics[] | select(.provider == "factory") | [.error.kind, .error.message] | join("|")')"
+assert_equals "state errored providers expose null windows and no extras" "true" "$(printf '%s' "${out}" | jq -r 'all(.providerMetrics[]; .windows.primary == null and .windows.secondary == null and .windows.tertiary == null and (.extraRateWindows | length == 0))')"
+
+out=$(run_state codexbar-error-only.json SHOWY_QUOTA_PROVIDERS_EXCLUDE=cursor)
+assert_equals "state exclude drops errored providerMetrics" "factory" "$(printf '%s' "${out}" | jq -r '.providerMetrics | map(.provider) | join(",")')"
+assert_equals "state exclude keeps renderable providers empty" "[]" "$(printf '%s' "${out}" | jq -c '.providers')"
+
+out=$(run_state "${sanitized_error_fixture}")
+assert_equals "state sanitizes and truncates provider error message" "160|true|true" "$(printf '%s' "${out}" | jq -r '.providerMetrics[] | select(.provider == "cursor") | .error.message | [(length | tostring), (contains("\u0001") | not | tostring), (startswith("Tokenbad ") | tostring)] | join("|")')"
 
 out=$(run_state codexbar-antigravity-quad.json SHOWY_QUOTA_NOW_EPOCH=4070908800)
 assert_equals "state extraRateWindows exposes known window metrics" "Gemini Session|true|35|65|300|180" "$(printf '%s' "${out}" | jq -r '.providerMetrics[] | select(.provider == "antigravity") | .extraRateWindows[0] | [.title, .usageKnown, .usedPercent, .remainingPercent, .windowMinutes, .minutesUntilReset] | map(tostring) | join("|")')"

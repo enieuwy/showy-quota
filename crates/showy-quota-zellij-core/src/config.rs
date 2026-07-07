@@ -29,6 +29,7 @@ pub struct RenderConfig {
     pub palette_elapsed_long: String,
     pub stale_glyph: String,
     pub degraded_cli_glyph: String,
+    pub error_glyph: String,
 
     pub reset_description_timezone_offset_minutes: Option<i16>,
     pub good_min_remaining: i32,
@@ -73,6 +74,7 @@ impl Default for RenderConfig {
             palette_elapsed_long: "3ddbd9".into(),
             stale_glyph: "⚠".into(),
             degraded_cli_glyph: "⚠cli".into(),
+            error_glyph: "⚠".into(),
             reset_description_timezone_offset_minutes: None,
             good_min_remaining: 40,
             warn_min_remaining: 15,
@@ -213,6 +215,7 @@ impl RenderConfig {
             "SHOWY_QUOTA_DEGRADED_CLI_GLYPH",
             &mut self.degraded_cli_glyph,
         );
+        assign_glyph(&get, "SHOWY_QUOTA_ERROR_GLYPH", &mut self.error_glyph);
         self.reset_description_timezone_offset_minutes = get_timezone_offset_minutes(
             &get,
             "SHOWY_QUOTA_RESET_DESCRIPTION_TIMEZONE_OFFSET",
@@ -294,6 +297,7 @@ fn kdl_aliases(env_name: &str) -> &'static [&'static str] {
         "SHOWY_QUOTA_PROVIDERS_EXCLUDE" => &["providers_exclude"],
         "SHOWY_QUOTA_PROVIDER_ORDER" => &["provider_order"],
         "SHOWY_QUOTA_DEGRADED_CLI_GLYPH" => &["degraded_cli_glyph"],
+        "SHOWY_QUOTA_ERROR_GLYPH" => &["error_glyph"],
         "SHOWY_QUOTA_RESET_DESCRIPTION_TIMEZONE_OFFSET" => &["reset_description_timezone_offset"],
         _ => &[],
     }
@@ -481,10 +485,22 @@ mod tests {
     }
 
     #[test]
+    fn error_glyph_can_be_configured_from_env_and_kdl_alias() {
+        let mut env = BTreeMap::new();
+        env.insert("SHOWY_QUOTA_ERROR_GLYPH".into(), "!!".into());
+        assert_eq!(RenderConfig::from_env_map(&env).error_glyph, "!!");
+
+        let mut kdl = BTreeMap::new();
+        kdl.insert("error_glyph".into(), "?".into());
+        assert_eq!(RenderConfig::from_kdl_config(&kdl).error_glyph, "?");
+    }
+
+    #[test]
     fn glyph_config_rejects_control_chars_and_long_values() {
         let mut kdl = BTreeMap::new();
         kdl.insert("stale_glyph".into(), "\u{1b}[31m!".into());
         kdl.insert("degraded_cli_glyph".into(), "abcdefghijklmnopq".into());
+        kdl.insert("error_glyph".into(), "bad\n".into());
 
         let config = RenderConfig::from_kdl_config(&kdl);
 
@@ -493,6 +509,7 @@ mod tests {
             config.degraded_cli_glyph,
             RenderConfig::default().degraded_cli_glyph
         );
+        assert_eq!(config.error_glyph, RenderConfig::default().error_glyph);
     }
 
     #[test]
@@ -500,11 +517,13 @@ mod tests {
         let mut kdl = BTreeMap::new();
         kdl.insert("stale_glyph".into(), String::new());
         kdl.insert("degraded_cli_glyph".into(), "abcdefghijklmnop".into());
+        kdl.insert("error_glyph".into(), "abcdefghijklmnop".into());
 
         let config = RenderConfig::from_kdl_config(&kdl);
 
         assert_eq!(config.stale_glyph, "");
         assert_eq!(config.degraded_cli_glyph, "abcdefghijklmnop");
+        assert_eq!(config.error_glyph, "abcdefghijklmnop");
     }
 
     #[test]

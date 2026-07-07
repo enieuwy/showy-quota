@@ -157,9 +157,10 @@ CodexBar discovers providers; this repo discovers them via the cache content. En
 | `cacheAgeSeconds` | Seconds since usage cache mtime, or `null` when absent. |
 | `staleAfterSeconds` | Numeric stale threshold. |
 | `providers[]` | Filtered provider id strings in render order (for example, `"codex"`). This is the stable flat list external layout managers use for item reconciliation. |
-| `providerMetrics[]` | Filtered provider metrics in the same render order. Each element is `{ "provider": "codex", "windows": { "primary": W|null, "secondary": W|null, "tertiary": W|null }, "extraRateWindows": [E...] }`. |
+| `providerMetrics[]` | Filtered provider metrics in render order, plus valid errored providers after the same allow/exclude/order filters. Renderable entries are `{ "provider": "codex", "windows": { "primary": W|null, "secondary": W|null, "tertiary": W|null }, "extraRateWindows": [E...], "error": null }`; errored entries use the same window keys set to `null`, `extraRateWindows: []`, and `error: { "kind": K, "message": M }`. |
 | `providerMetrics[].windows.*` | Positional window slots; missing or non-numeric `usedPercent` slots are `null` and never shifted up. `W` contains `usedPercent`, `remainingPercent`, `resetsAt`, `resetDescription`, `windowMinutes`, and `minutesUntilReset`. |
 | `providerMetrics[].extraRateWindows[]` | Extra rate windows from CodexBar. `E` adds `title` and `usageKnown` to the same usage fields as `W`; unknown usage keeps usage fields `null`. |
+| `providerMetrics[].error` | `null` for renderable providers. For non-renderable provider errors, `kind` is bucketed by case-insensitive message substrings (`auth`, `login`, `session`, or `token` → `auth`; `cookie` → `cookies`; `timeout`, `connect`, `network`, or `refused` → `network`; otherwise `unknown`) and `message` is sanitized for state JSON/diagnose output. |
 | `providerCount` | `providers | length`. |
 | `sketchybar.compactRecommended` | `providerCount >= SHOWY_QUOTA_SKETCHYBAR_COMPACT_PROVIDER_COUNT`. |
 

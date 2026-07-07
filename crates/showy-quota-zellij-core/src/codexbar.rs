@@ -99,6 +99,10 @@ pub fn payload_has_renderable_provider(records: &[ProviderRecord]) -> bool {
     records.iter().any(is_renderable)
 }
 
+pub fn is_errored(record: &ProviderRecord) -> bool {
+    record.error.is_some() && valid_provider_id(&record.provider) && !is_renderable(record)
+}
+
 pub(crate) fn is_renderable(record: &ProviderRecord) -> bool {
     record.error.is_none()
         && valid_provider_id(&record.provider)
@@ -327,6 +331,40 @@ mod tests {
         assert!(usage.primary.is_none());
         assert_eq!(usage.secondary.as_ref().unwrap().used_percent, Some(0.0));
         assert_eq!(usage.tertiary.as_ref().unwrap().used_percent, Some(25.0));
+    }
+
+    #[test]
+    fn errored_records_require_error_and_valid_non_renderable_provider() {
+        let errored = ProviderRecord {
+            provider: "codex".into(),
+            error: Some(serde_json::json!({"message": "failed"})),
+            usage: None,
+        };
+        assert!(is_errored(&errored));
+
+        let invalid = ProviderRecord {
+            provider: "bad/id".into(),
+            error: Some(serde_json::json!({"message": "failed"})),
+            usage: None,
+        };
+        assert!(!is_errored(&invalid));
+
+        let renderable = ProviderRecord {
+            provider: "codex".into(),
+            error: None,
+            usage: Some(Usage {
+                primary: Some(UsageWindow {
+                    used_percent: Some(10.0),
+                    resets_at: None,
+                    reset_description: None,
+                    window_minutes: None,
+                }),
+                secondary: None,
+                tertiary: None,
+                extra_rate_windows: Vec::new(),
+            }),
+        };
+        assert!(!is_errored(&renderable));
     }
 
     #[test]

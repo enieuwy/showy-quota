@@ -5,9 +5,7 @@ use time::format_description::well_known::Rfc3339;
 use time::macros::format_description;
 use time::{Duration, OffsetDateTime, PrimitiveDateTime, Time, UtcOffset};
 
-use crate::codexbar::{
-    is_renderable, parse_usage_payload, NamedWindow, ProviderRecord, Usage, UsageWindow,
-};
+use crate::codexbar::{is_errored, is_renderable, NamedWindow, ProviderRecord, Usage, UsageWindow};
 use crate::config::RenderConfig;
 use crate::palette::hex_to_rgb;
 
@@ -62,8 +60,37 @@ fn render_with_format(
     options: RenderOptions,
     output_format: OutputFormat,
 ) -> Result<String, RenderError> {
-    let records = parse_usage_payload(payload).map_err(|_| RenderError::InvalidPayload)?;
+    let records = parse_render_payload(payload).map_err(|_| RenderError::InvalidPayload)?;
     Ok(render_records(&records, config, options, output_format))
+}
+
+fn parse_render_payload(payload: &[u8]) -> Result<Vec<ProviderRecord>, serde_json::Error> {
+    let records: Vec<ProviderRecord> = serde_json::from_slice(payload)?;
+    if records.iter().all(valid_render_record) {
+        Ok(records)
+    } else {
+        Err(serde_json::Error::io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "invalid CodexBar usage payload",
+        )))
+    }
+}
+
+fn valid_render_record(record: &ProviderRecord) -> bool {
+    record.usage.as_ref().is_none_or(|usage| {
+        valid_render_window(usage.primary.as_ref())
+            && valid_render_window(usage.secondary.as_ref())
+            && valid_render_window(usage.tertiary.as_ref())
+    })
+}
+
+fn valid_render_window(window: Option<&UsageWindow>) -> bool {
+    window.is_none_or(|window| window.used_percent.is_some())
+}
+
+enum RenderUnit<'a> {
+    Provider(Cow<'a, ProviderRecord>, String),
+    Error(&'a ProviderRecord, String),
 }
 
 fn render_records(
@@ -74,7 +101,7 @@ fn render_records(
 ) -> String {
     let mut records: Vec<&ProviderRecord> = records
         .iter()
-        .filter(|record| is_renderable(record))
+        .filter(|record| is_renderable(record) || is_errored(record))
         .collect();
     filter_and_sort(&mut records, config);
 
@@ -107,31 +134,49 @@ fn render_records(
         // Model-pooled providers (auto-detected `dual2`) are split into one
         // synthetic per-family `dual` provider each (`AGᴳ`, `AGᶜ`); everything
         // else renders as-is. Each unit then flows through the normal dual path.
-        let mut units: Vec<(Cow<ProviderRecord>, String)> = Vec::new();
+        let mut units: Vec<RenderUnit<'_>> = Vec::new();
         for record in records {
+            if is_errored(record) {
+                units.push(RenderUnit::Error(record, provider_sigil(&record.provider)));
+                continue;
+            }
             match expand_pooled(record, config) {
                 Some(families) => {
                     for (sigil, synthetic) in families {
-                        units.push((Cow::Owned(synthetic), sigil));
+                        units.push(RenderUnit::Provider(Cow::Owned(synthetic), sigil));
                     }
                 }
-                None => units.push((Cow::Borrowed(record), provider_sigil(&record.provider))),
+                None => units.push(RenderUnit::Provider(
+                    Cow::Borrowed(record),
+                    provider_sigil(&record.provider),
+                )),
             }
         }
-        for (idx, (record, sigil)) in units.iter().enumerate() {
+        for (idx, unit) in units.iter().enumerate() {
             if idx > 0 {
                 separator_space(&mut out, output_format, chunk_bg, options.color);
             }
-            render_provider(
-                &mut out,
-                record,
-                sigil,
-                config,
-                options,
-                output_format,
-                chunk_bg,
-                stale_color,
-            );
+            match unit {
+                RenderUnit::Provider(record, sigil) => render_provider(
+                    &mut out,
+                    record,
+                    sigil,
+                    config,
+                    options,
+                    output_format,
+                    chunk_bg,
+                    stale_color,
+                ),
+                RenderUnit::Error(record, sigil) => render_error_provider(
+                    &mut out,
+                    record,
+                    sigil,
+                    config,
+                    options,
+                    output_format,
+                    chunk_bg,
+                ),
+            }
         }
     }
 
@@ -195,6 +240,58 @@ fn position(items: &[String], provider: &str) -> usize {
 
 fn contains(items: &[String], provider: &str) -> bool {
     items.iter().any(|item| item == provider)
+}
+
+fn render_error_provider(
+    out: &mut String,
+    record: &ProviderRecord,
+    sigil: &str,
+    config: &RenderConfig,
+    options: RenderOptions,
+    output_format: OutputFormat,
+    chunk_bg: &str,
+) {
+    debug_assert!(is_errored(record));
+    let error_color = &config.palette_countdown_warn;
+    let cap_left = cap_text(output_format, &config.cap_left);
+    style_text(
+        out,
+        cap_left.as_ref(),
+        Some(error_color),
+        Some(chunk_bg),
+        Weight::Normal,
+        output_format,
+        options.color,
+    );
+    style_text(
+        out,
+        sigil,
+        Some(chunk_bg),
+        Some(error_color),
+        Weight::Bold,
+        output_format,
+        options.color,
+    );
+    let label = format!("{}err", config.error_glyph);
+    style_text(
+        out,
+        &label,
+        Some(error_color),
+        Some(chunk_bg),
+        Weight::Normal,
+        output_format,
+        options.color,
+    );
+    let cap_right = cap_text(output_format, &config.cap_right);
+    style_text(
+        out,
+        cap_right.as_ref(),
+        Some(chunk_bg),
+        Some(chunk_bg),
+        Weight::Normal,
+        output_format,
+        options.color,
+    );
 }
 
 fn render_provider(
@@ -1490,6 +1587,128 @@ mod tests {
             },
         )
         .expect("rendered idle fixture")
+    }
+
+    fn base_options(color: bool) -> RenderOptions {
+        RenderOptions {
+            color,
+            stale: false,
+            degraded_cli: false,
+            now_epoch: 4_070_908_800,
+        }
+    }
+
+    const CLAUDE_RENDERABLE: &[u8] = br#"[
+        {
+            "provider": "claude",
+            "usage": {
+                "primary": {
+                    "usedPercent": 10,
+                    "resetsAt": "2099-01-01T01:00:00Z",
+                    "windowMinutes": 300
+                },
+                "secondary": {"usedPercent": 20}
+            }
+        }
+    ]"#;
+
+    const CLAUDE_THEN_CURSOR_ERROR: &[u8] = br#"[
+        {
+            "provider": "claude",
+            "usage": {
+                "primary": {
+                    "usedPercent": 10,
+                    "resetsAt": "2099-01-01T01:00:00Z",
+                    "windowMinutes": 300
+                },
+                "secondary": {"usedPercent": 20}
+            }
+        },
+        {
+            "provider": "cursor",
+            "error": {"message": "network failed"}
+        }
+    ]"#;
+
+    #[test]
+    fn zellij_error_only_renders_error_chunks_instead_of_idle() {
+        let output = render_zellij(
+            include_bytes!("../../../test/fixtures/codexbar-error-only.json"),
+            &RenderConfig::default(),
+            base_options(false),
+        )
+        .expect("rendered error-only fixture");
+
+        assert_eq!(output, "CR⚠err FA⚠err\n");
+        assert!(!output.contains("AI idle"), "{output}");
+    }
+
+    #[test]
+    fn tmux_error_only_renders_error_chunks_instead_of_idle() {
+        let output = render_tmux(
+            include_bytes!("../../../test/fixtures/codexbar-error-only.json"),
+            &RenderConfig::default(),
+            base_options(false),
+        )
+        .expect("rendered error-only fixture");
+
+        assert!(
+            output.contains(
+                "#[fg=#161616,bg=#ee5396,bold]CR#[default]#[fg=#ee5396,bg=#161616]⚠err#[default]"
+            ),
+            "{output}"
+        );
+        assert!(
+            output.contains(
+                "#[fg=#161616,bg=#ee5396,bold]FA#[default]#[fg=#ee5396,bg=#161616]⚠err#[default]"
+            ),
+            "{output}"
+        );
+        assert!(!output.contains("AI idle"), "{output}");
+    }
+
+    #[test]
+    fn mixed_render_keeps_provider_chunk_before_error_chunk() {
+        let config = RenderConfig::default();
+        let renderable = render_zellij(CLAUDE_RENDERABLE, &config, base_options(false))
+            .expect("rendered renderable provider");
+        let mixed = render_zellij(CLAUDE_THEN_CURSOR_ERROR, &config, base_options(false))
+            .expect("rendered mixed provider/error payload");
+        let renderable_chunk = renderable.trim_end_matches('\n');
+
+        let suffix = mixed
+            .strip_prefix(renderable_chunk)
+            .expect("mixed output keeps renderable chunk prefix unchanged");
+        assert_eq!(suffix, " CR⚠err\n");
+    }
+
+    #[test]
+    fn custom_error_glyph_is_honored() {
+        let config = RenderConfig {
+            error_glyph: "!!".into(),
+            ..RenderConfig::default()
+        };
+        let output = render_zellij(
+            include_bytes!("../../../test/fixtures/codexbar-error-only.json"),
+            &config,
+            base_options(false),
+        )
+        .expect("rendered error-only fixture");
+
+        assert!(output.contains("CR!!err"), "{output}");
+        assert!(!output.contains("CR⚠err"), "{output}");
+    }
+
+    #[test]
+    fn invalid_id_errored_records_are_dropped_to_idle() {
+        let output = render_zellij(
+            br#"[{"provider": "bad/id", "error": {"message": "nope"}}]"#,
+            &RenderConfig::default(),
+            base_options(false),
+        )
+        .expect("rendered invalid-id error payload");
+
+        assert_eq!(output, "AI idle\n");
     }
 
     #[test]

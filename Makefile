@@ -229,6 +229,11 @@ doctor: ## Check runtime prerequisites without touching the system.
 
 diagnose: ## Print runtime state useful for bug reports.
 	@$(REPO)/bin/showy-quota --diagnose
+	@if command -v jq >/dev/null 2>&1; then \
+		"$(REPO)/bin/showy-quota-state" --json 2>/dev/null \
+			| jq -r '.providerMetrics[]? | select(.error != null) | "provider errors: \(.provider): \(.error.kind): \(.error.message)"' 2>/dev/null \
+			|| true; \
+	fi
 
 lint: ## Run shellcheck if available.
 	@if command -v shellcheck >/dev/null 2>&1; then \
