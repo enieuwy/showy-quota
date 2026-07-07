@@ -24,10 +24,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   (no refresh-window fetch) for hot-path consumers.
 - Agent-CLI statusline adapter (`adapters/agent-cli/showy-quota-statusline`):
   renders the quota strip inside Claude Code (`statusLine` command) and any
-  tool that displays a command's one-line ANSI output. Powerline caps are
-  off by default for non-Nerd-Font hosts (`SHOWY_QUOTA_STATUSLINE_CAPS=1`
-  restores), width defaults to 8 cells via `SHOWY_QUOTA_STATUSLINE_WIDTH`.
-  See `docs/statusline.md`.
+  tool that displays a command's one-line ANSI output. Rounded Powerline
+  caps are inherited like every other strip (`SHOWY_QUOTA_STATUSLINE_CAPS=0`
+  drops them on plain-font hosts), width defaults to 8 cells via
+  `SHOWY_QUOTA_STATUSLINE_WIDTH`. See `docs/statusline.md`.
 - `make ci-gates`: runs every CI gate locally (lint, shell suite, rustfmt,
   clippy `-D warnings`, workspace tests, cargo audit, plugin build, WASM
   export check) — run before tagging a release. The WASM export check moved

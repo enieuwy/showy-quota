@@ -9,9 +9,11 @@
 # Statusline defaults differ from the terminal/Zellij driver:
 #   - width defaults to SHOWY_QUOTA_STATUSLINE_WIDTH (fallback 8), narrower than
 #     the 12-cell terminal strip because status lines are cramped;
-#   - Powerline-Extra end caps (U+E0B6/U+E0B4) are OFF by default because agent
-#     CLIs often render in a plain font that lacks Nerd Font glyphs and would
-#     show tofu. Set SHOWY_QUOTA_STATUSLINE_CAPS=1 to restore them.
+#   - Powerline-Extra end caps (U+E0B6/U+E0B4) are inherited from the bar's
+#     defaults / the user's SHOWY_QUOTA_CAP_* config, exactly like the Zellij
+#     and tmux strips. If the agent CLI renders in a plain font and shows tofu
+#     boxes, set SHOWY_QUOTA_STATUSLINE_CAPS=0 to drop the caps here without
+#     touching the other surfaces.
 #
 # It never hard-fails: if the bar cannot be found it prints `AI ?` and exits 0,
 # because a status-line segment must never break the shell/harness that runs it.
@@ -84,9 +86,10 @@ fi
 # statusline-specific knob; else 8 cells.
 export SHOWY_QUOTA_ZELLIJ_BAR_WIDTH="${SHOWY_QUOTA_ZELLIJ_BAR_WIDTH:-${SHOWY_QUOTA_STATUSLINE_WIDTH:-8}}"
 
-# Powerline caps off unless explicitly re-enabled. When re-enabled we leave the
-# bar's own cap defaults (or the user's SHOWY_QUOTA_CAP_* config) untouched.
-if [[ "${SHOWY_QUOTA_STATUSLINE_CAPS:-0}" != "1" ]]; then
+# Caps: inherit by default so the statusline matches the user's other strips
+# (rounded caps are the renderer-wide default). SHOWY_QUOTA_STATUSLINE_CAPS=0
+# opts this surface out for hosts without Nerd Font glyphs.
+if [[ "${SHOWY_QUOTA_STATUSLINE_CAPS:-1}" == "0" ]]; then
     export SHOWY_QUOTA_CAP_LEFT=""
     export SHOWY_QUOTA_CAP_RIGHT=""
 fi

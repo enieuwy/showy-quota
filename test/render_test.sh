@@ -5073,14 +5073,15 @@ out=$(run_statusline) || rc=$?
 assert_equals "statusline exits 0 with a seeded cache" "0" "${rc}"
 assert_contains "statusline renders the provider strip from stdin+cache" "CX" "${out}"
 
-# Powerline end caps (U+E0B6 = ee82b6, U+E0B4 = ee82b4) are off by default and
-# restored by SHOWY_QUOTA_STATUSLINE_CAPS=1.
+# Powerline end caps (U+E0B6 = ee82b6, U+E0B4 = ee82b4) are inherited from the
+# bar's defaults (on, like every other strip) and dropped by
+# SHOWY_QUOTA_STATUSLINE_CAPS=0 for plain-font hosts.
 statusline_default_bytes=$(run_statusline | od -An -tx1 | tr -d ' \n')
-assert_not_contains "statusline omits the left powerline cap by default" "ee82b6" "${statusline_default_bytes}"
-assert_not_contains "statusline omits the right powerline cap by default" "ee82b4" "${statusline_default_bytes}"
-statusline_caps_bytes=$(run_statusline SHOWY_QUOTA_STATUSLINE_CAPS=1 | od -An -tx1 | tr -d ' \n')
-assert_contains "statusline caps=1 restores the left powerline cap" "ee82b6" "${statusline_caps_bytes}"
-assert_contains "statusline caps=1 restores the right powerline cap" "ee82b4" "${statusline_caps_bytes}"
+assert_contains "statusline inherits the left powerline cap by default" "ee82b6" "${statusline_default_bytes}"
+assert_contains "statusline inherits the right powerline cap by default" "ee82b4" "${statusline_default_bytes}"
+statusline_caps_bytes=$(run_statusline SHOWY_QUOTA_STATUSLINE_CAPS=0 | od -An -tx1 | tr -d ' \n')
+assert_not_contains "statusline caps=0 drops the left powerline cap" "ee82b6" "${statusline_caps_bytes}"
+assert_not_contains "statusline caps=0 drops the right powerline cap" "ee82b4" "${statusline_caps_bytes}"
 
 # Width/caps env contract, isolated from the renderer via a reporting bar stub
 # that echoes the env the adapter hands it (proving SHOWY_QUOTA_BAR_BIN resolution).
@@ -5098,10 +5099,10 @@ run_statusline_stub() {
         "$@" \
         "${STATUSLINE_BIN}"
 }
-assert_equals "statusline defaults width to 8 and caps off" "width=8 capL=[] capR=[]" "$(run_statusline_stub)"
-assert_equals "statusline width knob overrides the default" "width=5 capL=[] capR=[]" "$(run_statusline_stub SHOWY_QUOTA_STATUSLINE_WIDTH=5)"
-assert_equals "statusline explicit bar width wins over the knob" "width=11 capL=[] capR=[]" "$(run_statusline_stub SHOWY_QUOTA_ZELLIJ_BAR_WIDTH=11 SHOWY_QUOTA_STATUSLINE_WIDTH=5)"
-assert_equals "statusline caps=1 leaves the bar cap defaults untouched" "width=8 capL=[UNSET] capR=[UNSET]" "$(run_statusline_stub SHOWY_QUOTA_STATUSLINE_CAPS=1)"
+assert_equals "statusline width knob overrides the default" "width=5 capL=[UNSET] capR=[UNSET]" "$(run_statusline_stub SHOWY_QUOTA_STATUSLINE_WIDTH=5)"
+assert_equals "statusline explicit bar width wins over the knob" "width=11 capL=[UNSET] capR=[UNSET]" "$(run_statusline_stub SHOWY_QUOTA_ZELLIJ_BAR_WIDTH=11 SHOWY_QUOTA_STATUSLINE_WIDTH=5)"
+assert_equals "statusline default leaves the bar cap defaults untouched" "width=8 capL=[UNSET] capR=[UNSET]" "$(run_statusline_stub)"
+assert_equals "statusline caps=0 blanks the caps for plain-font hosts" "width=8 capL=[] capR=[]" "$(run_statusline_stub SHOWY_QUOTA_STATUSLINE_CAPS=0)"
 
 # Unresolvable bar => neutral "AI ?" segment, exit 0. Isolate a copy of the
 # adapter from its sibling bin/ and clear PATH so no bar can be found.

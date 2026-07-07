@@ -23,7 +23,8 @@ because a status-line segment must never break the harness that runs it.
 ## Output shape
 
 The adapter emits the same styled one-line strip as the Zellij/zjstatus driver,
-just narrower and (by default) without Powerline end caps:
+just narrower — rounded end caps and all (set `SHOWY_QUOTA_STATUSLINE_CAPS=0`
+for plain-font hosts, which yields the capless form):
 
 ```text
 CX▕▀▀▀▀▀▀▀▀▏1:23 CL▕▀▀▀▀▀▀▀▀▏1:08
@@ -99,7 +100,7 @@ shell profile, or `~/.config/showy-quota/config.env`, which the bar sources):
 | Variable | Default | Meaning |
 |---|---|---|
 | `SHOWY_QUOTA_STATUSLINE_WIDTH` | `8` | Bar body width in terminal cells. Narrower than the 12-cell terminal strip because status lines are cramped. Feeds `SHOWY_QUOTA_ZELLIJ_BAR_WIDTH`. |
-| `SHOWY_QUOTA_STATUSLINE_CAPS` | `0` | `1` re-enables the Powerline-Extra rounded end caps (U+E0B6 / U+E0B4). Off by default because agent-CLI status lines may render in a font without Nerd Font glyphs, where the caps show as tofu. |
+| `SHOWY_QUOTA_STATUSLINE_CAPS` | `1` | `0` drops the Powerline-Extra rounded end caps (U+E0B6 / U+E0B4) on this surface only. Caps are inherited from the bar's defaults / your `SHOWY_QUOTA_CAP_*` config, matching the Zellij and tmux strips; opt out when the agent CLI renders in a font without Nerd Font glyphs, where the caps show as tofu. |
 | `SHOWY_QUOTA_BAR_BIN` | — | Override the resolved `showy-quota-zellij-bar` path (absolute path or a command name on `PATH`). |
 
 Precedence: an explicit `SHOWY_QUOTA_ZELLIJ_BAR_WIDTH` or `SHOWY_QUOTA_CAP_LEFT` /
