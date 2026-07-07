@@ -378,10 +378,14 @@ showy_quota_reset_description_epoch() {
     # branch below: GNU `date -d` (unlike BSD `date -j -f`) ignores the
     # strptime format and leniently fills the missing date from the real clock,
     # which would both mis-parse and ignore SHOWY_QUOTA_NOW_EPOCH.
+    # Reset descriptions carry minute precision; floor to the minute so the
+    # result is deterministic. BSD `date -j -f` fills seconds from the real
+    # clock when the format lacks %S, which would otherwise make two calls a
+    # second apart disagree.
     if [[ "${desc}" == *[0-9][0-9][0-9][0-9]* ]]; then
         for fmt in '%b %d, %Y %I:%M %p' '%B %d, %Y %I:%M %p'; do
             if epoch=$(showy_quota_parse_local_epoch "${fmt}" "${desc}"); then
-                printf '%s\n' "${epoch}"
+                printf '%s\n' "$(( epoch - epoch % 60 ))"
                 return 0
             fi
         done
@@ -394,6 +398,7 @@ showy_quota_reset_description_epoch() {
     elif today=$(date -d "@${now}" '+%Y-%m-%d' 2>/dev/null); then :
     else return 1; fi
     if epoch=$(showy_quota_parse_local_epoch '%Y-%m-%d %I:%M %p' "${today} ${desc}"); then
+        epoch=$(( epoch - epoch % 60 ))
         if (( epoch < now )); then
             epoch=$((epoch + 86400))
         fi
