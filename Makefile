@@ -118,12 +118,6 @@ install-copy: ## Copy runtime tree into DATA_DIR and link commands into BIN_DIR.
 		rm -f "$(DATA_DIR)/bin/showy-quota-render"; \
 		printf 'warning: showy-quota-render not installed; terminal strips will show "AI ?" with a hint until you run make render-bin or install a release tarball with bin/showy-quota-render\n' >&2; \
 	fi; \
-	if [ -x "$(DATA_DIR)/bin/showy-quota-render" ]; then \
-		mkdir -p "$(DATA_DIR)/target/release"; \
-		ln -sfn "../../bin/showy-quota-render" "$(DATA_DIR)/target/release/showy-quota-render"; \
-	else \
-		rm -f "$(DATA_DIR)/target/release/showy-quota-render"; \
-	fi; \
 	for name in $(BIN_NAMES); do chmod +x "$(DATA_DIR)/bin/$$name"; done; \
 	printf 'copied runtime tree to %s\n' "$(DATA_DIR)"
 	@for name in $(COPY_BIN_NAMES); do \

@@ -6,7 +6,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-07-07
+
 ### Added
+- The bar drivers resolve `showy-quota-render` as a sibling of the driver
+  script before consulting PATH or the repo `target/release` build, so
+  copied installs and release tarballs work hermetically without PATH
+  setup; the `SHOWY_QUOTA_RENDER_BIN` override is now documented in
+  `config.env.example`.
 - Native `showy-quota-render` binary (built from the core crate): renders the
   terminal strip from CodexBar JSON on stdin or `--json <path|->` in zellij
   ANSI (`--format zellij`, default) or tmux markup (`--format tmux`), takes
@@ -48,6 +55,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   and flag wiring against the in-process renderer.
 
 ### Fixed
+- The core crate's provider discovery now matches the shell fetcher's strict
+  contract: any enabled inventory record with an invalid provider id is a
+  discovery failure (`ProviderConfigError::InvalidInventory`) instead of
+  being silently dropped when other records are valid, and the core
+  `valid_provider_id` rejects the path components `.` and `..` like the
+  shell predicate does.
 - Shell pacing-marker math (`showy_quota_elapsed_marker_cell` in `lib/strip.sh`
   and `elapsed_marker_x` in the SketchyBar plugin) no longer divides by zero
   when an absurd `windowMinutes` (e.g. `2^62`) wraps 64-bit arithmetic to a
@@ -636,7 +649,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `bin/showy-quota-fetch`: cache dir and files now persist as `0700`/`0600`
   instead of the user's default umask. CodexBar usage JSON stays user-only.
 
-[Unreleased]: https://github.com/enieuwy/showy-quota/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/enieuwy/showy-quota/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/enieuwy/showy-quota/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/enieuwy/showy-quota/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/enieuwy/showy-quota/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/enieuwy/showy-quota/compare/v0.2.5...v0.3.0

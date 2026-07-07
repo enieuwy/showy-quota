@@ -1051,7 +1051,7 @@ impl State {
                     self.fallback_after_discovery();
                 }
             }
-            Err(ProviderConfigError::AllInvalid) | Err(ProviderConfigError::Parse(_)) => {
+            Err(ProviderConfigError::InvalidInventory) | Err(ProviderConfigError::Parse(_)) => {
                 self.discovery_failed_at = Some(now);
                 if resume_usage {
                     self.discovered_providers_at = None;

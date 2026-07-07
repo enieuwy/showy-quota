@@ -112,8 +112,14 @@ pub(crate) fn is_renderable(record: &ProviderRecord) -> bool {
             .is_some_and(Usage::has_renderable_window)
 }
 
+/// Shared provider-id predicate, byte-for-byte with the shell's
+/// `valid_provider_id`: the character-class check plus rejection of the
+/// path components `.` and `..`, which would escape per-provider stamp
+/// paths in the shell data plane.
 pub fn valid_provider_id(provider: &str) -> bool {
     !provider.is_empty()
+        && provider != "."
+        && provider != ".."
         && provider
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'-'))
@@ -150,33 +156,32 @@ pub struct ProviderConfigRecord {
 }
 
 /// Parse the output of `codexbar config providers --format json [--pretty]`.
-/// Returns the enabled, regex-validated provider ids in the order CodexBar
-/// reported them, or an error when the payload is not a JSON array.
+/// Returns the enabled, validated provider ids in the order CodexBar
+/// reported them (duplicates collapsed), or an error when the payload is not
+/// a JSON array.
 ///
-/// Mirror of the shell fetcher's two-pass discovery: if the inventory has
-/// records but none pass `valid_provider_id`, the whole response is treated
-/// as a discovery failure to avoid silently publishing an empty cache when
-/// CodexBar is misconfigured. An empty array (or all-disabled response) is a
-/// canonical empty inventory and returns `Ok(vec![])` so callers can decide
-/// to publish `[]` rather than block.
+/// Mirror of the shell fetcher's strict discovery contract: ANY enabled
+/// record whose id fails [`valid_provider_id`] marks the whole inventory as
+/// untrustworthy and is a discovery failure — silently dropping a corrupted
+/// record would hide a real provider without an error, and an all-invalid
+/// inventory must never publish an empty cache over real data. An empty
+/// array (or all-disabled response) is a canonical empty inventory and
+/// returns `Ok(vec![])` so callers can decide to publish `[]` rather than
+/// block.
 pub fn parse_provider_config_payload(payload: &[u8]) -> Result<Vec<String>, ProviderConfigError> {
     let raw: Vec<ProviderConfigRecord> =
         serde_json::from_slice(payload).map_err(ProviderConfigError::Parse)?;
-    let mut any_enabled = false;
     let mut enabled_valid: Vec<String> = Vec::new();
     for record in raw {
         if !record.enabled {
             continue;
         }
-        any_enabled = true;
-        if valid_provider_id(&record.provider)
-            && !enabled_valid.iter().any(|id| id == &record.provider)
-        {
+        if !valid_provider_id(&record.provider) {
+            return Err(ProviderConfigError::InvalidInventory);
+        }
+        if !enabled_valid.iter().any(|id| id == &record.provider) {
             enabled_valid.push(record.provider);
         }
-    }
-    if any_enabled && enabled_valid.is_empty() {
-        return Err(ProviderConfigError::AllInvalid);
     }
     Ok(enabled_valid)
 }
@@ -185,17 +190,18 @@ pub fn parse_provider_config_payload(payload: &[u8]) -> Result<Vec<String>, Prov
 pub enum ProviderConfigError {
     /// The discovery payload was not a JSON array of provider config records.
     Parse(serde_json::Error),
-    /// The discovery payload had enabled records but none passed
-    /// [`valid_provider_id`]; treat as discovery failure rather than empty.
-    AllInvalid,
+    /// The discovery payload had an enabled record whose id failed
+    /// [`valid_provider_id`]; the inventory is untrustworthy, treat as a
+    /// discovery failure rather than dropping records or publishing empty.
+    InvalidInventory,
 }
 
 impl std::fmt::Display for ProviderConfigError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Parse(err) => write!(f, "invalid codexbar config providers payload: {err}"),
-            Self::AllInvalid => {
-                f.write_str("codexbar config providers returned only invalid provider ids")
+            Self::InvalidInventory => {
+                f.write_str("codexbar config providers returned invalid provider ids")
             }
         }
     }
@@ -205,7 +211,7 @@ impl std::error::Error for ProviderConfigError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Parse(err) => Some(err),
-            Self::AllInvalid => None,
+            Self::InvalidInventory => None,
         }
     }
 }
@@ -272,18 +278,26 @@ mod tests {
     fn parse_provider_config_rejects_all_invalid_enabled_ids() {
         let payload = br#"[{"provider": "bad/id", "enabled": true}]"#;
         let err = parse_provider_config_payload(payload).expect_err("must fail");
-        assert!(matches!(err, ProviderConfigError::AllInvalid));
+        assert!(matches!(err, ProviderConfigError::InvalidInventory));
     }
 
     #[test]
-    fn parse_provider_config_keeps_mixed_valid_invalid_subset() {
-        // Invalid ids are silently skipped when at least one valid id passes.
+    fn parse_provider_config_rejects_mixed_valid_invalid_inventory() {
+        // Strict contract, mirroring the shell fetcher: one corrupted record
+        // poisons the batch — dropping it would silently hide a provider.
         let payload = br#"[
             {"provider": "ok.id",  "enabled": true},
             {"provider": "bad/id", "enabled": true}
         ]"#;
-        let ids = parse_provider_config_payload(payload).expect("partial valid");
-        assert_eq!(ids, vec!["ok.id"]);
+        let err = parse_provider_config_payload(payload).expect_err("must fail");
+        assert!(matches!(err, ProviderConfigError::InvalidInventory));
+    }
+
+    #[test]
+    fn parse_provider_config_rejects_dot_provider_ids() {
+        let payload = br#"[{"provider": ".", "enabled": true}]"#;
+        let err = parse_provider_config_payload(payload).expect_err("must fail");
+        assert!(matches!(err, ProviderConfigError::InvalidInventory));
     }
 
     #[test]

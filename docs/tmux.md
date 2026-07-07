@@ -61,8 +61,8 @@ fallback: #[…]CL▕▀▀▀▀▀▀▀▀▀▀▀▀▏12m #[…]⚠c
 when you use a release tarball, and `make install-bin` builds/links it for
 source installs. If you keep a custom renderer build somewhere else, set
 `SHOWY_QUOTA_RENDER_BIN=/absolute/path/to/showy-quota-render`; otherwise the
-driver looks for `showy-quota-render` on PATH and then in the repo's
-`target/release/` directory.
+driver looks for a `showy-quota-render` sibling next to the driver script,
+then on PATH, then in the repo's `target/release/` directory.
 
 ## Font requirements
 

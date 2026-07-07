@@ -69,6 +69,14 @@ resolve_render_bin() {
         fi
     fi
 
+    # Sibling binary: copied installs and release tarballs ship
+    # showy-quota-render next to this driver, so the installed tree works
+    # without PATH or a checkout.
+    if [[ -x "${SCRIPT_DIR}/showy-quota-render" ]]; then
+        printf '%s\n' "${SCRIPT_DIR}/showy-quota-render"
+        return 0
+    fi
+
     if resolved="$(command -v showy-quota-render 2>/dev/null)"; then
         printf '%s\n' "${resolved}"
         return 0
