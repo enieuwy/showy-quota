@@ -1307,15 +1307,18 @@ impl State {
             return false;
         }
         if let Some(state) = self.provider_states.get(provider) {
-            if let Some(active_attempt) = state.active_attempt_token.as_deref() {
-                if attempt != Some(active_attempt) {
-                    // Late result from an expired command; ignore it so a
-                    // previously wedged provider cannot overwrite newer state.
-                    return false;
-                }
-            } else if attempt.is_some() && state.last_failure_seconds.is_some() && !state.in_flight
-            {
-                return false;
+            // Strict attempt matching, same rule as handle_discovery_result:
+            // a result is accepted only for the exact live attempt (or on the
+            // legacy tokenless path). A tokened result arriving when no
+            // attempt is active is late, orphaned (its token was cleared by
+            // clear_all_provider_in_flight), or a duplicate — accepting it
+            // could overwrite a newer success with stale data. Rejection is
+            // cheap: in_flight is already false and no failure/backoff is
+            // recorded, so the next tick simply re-kicks the provider.
+            match (attempt, state.active_attempt_token.as_deref()) {
+                (Some(result_token), Some(active)) if result_token == active => {}
+                (None, None) => {}
+                _ => return false,
             }
         }
         if let Some(state) = self.provider_states.get_mut(provider) {
@@ -3106,6 +3109,66 @@ mod tests {
             provider_fallback_context_with_attempt("codex", "old"),
         )));
         assert!(state.last_payload.is_none());
+    }
+
+    #[test]
+    fn late_result_after_newer_success_is_ignored() {
+        let mut state = State {
+            permissions_granted: false,
+            source: Source::Cli,
+            provider_failure_backoff_seconds: 1.0,
+            discovered_providers: vec!["codex".to_string()],
+            discovered_providers_at: Some(now_seconds()),
+            ..State::default()
+        };
+        // Attempt "a" is kicked, then its token is wiped while the command is
+        // still running (PermissionRequestResult -> clear_all_provider_in_flight).
+        let entry = state.provider_states.entry("codex".into()).or_default();
+        entry.in_flight = true;
+        entry.active_attempt_token = Some("a".to_string());
+        state.clear_all_provider_in_flight();
+
+        // Attempt "b" is kicked and succeeds; the provider now has fresh data
+        // and, crucially, no recorded failure.
+        let entry = state.provider_states.entry("codex".into()).or_default();
+        entry.in_flight = true;
+        entry.active_attempt_token = Some("b".to_string());
+        assert!(state.update(Event::RunCommandResult(
+            Some(0),
+            provider_record(&mixed_payload(), "codex"),
+            Vec::new(),
+            provider_fallback_context_with_attempt("codex", "b"),
+        )));
+        let fresh_payload = state.last_payload.clone();
+        assert!(fresh_payload.is_some());
+        let fresh_record = state
+            .provider_states
+            .get("codex")
+            .and_then(|entry| entry.last_record.clone());
+        assert!(fresh_record.is_some());
+
+        // Attempt "a"'s delayed result must be rejected outright — before this
+        // guard, the missing last_failure_seconds let it overwrite "b"'s
+        // fresher record with stale data.
+        assert!(!state.update(Event::RunCommandResult(
+            Some(0),
+            b"[]".to_vec(),
+            Vec::new(),
+            provider_fallback_context_with_attempt("codex", "a"),
+        )));
+        assert_eq!(state.last_payload, fresh_payload);
+        assert_eq!(
+            state
+                .provider_states
+                .get("codex")
+                .and_then(|entry| entry.last_record.clone()),
+            fresh_record
+        );
+        // The rejected result must not disturb scheduling state either: no
+        // failure recorded, nothing in flight, so the next tick may re-kick.
+        let entry = state.provider_states.get("codex").expect("provider state");
+        assert!(!entry.in_flight);
+        assert!(entry.last_failure_seconds.is_none());
     }
 
     #[test]

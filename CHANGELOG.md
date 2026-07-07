@@ -6,6 +6,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- The Zellij plugin rejects late per-provider CLI results whose attempt token
+  no longer matches the live attempt, using the same strict rule as discovery.
+  Previously a delayed result from a superseded attempt (its token cleared by
+  a permission re-grant while the command was still running) was accepted
+  whenever the provider had no recorded failure, letting stale data overwrite
+  a newer successful record until the next refresh.
+
 ### Added
 - `showy-quota guard`: scriptable quota gate for automation (CI pre-flight,
   agent hooks, cron). Selects providers/windows (`--provider`, `--window
