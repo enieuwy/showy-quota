@@ -1243,7 +1243,7 @@ fn terminal_mode_for_provider(
     mode.to_string()
 }
 
-fn provider_sigil(provider: &str) -> String {
+pub(crate) fn provider_sigil(provider: &str) -> String {
     match provider {
         "codex" => "CX".into(),
         "claude" => "CL".into(),
@@ -1289,7 +1289,7 @@ fn primary_label(minutes: Option<i64>, remaining: i32, reset_value: Option<&str>
     "?".into()
 }
 
-fn format_countdown(minutes: i64) -> String {
+pub(crate) fn format_countdown(minutes: i64) -> String {
     if minutes <= 0 {
         return "now".into();
     }

@@ -1,7 +1,9 @@
+pub mod cache;
 pub mod codexbar;
 pub mod config;
 pub mod metrics;
 pub mod palette;
+pub mod prompt;
 pub mod render;
 pub(crate) mod reset;
 
@@ -12,4 +14,5 @@ pub use codexbar::{
 };
 pub use config::RenderConfig;
 pub use metrics::emit_provider_metrics;
+pub use prompt::{emit_prompt_segment, PromptOptions};
 pub use render::{render_tmux, render_zellij, OutputFormat, RenderError, RenderOptions};

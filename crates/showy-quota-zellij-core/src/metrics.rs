@@ -7,27 +7,27 @@ use crate::render::RenderError;
 use crate::reset::minutes_until;
 
 #[derive(Serialize)]
-struct ProviderMetric {
-    provider: String,
-    windows: WindowsMetric,
+pub(crate) struct ProviderMetric {
+    pub(crate) provider: String,
+    pub(crate) windows: WindowsMetric,
     #[serde(rename = "extraRateWindows")]
     extra_rate_windows: Vec<ExtraWindowMetric>,
     error: Option<ErrorMetric>,
 }
 
 #[derive(Serialize)]
-struct WindowsMetric {
-    primary: Option<WindowMetric>,
-    secondary: Option<WindowMetric>,
-    tertiary: Option<WindowMetric>,
+pub(crate) struct WindowsMetric {
+    pub(crate) primary: Option<WindowMetric>,
+    pub(crate) secondary: Option<WindowMetric>,
+    pub(crate) tertiary: Option<WindowMetric>,
 }
 
 #[derive(Clone, Serialize)]
-struct WindowMetric {
+pub(crate) struct WindowMetric {
     #[serde(rename = "usedPercent")]
-    used_percent: i32,
+    pub(crate) used_percent: i32,
     #[serde(rename = "remainingPercent")]
-    remaining_percent: i32,
+    pub(crate) remaining_percent: i32,
     #[serde(rename = "resetsAt")]
     resets_at: Option<String>,
     #[serde(rename = "resetDescription")]
@@ -35,7 +35,7 @@ struct WindowMetric {
     #[serde(rename = "windowMinutes")]
     window_minutes: Option<i64>,
     #[serde(rename = "minutesUntilReset")]
-    minutes_until_reset: Option<i64>,
+    pub(crate) minutes_until_reset: Option<i64>,
 }
 
 #[derive(Serialize)]
@@ -77,9 +77,18 @@ pub fn emit_provider_metrics(
     config: &RenderConfig,
     now_epoch: i64,
 ) -> Result<String, RenderError> {
+    let metrics = provider_metrics(payload, config, now_epoch)?;
+    serde_json::to_string(&metrics).map_err(|_| RenderError::InvalidPayload)
+}
+
+pub(crate) fn provider_metrics(
+    payload: &[u8],
+    config: &RenderConfig,
+    now_epoch: i64,
+) -> Result<Vec<ProviderMetric>, RenderError> {
     let value: Value = serde_json::from_slice(payload).map_err(|_| RenderError::InvalidPayload)?;
     let Value::Array(records) = value else {
-        return Ok(String::from("[]"));
+        return Ok(Vec::new());
     };
     let records: Vec<ProviderRecord> =
         serde_json::from_value(Value::Array(records)).map_err(|_| RenderError::InvalidPayload)?;
@@ -90,8 +99,7 @@ pub fn emit_provider_metrics(
         .collect();
 
     sort_metrics(&mut metrics, config);
-
-    serde_json::to_string(&metrics).map_err(|_| RenderError::InvalidPayload)
+    Ok(metrics)
 }
 
 fn provider_metric(

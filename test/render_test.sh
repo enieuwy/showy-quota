@@ -246,6 +246,14 @@ fixture_path() {
         printf '%s' "${FIXTURE_DIR}/${fixture}"
     fi
 }
+
+seed_usage_cache() {
+    local cache="$1" fixture="$2" source="${3:-serve}"
+    local fixture_file
+    fixture_file=$(fixture_path "${fixture}")
+    cp "${fixture_file}" "${cache}/usage.json"
+    printf '%s\n' "${source}" > "${cache}/source"
+}
 pid_start_epoch() {
     python3 - "$1" <<'PY'
 import datetime
@@ -279,14 +287,14 @@ run_renderer() {
     local renderer="$1" fixture="$2"
     shift 2
     local cache; cache=$(mk_cache)
-    local fixture_file out
-    fixture_file=$(fixture_path "${fixture}")
+    local out
+    seed_usage_cache "${cache}" "${fixture}" serve
     out=$(
         env \
             PATH="${stub_dir}:${PATH}" \
             SHOWY_QUOTA_NO_CONFIG=1 \
             SHOWY_QUOTA_CACHE_DIR="${cache}" \
-            SHOWY_QUOTA_TEST_FIXTURE="${fixture_file}" \
+            SHOWY_QUOTA_TEST_FIXTURE="$(fixture_path "${fixture}")" \
             SHOWY_QUOTA_DEGRADED_CLI=0 \
             SHOWY_QUOTA_FORCE_COLOR=1 \
             "$@" \
@@ -1373,6 +1381,99 @@ if (( json_bad_rc != 0 )); then
 else
     fail "zellij --json rejects non-quota JSON file" "rc=${json_bad_rc}"
 fi
+
+printf '\ndriver cache freshness contract\n'
+driver_fetch_stub="${TMP}/driver-fetch-no-persist"
+cat > "${driver_fetch_stub}" <<'EOF'
+#!/bin/sh
+exit 1
+EOF
+chmod +x "${driver_fetch_stub}"
+
+driver_cache=$(mk_cache)
+seed_usage_cache "${driver_cache}" codexbar-empty.json serve
+out=$(
+    env \
+        PATH="${stub_dir}:${PATH}" \
+        SHOWY_QUOTA_NO_CONFIG=1 \
+        SHOWY_QUOTA_CACHE_DIR="${driver_cache}" \
+        SHOWY_QUOTA_FETCH_BIN="${driver_fetch_stub}" \
+        SHOWY_QUOTA_FORCE_COLOR=0 \
+        NO_COLOR=1 \
+        "${REPO_ROOT}/bin/showy-quota-zellij-bar"
+)
+assert_contains "driver fresh cache renders seeded data" "AI idle" "${out}"
+assert_not_contains "driver fresh cache omits stale marker" "⚠" "${out}"
+
+driver_stale_cache=$(mk_cache)
+seed_usage_cache "${driver_stale_cache}" codexbar-empty.json serve
+touch -t 202001010000 "${driver_stale_cache}/usage.json"
+out=$(
+    env \
+        PATH="${stub_dir}:${PATH}" \
+        SHOWY_QUOTA_NO_CONFIG=1 \
+        SHOWY_QUOTA_CACHE_DIR="${driver_stale_cache}" \
+        SHOWY_QUOTA_FETCH_BIN="${driver_fetch_stub}" \
+        SHOWY_QUOTA_FORCE_COLOR=0 \
+        NO_COLOR=1 \
+        "${REPO_ROOT}/bin/showy-quota-zellij-bar"
+)
+assert_contains "driver stale cache shows stale marker" "AI idle ⚠" "${out}"
+
+driver_degraded_cache=$(mk_cache)
+seed_usage_cache "${driver_degraded_cache}" codexbar-empty.json cli
+out=$(
+    env -u SHOWY_QUOTA_DEGRADED_CLI \
+        PATH="${stub_dir}:${PATH}" \
+        SHOWY_QUOTA_NO_CONFIG=1 \
+        SHOWY_QUOTA_CACHE_DIR="${driver_degraded_cache}" \
+        SHOWY_QUOTA_FETCH_BIN="${driver_fetch_stub}" \
+        SHOWY_QUOTA_FORCE_COLOR=0 \
+        NO_COLOR=1 \
+        "${REPO_ROOT}/bin/showy-quota-zellij-bar"
+)
+assert_contains "driver cli source derives degraded marker" "AI idle ⚠cli" "${out}"
+
+out=$(
+    env \
+        PATH="${stub_dir}:${PATH}" \
+        SHOWY_QUOTA_NO_CONFIG=1 \
+        SHOWY_QUOTA_CACHE_DIR="${driver_degraded_cache}" \
+        SHOWY_QUOTA_FETCH_BIN="${driver_fetch_stub}" \
+        SHOWY_QUOTA_DEGRADED_CLI=0 \
+        SHOWY_QUOTA_FORCE_COLOR=0 \
+        NO_COLOR=1 \
+        "${REPO_ROOT}/bin/showy-quota-zellij-bar"
+)
+assert_not_contains "driver degraded CLI zero disables marker" "⚠cli" "${out}"
+
+driver_explicit_degraded_cache=$(mk_cache)
+seed_usage_cache "${driver_explicit_degraded_cache}" codexbar-empty.json serve
+out=$(
+    env \
+        PATH="${stub_dir}:${PATH}" \
+        SHOWY_QUOTA_NO_CONFIG=1 \
+        SHOWY_QUOTA_CACHE_DIR="${driver_explicit_degraded_cache}" \
+        SHOWY_QUOTA_FETCH_BIN="${driver_fetch_stub}" \
+        SHOWY_QUOTA_DEGRADED_CLI=1 \
+        SHOWY_QUOTA_FORCE_COLOR=0 \
+        NO_COLOR=1 \
+        "${REPO_ROOT}/bin/showy-quota-zellij-bar"
+)
+assert_contains "driver degraded CLI one forces marker" "AI idle ⚠cli" "${out}"
+
+driver_missing_cache=$(mk_cache)
+out=$(
+    env \
+        PATH="${stub_dir}:${PATH}" \
+        SHOWY_QUOTA_NO_CONFIG=1 \
+        SHOWY_QUOTA_CACHE_DIR="${driver_missing_cache}" \
+        SHOWY_QUOTA_FETCH_BIN="${driver_fetch_stub}" \
+        SHOWY_QUOTA_FORCE_COLOR=0 \
+        NO_COLOR=1 \
+        "${REPO_ROOT}/bin/showy-quota-zellij-bar"
+)
+assert_equals "driver missing cache falls back to neutral segment" "AI ?" "${out}"
 
 printf '\nrender CLI integration\n'
 if (cd "${REPO_ROOT}" && cargo test -p showy-quota-zellij-core --test render_cli); then
@@ -5252,9 +5353,9 @@ assert_equals "guard stale cache with --allow-stale evaluates (exit 0)" "0" "${r
 
 # ── automation: quota prompt segment ────────────────────────────────────
 # prompt prints "<SIGIL> <used>% <countdown>" for the worst-remaining window,
-# reading the cache as-is via `showy-quota-state --no-fetch` (never refreshing).
-# NOW_EPOCH pins the 2099-dated resets to deterministic countdowns and the huge
-# refresh knob keeps the seeded cache non-stale.
+# delegating cache-only rendering to the native `showy-quota-render --emit prompt
+# --from-cache` path. NOW_EPOCH pins the 2099-dated resets to deterministic
+# countdowns; the huge refresh knob keeps the seeded healthy cache non-stale.
 printf '\nquota prompt segment\n'
 
 run_prompt() {
@@ -5271,8 +5372,7 @@ run_prompt() {
 }
 
 prompt_cache=$(mk_cache)
-cp "${FIXTURE_DIR}/codexbar-mixed.json" "${prompt_cache}/usage.json"
-printf 'cli\n' > "${prompt_cache}/source"
+seed_usage_cache "${prompt_cache}" codexbar-mixed.json serve
 
 # Worst window on the mixed fixture is codex/secondary: 59% used, ~7 days out.
 rc=0
@@ -5310,11 +5410,23 @@ prompt_noansi_bytes=$(
 )
 assert_not_contains "prompt --ansi with NO_COLOR emits no escape" "1b5b" "${prompt_noansi_bytes}"
 
+prompt_stale_cache=$(mk_cache)
+seed_usage_cache "${prompt_stale_cache}" codexbar-mixed.json serve
+touch -t 202001010000 "${prompt_stale_cache}/usage.json"
+out=$(
+    env SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_MANAGE_SERVE=0 \
+        SHOWY_QUOTA_CACHE_DIR="${prompt_stale_cache}" \
+        SHOWY_QUOTA_CODEXBAR_BIN="${TMP}/no-such-codexbar-prompt" \
+        SHOWY_QUOTA_CODEXBAR_SERVE_URL='' \
+        SHOWY_QUOTA_NOW_EPOCH=4070908800 \
+        "${REPO_ROOT}/bin/showy-quota" prompt
+)
+assert_contains "prompt stale cache appends stale glyph" "⚠" "${out}"
+
 # prompt must never refresh: point codexbar at a marker-writing stub and confirm
 # the default (cache-only) path never executes it.
 prompt_marker_cache=$(mk_cache)
-cp "${FIXTURE_DIR}/codexbar-mixed.json" "${prompt_marker_cache}/usage.json"
-printf 'cli\n' > "${prompt_marker_cache}/source"
+seed_usage_cache "${prompt_marker_cache}" codexbar-mixed.json serve
 prompt_marker="${TMP}/prompt-no-refresh.marker"
 prompt_stub="${TMP}/prompt-codexbar-stub"
 cat > "${prompt_stub}" <<EOF

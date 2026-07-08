@@ -809,23 +809,6 @@ def entry($pid; $slot):
 | .worst = (if (.evaluated|length) > 0 then (.evaluated | min_by(.remainingPercent)) else null end)
 '
 
-# jq: worst-remaining window across the selected providers, as TSV
-# "provider\tused\tremaining\tminutes" (minutes empty when reset unknown).
-# shellcheck disable=SC2016  # jq program: $-names are jq variables, not shell
-PROMPT_JQ='
-(.providerMetrics // []) as $pm
-| [ $pm[] as $m
-    | select(($requested|length) == 0 or (($requested|index($m.provider)) != null))
-    | ($m.windows.primary, $m.windows.secondary, $m.windows.tertiary)
-    | select(. != null and ((.remainingPercent|type) == "number"))
-    | {provider: $m.provider, used: .usedPercent, remaining: .remainingPercent, minutes: .minutesUntilReset}
-  ]
-| if length == 0 then empty
-  else (min_by(.remaining))
-    | [ .provider, (.used|tostring), (.remaining|tostring), (if .minutes == null then "" else (.minutes|tostring) end) ]
-    | @tsv
-  end
-'
 
 guard_help() {
     printf '%s\n' \
@@ -1054,7 +1037,6 @@ cmd_prompt() {
     load_state_libs
     # A prompt segment must never break a shell: any environment failure prints
     # the neutral "AI ?" and exits 0. Only argument errors exit non-zero.
-    showy_quota_have jq || { printf 'AI ?\n'; exit 0; }
 
     PROVIDER_IDS=()
     local ansi=0
@@ -1077,49 +1059,33 @@ cmd_prompt() {
         esac
     done
 
-    local state_bin="${SCRIPT_DIR}/showy-quota-state" state_json
+    showy_quota_export_config
+
+    local render_bin
+    if ! render_bin="$(showy_quota_resolve_render_bin "${SCRIPT_DIR}" "${SCRIPT_DIR}/..")"; then
+        printf 'AI ?\n'
+        exit 0
+    fi
+
     if [[ "${SHOWY_QUOTA_PROMPT_FETCH:-}" == "1" ]]; then
-        state_json="$("${state_bin}" --json 2>/dev/null)" || state_json=""
-    else
-        state_json="$("${state_bin}" --no-fetch --json 2>/dev/null)" || state_json=""
-    fi
-    if [[ -z "${state_json}" ]] || ! printf '%s' "${state_json}" | jq -e 'type == "object"' >/dev/null 2>&1; then
-        printf 'AI ?\n'; exit 0
+        local fetch; fetch="$(automation_fetch_bin)"
+        "${fetch}" --refresh >/dev/null 2>&1 || true
     fi
 
-    local requested_json stale worst
-    requested_json="$(providers_json)"
-    stale="$(printf '%s' "${state_json}" | jq -r '.stale')"
-    worst="$(printf '%s' "${state_json}" | jq -r --argjson requested "${requested_json}" "${PROMPT_JQ}")" || worst=""
-    if [[ -z "${worst}" ]]; then
-        printf 'AI ?\n'; exit 0
+    local -a provider_args=()
+    if (( ${#PROVIDER_IDS[@]} > 0 )); then
+        local provider_csv
+        provider_csv="$(IFS=,; printf '%s' "${PROVIDER_IDS[*]}")"
+        provider_args=(--provider "${provider_csv}")
     fi
 
-    local provider used remaining minutes
-    IFS=$'\t' read -r provider used remaining minutes < <(printf '%s\n' "${worst}")
+    local -a render_args=(--emit prompt --from-cache)
+    (( ansi )) && render_args+=(--ansi)
+    render_args+=("${provider_args[@]}")
 
-    local sigil countdown seg
-    sigil="$(showy_quota_provider_sigil "${provider}")"
-    countdown=""
-    [[ -n "${minutes}" ]] && countdown="$(showy_quota_format_countdown "${minutes}")"
-    seg="${sigil} ${used}%"
-    [[ -n "${countdown}" ]] && seg="${seg} ${countdown}"
-
-    local color_on=0
-    if (( ansi )) && [[ -z "${NO_COLOR:-}" ]]; then color_on=1; fi
-
-    local out
-    if (( color_on )); then
-        local code=31
-        if (( remaining >= 50 )); then code=32
-        elif (( remaining >= 20 )); then code=33
-        fi
-        out=$'\033['"${code}"'m'"${seg}"$'\033[0m'
-    else
-        out="${seg}"
+    if ! "${render_bin}" "${render_args[@]}" 2>/dev/null; then
+        printf 'AI ?\n'
     fi
-    [[ "${stale}" == "true" ]] && out="${out} ${SHOWY_QUOTA_STALE_GLYPH}"
-    printf '%s\n' "${out}"
     exit 0
 }
 

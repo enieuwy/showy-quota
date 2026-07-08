@@ -7,6 +7,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Changed
+- The bar drivers and `showy-quota prompt` collapse their hot path into the
+  native renderer: `showy-quota-render` gains `--from-cache` (reads the cache
+  payload/source/mtime and computes stale/degraded itself) and `--emit prompt`
+  (the worst-remaining prompt segment). The shell drivers now fetch to warm the
+  cache (cold path, unchanged) then render in one binary call with no shell
+  `jq`/`date` on the render path, and `showy-quota prompt` is a single native
+  invocation (was ~20 process spawns incl. 8 `jq`; now 0 `jq`/`date`). Output
+  is byte-identical across all fixtures and freshness states. This also removes
+  the last shell `date` reset-parsing from the render/prompt paths (no BSD/GNU
+  divergence) and matches the AGENTS.md scope: Rust owns the hot path, shell
+  owns cold fetch. `SHOWY_QUOTA_DEGRADED_CLI` remains tri-state (`1` on, other
+  non-empty off, unset derives from source).
+
 - `showy-quota-state` now computes `providerMetrics` via the native renderer
   (`showy-quota-render --emit metrics`) instead of shell jq: the per-provider
   window math, reset-time parsing, and minutes-until-reset move into the Rust

@@ -69,32 +69,20 @@ if ! RENDER_BIN="$(showy_quota_resolve_render_bin "${SCRIPT_DIR}" "${REPO_ROOT}"
     exit 0
 fi
 
-if [[ -n "${json_input}" ]]; then
-    if [[ "${json_input}" == "-" ]]; then
-        data=$(</dev/stdin)
-    else
-        [[ -f "${json_input}" ]] || showy_quota_die "JSON input is not a regular file: ${json_input}"
-        showy_quota_json_valid "${json_input}" || showy_quota_die "JSON input is not valid quota data: ${json_input}"
-        data=$(< "${json_input}")
-    fi
-elif ! data=$("${FETCH}" 2>/dev/null) || [[ -z "${data}" ]]; then
-    print_ai_fallback
-    exit 0
-fi
-
-if [[ -z "${data}" ]]; then
-    print_ai_fallback
-    exit 0
-fi
-
-args=("${RENDER_BIN}" --format zellij --json -)
-if [[ -z "${json_input}" ]] && showy_quota_cache_stale_for "${SHOWY_QUOTA_USAGE_FILE}"; then
-    args+=(--stale)
-fi
-if [[ -z "${json_input}" ]] && { [[ "${SHOWY_QUOTA_DEGRADED_CLI:-}" == "1" ]] || { [[ -z "${SHOWY_QUOTA_DEGRADED_CLI:-}" ]] && showy_quota_cache_degraded_cli; }; }; then
-    args+=(--degraded-cli)
-fi
-
 showy_quota_export_config
 
-exec "${args[@]}" < <(printf '%s' "${data}")
+if [[ -n "${json_input}" ]]; then
+    if [[ "${json_input}" != "-" ]]; then
+        [[ -f "${json_input}" ]] || showy_quota_die "JSON input is not a regular file: ${json_input}"
+        showy_quota_json_valid "${json_input}" || showy_quota_die "JSON input is not valid quota data: ${json_input}"
+    fi
+    exec "${RENDER_BIN}" --format zellij --json "${json_input}"
+fi
+
+"${FETCH}" >/dev/null 2>&1 || true
+
+if ! out=$("${RENDER_BIN}" --format zellij --from-cache 2>/dev/null); then
+    print_ai_fallback
+    exit 0
+fi
+printf '%s\n' "${out}"
