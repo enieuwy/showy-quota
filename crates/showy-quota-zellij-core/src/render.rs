@@ -1155,6 +1155,7 @@ fn expand_pooled(
                         tertiary: None,
                         extra_rate_windows: Vec::new(),
                     }),
+                    status: None,
                 };
                 (sigil, synthetic)
             })

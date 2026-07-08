@@ -73,7 +73,7 @@ It always requests `WebAccess`, then requests `OpenTerminalsOrPlugins` only when
 
 The plugin keeps last-known-good JSON in memory for the pane/session. If refreshes fail after a success, it continues rendering the previous data and marks it stale at `2 × interval_seconds`. That preserves the user-visible last-known-good behavior without requiring `FullHdAccess` or a disk cache.
 
-Terminal-strip rendering is centralized in the native `showy-quota-render` binary. The tmux and advanced zjstatus shell bars now only fetch/load JSON, detect stale or degraded cache state, and stream the payload to that binary with `--format tmux` or `--format zellij`; the standalone Zellij plugin uses the same Rust rendering core in-process. SketchyBar remains shell-native because it renders separate rows and icons instead of the compact terminal strip.
+Hot-path compute is centralized in the native `showy-quota-render` binary. The tmux and advanced zjstatus shell bars only warm the cache and call `--from-cache`; the standalone Zellij plugin uses the same Rust rendering core in-process; the prompt segment comes from `--emit prompt`; and the SketchyBar plugin gets its per-provider row data (remaining percentages, elapsed markers, countdown labels, final colors, stale/shared-cycle handling) from `--emit sketchybar`. SketchyBar's shell keeps only host integration: item declaration/teardown, icon rendering and caching, click scripts, and the `sketchybar --set` calls.
 
 ## Terminal rendering modes
 
@@ -129,9 +129,9 @@ The stacked modes collapse to the densest body the data supports: `mono4` needs 
 
 ## Why bash and Rust, not Python/Go
 
-The old `ai-quota` predecessor was Python with a daemon, sidecar, and `--client-defaults` indirection. That stack made sense when it also had to talk to providers. CodexBar removed that need for host bars: bash + `jq` remains the lowest-friction data-plane glue for tmux and SketchyBar, while the compact terminal strip is small and deterministic enough to centralize in Rust.
+The old `ai-quota` predecessor was Python with a daemon, sidecar, and `--client-defaults` indirection. That stack made sense when it also had to talk to providers. CodexBar removed that need for host bars: bash + `jq` remains the lowest-friction glue for the cold fetch path and host integration, while every hot render/compute path (terminal strips, prompt segment, providerMetrics, SketchyBar rows) is small and deterministic enough to centralize in Rust.
 
-Zellij is different at the integration boundary. A high-value Zellij integration must be a standalone WASM plugin so users can install one artifact and avoid `zjstatus`, feeder loops, and shell-script setup. Zellij officially supports Rust plugins, so the standalone pane uses Rust in-process; tmux and advanced zjstatus keep shell drivers but delegate the compact strip to `showy-quota-render`. The project is not a full Rust port: SketchyBar stays on the shell-native row/icon path, and the shell cache remains the host-bar reliability boundary.
+Zellij is different at the integration boundary. A high-value Zellij integration must be a standalone WASM plugin so users can install one artifact and avoid `zjstatus`, feeder loops, and shell-script setup. Zellij officially supports Rust plugins, so the standalone pane uses Rust in-process; tmux, advanced zjstatus, and SketchyBar keep shell drivers but delegate all row/strip compute to `showy-quota-render`. The shell cache remains the host-bar reliability boundary.
 
 Go is not used because the Zellij plugin API is Rust-first. TinyGo/community bindings would add WASI/API risk, and a Go CLI plus Rust plugin would split compiled logic across two languages.
 

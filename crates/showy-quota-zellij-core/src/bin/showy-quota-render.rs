@@ -4,8 +4,9 @@ use std::process;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use showy_quota_zellij_core::{
-    cache::read_cache_from_env, emit_prompt_segment, emit_provider_metrics, render_tmux,
-    render_zellij, valid_provider_id, PromptOptions, RenderConfig, RenderError, RenderOptions,
+    cache::read_cache_from_env, emit_prompt_segment, emit_provider_metrics, emit_sketchybar,
+    render_tmux, render_zellij, valid_provider_id, PromptOptions, RenderConfig, RenderError,
+    RenderOptions, SketchybarOptions,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -19,6 +20,7 @@ enum Emit {
     Render,
     Metrics,
     Prompt,
+    Sketchybar,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,6 +67,22 @@ fn run() -> Result<(), String> {
     if cli.emit == Emit::Metrics {
         let mut rendered =
             emit_provider_metrics(&input.payload, &config, now_epoch).map_err(render_error)?;
+        rendered.push('\n');
+        return write_output(&rendered);
+    }
+
+    if cli.emit == Emit::Sketchybar {
+        let mut rendered = emit_sketchybar(
+            &input.payload,
+            &config,
+            now_epoch,
+            SketchybarOptions {
+                stale,
+                degraded_cli,
+                bar_width: png_bar_width_from_env(),
+            },
+        )
+        .map_err(render_error)?;
         rendered.push('\n');
         return write_output(&rendered);
     }
@@ -152,13 +170,14 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Cli, String> {
                 from_cache = true;
             }
             "--emit" => {
-                let value = args
-                    .next()
-                    .ok_or_else(|| String::from("--emit requires render, metrics, or prompt"))?;
+                let value = args.next().ok_or_else(|| {
+                    String::from("--emit requires render, metrics, prompt, or sketchybar")
+                })?;
                 emit = match value.as_str() {
                     "render" => Emit::Render,
                     "metrics" => Emit::Metrics,
                     "prompt" => Emit::Prompt,
+                    "sketchybar" => Emit::Sketchybar,
                     _ => return Err(format!("unknown emit mode: {value}")),
                 };
             }
@@ -276,8 +295,19 @@ fn now_epoch() -> i64 {
         .unwrap_or(0)
 }
 
+/// `SHOWY_QUOTA_PNG_BAR_W`: SketchyBar slider width in pixels. The shell
+/// data plane validates and exports it (default 80, capped 4096); fall back
+/// to the stock width on garbage so marker math never divides by zero.
+fn png_bar_width_from_env() -> i64 {
+    std::env::var("SHOWY_QUOTA_PNG_BAR_W")
+        .ok()
+        .and_then(|value| value.parse::<i64>().ok())
+        .filter(|value| (0..=4096).contains(value))
+        .unwrap_or(80)
+}
+
 fn print_help() {
     println!(
-        "Usage: showy-quota-render [--emit render|metrics|prompt] [--format zellij|tmux] [--json <path|-> | --from-cache] [--provider ID[,ID...]] [--ansi] [--stale] [--degraded-cli]\n\nPrints a rendered quota strip, providerMetrics JSON, or shell prompt segment from CodexBar JSON."
+        "Usage: showy-quota-render [--emit render|metrics|prompt|sketchybar] [--format zellij|tmux] [--json <path|-> | --from-cache] [--provider ID[,ID...]] [--ansi] [--stale] [--degraded-cli]\n\nPrints a rendered quota strip, providerMetrics JSON, SketchyBar row data, or shell prompt segment from CodexBar JSON."
     );
 }

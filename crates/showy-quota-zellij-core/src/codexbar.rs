@@ -7,6 +7,19 @@ pub struct ProviderRecord {
     pub error: Option<serde_json::Value>,
     #[serde(default)]
     pub usage: Option<Usage>,
+    #[serde(default)]
+    pub status: Option<ProviderStatus>,
+}
+
+/// Optional CodexBar provider status block (`status.indicator` +
+/// `status.url`). SketchyBar tints provider icons and points click-through
+/// at the status page when an incident is active.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ProviderStatus {
+    #[serde(default)]
+    pub indicator: Option<String>,
+    #[serde(default)]
+    pub url: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -354,6 +367,7 @@ mod tests {
             provider: "codex".into(),
             error: Some(serde_json::json!({"message": "failed"})),
             usage: None,
+            status: None,
         };
         assert!(is_errored(&errored));
 
@@ -361,6 +375,7 @@ mod tests {
             provider: "bad/id".into(),
             error: Some(serde_json::json!({"message": "failed"})),
             usage: None,
+            status: None,
         };
         assert!(!is_errored(&invalid));
 
@@ -378,6 +393,7 @@ mod tests {
                 tertiary: None,
                 extra_rate_windows: Vec::new(),
             }),
+            status: None,
         };
         assert!(!is_errored(&renderable));
     }

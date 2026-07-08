@@ -452,11 +452,11 @@ clear_declared_items() {
     write_state_providers "" || showy_quota_log "failed to clear sketchybar provider state"
 }
 
-showy_quota_have jq || {
-    showy_quota_log "jq required for sketchybar plugin"
+if ! RENDER_BIN="$(showy_quota_resolve_render_bin "${REPO_ROOT}/bin" "${REPO_ROOT}")"; then
+    showy_quota_log "showy-quota-render required for sketchybar plugin; run make render-bin"
     clear_declared_items
     exit 0
-}
+fi
 
 HAVE_MAGICK=0
 showy_quota_have magick && HAVE_MAGICK=1
@@ -489,11 +489,8 @@ PRIMARY_UNKNOWN_HEX="$(showy_quota_primary_palette unknown)"
 TRACK_HEX="$(showy_quota_palette track)"
 TRACK_ARGB="$(argb_from_hex "${TRACK_HEX}")"
 ICON_TEXT_HEX="$(showy_quota_palette icon_text)"
-COUNTDOWN_HEX="$(showy_quota_palette countdown)"
-COUNTDOWN_ARGB="$(argb_from_hex "${COUNTDOWN_HEX}")"
 COUNTDOWN_WARN_HEX="$(showy_quota_palette countdown_warn)"
 COUNTDOWN_WARN_ARGB="$(argb_from_hex "${COUNTDOWN_WARN_HEX}")"
-STALE_ARGB="$(argb_from_hex "$(showy_quota_palette stale)")"
 ELAPSED_HEX="$(showy_quota_palette elapsed)"
 ELAPSED_ARGB="$(argb_from_hex "${ELAPSED_HEX}")"
 
@@ -681,15 +678,6 @@ clamp_slider_percentage() {
     printf '%s\n' "${pct}"
 }
 
-marker_percentage_from_x() {
-    local marker="$1" w="${SHOWY_QUOTA_PNG_BAR_W}"
-    [[ "${marker}" =~ ^[0-9]+$ ]] || return 1
-    (( w > 1 )) || return 1
-    (( marker < 0 )) && marker=0
-    (( marker >= w )) && marker=$((w - 1))
-    printf '%s\n' $(( (marker * 100 + (w - 1) / 2) / (w - 1) ))
-}
-
 slider_click_script() {
     local item="$1" pct="$2"
     printf 'command -v sketchybar >/dev/null 2>&1 && sketchybar --set %s slider.percentage=%s >/dev/null 2>&1; %s' \
@@ -698,64 +686,55 @@ slider_click_script() {
         "${CLICK}"
 }
 
-# ── label rendering ──────────────────────────────────────────────────
-
-label_for_minutes() {
-    local minutes="$1" remaining="$2" reset_value="${3:-}"
-    local label
-    label=$(showy_quota_primary_label "${minutes}" "${remaining}" "${reset_value}")
-    local color="${COUNTDOWN_ARGB}"
-    if [[ -n "${minutes}" && "${minutes}" -lt "${SHOWY_QUOTA_TIME_WARN_MINUTES}" ]] 2>/dev/null; then
-        color="${COUNTDOWN_WARN_ARGB}"
-    fi
-    printf '%s\n%s\n' "${label}" "${color}"
-}
-
 # ── main ─────────────────────────────────────────────────────────────
 
 acquire_render_lock || exit 0
 refresh_in_background=0
-if data=$("${FETCH}" --cache-only 2>/dev/null); then
+if "${FETCH}" --cache-only >/dev/null 2>&1; then
     refresh_in_background=1
 else
-    data=$("${FETCH}" 2>/dev/null || printf '[]')
+    "${FETCH}" >/dev/null 2>&1 || true
 fi
-if showy_quota_cache_stale_for "${SHOWY_QUOTA_USAGE_FILE}"; then
-    stale=1
-else
-    stale=0
-fi
+
+# Row compute (renderable filtering, elapsed markers, countdown labels,
+# window colors, stale and shared-cycle handling) lives in the native
+# renderer; this plugin only assembles SketchyBar items from the emitted
+# fields. See crates/showy-quota-zellij-core/src/sketchybar.rs for the
+# record format (US-separated fields, one provider per line, header first).
+showy_quota_export_config
+rows_payload=$("${RENDER_BIN}" --emit sketchybar --from-cache 2>/dev/null) || rows_payload=""
+
+stale=0
 degraded_cli=0
-if [[ "${SHOWY_QUOTA_DEGRADED_CLI:-}" == "1" ]] || { [[ -z "${SHOWY_QUOTA_DEGRADED_CLI:-}" ]] && showy_quota_cache_degraded_cli; }; then
-    degraded_cli=1
+rows=""
+if [[ -n "${rows_payload}" ]]; then
+    header="${rows_payload%%$'\n'*}"
+    [[ "${rows_payload}" == *$'\n'* ]] && rows="${rows_payload#*$'\n'}"
+    IFS=$'\x1f' read -r header_stale header_degraded <<< "${header}"
+    [[ "${header_stale}" == "1" ]] && stale=1
+    [[ "${header_degraded}" == "1" ]] && degraded_cli=1
+else
+    # No renderable cache (cold start without codexbar, or an invalid
+    # payload): mirror the empty-data path so items tear down while the
+    # stale/degraded markers still reflect the on-disk cache state.
+    showy_quota_cache_stale_for "${SHOWY_QUOTA_USAGE_FILE}" && stale=1
+    if [[ "${SHOWY_QUOTA_DEGRADED_CLI:-}" == "1" ]] \
+        || { [[ -z "${SHOWY_QUOTA_DEGRADED_CLI:-}" ]] && showy_quota_cache_degraded_cli; }; then
+        degraded_cli=1
+    fi
 fi
 if (( refresh_in_background )); then
     start_background_refresh
 fi
 
-elapsed_marker_x() {
-    local reset_at="$1" window_minutes="$2"
-    [[ -n "${reset_at}" && "${window_minutes}" =~ ^[0-9]+$ ]] || return 1
-    (( window_minutes > 0 )) || return 1
-
-    local reset_epoch duration start_epoch now elapsed marker
-    reset_epoch=$(showy_quota_reset_epoch "${reset_at}") || return 1
-    duration=$((window_minutes * 60))
-    # An absurd windowMinutes can wrap 64-bit arithmetic (2^62 * 60 ≡ 0) and
-    # divide by zero below; mirror the Rust core's checked_mul: no marker.
-    (( duration / 60 == window_minutes )) || return 1
-    start_epoch=$((reset_epoch - duration))
-    now=$(showy_quota_now_epoch)
-    elapsed=$((now - start_epoch))
-    (( elapsed < 0 )) && elapsed=0
-    (( elapsed > duration )) && elapsed="${duration}"
-    marker=$(( (duration - elapsed) * SHOWY_QUOTA_PNG_BAR_W / duration ))
-    (( marker < 0 )) && marker=0
-    (( marker >= SHOWY_QUOTA_PNG_BAR_W )) && marker=$((SHOWY_QUOTA_PNG_BAR_W - 1))
-    printf '%s\n' "${marker}"
-}
-filtered=$(printf '%s' "${data}" | showy_quota_filter_renderable)
-desired_providers=$(printf '%s' "${filtered}" | jq -r '.[].provider')
+desired_providers=""
+while IFS=$'\x1f' read -r pid _; do
+    [[ -n "${pid}" ]] || continue
+    if [[ -n "${desired_providers}" ]]; then
+        desired_providers+=$'\n'
+    fi
+    desired_providers+="${pid}"
+done <<< "${rows}"
 declared_providers="$(read_state_providers)"
 declared_item_providers="${declared_providers}"
 force_redeclare=0
@@ -804,44 +783,12 @@ if (( force_redeclare )) || [[ "${desired_providers}" != "${declared_providers}"
     trigger_provider_change "${desired_providers}"
 fi
 
-# Slots are semantic: primary/secondary/tertiary map to fixed item rows.
-# A slot only counts when that exact window has a numeric usedPercent;
-# missing slots stay empty instead of later windows shifting up. In the
-# pooled layout a `usageKnown:false` window is present-but-unmeasured (e.g.
-# Antigravity's Claude/GPT pool during a collection hiccup): keep its lane
-# drawn as an empty track (rem 0, no marker) instead of collapsing it, so a
-# transiently-thin family does not vanish — parity with the Zellij renderer,
-# which keeps the AGᶜ lane.
-rows=$(printf '%s' "${filtered}" | jq -r '
-    def pct(x): if x == null then 0 else ([0, ([100, (x|tonumber|floor)] | min)] | max) end;
-    def slot(w): if (w != null and (w.usedPercent | type == "number")) then w else null end;
-    def wmin(w): (w.windowMinutes // null) | (if (type == "number" and . >= 0) then . else null end);
-    def rval: (.resetsAt // .resetDescription // "");
-    def row(w): (if w == null then {rem:"",reset:"",win:""} else {rem:(100 - pct(w.usedPercent)), reset:(w | rval), win:(w.windowMinutes // "")} end);
-    .[]
-    | (slot(.usage.primary)) as $p
-    | (slot(.usage.secondary)) as $s
-    | (slot(.usage.tertiary)) as $t
-    | ([ $p, $s, $t ] | map(select(. != null))) as $slots
-    | ((.usage.extraRateWindows // []) | map(select(.window != null and (.window.usedPercent | type == "number")))) as $ex
-    | ([ $ex[] | [ wmin(.window), (.window.resetsAt // null) ] ]) as $exkeys
-    | ([ $slots[] | select( [wmin(.), (.resetsAt // null)] as $k | (any($exkeys[]; . == $k) | not) ) ]) as $unmatched
-    | (($ex | length) > 0 and ($unmatched | length) == 0) as $pooled
-    | (if $pooled
-         then [ $ex[] | (if .usageKnown == false then {rem:0,reset:"",win:""} else row(.window) end) ]
-         else [ row($p), row($s), row($t) ]
-       end) as $rows
-    | [
-        .provider,
-        ($rows[0].rem // ""), ($rows[0].reset // ""), ($rows[0].win // ""),
-        ($rows[1].rem // ""), ($rows[1].reset // ""), ($rows[1].win // ""),
-        ($rows[2].rem // ""), ($rows[2].reset // ""), ($rows[2].win // ""),
-        ($rows[3].rem // ""), ($rows[3].reset // ""), ($rows[3].win // ""),
-        (.status.indicator // "none"),
-        (.status.url // "")
-    ] | map(tostring) | join("\u001f")')
-
-while IFS=$'\x1f' read -r pid rem_p p_reset p_window rem_s s_reset s_window rem_t t_reset t_window rem_q q_reset q_window status status_url; do
+# shellcheck disable=SC2034  # p/s presence flags keep the record uniform
+while IFS=$'\x1f' read -r pid label color status status_url \
+    p_present rem_p_pct marker_p_pct primary_highlight \
+    s_present rem_s_pct marker_s_pct secondary_highlight \
+    t_present rem_t_pct marker_t_pct tertiary_highlight \
+    q_present rem_q_pct marker_q_pct quaternary_highlight; do
     [[ -n "${pid}" ]] || continue
 
     icon=""
@@ -852,24 +799,11 @@ while IFS=$'\x1f' read -r pid rem_p p_reset p_window rem_s s_reset s_window rem_
     else
         icon=$(provider_icon_png "${pid}" "${status}" || true)
     fi
-    marker_p=$(elapsed_marker_x "${p_reset}" "${p_window}" || true)
-    marker_s=$(elapsed_marker_x "${s_reset}" "${s_window}" || true)
-    marker_t=$(elapsed_marker_x "${t_reset}" "${t_window}" || true)
-    marker_q=$(elapsed_marker_x "${q_reset}" "${q_window}" || true)
-
-    rem_p_pct=$(clamp_slider_percentage "${rem_p}")
-    rem_s_pct=$(clamp_slider_percentage "${rem_s}")
-    rem_t_pct=$(clamp_slider_percentage "${rem_t}")
-    rem_q_pct=$(clamp_slider_percentage "${rem_q}")
-    marker_p_pct=$(marker_percentage_from_x "${marker_p}" || true)
-    marker_s_pct=$(marker_percentage_from_x "${marker_s}" || true)
-    marker_t_pct=$(marker_percentage_from_x "${marker_t}" || true)
-    marker_q_pct=$(marker_percentage_from_x "${marker_q}" || true)
 
     has_t=0
-    [[ -n "${rem_t}" ]] && has_t=1
+    [[ "${t_present}" == "1" ]] && has_t=1
     has_q=0
-    [[ -n "${rem_q}" ]] && has_q=1
+    [[ "${q_present}" == "1" ]] && has_q=1
     if (( has_q )); then
         primary_y=9
         secondary_y=3
@@ -887,60 +821,12 @@ while IFS=$'\x1f' read -r pid rem_p p_reset p_window rem_s s_reset s_window rem_
         quaternary_y=-4
     fi
 
-    minutes=""
-    if [[ -n "${p_reset}" ]]; then
-        minutes=$(showy_quota_minutes_until "${p_reset}" || true)
-    fi
-    label=""; color=""
     icon_click=$(click_script_for_status "${status}" "${status_url}")
     font_icon_color="$(argb_from_hex "${ICON_TEXT_HEX}")"
     font_icon_item_width=$((SHOWY_QUOTA_SKETCHYBAR_ICON_WIDTH + SHOWY_QUOTA_SKETCHYBAR_PROVIDER_ICON_FONT_PADDING_RIGHT))
     status_icon_hex=$(status_color_for_indicator "${status}" || true)
     if [[ -n "${status_icon_hex}" ]]; then
         font_icon_color="$(argb_from_hex "${status_icon_hex}")"
-    fi
-    if [[ -n "${rem_p}" ]]; then
-        { IFS= read -r label; IFS= read -r color; } < <(label_for_minutes "${minutes}" "${rem_p}" "${p_reset}") || true
-    else
-        # No primary window at all: nothing consumed, nothing to count down.
-        label='idle'
-    fi
-    [[ -n "${color}" ]] || color="${COUNTDOWN_ARGB}"
-    p_present=0; [[ -n "${rem_p}" ]] && p_present=1
-    s_present=0; [[ -n "${rem_s}" ]] && s_present=1
-    t_present=0; [[ -n "${rem_t}" ]] && t_present=1
-    q_present=0; [[ -n "${rem_q}" ]] && q_present=1
-    shared_cycle=0
-    if showy_quota_shared_cycle \
-        "${p_present}" "${p_reset}" "${p_window}" \
-        "${s_present}" "${s_reset}" "${s_window}" \
-        "${t_present}" "${t_reset}" "${t_window}" \
-        "${q_present}" "${q_reset}" "${q_window}"; then
-        # Parallel pools on one billing cycle (e.g. Cursor Total/Auto/API):
-        # keep only the primary pacing marker and undim every row.
-        shared_cycle=1
-        marker_s_pct=""
-        marker_t_pct=""
-    fi
-    p_long=$(showy_quota_is_long_window "${p_window}")
-    s_long=$(showy_quota_is_long_window "${s_window}")
-    t_long=$(showy_quota_is_long_window "${t_window}")
-    q_long=$(showy_quota_is_long_window "${q_window}")
-    if (( shared_cycle )); then p_long=0; s_long=0; t_long=0; q_long=0; fi
-    primary_highlight="$(argb_from_hex "$(showy_quota_window_color "${rem_p_pct}" "${p_long}")")"
-    secondary_highlight="$(argb_from_hex "$(showy_quota_window_color "${rem_s_pct}" "${s_long}")")"
-    tertiary_highlight="$(argb_from_hex "$(showy_quota_window_color "${rem_t_pct}" "${t_long}")")"
-    quaternary_highlight="$(argb_from_hex "$(showy_quota_window_color "${rem_q_pct}" "${q_long}")")"
-    if (( stale )); then
-        color="${STALE_ARGB}"
-        primary_highlight="${STALE_ARGB}"
-        secondary_highlight="${STALE_ARGB}"
-        tertiary_highlight="${STALE_ARGB}"
-        quaternary_highlight="${STALE_ARGB}"
-        marker_p_pct=""
-        marker_s_pct=""
-        marker_t_pct=""
-        marker_q_pct=""
     fi
 
     primary_item="showy_quota.${pid}.primary"

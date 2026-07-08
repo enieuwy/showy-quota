@@ -32,6 +32,14 @@ Provider order is stable across additions/removals. Set
 providers are skipped. Set `SHOWY_QUOTA_PROVIDERS` when you want an ordered
 allow-list instead.
 
+Row compute happens in the native renderer: each tick the plugin warms the
+shared cache and reads final per-provider fields (remaining percentages,
+elapsed markers, countdown labels, colors, stale/shared-cycle handling) from
+`showy-quota-render --emit sketchybar --from-cache`. The shell plugin only
+manages SketchyBar items, icons, and click scripts — no `jq` or `date` runs
+on the render tick. The render binary ships with `make install-bin` /
+release tarballs; without it the plugin clears its items and logs a hint.
+
 
 ## Layout state
 

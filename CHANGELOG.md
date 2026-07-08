@@ -22,6 +22,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   same collection work as the CLI fallback minus a process launch per
   refresh, and degrades per provider).
 
+- The SketchyBar plugin's per-tick compute moves into the native renderer:
+  `showy-quota-render` gains `--emit sketchybar`, emitting final per-provider
+  row fields (remaining percentages, elapsed-marker positions, countdown
+  labels, resolved colors, stale/degraded and shared-cycle handling) from the
+  shared cache. The shell plugin now only manages SketchyBar items, icons,
+  and click scripts — the render tick runs no `jq` or `date` (was 3 jq plus
+  per-provider `date` spawns every `SHOWY_QUOTA_SKETCHYBAR_UPDATE_FREQ`).
+  Row semantics are unchanged (verified by the full shell suite, including
+  pooled lanes, `usageKnown:false` placeholders, shared-cycle marker
+  suppression, and pinned-clock marker positions); the plugin now requires
+  the `showy-quota-render` binary like the tmux/Zellij drivers already do,
+  and clears its items with a hint when it is missing.
+
 - The bar drivers and `showy-quota prompt` collapse their hot path into the
   native renderer: `showy-quota-render` gains `--from-cache` (reads the cache
   payload/source/mtime and computes stale/degraded itself) and `--emit prompt`
