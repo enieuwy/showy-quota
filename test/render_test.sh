@@ -1643,6 +1643,79 @@ assert_equals "state compact recommendation defaults below threshold" "false" "$
 assert_equals "state exposes degraded CLI source" "cli" "$(printf '%s' "${out}" | jq -r '.cache.source')"
 assert_equals "state exposes degraded flag" "true" "$(printf '%s' "${out}" | jq -r '.cache.degraded')"
 
+# The core metrics emitter now applies the strict provider-id predicate here.
+# This intentionally tightens state providerMetrics versus the old loose jq path,
+# which accepted ".", "..", and leading-dash provider ids.
+state_strict_ids_fixture="${TMP}/codexbar-strict-provider-metrics.json"
+cat > "${state_strict_ids_fixture}" <<'EOF'
+[
+  {
+    "provider": "codex",
+    "source": "openai-web",
+    "usage": {
+      "primary": { "usedPercent": 42, "windowMinutes": 300 },
+      "secondary": null,
+      "tertiary": null
+    }
+  },
+  {
+    "provider": ".",
+    "source": "test",
+    "usage": {
+      "primary": { "usedPercent": 11, "windowMinutes": 300 },
+      "secondary": null,
+      "tertiary": null
+    }
+  },
+  {
+    "provider": "..",
+    "source": "test",
+    "usage": {
+      "primary": { "usedPercent": 12, "windowMinutes": 300 },
+      "secondary": null,
+      "tertiary": null
+    }
+  },
+  {
+    "provider": "-evil",
+    "source": "test",
+    "usage": {
+      "primary": { "usedPercent": 13, "windowMinutes": 300 },
+      "secondary": null,
+      "tertiary": null
+    }
+  }
+]
+EOF
+state_strict_ids_cache=$(mk_cache)
+cp "${state_strict_ids_fixture}" "${state_strict_ids_cache}/usage.json"
+printf 'cli\n' > "${state_strict_ids_cache}/source"
+state_strict_ids_fetch="${TMP}/state-strict-provider-metrics-fetch"
+cat > "${state_strict_ids_fetch}" <<EOF
+#!/bin/sh
+cat "${state_strict_ids_cache}/usage.json"
+EOF
+chmod +x "${state_strict_ids_fetch}"
+state_strict_ids_json=$(
+    env SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_MANAGE_SERVE=0 \
+        SHOWY_QUOTA_NOW_EPOCH=4070908800 \
+        SHOWY_QUOTA_CACHE_DIR="${state_strict_ids_cache}" \
+        SHOWY_QUOTA_FETCH_BIN="${state_strict_ids_fetch}" \
+        SHOWY_QUOTA_CODEXBAR_BIN="${TMP}/no-such-codexbar-state-strict-ids" \
+        SHOWY_QUOTA_CODEXBAR_SERVE_URL='' \
+        "${REPO_ROOT}/bin/showy-quota-state" --no-fetch --json
+)
+assert_equals "state providerMetrics strict ids keep valid provider" "true" "$(printf '%s' "${state_strict_ids_json}" | jq -r 'any(.providerMetrics[]; .provider == "codex")')"
+assert_equals "state providerMetrics strict ids reject dot provider" "false" "$(printf '%s' "${state_strict_ids_json}" | jq -r 'any(.providerMetrics[]; .provider == ".")')"
+assert_equals "state providerMetrics strict ids reject dotdot provider" "false" "$(printf '%s' "${state_strict_ids_json}" | jq -r 'any(.providerMetrics[]; .provider == "..")')"
+assert_equals "state providerMetrics strict ids reject leading-dash provider" "false" "$(printf '%s' "${state_strict_ids_json}" | jq -r 'any(.providerMetrics[]; .provider == "-evil")')"
+
+render_metrics_smoke=$(
+    env SHOWY_QUOTA_NOW_EPOCH=4070908800 \
+        "${RENDER_BIN}" --emit metrics --json - < "${FIXTURE_DIR}/codexbar-mixed.json"
+)
+assert_equals "render metrics CLI emits state providerMetrics contract" "array|string|number|true" "$(printf '%s' "${render_metrics_smoke}" | jq -r '[(type), (.[0].provider | type), (.[0].windows.primary.usedPercent | type), (.[0].error == null)] | map(tostring) | join("|")')"
+
 out=$(run_state codexbar-error-only.json)
 assert_equals "state error-only providers stay renderable-only empty" "[]" "$(printf '%s' "${out}" | jq -c '.providers')"
 assert_equals "state error-only provider count stays renderable-only zero" "0" "$(printf '%s' "${out}" | jq -r '.providerCount')"

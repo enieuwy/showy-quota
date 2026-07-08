@@ -4,7 +4,7 @@ use std::process;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use showy_quota_zellij_core::{
-    render_tmux, render_zellij, RenderConfig, RenderError, RenderOptions,
+    emit_provider_metrics, render_tmux, render_zellij, RenderConfig, RenderError, RenderOptions,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -13,8 +13,15 @@ enum Format {
     Tmux,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Emit {
+    Render,
+    Metrics,
+}
+
 struct Cli {
     format: Format,
+    emit: Emit,
     json_path: String,
     stale: bool,
     degraded_cli: bool,
@@ -31,12 +38,20 @@ fn run() -> Result<(), String> {
     let cli = parse_args(std::env::args().skip(1))?;
     let payload = read_payload(&cli.json_path)?;
     let config = RenderConfig::from_env();
+    let now_epoch = now_epoch();
     let options = RenderOptions {
         color: want_zellij_color(),
         stale: cli.stale,
         degraded_cli: cli.degraded_cli,
-        now_epoch: now_epoch(),
+        now_epoch,
     };
+
+    if cli.emit == Emit::Metrics {
+        let mut rendered =
+            emit_provider_metrics(&payload, &config, now_epoch).map_err(render_error)?;
+        rendered.push('\n');
+        return write_output(&rendered);
+    }
 
     let rendered = match cli.format {
         Format::Zellij => render_zellij(&payload, &config, options),
@@ -44,6 +59,10 @@ fn run() -> Result<(), String> {
     }
     .map_err(render_error)?;
 
+    write_output(&rendered)
+}
+
+fn write_output(rendered: &str) -> Result<(), String> {
     // A consumer that stops reading early (e.g. `... | head`) closes the
     // pipe; that is not an error for a status renderer — exit quietly
     // instead of panicking on EPIPE like the default print! path would.
@@ -61,6 +80,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Cli, String> {
     let mut json_path = String::from("-");
     let mut stale = false;
     let mut degraded_cli = false;
+    let mut emit = Emit::Render;
     let mut args = args;
 
     while let Some(arg) = args.next() {
@@ -80,6 +100,16 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Cli, String> {
                     .next()
                     .ok_or_else(|| String::from("--json requires path or -"))?;
             }
+            "--emit" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| String::from("--emit requires render or metrics"))?;
+                emit = match value.as_str() {
+                    "render" => Emit::Render,
+                    "metrics" => Emit::Metrics,
+                    _ => return Err(format!("unknown emit mode: {value}")),
+                };
+            }
             "--stale" => stale = true,
             "--degraded-cli" => degraded_cli = true,
             "-h" | "--help" => {
@@ -91,6 +121,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Cli, String> {
     }
 
     Ok(Cli {
+        emit,
         format,
         json_path,
         stale,
@@ -143,6 +174,6 @@ fn now_epoch() -> i64 {
 
 fn print_help() {
     println!(
-        "Usage: showy-quota-render [--format zellij|tmux] [--json <path|->] [--stale] [--degraded-cli]\n\nPrints a rendered quota strip from CodexBar JSON."
+        "Usage: showy-quota-render [--emit render|metrics] [--format zellij|tmux] [--json <path|->] [--stale] [--degraded-cli]\n\nPrints a rendered quota strip or providerMetrics JSON from CodexBar JSON."
     );
 }

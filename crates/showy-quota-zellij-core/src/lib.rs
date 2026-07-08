@@ -1,7 +1,9 @@
 pub mod codexbar;
 pub mod config;
+pub mod metrics;
 pub mod palette;
 pub mod render;
+pub(crate) mod reset;
 
 pub use codexbar::{
     is_errored, parse_provider_config_payload, parse_usage_payload,
@@ -9,4 +11,5 @@ pub use codexbar::{
     ProviderConfigError, ProviderRecord,
 };
 pub use config::RenderConfig;
+pub use metrics::emit_provider_metrics;
 pub use render::{render_tmux, render_zellij, OutputFormat, RenderError, RenderOptions};

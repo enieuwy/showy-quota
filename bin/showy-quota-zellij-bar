@@ -62,56 +62,8 @@ print_ai_fallback() {
     printf '\n'
 }
 
-resolve_render_bin() {
-    local candidate resolved repo_candidate
-    if [[ -n "${SHOWY_QUOTA_RENDER_BIN:-}" ]]; then
-        if candidate="$(showy_quota_valid_bin "${SHOWY_QUOTA_RENDER_BIN}")"; then
-            if [[ "${candidate}" == */* ]]; then
-                if [[ -x "${candidate}" ]]; then
-                    printf '%s\n' "${candidate}"
-                    return 0
-                fi
-            elif resolved="$(command -v "${candidate}" 2>/dev/null)"; then
-                printf '%s\n' "${resolved}"
-                return 0
-            fi
-        fi
-    fi
 
-    # Sibling binary: copied installs and release tarballs ship
-    # showy-quota-render next to this driver, so the installed tree works
-    # without PATH or a checkout.
-    if [[ -x "${SCRIPT_DIR}/showy-quota-render" ]]; then
-        printf '%s\n' "${SCRIPT_DIR}/showy-quota-render"
-        return 0
-    fi
-
-    if resolved="$(command -v showy-quota-render 2>/dev/null)"; then
-        printf '%s\n' "${resolved}"
-        return 0
-    fi
-
-    repo_candidate="${REPO_ROOT}/target/release/showy-quota-render"
-    if [[ -x "${repo_candidate}" ]]; then
-        printf '%s\n' "${repo_candidate}"
-        return 0
-    fi
-
-    return 1
-}
-
-export_showy_quota_config() {
-    local name decl
-    for name in ${!SHOWY_QUOTA_@}; do
-        decl="$(declare -p "${name}" 2>/dev/null || true)"
-        case "${decl}" in
-            declare\ -a*|declare\ -A*) continue ;;
-        esac
-        export "${name?}"
-    done
-}
-
-if ! RENDER_BIN="$(resolve_render_bin)"; then
+if ! RENDER_BIN="$(showy_quota_resolve_render_bin "${SCRIPT_DIR}" "${REPO_ROOT}")"; then
     print_ai_fallback
     printf 'showy-quota-render not found; run make render-bin\n' >&2
     exit 0
@@ -143,6 +95,6 @@ if [[ -z "${json_input}" ]] && { [[ "${SHOWY_QUOTA_DEGRADED_CLI:-}" == "1" ]] ||
     args+=(--degraded-cli)
 fi
 
-export_showy_quota_config
+showy_quota_export_config
 
 exec "${args[@]}" < <(printf '%s' "${data}")

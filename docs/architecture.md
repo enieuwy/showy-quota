@@ -164,6 +164,8 @@ CodexBar discovers providers; this repo discovers them via the cache content. En
 | `providerCount` | `providers | length`. |
 | `sketchybar.compactRecommended` | `providerCount >= SHOWY_QUOTA_SKETCHYBAR_COMPACT_PROVIDER_COUNT`. |
 
+`providerMetrics` is computed by the native renderer (`showy-quota-render --emit metrics`, the same binary the bar drivers use), which `showy-quota-state` invokes with the raw CodexBar payload on stdin; the shell no longer parses reset times or window math, so the metrics are deterministic across platforms (no BSD/GNU `date` divergence). Provider ids in `providerMetrics` are validated with the same strict predicate as the rest of the pipeline — `.`, `..`, and leading-dash ids are rejected, not merely regex-matched. The flat `providers[]` list, `available`, `stale`, cache, and `sketchybar` fields remain shell-owned.
+
 Consumers should treat `available=false` as "leave the current layout alone"; it means no last-known-good cache exists yet.
 
 The SketchyBar plugin triggers `showy_quota_provider_change` when that filtered provider set changes, so configs can subscribe without polling if they want immediate layout reconciliation.

@@ -46,6 +46,55 @@ showy_quota_valid_bin() {
     printf '%s' "${value}"
 }
 
+# Resolve the showy-quota-render binary the shell drivers/state delegate to.
+# Order: SHOWY_QUOTA_RENDER_BIN override, a sibling next to the caller script
+# (copied installs and release tarballs), PATH, then the repo dev build.
+# Args: <script_dir> <repo_root> (either may be empty). Prints the path, or
+# returns 1 when none is found so callers can degrade gracefully.
+showy_quota_resolve_render_bin() {
+    local script_dir="${1:-}" repo_root="${2:-}" candidate resolved
+    if [[ -n "${SHOWY_QUOTA_RENDER_BIN:-}" ]]; then
+        if candidate="$(showy_quota_valid_bin "${SHOWY_QUOTA_RENDER_BIN}")"; then
+            if [[ "${candidate}" == */* ]]; then
+                if [[ -x "${candidate}" ]]; then
+                    printf '%s\n' "${candidate}"
+                    return 0
+                fi
+            elif resolved="$(command -v "${candidate}" 2>/dev/null)"; then
+                printf '%s\n' "${resolved}"
+                return 0
+            fi
+        fi
+    fi
+    if [[ -n "${script_dir}" && -x "${script_dir}/showy-quota-render" ]]; then
+        printf '%s\n' "${script_dir}/showy-quota-render"
+        return 0
+    fi
+    if resolved="$(command -v showy-quota-render 2>/dev/null)"; then
+        printf '%s\n' "${resolved}"
+        return 0
+    fi
+    if [[ -n "${repo_root}" && -x "${repo_root}/target/release/showy-quota-render" ]]; then
+        printf '%s\n' "${repo_root}/target/release/showy-quota-render"
+        return 0
+    fi
+    return 1
+}
+
+# Export scalar SHOWY_QUOTA_* config into the environment so the native
+# renderer (a child process) sees the configuration the shell loaded. Array
+# and associative-array vars are skipped; they are not part of the contract.
+showy_quota_export_config() {
+    local name decl
+    for name in ${!SHOWY_QUOTA_@}; do
+        decl="$(declare -p "${name}" 2>/dev/null || true)"
+        case "${decl}" in
+            declare\ -a*|declare\ -A*) continue ;;
+        esac
+        export "${name?}"
+    done
+}
+
 # Validate a configured status glyph. Glyphs reach `sketchybar --set` and the
 # terminal strips; a control character or an absurd length from env/config could
 # corrupt rendering (quoting already prevents argument injection). Echoes the

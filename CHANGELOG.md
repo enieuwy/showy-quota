@@ -6,6 +6,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- `showy-quota-state` now computes `providerMetrics` via the native renderer
+  (`showy-quota-render --emit metrics`) instead of shell jq: the per-provider
+  window math, reset-time parsing, and minutes-until-reset move into the Rust
+  core (shared with the strip renderer), so the output is deterministic across
+  platforms with no BSD/GNU `date` divergence. The `providerMetrics` schema is
+  byte-identical (verified across all fixtures), with one intentional
+  tightening: provider ids are validated strictly (`.`, `..`, and leading-dash
+  rejected), matching the rest of the pipeline. `guard` and `prompt` consume
+  the same JSON and are unchanged. The render-bin resolver and config export
+  are now shared helpers in `lib/common.sh` used by the drivers and state.
+
 ### Security
 - Hardening pass across the shell and Rust surfaces: cap glyphs now go through
   the glyph validator (rejecting NUL/C0/C1/DEL bytes) and tmux glyph output is
