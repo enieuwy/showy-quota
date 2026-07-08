@@ -158,12 +158,12 @@ showy_quota_load_config
 : "${SHOWY_QUOTA_CODEXBAR_BIN:=codexbar}"
 : "${SHOWY_QUOTA_CODEXBAR_SERVE_URL=http://127.0.0.1:8080}"
 : "${SHOWY_QUOTA_CODEXBAR_SERVE_PORT:=}"
-: "${SHOWY_QUOTA_CODEXBAR_SERVE_REFRESH_INTERVAL_SECONDS:=60}"
+: "${SHOWY_QUOTA_CODEXBAR_SERVE_REFRESH_INTERVAL_SECONDS:=}" # derived from REFRESH_SECONDS below
 : "${SHOWY_QUOTA_CODEXBAR_SERVE_START_WAIT_TENTHS:=30}"
 : "${SHOWY_QUOTA_MANAGE_SERVE:=1}"
 : "${SHOWY_QUOTA_CODEXBAR_SERVE_TIMEOUT_SECONDS:=10}"
 : "${SHOWY_QUOTA_CODEXBAR_SERVE_USAGE_TIMEOUT_SECONDS:=30}"
-: "${SHOWY_QUOTA_CODEXBAR_SERVE_REFRESH_SECONDS:=10}"
+: "${SHOWY_QUOTA_CODEXBAR_SERVE_REFRESH_SECONDS:=}" # derived from REFRESH_SECONDS below
 : "${SHOWY_QUOTA_CODEXBAR_CLI_TIMEOUT_SECONDS:=20}"
 : "${SHOWY_QUOTA_CODEXBAR_SERVE_FAILURES_BEFORE_RESTART:=3}"
 : "${SHOWY_QUOTA_CODEXBAR_SERVE_FAILURES_BEFORE_CLI:=${SHOWY_QUOTA_CODEXBAR_SERVE_FAILURES_BEFORE_RESTART}}"
@@ -258,6 +258,27 @@ SHOWY_QUOTA_TIME_WARN_MINUTES=$(showy_quota_uint "${SHOWY_QUOTA_TIME_WARN_MINUTE
 SHOWY_QUOTA_DIM_WINDOW_MINUTES=$(showy_quota_uint "${SHOWY_QUOTA_DIM_WINDOW_MINUTES}" 10080)
 SHOWY_QUOTA_ZELLIJ_PIPE_INTERVAL=$(showy_quota_uint "${SHOWY_QUOTA_ZELLIJ_PIPE_INTERVAL}" 10 86400)
 SHOWY_QUOTA_ZELLIJ_PIPE_TIMEOUT_TENTHS=$(showy_quota_uint "${SHOWY_QUOTA_ZELLIJ_PIPE_TIMEOUT_TENTHS}" 20 36000)
+
+# ── serve cadence derivation ───────────────────────────────────────────
+# Serve cadence tracks the freshness contract instead of oversampling it: a
+# managed `codexbar serve` collects once per SHOWY_QUOTA_REFRESH_SECONDS and
+# the /usage poll re-reads at half that cadence. Worst-case displayed data age
+# stays ~1.5x REFRESH_SECONDS — inside the 2x stale horizon — while doing a
+# fraction of the probe work of the old fixed 10s poll against a serve that
+# only re-collects once a minute. Explicit values still win; garbage falls
+# back to the stock 120s contract.
+if [[ -z "${SHOWY_QUOTA_CODEXBAR_SERVE_REFRESH_INTERVAL_SECONDS}" ]]; then
+    if (( SHOWY_QUOTA_REFRESH_SECONDS > 0 )); then
+        SHOWY_QUOTA_CODEXBAR_SERVE_REFRESH_INTERVAL_SECONDS="${SHOWY_QUOTA_REFRESH_SECONDS}"
+    else
+        SHOWY_QUOTA_CODEXBAR_SERVE_REFRESH_INTERVAL_SECONDS=120
+    fi
+fi
+SHOWY_QUOTA_CODEXBAR_SERVE_REFRESH_INTERVAL_SECONDS=$(showy_quota_uint "${SHOWY_QUOTA_CODEXBAR_SERVE_REFRESH_INTERVAL_SECONDS}" 120)
+if [[ -z "${SHOWY_QUOTA_CODEXBAR_SERVE_REFRESH_SECONDS}" ]]; then
+    SHOWY_QUOTA_CODEXBAR_SERVE_REFRESH_SECONDS=$((SHOWY_QUOTA_REFRESH_SECONDS / 2))
+fi
+SHOWY_QUOTA_CODEXBAR_SERVE_REFRESH_SECONDS=$(showy_quota_uint "${SHOWY_QUOTA_CODEXBAR_SERVE_REFRESH_SECONDS}" 60)
 
 # SketchyBar geometry knobs reach `sketchybar --set` / ImageMagick as numeric
 # arguments; clamp them to sane integer ceilings so a malformed value produces

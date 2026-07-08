@@ -7,6 +7,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Changed
+- Serve cadence now derives from the freshness contract instead of
+  oversampling it. A managed `codexbar serve` starts with `--refresh-interval`
+  equal to `SHOWY_QUOTA_REFRESH_SECONDS` (was a fixed 60s), and the `/usage`
+  poll gate `SHOWY_QUOTA_CODEXBAR_SERVE_REFRESH_SECONDS` defaults to half the
+  contract (60s with stock config; was a fixed 10s). Serve only re-collects
+  once per its refresh interval, so the old 10s poll mostly re-downloaded
+  identical JSON — the new defaults cut steady-state probe work ~6x and
+  collection wakeups 2x while keeping worst-case displayed data age at
+  ~1.5x the contract, inside the 2x stale horizon. The standalone Zellij
+  plugin follows suit: `interval_seconds` defaults to 60 (was 10) and its
+  managed serve collects every 120s. Explicit overrides win everywhere;
+  `SHOWY_QUOTA_MANAGE_SERVE=1` stays the default (a resident serve does the
+  same collection work as the CLI fallback minus a process launch per
+  refresh, and degrades per provider).
+
 - The bar drivers and `showy-quota prompt` collapse their hot path into the
   native renderer: `showy-quota-render` gains `--from-cache` (reads the cache
   payload/source/mtime and computes stale/degraded itself) and `--emit prompt`

@@ -75,7 +75,7 @@ pane size=1 borderless=true {
         serve_url "http://127.0.0.1:8080"
         manage_serve true
         serve_command "codexbar"
-        interval_seconds 10
+        interval_seconds 60
         cli_fallback "degraded"
         cli_command "codexbar"
         cli_interval_seconds 120
@@ -234,7 +234,7 @@ Common options:
 |`manage_serve`|`true`|Ask Zellij to start `codexbar serve` in a hidden background command pane when `/health` is unavailable.|
 |`serve_command`|`codexbar`|Command used for managed serve startup.|
 |`serve_port`|URL port|Port passed to `codexbar serve --port`; defaults to the port in `serve_url` so custom localhost ports stay aligned.|
-|`interval_seconds`|`10`|Serve refresh cadence; timers are one-shot and re-armed after each tick.|
+|`interval_seconds`|`60`|Serve refresh cadence; timers are one-shot and re-armed after each tick. Serve only re-collects once per its `--refresh-interval` (a plugin-managed serve collects every 120 s), so polling much faster mostly re-downloads identical JSON.|
 |`cli_fallback`|`degraded`|`degraded` or `off`. Degraded fallback appends `degraded_cli_glyph`.|
 |`build_marker`|`false`|Opt-in stale-build warning. When `true`, the plugin periodically probes the installed `codexbar --version` and appends `⚠ver` while the running serve's `/health` version differs (detection only — never recycles a session serve). Off by default: the version probe does not run and no marker shows. Needs `cli_fallback` enabled (the probe uses `RunCommands`).|
 |`cli_command`|`codexbar`|Command used for provider discovery (`codexbar config providers …`) and per-provider fallback (`codexbar usage --provider <id> …`). Do not point this at `showy-quota-fetch`; the plugin is intentionally self-contained.|

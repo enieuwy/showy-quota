@@ -31,7 +31,7 @@ layout {
                 serve_url "http://127.0.0.1:8080"
                 manage_serve true
                 serve_command "codexbar"
-                interval_seconds 10
+                interval_seconds 60
                 cli_fallback "degraded"
                 cli_command "codexbar"
                 cli_interval_seconds 120
@@ -170,7 +170,7 @@ plugin location="file:~/.config/zellij/plugins/showy-quota-zellij.wasm" {
     serve_url "http://127.0.0.1:8080"
     manage_serve true
     serve_command "codexbar"
-    interval_seconds 10
+    interval_seconds 60
     cli_fallback "degraded"
     cli_command "codexbar"
     cli_interval_seconds 120

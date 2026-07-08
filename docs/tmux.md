@@ -143,11 +143,13 @@ set -g window-status-current-format ''
 
 tmux invokes the script on its own schedule (default 15 s). The script
 itself reads from the shared cache, so it is fast (≤ 50 ms typical).
-With `codexbar serve` reachable, the shared cache refreshes from the local HTTP
-endpoint every `SHOWY_QUOTA_CODEXBAR_SERVE_REFRESH_SECONDS` by default. If serve
-is missing, `showy-quota-fetch` starts it when `SHOWY_QUOTA_MANAGE_SERVE=1`
-(default). Tighten `SHOWY_QUOTA_REFRESH_SECONDS` only if you intentionally want
-the slower CLI fallback to run more often too.
+With `codexbar serve` reachable, the shared cache re-reads `/usage` every
+`SHOWY_QUOTA_CODEXBAR_SERVE_REFRESH_SECONDS` (default: half of
+`SHOWY_QUOTA_REFRESH_SECONDS`, i.e. 60 s). If serve is missing,
+`showy-quota-fetch` starts it when `SHOWY_QUOTA_MANAGE_SERVE=1` (default),
+telling it to collect once per `SHOWY_QUOTA_REFRESH_SECONDS`. Tighten
+`SHOWY_QUOTA_REFRESH_SECONDS` if you want fresher data; the serve cadences
+follow it, and it also bounds how often the slower CLI fallback runs.
 
 ## PATH gotchas
 

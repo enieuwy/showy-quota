@@ -300,7 +300,7 @@ impl Default for State {
         Self {
             render_config: RenderConfig::default(),
             serve_url: "http://127.0.0.1:8080".into(),
-            interval_seconds: 10.0,
+            interval_seconds: 60.0,
             cli_interval_seconds: 120.0,
             manage_serve: true,
             serve_command: "codexbar".into(),
@@ -363,9 +363,13 @@ impl ZellijPlugin for State {
         if !self.serve_url.trim().is_empty() && !is_loopback_serve_url(&self.serve_url) {
             self.serve_url = String::new();
         }
+        // Serve /usage poll cadence. `codexbar serve` only re-collects once
+        // per its --refresh-interval, so polling much faster than that just
+        // re-downloads identical JSON; 60s keeps worst-case data age well
+        // inside quota-window granularity while waking the host far less.
         self.interval_seconds = parse_positive_f64(
             configuration.get("interval_seconds").map(String::as_str),
-            10.0,
+            60.0,
         );
         self.cli_interval_seconds = parse_positive_f64(
             configuration
@@ -867,7 +871,10 @@ impl State {
                 "--port".into(),
                 self.serve_port.clone(),
                 "--refresh-interval".into(),
-                "60".into(),
+                // Align managed-serve collection with the shell data plane's
+                // freshness contract default (SHOWY_QUOTA_REFRESH_SECONDS=120)
+                // so it does not matter which side started the serve.
+                "120".into(),
             ],
             cwd: None,
         };
