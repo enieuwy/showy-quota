@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-07-13
+
 ### Changed
 - Serve cadence now derives from the freshness contract instead of
   oversampling it. A managed `codexbar serve` starts with `--refresh-interval`
@@ -91,6 +93,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   a permission re-grant while the command was still running) was accepted
   whenever the provider had no recorded failure, letting stale data overwrite
   a newer successful record until the next refresh.
+- Codex renders correctly after OpenAI temporarily removed the 5-hour limit
+  (`usage.primary: null`). When the primary slot is absent, the renderers now
+  left-compact the present windows so the live weekly cap drives the primary
+  row and its reset countdown instead of an empty top row and an `idle` label —
+  applied identically on the terminal bars and SketchyBar (previously the two
+  diverged: SketchyBar promoted the weekly and showed the countdown while the
+  tmux/Zellij bars left the top row empty with `idle`). Auto model-pool
+  detection also no longer fires on a coincidental `windowMinutes`/`resetsAt`
+  collision between a positional slot and a single extra (Codex's main weekly
+  vs its Spark weekly); pooling now requires the extras to carry more pools
+  than the positional slots expose. A provider left with a single live window
+  (like Codex now) renders as one full-height bar — a solid `█` body in the
+  terminals, one centered native row on SketchyBar — instead of a half-filled
+  bar with an empty second row. Slot promotion is render-only;
+  `showy-quota-state` still reports the raw positional windows. An unused 5h
+  window (`usedPercent: 0`, not `null`) still renders its own full row.
 
 ### Added
 - `showy-quota guard`: scriptable quota gate for automation (CI pre-flight,
@@ -762,7 +780,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `bin/showy-quota-fetch`: cache dir and files now persist as `0700`/`0600`
   instead of the user's default umask. CodexBar usage JSON stays user-only.
 
-[Unreleased]: https://github.com/enieuwy/showy-quota/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/enieuwy/showy-quota/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/enieuwy/showy-quota/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/enieuwy/showy-quota/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/enieuwy/showy-quota/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/enieuwy/showy-quota/compare/v0.3.0...v0.4.0
