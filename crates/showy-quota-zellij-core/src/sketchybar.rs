@@ -255,11 +255,7 @@ fn provider_lanes(record: &ProviderRecord) -> [Option<Lane>; LANE_COUNT] {
         return [None, None, None, None];
     };
 
-    let slots: [Option<&UsageWindow>; 3] = [
-        slot(usage.primary.as_ref()),
-        slot(usage.secondary.as_ref()),
-        slot(usage.tertiary.as_ref()),
-    ];
+    let slots = usage.render_slots();
     let extras: Vec<&NamedWindow> = usage
         .extra_rate_windows
         .iter()
@@ -282,7 +278,12 @@ fn provider_lanes(record: &ProviderRecord) -> [Option<Lane>; LANE_COUNT] {
         let key = (window.window_minutes(), window.resets_at.as_deref());
         !extra_keys.contains(&key)
     });
-    let pooled = !extras.is_empty() && !unmatched;
+    // A coincidental (windowMinutes, resetsAt) collision between a positional
+    // slot and a single extra is not model pooling; require the extras to
+    // carry more pools than the positional view exposes (mirror of
+    // render.rs::pooled_auto).
+    let present_positional = slots.iter().flatten().count();
+    let pooled = !extras.is_empty() && !unmatched && extras.len() > present_positional;
 
     let mut lanes: [Option<Lane>; LANE_COUNT] = [None, None, None, None];
     if pooled {
@@ -303,11 +304,6 @@ fn provider_lanes(record: &ProviderRecord) -> [Option<Lane>; LANE_COUNT] {
         }
     }
     lanes
-}
-
-/// jq `slot(w)`: a positional window counts only with a numeric usedPercent.
-fn slot(window: Option<&UsageWindow>) -> Option<&UsageWindow> {
-    window.filter(|window| window.used_percent.is_some())
 }
 
 /// jq `row(w)`: remaining percent plus the raw reset/window strings. The jq
@@ -628,12 +624,14 @@ mod tests {
     fn label_edges_idle_and_unknown() {
         let config = RenderConfig::default();
         let now = 1_700_000_000;
-        // Untouched window with no reset -> idle; consumed window with no
-        // reset -> '?'; no primary at all -> idle.
+        // Label comes from the primary lane. Untouched no-reset primary -> idle;
+        // consumed no-reset primary -> '?'. When the primary slot is absent the
+        // live window left-compacts into the primary lane and drives the label:
+        // gemini's untouched no-reset secondary promotes to an idle primary.
         let payload = r#"[
             {"provider": "codex", "usage": {"primary": {"usedPercent": 0}}},
             {"provider": "claude", "usage": {"primary": {"usedPercent": 40}}},
-            {"provider": "gemini", "usage": {"secondary": {"usedPercent": 10}}}
+            {"provider": "gemini", "usage": {"secondary": {"usedPercent": 0}}}
         ]"#;
         let rendered = emit(payload, &config, now, options());
         let rows = lines(&rendered);
@@ -641,9 +639,41 @@ mod tests {
         assert_eq!(rows[1][1], "idle");
         assert_eq!(rows[2][1], "?");
         assert_eq!(rows[3][0], "gemini");
-        assert_eq!(rows[3][1], "idle", "missing primary lane is idle");
-        assert_eq!(rows[3][5], "0", "primary lane absent");
-        assert_eq!(rows[3][9], "1", "secondary lane present");
+        assert_eq!(rows[3][1], "idle", "promoted no-reset full window is idle");
+        assert_eq!(
+            rows[3][5], "1",
+            "live window promoted into the primary lane"
+        );
+        assert_eq!(rows[3][9], "0", "secondary lane vacated by promotion");
+    }
+
+    #[test]
+    fn null_primary_promotes_live_window_and_depools_key_collision() {
+        let config = RenderConfig::default();
+        let now = 1_700_000_000; // 2023-11-14T22:13:20Z
+                                 // Codex after OpenAI removed the 5h limit: primary is null, the weekly
+                                 // is the live cap, and a Spark weekly coincidentally shares its
+                                 // (windowMinutes, resetsAt) key. The single extra must NOT make Codex
+                                 // look model-pooled (one extra vs one positional slot), so the
+                                 // positional weekly's usage wins (100 remaining, not the extra's 60),
+                                 // and it left-compacts into the primary lane with the weekly countdown.
+        let payload = r#"[{
+            "provider": "codex",
+            "usage": {
+                "primary": null,
+                "secondary": {"usedPercent": 0, "resetsAt": "2023-11-20T22:13:20Z", "windowMinutes": 10080},
+                "extraRateWindows": [
+                    {"title": "Codex Spark Weekly", "usageKnown": true,
+                     "window": {"usedPercent": 40, "resetsAt": "2023-11-20T22:13:20Z", "windowMinutes": 10080}}
+                ]
+            }
+        }]"#;
+        let row = &lines(&emit(payload, &config, now, options()))[1];
+        assert_eq!(row[0], "codex");
+        assert_eq!(row[1], "6d", "promoted weekly drives the countdown");
+        assert_eq!(row[5], "1", "weekly promoted into the primary lane");
+        assert_eq!(row[6], "100", "positional weekly wins, not the Spark extra");
+        assert_eq!(row[9], "0", "no secondary lane");
     }
 
     #[test]

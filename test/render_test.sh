@@ -1278,6 +1278,20 @@ out=$(run_renderer showy-quota-zellij-bar codexbar-codex-spark.json SHOWY_QUOTA_
 assert_contains "zellij codex manual dual2 splits main into CXᶜ" "CXᶜ▕▀▀▀▀▀▀▀▀▀▀▀▀▏" "${out}"
 assert_contains "zellij codex manual dual2 splits spark into CXˢ" "CXˢ▕▀▀▀▀▀▀▀▀▀▀▀▀▏" "${out}"
 
+# Codex after OpenAI temporarily removed the 5h limit: usage.primary is null,
+# so the weekly cap left-compacts into the primary row and drives the countdown
+# (a real reset, not an empty top + idle). With only one live window it renders
+# as a single full-height bar (no empty second row). Its Spark weekly shares the
+# reset key but must NOT make Codex look model-pooled (no CXˢ/CXᶜ split).
+out=$(run_renderer showy-quota-zellij-bar codexbar-codex-no-5h.json SHOWY_QUOTA_PROVIDERS=codex SHOWY_QUOTA_ZELLIJ_BAR_WIDTH=12 SHOWY_QUOTA_REFRESH_SECONDS=9999999999 SHOWY_QUOTA_NOW_EPOCH=4070908800 NO_COLOR=1 SHOWY_QUOTA_FORCE_COLOR=0)
+assert_contains "zellij codex null primary promotes weekly as one full bar" "CX▕████████████▏6d" "${out}"
+assert_not_contains "zellij codex single window uses no half-block" "▀" "${out}"
+assert_not_contains "zellij codex null primary is not split by family (Spark)" "CXˢ" "${out}"
+assert_not_contains "zellij codex null primary is not split by family (main)" "CXᶜ" "${out}"
+# The single full-height bar is the dim-good long-horizon fill over the surface.
+out=$(run_renderer showy-quota-zellij-bar codexbar-codex-no-5h.json SHOWY_QUOTA_PROVIDERS=codex SHOWY_QUOTA_ZELLIJ_BAR_WIDTH=12 SHOWY_QUOTA_REFRESH_SECONDS=9999999999 SHOWY_QUOTA_NOW_EPOCH=4070908800 SHOWY_QUOTA_FORCE_COLOR=1)
+assert_contains "zellij codex promoted weekly fills a full-height bar" $'38;2;20;104;58m\x1b[48;2;42;42;42m█' "${out}"
+
 # Horizon model: in a time-tiered provider the short (5h) window stays bright
 # and the long (weekly) window dims, and BOTH rows show a pacing marker.
 out=$(run_renderer showy-quota-zellij-bar codexbar-mixed.json SHOWY_QUOTA_PROVIDERS=claude SHOWY_QUOTA_ZELLIJ_BAR_WIDTH=8 SHOWY_QUOTA_REFRESH_SECONDS=9999999999 SHOWY_QUOTA_NOW_EPOCH=4070919600 SHOWY_QUOTA_FORCE_COLOR=1)
@@ -1989,10 +2003,20 @@ cache=$(mk_cache)
 log="${TMP}/sb-secondary-only.log"
 run_sketchybar_plugin "${secondary_only_fixture}" "${cache}" "${log}"
 plugin_log="$(< "${log}")"
-assert_contains "plugin keeps missing primary slot as empty top row" "--set showy_quota.antigravity.primary drawing=on slider.percentage=0" "${plugin_log}"
-assert_contains "plugin keeps secondary window in semantic middle row" "--set showy_quota.antigravity.secondary drawing=on slider.percentage=100" "${plugin_log}"
-assert_contains "plugin keeps tertiary window in semantic bottom row" "--set showy_quota.antigravity.tertiary drawing=on slider.percentage=75" "${plugin_log}"
-assert_contains "plugin labels missing-primary provider idle" "showy_quota.antigravity.label drawing=on label=idle" "${plugin_log}"
+assert_contains "plugin promotes live secondary into the primary row" "--set showy_quota.antigravity.primary drawing=on slider.percentage=100" "${plugin_log}"
+assert_contains "plugin promotes tertiary into the middle row" "--set showy_quota.antigravity.secondary drawing=on slider.percentage=75" "${plugin_log}"
+assert_contains "plugin leaves the vacated bottom row undrawn" "showy_quota.antigravity.tertiary drawing=off" "${plugin_log}"
+assert_contains "plugin labels a promoted no-reset full window idle" "showy_quota.antigravity.label drawing=on label=idle" "${plugin_log}"
+
+# Single live window (Codex once OpenAI drops the 5h limit): one centered
+# full-height row, and the vacated secondary row is not drawn (no empty track).
+cache=$(mk_cache)
+log="${TMP}/sb-single-window.log"
+run_sketchybar_plugin codexbar-codex-no-5h.json "${cache}" "${log}" SHOWY_QUOTA_PROVIDERS=codex SHOWY_QUOTA_NOW_EPOCH=4070908800
+plugin_log="$(< "${log}")"
+assert_contains "plugin centers a single-window primary row" "--set showy_quota.codex.primary drawing=on slider.percentage=100" "${plugin_log}"
+assert_contains "plugin gives the single-window row centered geometry" "slider.knob.drawing=off background.color=0x00000000 background.height=0 padding_left=0 padding_right=0 width=0 y_offset=0 click_script" "${plugin_log}"
+assert_contains "plugin leaves the single-window secondary row undrawn" "--set showy_quota.codex.secondary drawing=off" "${plugin_log}"
 
 # Model-pooled provider (Antigravity): SketchyBar auto-detects the pools (extras
 # carry every positional slot) and shows all four windows as family-grouped rows
@@ -2496,14 +2520,15 @@ printf '%s\n' \
 out=$(run_renderer showy-quota-zellij-bar "${secondary_only_fixture}" SHOWY_QUOTA_PROVIDER_MODES=antigravity=mono3 SHOWY_QUOTA_ZELLIJ_BAR_WIDTH=8 SHOWY_QUOTA_REFRESH_SECONDS=9999999999 NO_COLOR=1 SHOWY_QUOTA_FORCE_COLOR=0)
 assert_contains "secondary-only provider renders in zellij" "AG" "${out}"
 assert_contains "secondary-only provider shows idle label" "idle" "${out}"
-assert_contains "secondary-only provider keeps semantic middle/bottom rows" "AG▕🬹🬹🬹🬹🬹🬹🬋🬋▏" "${out}"
-for top_lit in '🬂' '🬎' '🬰' '█'; do
-    assert_not_contains "secondary-only provider keeps top row empty (${top_lit})" "${top_lit}" "${out}"
-done
+# Promotion leaves two live windows, so forced mono3 downgrades to a plain dual
+# (half-blocks, no sextants) with the promoted secondary on the top row.
+assert_contains "secondary-only provider promotes to a plain dual" "AG▕▀▀▀▀▀▀▀▀▏idle" "${out}"
+assert_not_contains "secondary-only promotion leaves no sextant top row" "🬹" "${out}"
+assert_not_contains "secondary-only promotion leaves no sextant bottom row" "🬋" "${out}"
 out=$(run_renderer showy-quota-tmux-bar "${secondary_only_fixture}" SHOWY_QUOTA_PROVIDER_MODES=antigravity=mono3 SHOWY_QUOTA_TMUX_BAR_WIDTH=8 SHOWY_QUOTA_REFRESH_SECONDS=9999999999)
 visible=$(strip_tmux_markup "${out}")
 assert_contains "secondary-only provider renders in tmux" "AG" "${visible}"
-assert_contains "secondary-only provider keeps semantic rows in tmux" "AG▕🬹🬹🬹🬹🬹🬹🬋🬋▏" "${visible}"
+assert_contains "secondary-only provider promotes to a plain dual in tmux" "AG▕▀▀▀▀▀▀▀▀▏" "${visible}"
 out=$(run_state "${secondary_only_fixture}")
 assert_equals "secondary-only provider is renderable state" "antigravity" "$(printf '%s' "${out}" | jq -r '.providers | join(",")')"
 # 3. Non-array JSON must be rejected by the fetcher (refresh path).

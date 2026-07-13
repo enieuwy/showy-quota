@@ -94,6 +94,37 @@ impl Usage {
         .flatten()
         .any(|window| window.used_percent.is_some())
     }
+
+    /// Semantic positional slots for the renderers. A window occupies a slot
+    /// only when it reports a numeric `usedPercent`. When the primary slot is
+    /// absent, the present windows left-compact into the leading slots so the
+    /// live window drives the primary row and countdown instead of an empty
+    /// top row and an `idle` label — e.g. Codex after OpenAI temporarily
+    /// removed the 5h limit, where `usage.primary` is null and the weekly cap
+    /// is the live window. A present primary leaves the slots in positional
+    /// order (no shifting). This is a render-layer view only; the raw
+    /// positional windows stay untouched (e.g. `showy-quota-state`).
+    pub fn render_slots(&self) -> [Option<&UsageWindow>; 3] {
+        let raw = [
+            slot(self.primary.as_ref()),
+            slot(self.secondary.as_ref()),
+            slot(self.tertiary.as_ref()),
+        ];
+        if raw[0].is_some() {
+            return raw;
+        }
+        let mut compacted: [Option<&UsageWindow>; 3] = [None, None, None];
+        for (index, window) in raw.into_iter().flatten().enumerate() {
+            compacted[index] = Some(window);
+        }
+        compacted
+    }
+}
+
+/// A window occupies its positional slot only when it reports a numeric
+/// `usedPercent`; a present-but-empty object never counts as live quota.
+fn slot(window: Option<&UsageWindow>) -> Option<&UsageWindow> {
+    window.filter(|window| window.used_percent.is_some())
 }
 
 pub fn parse_usage_payload(payload: &[u8]) -> Result<Vec<ProviderRecord>, serde_json::Error> {

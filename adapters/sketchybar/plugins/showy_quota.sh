@@ -804,6 +804,8 @@ while IFS=$'\x1f' read -r pid label color status status_url \
     [[ "${t_present}" == "1" ]] && has_t=1
     has_q=0
     [[ "${q_present}" == "1" ]] && has_q=1
+    has_s=0
+    [[ "${s_present}" == "1" ]] && has_s=1
     if (( has_q )); then
         primary_y=9
         secondary_y=3
@@ -814,11 +816,18 @@ while IFS=$'\x1f' read -r pid label color status status_url \
         secondary_y=0
         tertiary_y=-7
         quaternary_y=-7
-    else
+    elif (( has_s )); then
         primary_y=4
         secondary_y=-4
         tertiary_y=-4
         quaternary_y=-4
+    else
+        # Single live window (e.g. Codex once the 5h limit is dropped): one
+        # centered full-height bar, no empty second row.
+        primary_y=0
+        secondary_y=0
+        tertiary_y=0
+        quaternary_y=0
     fi
 
     icon_click=$(click_script_for_status "${status}" "${status_url}")
@@ -860,8 +869,12 @@ while IFS=$'\x1f' read -r pid label color status status_url \
 
     args+=(
         --set "${primary_item}" drawing=on slider.percentage="${rem_p_pct}" slider.highlight_color="${primary_highlight}" slider.background.color="${TRACK_ARGB}" slider.background.height="${NATIVE_ROW_HEIGHT}" slider.background.corner_radius="${NATIVE_ROW_RADIUS}" slider.knob.drawing=off background.color=0x00000000 background.height=0 padding_left=0 padding_right=0 width=0 y_offset="${primary_y}" click_script="${primary_click}"
-        --set "${secondary_item}" drawing=on slider.percentage="${rem_s_pct}" slider.highlight_color="${secondary_highlight}" slider.background.color="${TRACK_ARGB}" slider.background.height="${NATIVE_ROW_HEIGHT}" slider.background.corner_radius="${NATIVE_ROW_RADIUS}" slider.knob.drawing=off background.color=0x00000000 background.height=0 padding_left=0 padding_right=0 width=0 y_offset="${secondary_y}" click_script="${secondary_click}"
     )
+    if (( has_s )); then
+        args+=( --set "${secondary_item}" drawing=on slider.percentage="${rem_s_pct}" slider.highlight_color="${secondary_highlight}" slider.background.color="${TRACK_ARGB}" slider.background.height="${NATIVE_ROW_HEIGHT}" slider.background.corner_radius="${NATIVE_ROW_RADIUS}" slider.knob.drawing=off background.color=0x00000000 background.height=0 padding_left=0 padding_right=0 width=0 y_offset="${secondary_y}" click_script="${secondary_click}" )
+    else
+        args+=( --set "${secondary_item}" drawing=off slider.percentage=0 background.color=0x00000000 background.height=0 padding_left=0 padding_right=0 width=0 y_offset="${secondary_y}" click_script="${secondary_click}" )
+    fi
 
     if (( has_t )); then
         args+=( --set "${tertiary_item}" drawing=on slider.percentage="${rem_t_pct}" slider.highlight_color="${tertiary_highlight}" slider.background.color="${TRACK_ARGB}" slider.background.height="${NATIVE_ROW_HEIGHT}" slider.background.corner_radius="${NATIVE_ROW_RADIUS}" slider.knob.drawing=off background.color=0x00000000 background.height=0 padding_left=0 padding_right=0 width=0 y_offset="${tertiary_y}" click_script="${tertiary_click}" )
@@ -881,7 +894,7 @@ while IFS=$'\x1f' read -r pid label color status status_url \
         args+=( --set "${primary_marker_item}" drawing=off slider.percentage=0 y_offset="${primary_y}" click_script="${primary_marker_click}" )
     fi
 
-    if [[ -n "${marker_s_pct}" ]]; then
+    if (( has_s )) && [[ -n "${marker_s_pct}" ]]; then
         args+=( --set "${secondary_marker_item}" drawing=on slider.percentage="${marker_s_pct}" slider.highlight_color=0x00000000 slider.background.color=0x00000000 slider.background.height="${NATIVE_ROW_HEIGHT}" slider.background.corner_radius=0 slider.knob.drawing=on slider.knob.color=0x00000000 slider.knob.width=1 slider.knob.padding_left=0 slider.knob.padding_right=0 slider.knob.background.drawing=on slider.knob.background.color="${ELAPSED_ARGB}" slider.knob.background.height="${NATIVE_ROW_HEIGHT}" slider.knob.background.corner_radius=0 background.color=0x00000000 background.height=0 padding_left=0 padding_right=0 width=0 y_offset="${secondary_y}" click_script="${secondary_marker_click}" )
     else
         args+=( --set "${secondary_marker_item}" drawing=off slider.percentage=0 y_offset="${secondary_y}" click_script="${secondary_marker_click}" )

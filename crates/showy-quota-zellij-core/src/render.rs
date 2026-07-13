@@ -298,19 +298,18 @@ fn render_provider(
         .as_ref()
         .expect("renderable provider has usage");
     // Slots are semantic: primary/secondary/tertiary map to fixed rows and
-    // roles. A slot only counts when that exact window reports a numeric
-    // usedPercent; missing slots stay missing (used = -1, remaining = 0)
-    // instead of later windows shifting up.
-    let primary = semantic_slot(&usage.primary);
-    let secondary = semantic_slot(&usage.secondary);
-    let tertiary = semantic_slot(&usage.tertiary);
+    // roles. A window occupies a slot only when it reports a numeric
+    // usedPercent. When the primary slot is absent the present windows
+    // left-compact upward so the live window drives the primary row and
+    // countdown (see Usage::render_slots).
+    let slots = usage.render_slots();
+    let [primary, secondary, tertiary] = slots;
 
     // Cursor-style shared-cycle pools (Total/Auto/API) report one resetsAt and
     // windowMinutes across their slots: parallel usage categories within a
     // single monthly budget, not a live tier over a longer cap. Keep them at
     // full brightness and draw a single pacing marker instead of dimming every
     // row and repeating the identical marker.
-    let slots = [primary, secondary, tertiary];
     let assembled_windows = distinct_render_windows(&slots, &usage.extra_rate_windows, 4);
     let quaternary = assembled_windows.get(3).copied();
     let shared = shared_cycle(&[primary, secondary, tertiary, quaternary]);
@@ -492,6 +491,23 @@ fn render_provider(
             &mono_color,
             &markers,
         );
+    } else if primary.is_some() && secondary.is_none() && tertiary.is_none() {
+        // Exactly one live window (a lone primary, e.g. Codex once the 5h
+        // limit is dropped): one full-height bar, no empty second row. A
+        // middle gap ([primary, None, tertiary]) keeps the dual body so the
+        // tertiary is not dropped.
+        single_metric_bar(
+            out,
+            config,
+            options,
+            output_format,
+            SingleArgs {
+                remaining: p_remaining,
+                reset: marker_primary_reset,
+                window: marker_primary_window,
+                color: &primary_color,
+            },
+        );
     } else {
         dual_metric_bar(
             out,
@@ -530,14 +546,6 @@ fn render_provider(
         output_format,
         options.color,
     );
-}
-
-/// A usage slot is present only when that exact window reports a numeric
-/// usedPercent; renderers never shift later windows into earlier slots.
-fn semantic_slot(window: &Option<UsageWindow>) -> Option<&UsageWindow> {
-    window
-        .as_ref()
-        .filter(|window| window.used_percent.is_some())
 }
 
 /// A window is "long-horizon" (a weekly/monthly cap, rendered dimmed) when it
@@ -633,6 +641,65 @@ fn dual_metric_bar(
             "▀",
             Some(top_color),
             Some(bottom_color),
+            Weight::Normal,
+            output_format,
+            options.color,
+        );
+    }
+    style_text(
+        out,
+        "▏",
+        Some(&config.palette_bg),
+        Some(surface_color),
+        Weight::Normal,
+        output_format,
+        options.color,
+    );
+}
+
+/// Arguments for the single full-height bar body.
+struct SingleArgs<'a> {
+    remaining: i32,
+    reset: Option<&'a str>,
+    window: Option<i64>,
+    color: &'a str,
+}
+
+/// Render a single full-height bar (`█`) for a provider with exactly one live
+/// window — e.g. Codex once OpenAI removed the 5h limit, leaving only the
+/// weekly cap. One limit is one bar: this avoids a half-empty dual row or a
+/// lone sextant lane stranded above empty rows.
+fn single_metric_bar(
+    out: &mut String,
+    config: &RenderConfig,
+    options: RenderOptions,
+    output_format: OutputFormat,
+    args: SingleArgs<'_>,
+) {
+    let width = output_format.bar_width(config);
+    let surface_color = &config.palette_surface;
+    let elapsed_color = &config.palette_elapsed;
+    let fill = filled_cells(args.remaining, width);
+    let marker = elapsed_marker_cell(
+        args.reset,
+        args.window,
+        width,
+        options.now_epoch,
+        config.reset_description_timezone_offset_minutes,
+    );
+    for i in 0..width {
+        let cell_color = if Some(i) == marker {
+            elapsed_color
+        } else if i < fill {
+            args.color
+        } else {
+            surface_color
+        };
+        style_text(
+            out,
+            "█",
+            Some(cell_color),
+            Some(surface_color),
             Weight::Normal,
             output_format,
             options.color,
@@ -1003,6 +1070,15 @@ fn pooled_auto(slots: &[Option<&UsageWindow>; 3], extras: &[NamedWindow]) -> boo
     if present_extras.is_empty() {
         return false;
     }
+    // A coincidental (windowMinutes, resetsAt) collision between a positional
+    // slot and a single extra (e.g. Codex's main weekly vs its Spark weekly)
+    // is not model pooling. Require the extras to carry MORE pools than the
+    // positional view exposes, so they are genuinely the canonical superset
+    // rather than a same-shaped parallel pool.
+    let present_positional = slots.iter().flatten().count();
+    if present_extras.len() <= present_positional {
+        return false;
+    }
     slots
         .iter()
         .flatten()
@@ -1119,11 +1195,7 @@ fn expand_pooled(
     config: &RenderConfig,
 ) -> Option<Vec<(String, ProviderRecord)>> {
     let usage = record.usage.as_ref()?;
-    let slots = [
-        semantic_slot(&usage.primary),
-        semantic_slot(&usage.secondary),
-        semantic_slot(&usage.tertiary),
-    ];
+    let slots = usage.render_slots();
     let pooled = pooled_auto(&slots, &usage.extra_rate_windows);
     let mode = terminal_mode_for_provider(
         config,
@@ -1770,21 +1842,73 @@ mod tests {
     }
 
     #[test]
-    fn renders_provider_without_primary_window() {
-        // Antigravity now defaults to dual2; force mono3 to exercise the
-        // mono3 null-primary slot mapping (secondary→middle, tertiary→bottom).
+    fn promotes_live_window_when_primary_absent() {
+        // OpenAI temporarily removed Codex's 5h limit: usage.primary is null
+        // and the weekly cap is the live window. It must drive the primary row
+        // and countdown (a real reset, not an empty top + idle), and the
+        // coincidental Spark weekly must not make Codex look model-pooled.
+        let config = RenderConfig::default();
+        let output = render_zellij(
+            br#"[
+                {
+                    "provider": "codex",
+                    "usage": {
+                        "primary": null,
+                        "secondary": {"usedPercent": 0, "windowMinutes": 10080, "resetsAt": "2099-01-07T00:00:00Z"},
+                        "tertiary": null,
+                        "extraRateWindows": [
+                            {"id": "codex-spark-weekly", "title": "Codex Spark Weekly", "window": {"usedPercent": 0, "windowMinutes": 10080, "resetsAt": "2099-01-07T00:00:00Z"}}
+                        ]
+                    }
+                }
+            ]"#,
+            &config,
+            RenderOptions {
+                color: true,
+                stale: false,
+                degraded_cli: false,
+                now_epoch: 4_070_908_800,
+            },
+        )
+        .expect("rendered promoted-primary provider");
+
+        assert!(output.contains("CX"), "{output}");
+        // The promoted weekly counts down instead of showing an idle top row.
+        assert!(output.contains("6d"), "{output}");
+        assert!(!output.contains("idle"), "{output}");
+        // Not model-pooled: a single CX chunk, never a per-family split.
+        assert!(!output.contains('ˢ') && !output.contains('ᶜ'), "{output}");
+        // One live window renders as a single full-height bar (`█`): dim-good
+        // fill over the empty surface. There is no half-block (`▀`) split and
+        // therefore no empty second row.
+        assert!(
+            output.contains("\u{1b}[38;2;20;104;58m\u{1b}[48;2;42;42;42m\u{2588}"),
+            "weekly must render as a full-height fill: {output}"
+        );
+        assert!(
+            !output.contains('\u{2580}'),
+            "single window must not use a half-block: {output}"
+        );
+    }
+
+    #[test]
+    fn middle_gap_keeps_dual_body_not_single_bar() {
+        // [primary, None, tertiary]: two live windows with a missing secondary.
+        // The single-bar path is only for exactly one window, so this must keep
+        // the dual body (half-blocks) and not collapse — dropping the tertiary.
         let config = RenderConfig {
-            terminal_bar_mode: "mono3".into(),
+            terminal_bar_mode: "dual".into(),
+            zellij_bar_width: 8,
             ..RenderConfig::default()
         };
         let output = render_zellij(
             br#"[
                 {
-                    "provider": "antigravity",
+                    "provider": "codex",
                     "usage": {
-                        "primary": null,
-                        "secondary": {"usedPercent": 0},
-                        "tertiary": {"usedPercent": 25}
+                        "primary": {"usedPercent": 20, "windowMinutes": 300, "resetsAt": "2099-01-01T05:00:00Z"},
+                        "secondary": null,
+                        "tertiary": {"usedPercent": 40, "windowMinutes": 10080, "resetsAt": "2099-01-07T00:00:00Z"}
                     }
                 }
             ]"#,
@@ -1796,24 +1920,15 @@ mod tests {
                 now_epoch: 4_070_908_800,
             },
         )
-        .expect("rendered secondary-only provider");
-
-        assert!(output.contains("AG"), "{output}");
-        // No primary window: nothing to count down.
-        assert!(output.contains("idle"), "{output}");
-        // Forced mono3 renders the secondary-only shape (width 12):
-        // secondary fills the middle row (100 remaining → 12 cells) and
-        // tertiary the bottom row (75 remaining → 9 cells), so cells are
-        // middle+bottom (mask 6) then middle-only (mask 2).
-        assert!(output.contains("🬹"), "{output}");
-        assert!(output.contains("🬋"), "{output}");
-        // The top row must stay empty: no glyph with the primary bit set.
-        for top_lit in ["🬂", "🬎", "🬰", "█"] {
-            assert!(
-                !output.contains(top_lit),
-                "missing primary must not light the top row: {output}"
-            );
-        }
+        .expect("rendered middle-gap provider");
+        assert!(
+            output.contains('\u{2580}'),
+            "middle gap must keep the dual half-block body: {output}"
+        );
+        assert!(
+            !output.contains('\u{2588}'),
+            "middle gap must not collapse to a single full bar: {output}"
+        );
     }
 
     fn cycle_window(reset: &str, minutes: i64) -> UsageWindow {

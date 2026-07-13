@@ -1,0 +1,9 @@
+[
+  {"provider":"codex","source":"oauth","usage":{
+    "primary":null,
+    "secondary":{"usedPercent":0,"windowMinutes":10080,"resetsAt":"2099-01-07T00:00:00Z"},
+    "tertiary":null,
+    "extraRateWindows":[
+      {"id":"codex-spark-weekly","title":"Codex Spark Weekly","window":{"usedPercent":0,"windowMinutes":10080,"resetsAt":"2099-01-07T00:00:00Z"}}
+    ]}}
+]
