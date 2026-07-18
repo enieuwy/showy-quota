@@ -58,7 +58,7 @@ const BUILD_STALE_MARKER: &str = "⚠ver";
 /// child and queue a fresh prompt on every retry. The watchdog reaps it instead.
 fn watchdog_script(timeout_secs: u64) -> String {
     format!(
-        "\"$@\" & __p=$!; (sleep {t}; kill \"$__p\" 2>/dev/null; sleep 2; kill -9 \"$__p\" 2>/dev/null) & __k=$!; wait \"$__p\"; __r=$?; kill \"$__k\" 2>/dev/null; exit \"$__r\"",
+        "\"$@\" & __p=$!; (sleep {t} & __s=$!; trap 'kill \"$__s\" 2>/dev/null' EXIT; wait \"$__s\"; kill \"$__p\" 2>/dev/null; sleep 2 & __s=$!; wait \"$__s\"; kill -9 \"$__p\" 2>/dev/null) & __k=$!; wait \"$__p\"; __r=$?; kill \"$__k\" 2>/dev/null; wait \"$__k\" 2>/dev/null; exit \"$__r\"",
         t = timeout_secs
     )
 }
@@ -80,7 +80,7 @@ fn watchdog_argv<'a>(script: &'a str, command: &[&'a str]) -> Vec<&'a str> {
 /// injection-safe like `watchdog_script`.
 fn version_probe_script(timeout_secs: u64) -> String {
     format!(
-        "case $1 in */*) b=$1;; *) b=$(command -v \"$1\" 2>/dev/null) || b=$1;; esac; \"$b\" --version & __p=$!; (sleep {t}; kill \"$__p\" 2>/dev/null; sleep 2; kill -9 \"$__p\" 2>/dev/null) & __k=$!; wait \"$__p\"; __r=$?; kill \"$__k\" 2>/dev/null; exit \"$__r\"",
+        "case $1 in */*) b=$1;; *) b=$(command -v \"$1\" 2>/dev/null) || b=$1;; esac; \"$b\" --version & __p=$!; (sleep {t} & __s=$!; trap 'kill \"$__s\" 2>/dev/null' EXIT; wait \"$__s\"; kill \"$__p\" 2>/dev/null; sleep 2 & __s=$!; wait \"$__s\"; kill -9 \"$__p\" 2>/dev/null) & __k=$!; wait \"$__p\"; __r=$?; kill \"$__k\" 2>/dev/null; wait \"$__k\" 2>/dev/null; exit \"$__r\"",
         t = timeout_secs
     )
 }
@@ -278,6 +278,7 @@ struct State {
     ondisk_version_checked_at: Option<f64>,
     version_probe_in_flight: bool,
     version_probe_token: Option<String>,
+    version_probe_started_at: Option<f64>,
     // Opt-in (KDL `build_marker true`, default off). When off, the on-disk
     // version probe never runs and the ⚠ver marker is never appended — the
     // whole stale-build gate is a silent no-op. The plugin only flags; it
@@ -339,6 +340,7 @@ impl Default for State {
             ondisk_version_checked_at: None,
             version_probe_in_flight: false,
             version_probe_token: None,
+            version_probe_started_at: None,
             show_build_marker: false,
             instance_hash: 0,
             fallback_jitter_seconds: 60.0,
@@ -442,13 +444,10 @@ impl ZellijPlugin for State {
             EventType::RunCommandResult,
         ]);
 
-        // Some Zellij versions do not emit PermissionRequestResult when a
-        // local file plugin is already pre-granted in permissions.kdl. Start
-        // optimistically from a timer so pre-granted plugins render instead
-        // of staying blank; an explicit Denied result below still shuts
-        // requests down.
-        self.permissions_granted = true;
-        shim_set_timeout(0.1);
+        // Runtime work begins only after Zellij explicitly grants the requested
+        // capabilities. Pre-granted permissions.kdl configurations follow the
+        // same path: Zellij emits PermissionRequestResult::Granted.
+        self.permissions_granted = false;
 
         let permissions = requested_permissions(self.manage_serve, self.cli_fallback);
         shim_request_permission(&permissions);
@@ -467,6 +466,9 @@ impl ZellijPlugin for State {
                 self.discovery_attempt_token = None;
                 self.discovery_started_at = None;
                 self.usage_after_discovery = false;
+                self.version_probe_in_flight = false;
+                self.version_probe_token = None;
+                self.version_probe_started_at = None;
                 self.serve_inventory_mismatch = false;
                 self.clear_all_provider_in_flight();
                 self.cli_hold_until = None;
@@ -485,6 +487,9 @@ impl ZellijPlugin for State {
                 self.discovery_attempt_token = None;
                 self.discovery_started_at = None;
                 self.usage_after_discovery = false;
+                self.version_probe_in_flight = false;
+                self.version_probe_token = None;
+                self.version_probe_started_at = None;
                 self.serve_inventory_mismatch = false;
                 self.clear_all_provider_in_flight();
                 self.cli_hold_until = None;
@@ -492,6 +497,9 @@ impl ZellijPlugin for State {
                 true
             }
             Event::Timer(_) => {
+                if !self.permissions_granted {
+                    return false;
+                }
                 let previous_output = self.last_output.clone();
                 self.schedule_timer();
                 self.refresh_output();
@@ -680,6 +688,27 @@ impl State {
         self.discovery_failed_at = Some(now);
     }
 
+    /// Expire a lost `codexbar --version` result so its in-flight latch cannot
+    /// suppress every later probe. Treat expiry like a failed result: preserve
+    /// the last-known version and defer the next attempt until its normal TTL.
+    fn expire_stale_version_probe(&mut self) {
+        if !self.version_probe_in_flight {
+            return;
+        }
+        let now = now_seconds();
+        let Some(started_at) = self.version_probe_started_at else {
+            self.version_probe_started_at = Some(now);
+            return;
+        };
+        if (now - started_at).max(0.0) < VERSION_COMMAND_TIMEOUT_SECONDS as f64 {
+            return;
+        }
+        self.version_probe_in_flight = false;
+        self.version_probe_token = None;
+        self.version_probe_started_at = None;
+        self.ondisk_version_checked_at = Some(now);
+    }
+
     /// Expire a hung /health or /usage probe. Returns true when it expired and
     /// routed the timeout through the same failure path a non-200 result would,
     /// so the caller (tick) should not also kick a fresh request this pass.
@@ -727,6 +756,7 @@ impl State {
             return;
         }
         self.expire_stale_discovery();
+        self.expire_stale_version_probe();
         self.maybe_kick_version_probe();
         if self.source == Source::Serve {
             if self.discovery_in_flight {
@@ -1128,6 +1158,7 @@ impl State {
     fn kick_version_probe(&mut self, now: f64) {
         self.version_probe_in_flight = true;
         let attempt_token = format!("{:.6}", now);
+        self.version_probe_started_at = Some(now);
         self.version_probe_token = Some(attempt_token.clone());
         let mut context = BTreeMap::new();
         context.insert("kind".to_string(), VERSION_KIND.to_string());
@@ -1146,6 +1177,7 @@ impl State {
         }
         self.version_probe_in_flight = false;
         self.version_probe_token = None;
+        self.version_probe_started_at = None;
         self.ondisk_version_checked_at = Some(now_seconds());
         if exit != Some(0) {
             return;
@@ -1203,6 +1235,8 @@ impl State {
             Vec::new()
         };
         candidates.retain(|id| valid_provider_id(id));
+        let mut seen = std::collections::BTreeSet::new();
+        candidates.retain(|id| seen.insert(id.clone()));
         if !self.render_config.providers.is_empty() {
             let allow: std::collections::BTreeSet<&str> = self
                 .render_config
@@ -1313,20 +1347,20 @@ impl State {
         if provider.is_empty() {
             return false;
         }
-        if let Some(state) = self.provider_states.get(provider) {
-            // Strict attempt matching, same rule as handle_discovery_result:
-            // a result is accepted only for the exact live attempt (or on the
-            // legacy tokenless path). A tokened result arriving when no
-            // attempt is active is late, orphaned (its token was cleared by
-            // clear_all_provider_in_flight), or a duplicate — accepting it
-            // could overwrite a newer success with stale data. Rejection is
-            // cheap: in_flight is already false and no failure/backoff is
-            // recorded, so the next tick simply re-kicks the provider.
-            match (attempt, state.active_attempt_token.as_deref()) {
-                (Some(result_token), Some(active)) if result_token == active => {}
-                (None, None) => {}
-                _ => return false,
-            }
+        let Some(state) = self.provider_states.get(provider) else {
+            return false;
+        };
+        // Strict attempt matching, same rule as handle_discovery_result: a
+        // result is accepted only for the exact live attempt (or on the legacy
+        // tokenless path). A tokened result arriving when no attempt is active
+        // is late, orphaned (its token was cleared by
+        // clear_all_provider_in_flight), or a duplicate — accepting it could
+        // overwrite a newer success with stale data. Rejection is cheap: the
+        // next tick simply re-kicks the provider.
+        match (attempt, state.active_attempt_token.as_deref()) {
+            (Some(result_token), Some(active)) if state.in_flight && result_token == active => {}
+            (None, None) if state.in_flight => {}
+            _ => return false,
         }
         if let Some(state) = self.provider_states.get_mut(provider) {
             state.in_flight = false;
@@ -1379,7 +1413,11 @@ impl State {
     fn clear_all_provider_in_flight(&mut self) {
         for state in self.provider_states.values_mut() {
             state.in_flight = false;
+            state.last_result_empty = false;
+            state.last_attempt_seconds = None;
+            state.last_failure_seconds = None;
             state.active_attempt_token = None;
+            state.consecutive_failures = 0;
         }
     }
 
@@ -1856,7 +1894,7 @@ fn is_loopback_serve_url(url: &str) -> bool {
         Some(rest) => rest,
         None => return false,
     };
-    let authority = rest.split('/').next().unwrap_or(rest);
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
     let authority = authority
         .rsplit_once('@')
         .map(|(_, authority)| authority)
@@ -2337,6 +2375,8 @@ mod tests {
         ));
         assert!(!is_loopback_serve_url("http://127.0.0.1.evil.com"));
         assert!(!is_loopback_serve_url("ftp://127.0.0.1"));
+        assert!(!is_loopback_serve_url("http://evil.com?@localhost"));
+        assert!(!is_loopback_serve_url("http://evil.com#@localhost"));
         assert!(!is_loopback_serve_url(""));
     }
 
@@ -2611,6 +2651,31 @@ mod tests {
     }
 
     #[test]
+    fn stale_version_probe_expires_before_serve_tick() {
+        let mut state = State {
+            permissions_granted: true,
+            source: Source::Serve,
+            cli_fallback: CliFallback::Degraded,
+            show_build_marker: true,
+            serve_build_version: Some("0.37.2".into()),
+            discovered_providers_at: Some(now_seconds()),
+            version_probe_in_flight: true,
+            version_probe_token: Some("lost".into()),
+            version_probe_started_at: Some(
+                now_seconds() - VERSION_COMMAND_TIMEOUT_SECONDS as f64 - 1.0,
+            ),
+            ..State::default()
+        };
+
+        state.tick();
+
+        assert!(!state.version_probe_in_flight);
+        assert!(state.version_probe_token.is_none());
+        assert!(state.version_probe_started_at.is_none());
+        assert!(state.ondisk_version_checked_at.is_some());
+    }
+
+    #[test]
     fn per_provider_result_after_usage_failure_is_accepted_while_probing() {
         let mut state = State {
             permissions_granted: false,
@@ -2773,6 +2838,14 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_allow_list_entries_produce_one_eligible_provider() {
+        let mut state = State::default();
+        state.render_config.providers = vec!["codex".to_string(), "codex".to_string()];
+
+        assert_eq!(state.eligible_provider_inventory(), vec!["codex"]);
+    }
+
+    #[test]
     fn provider_order_promotes_listed_providers_to_the_front() {
         let mut state = State::default();
         state.discovered_providers = vec![
@@ -2812,6 +2885,30 @@ mod tests {
     }
 
     #[test]
+    fn permission_regrant_clears_provider_failure_backoff() {
+        let now = now_seconds();
+        let mut state = State {
+            source: Source::Unknown,
+            cli_fallback: CliFallback::Off,
+            provider_failure_backoff_seconds: 60.0,
+            ..State::default()
+        };
+        state.record_provider_failure("codex", now);
+        state.record_provider_failure("codex", now);
+        assert!(state.provider_in_flight_or_backoff("codex", now));
+
+        state.update(Event::PermissionRequestResult(PermissionStatus::Denied));
+        state.update(Event::PermissionRequestResult(PermissionStatus::Granted));
+
+        let provider = state.provider_states.get("codex").expect("provider state");
+        assert!(provider.last_failure_seconds.is_none());
+        assert_eq!(provider.consecutive_failures, 0);
+        assert!(provider.last_attempt_seconds.is_none());
+        assert!(!provider.last_result_empty);
+        assert!(!state.provider_in_flight_or_backoff("codex", now));
+    }
+
+    #[test]
     fn provider_backoff_escalates_on_consecutive_failures() {
         let mut state = State {
             provider_failure_backoff_seconds: 60.0,
@@ -2840,6 +2937,8 @@ mod tests {
         assert_eq!(&argv[4..], &["codexbar", "usage", "--provider", "claude"]);
         assert!(script.contains("sleep 15"));
         assert!(script.contains("kill -9"));
+        assert!(script.contains("trap 'kill \"$__s\" 2>/dev/null' EXIT"));
+        assert!(script.contains("wait \"$__k\""));
         // Provider ids and the binary path ride in "$@", never the shell string.
         assert!(!script.contains("claude"));
     }
@@ -2975,6 +3074,37 @@ mod tests {
         state.handle_discovery_result(Some(0), payload, None);
         assert!(!state.provider_states.contains_key("antigravity"));
         assert_eq!(state.discovered_providers, vec!["claude".to_string()]);
+    }
+
+    #[test]
+    fn late_provider_result_does_not_resurrect_discovery_pruned_provider() {
+        let mut state = State {
+            source: Source::Cli,
+            discovery_in_flight: true,
+            discovery_attempt_token: Some("discovery".into()),
+            ..State::default()
+        };
+        state.kick_provider_call("codex");
+        let attempt = state
+            .provider_states
+            .get("codex")
+            .and_then(|provider| provider.active_attempt_token.clone())
+            .expect("provider attempt");
+
+        state.handle_discovery_result(
+            Some(0),
+            br#"[{"provider":"claude","enabled":true}]"#.to_vec(),
+            Some("discovery"),
+        );
+        assert!(!state.provider_states.contains_key("codex"));
+
+        assert!(!state.handle_provider_fallback_result(
+            "codex",
+            Some(&attempt),
+            Some(0),
+            provider_record(&mixed_payload(), "codex"),
+        ));
+        assert!(!state.provider_states.contains_key("codex"));
     }
 
     #[test]
@@ -3430,6 +3560,36 @@ mod tests {
     }
 
     #[test]
+    fn permission_results_reset_version_probe_and_start_work_after_grant() {
+        let mut denied = State {
+            version_probe_in_flight: true,
+            version_probe_token: Some("denied".into()),
+            version_probe_started_at: Some(now_seconds()),
+            ..State::default()
+        };
+        denied.update(Event::PermissionRequestResult(PermissionStatus::Denied));
+        assert!(!denied.permissions_granted);
+        assert!(!denied.version_probe_in_flight);
+        assert!(denied.version_probe_token.is_none());
+        assert!(denied.version_probe_started_at.is_none());
+
+        let mut granted = State {
+            source: Source::Unknown,
+            cli_fallback: CliFallback::Off,
+            version_probe_in_flight: true,
+            version_probe_token: Some("granted".into()),
+            version_probe_started_at: Some(now_seconds()),
+            ..State::default()
+        };
+        granted.update(Event::PermissionRequestResult(PermissionStatus::Granted));
+        assert!(granted.permissions_granted);
+        assert!(!granted.version_probe_in_flight);
+        assert!(granted.version_probe_token.is_none());
+        assert!(granted.version_probe_started_at.is_none());
+        assert!(granted.health_in_flight);
+    }
+
+    #[test]
     fn version_probe_argv_wraps_bin_without_interpolation() {
         let script = version_probe_script(5);
         let argv = version_probe_argv(&script, "codexbar");
@@ -3441,6 +3601,8 @@ mod tests {
         assert!(script.contains("command -v"));
         assert!(script.contains("--version"));
         assert!(script.contains("sleep 5"));
+        assert!(script.contains("trap 'kill \"$__s\" 2>/dev/null' EXIT"));
+        assert!(script.contains("wait \"$__k\""));
         // The binary rides in $1, never interpolated into the shell string.
         assert!(!script.contains("codexbar"));
     }

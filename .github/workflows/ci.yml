@@ -87,7 +87,6 @@ jobs:
         run: cargo test --workspace
 
       - name: cargo audit
-        if: runner.os == 'Linux'
         run: |
           cargo install cargo-audit --locked
           cargo audit

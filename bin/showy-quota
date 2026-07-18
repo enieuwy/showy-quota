@@ -26,7 +26,7 @@ THEME_NAME_RE='^[A-Za-z0-9._-]+$'
 
 usage() {
     printf '%s\n' \
-        'Usage: showy-quota [--set <name>|--unset|--current|--list|--preview <name>|--diagnose [--json]|--grant-zellij [path]]' \
+        'Usage: showy-quota [--set <name>|--unset|--current|--list|--preview <name>|--diagnose [--json]|--grant-zellij [opts] [path]]' \
         '       showy-quota guard [opts]   |   showy-quota prompt [opts]   (run either with -h for details)' \
         '' \
         'With no flags, opens an interactive theme selector when fzf and a TTY are available.' \
@@ -39,7 +39,7 @@ usage() {
         '  --list            Print available theme names, one per line' \
         '  --preview <name>  Print one ANSI preview strip for a theme' \
         '  --diagnose        Print runtime state useful for bug reports (--json for machines)' \
-        '  --grant-zellij [p] Pre-grant Zellij plugin permissions (writes permissions.kdl)' \
+        '  --grant-zellij [opts] [p] Pre-grant minimal Zellij permissions; opts: --manage-serve, --cli-fallback, --force' \
         '  guard [opts]      Evaluate quota thresholds for automation (exit 0/1/2/3); "guard -h" for options' \
         '  prompt [opts]     Print a one-line quota segment for shell prompts; "prompt -h" for options' \
         '  -h, --help        Show this help'
@@ -631,9 +631,37 @@ resolve_abs_path() {
 # Pre-grant the standalone Zellij plugin's permissions so it never prompts on
 # first launch. The grant lives in Zellij's permissions.kdl (a cache file that
 # macOS may purge), keyed by the plugin's location; re-running this is safe and
-# re-heals after a purge. Other plugins' grants are preserved.
+# re-heals after a purge. Other plugins' grants are preserved. WebAccess is
+# always granted; the two optional capabilities mirror the plugin's config.
 grant_zellij() {
-    local plugin_arg="${1:-}" plugin_path plugins_dir
+    local plugin_arg="" plugin_path plugins_dir
+    local manage_serve=0 cli_fallback=0 force=0
+    local -a permissions=("WebAccess")
+
+    while (($#)); do
+        case "$1" in
+            --manage-serve) manage_serve=1 ;;
+            --cli-fallback) cli_fallback=1 ;;
+            --force) force=1 ;;
+            --)
+                shift
+                (($# <= 1)) || usage_error '--grant-zellij accepts at most one plugin path'
+                if (($#)); then
+                    plugin_arg="$1"
+                fi
+                break
+                ;;
+            -*)
+                usage_error "unknown --grant-zellij option: $1"
+                ;;
+            *)
+                [[ -z "${plugin_arg}" ]] || usage_error '--grant-zellij accepts at most one plugin path'
+                plugin_arg="$1"
+                ;;
+        esac
+        shift
+    done
+
     if [[ -n "${plugin_arg}" ]]; then
         plugin_path="$(resolve_abs_path "${plugin_arg}")"
     else
@@ -647,10 +675,13 @@ grant_zellij() {
         die "plugin path contains characters unsafe for the KDL permissions file (quote, backslash, or control char): ${plugin_path}"
     fi
 
-    if [[ ! -e "${plugin_path}" ]]; then
-        printf 'showy-quota: warning: no plugin file at %s\n' "${plugin_path}" >&2
-        printf 'showy-quota: granting anyway — ensure this matches the layout "location" entry\n' >&2
+    if [[ ! -f "${plugin_path}" ]]; then
+        (( force )) || die "plugin file does not exist: ${plugin_path} (pass --force to pre-provision intentionally)"
+        printf 'showy-quota: warning: pre-provisioning permissions for absent plugin file: %s\n' "${plugin_path}" >&2
     fi
+
+    (( manage_serve )) && permissions+=("OpenTerminalsOrPlugins")
+    (( cli_fallback )) && permissions+=("RunCommands")
 
     # Zellij 0.44.x keys grants on the bare absolute path; older versions used
     # the `file:` URL form. Write every plausible key so the grant survives
@@ -667,7 +698,7 @@ grant_zellij() {
     local block_re='^[[:space:]]*"?([^"{]*[^"[:space:]{])"?[[:space:]]*\{[[:space:]]*$'
     local close_re='^[[:space:]]*\}[[:space:]]*$'
     local -a kept=()
-    local skipping=0 line name key managed last
+    local skipping=0 line name key managed last permission
     if [[ -f "${perms_file}" ]]; then
         while IFS= read -r line || [[ -n "${line}" ]]; do
             if (( skipping )); then
@@ -701,7 +732,11 @@ grant_zellij() {
     if ! {
         if ((${#kept[@]})); then printf '%s\n' "${kept[@]}"; fi
         for key in "${keys[@]}"; do
-            printf '"%s" {\n    WebAccess\n    OpenTerminalsOrPlugins\n    RunCommands\n}\n' "${key}"
+            printf '"%s" {\n' "${key}"
+            for permission in "${permissions[@]}"; do
+                printf '    %s\n' "${permission}"
+            done
+            printf '}\n'
         done
     } > "${tmp}"; then
         die "cannot write temporary file next to ${perms_file}"
@@ -714,7 +749,9 @@ grant_zellij() {
     printf '  permissions file: %s\n' "${perms_file}"
     printf '  plugin path:      %s\n' "${plugin_path}"
     printf '  keys written:     %s\n' "${#keys[@]}"
-    printf '  permissions:      WebAccess OpenTerminalsOrPlugins RunCommands\n'
+    printf '  permissions:'
+    printf ' %s' "${permissions[@]}"
+    printf '\n'
     printf 'Open a new Zellij tab (or restart Zellij) for the grant to take effect.\n'
 }
 
@@ -746,9 +783,10 @@ automation_fetch_bin() {
 # CodexBar's id charset so a malformed flag is a usage error, not "unknown".
 parse_provider_list() {
     local raw="$1" part
+    local -a parts=()
     PROVIDER_IDS=()
-    local IFS=','
-    for part in ${raw}; do
+    IFS=',' read -r -a parts <<< "${raw}"
+    for part in "${parts[@]}"; do
         part="${part#"${part%%[![:space:]]*}"}"
         part="${part%"${part##*[![:space:]]}"}"
         [[ -n "${part}" ]] || continue
@@ -1126,12 +1164,8 @@ main() {
             fi
             ;;
         --grant-zellij)
-            if (($# == 2)); then
-                grant_zellij "$2"
-            else
-                (($# == 1)) || usage_error '--grant-zellij accepts at most one plugin path'
-                grant_zellij ""
-            fi
+            shift
+            grant_zellij "$@"
             ;;
         guard)
             shift

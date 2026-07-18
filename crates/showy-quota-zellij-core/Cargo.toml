@@ -10,7 +10,7 @@ publish = false
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-time = { version = "=0.3.53", features = ["formatting", "local-offset", "macros", "parsing"] }
+time = { version = "0.3.53", features = ["formatting", "local-offset", "macros", "parsing"] }
 
 [[bin]]
 name = "showy-quota-render"

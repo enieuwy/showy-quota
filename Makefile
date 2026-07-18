@@ -15,6 +15,7 @@ ZELLIJ_PLUGINS ?= $(HOME)/.config/zellij/plugins
 SBAR_ITEMS    ?= $(SKETCHYBAR)/items
 SBAR_PLUGINS  ?= $(SKETCHYBAR)/plugins
 FORCE         ?= 0
+FORCE_PLUGIN_REMOVE ?= 0
 CARGO         ?= cargo
 MAKE_COMMAND  ?= $(MAKE)
 RUSTC         ?= rustc
@@ -213,6 +214,11 @@ plugin: ## Build the standalone Zellij WASM plugin.
 
 install-plugin: plugin ## Install the standalone Zellij WASM plugin (pre-grants Zellij permissions).
 	@mkdir -p "$(ZELLIJ_PLUGINS)"
+	@checksum="$(PLUGIN_WASM).sha256"; \
+	if [ -f "$$checksum" ]; then \
+		printf 'verifying %s\n' "$$checksum"; \
+		(cd "$$(dirname "$(PLUGIN_WASM)")" && shasum -a 256 -c "$$(basename "$$checksum")); \
+	fi
 	@if [ -e "$(PLUGIN_TARGET)" ] && ! cmp -s "$(PLUGIN_WASM)" "$(PLUGIN_TARGET)"; then \
 		if [ "$(FORCE)" != "1" ]; then \
 			printf 'refusing to clobber %s (set FORCE=1 to replace)\n' "$(PLUGIN_TARGET)" >&2; \
@@ -300,7 +306,7 @@ uninstall: ## Remove symlinks and copied DATA_DIR that this Makefile created.
 		printf 'removed %s\n' "$$data_dir"; \
 	fi
 	@if [ -f "$(PLUGIN_TARGET)" ]; then \
-		if [ -f "$(PLUGIN_WASM)" ] && cmp -s "$(PLUGIN_WASM)" "$(PLUGIN_TARGET)"; then \
+		if [ "$(FORCE_PLUGIN_REMOVE)" = "1" ] || { [ -f "$(PLUGIN_WASM)" ] && cmp -s "$(PLUGIN_WASM)" "$(PLUGIN_TARGET)"; }; then \
 			rm -f "$(PLUGIN_TARGET)"; printf 'removed %s\n' "$(PLUGIN_TARGET)"; \
 		else \
 			printf 'skip %s (does not match current build artifact)\n' "$(PLUGIN_TARGET)" >&2; \

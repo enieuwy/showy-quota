@@ -127,7 +127,20 @@ fn slot(window: Option<&UsageWindow>) -> Option<&UsageWindow> {
     window.filter(|window| window.used_percent.is_some())
 }
 
+/// Upper bound on a CodexBar usage payload accepted by the parser. Mirrors the
+/// `--max-filesize` ceiling the shell fetcher applies to the HTTP `/usage`
+/// probe so the CLI-fallback and cache parse paths are bounded too: a buggy or
+/// compromised `codexbar` emitting multi-gigabyte JSON cannot exhaust memory on
+/// every render tick.
+pub const MAX_USAGE_JSON_BYTES: usize = 5 * 1024 * 1024;
+
 pub fn parse_usage_payload(payload: &[u8]) -> Result<Vec<ProviderRecord>, serde_json::Error> {
+    if payload.len() > MAX_USAGE_JSON_BYTES {
+        return Err(serde_json::Error::io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "CodexBar usage payload exceeds size cap",
+        )));
+    }
     let records: Vec<ProviderRecord> = serde_json::from_slice(payload)?;
     if records.iter().all(valid_provider_record) {
         Ok(records)
@@ -162,6 +175,7 @@ pub(crate) fn is_renderable(record: &ProviderRecord) -> bool {
 /// would escape per-provider stamp paths in the shell data plane.
 pub fn valid_provider_id(provider: &str) -> bool {
     !provider.is_empty()
+        && provider.len() <= 64
         && !provider.starts_with('-')
         && provider != "."
         && provider != ".."
@@ -449,6 +463,24 @@ mod tests {
     #[test]
     fn valid_provider_id_rejects_leading_dash() {
         assert!(!valid_provider_id("-codex"));
+    }
+
+    #[test]
+    fn valid_provider_id_rejects_over_64_chars() {
+        assert!(valid_provider_id(&"a".repeat(64)));
+        assert!(!valid_provider_id(&"a".repeat(65)));
+    }
+
+    #[test]
+    fn parse_usage_payload_rejects_oversize_input() {
+        let mut payload = Vec::with_capacity(MAX_USAGE_JSON_BYTES + 16);
+        payload.push(b'[');
+        payload.resize(MAX_USAGE_JSON_BYTES + 1, b' ');
+        let err = parse_usage_payload(&payload).expect_err("oversize payload must be rejected");
+        assert!(
+            err.is_io(),
+            "size-cap rejection should be an IO-category error"
+        );
     }
 
     #[test]

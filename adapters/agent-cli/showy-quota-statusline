@@ -53,14 +53,21 @@ print_fallback() {
 resolve_bar_bin() {
     local candidate resolved
     if [[ -n "${SHOWY_QUOTA_BAR_BIN:-}" ]]; then
-        if [[ "${SHOWY_QUOTA_BAR_BIN}" == */* ]]; then
-            if [[ -x "${SHOWY_QUOTA_BAR_BIN}" ]]; then
-                printf '%s\n' "${SHOWY_QUOTA_BAR_BIN}"
+        # Validate the override the same way lib/common.sh's showy_quota_valid_bin
+        # does (reject whitespace/shell metacharacters) so a poisoned env cannot
+        # smuggle an arbitrary command into exec. Inlined so this adapter keeps
+        # its own width/cap defaults instead of inheriting the terminal driver's.
+        if [[ "${SHOWY_QUOTA_BAR_BIN}" =~ ^[A-Za-z0-9._+@/-]+$ ]]; then
+            candidate="${SHOWY_QUOTA_BAR_BIN}"
+            if [[ "${candidate}" == */* ]]; then
+                if [[ -x "${candidate}" ]]; then
+                    printf '%s\n' "${candidate}"
+                    return 0
+                fi
+            elif resolved="$(command -v "${candidate}" 2>/dev/null)"; then
+                printf '%s\n' "${resolved}"
                 return 0
             fi
-        elif resolved="$(command -v "${SHOWY_QUOTA_BAR_BIN}" 2>/dev/null)"; then
-            printf '%s\n' "${resolved}"
-            return 0
         fi
     fi
 

@@ -1272,7 +1272,10 @@ fn elapsed_marker_cell(
     let reset_epoch = reset_epoch(reset_at?, now_epoch, reset_description_offset_minutes)?;
     let duration = window_minutes.checked_mul(60)?;
     let start_epoch = reset_epoch.checked_sub(duration)?;
-    let elapsed = (now_epoch - start_epoch).clamp(0, duration);
+    // Widen to i128 before the subtraction: `now_epoch` is externally settable
+    // (SHOWY_QUOTA_NOW_EPOCH) and `start_epoch` can be a large negative i64, so a
+    // plain i64 subtraction could overflow (panic in debug, wrap in release).
+    let elapsed = ((now_epoch as i128 - start_epoch as i128).clamp(0, duration as i128)) as i64;
     // Compute in u64 so a large window_minutes does not truncate/overflow when
     // cast to a 32-bit usize on wasm32; the quotient is <= width and fits usize.
     let remaining = (duration - elapsed) as u64;
@@ -1821,6 +1824,22 @@ mod tests {
             reset_epoch("Resets Jun 2, 2026 4:30 PM", 1_780_401_600, Some(-420)),
             Some(1_780_443_000)
         );
+    }
+
+    #[test]
+    fn elapsed_marker_cell_does_not_overflow_at_extreme_now_epoch() {
+        // now_epoch near i64::MAX with a window whose start_epoch is deeply
+        // negative must not overflow the elapsed subtraction (panic in debug,
+        // wrap in release). A tiny reset epoch with a large window drives
+        // start_epoch negative. The marker is still clamped into [0, width).
+        let marker = elapsed_marker_cell(
+            Some("1970-01-02T00:00:00Z"),
+            Some(10_080),
+            10,
+            i64::MAX,
+            Some(0),
+        );
+        assert!(matches!(marker, Some(m) if m < 10));
     }
 
     #[test]

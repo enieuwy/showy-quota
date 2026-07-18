@@ -59,6 +59,30 @@ if [[ ! "${threshold}" =~ ^[0-9]+$ ]]; then
     threshold=5
 fi
 
+# Provider errors are included in state JSON and bug-report diagnostics. Keep
+# the classification from the native renderer, but remove credential and local
+# identity material before the message crosses this public-facing boundary.
+sanitize_error_message() {
+    jq -c --arg home "${HOME}" '
+        def sanitize_error_message:
+            gsub("(?i)\\b(?:Cookie|Authorization)[[:space:]]*:[^\r\n]*"; "<redacted-header>")
+            | gsub("[[:cntrl:]]"; "")
+            | gsub("[[:space:]]+"; " ")
+            | split($home) | join("<redacted-home>")
+            | gsub("[[:alnum:]._%+-]+@[[:alnum:].-]+\\.[[:alpha:]]{2,}"; "<redacted-email>")
+            | gsub("(?i)\\b(?:bearer|token)[[:space:]]*(?:=|:)?[[:space:]]*[A-Za-z0-9+/_-]{20,}={0,2}"; "<redacted-secret>")
+            | gsub("(?i)\\b[0-9a-f]{20,}\\b"; "<redacted-secret>")
+            | gsub("[A-Za-z0-9+/_-]{20,}={0,2}"; "<redacted-secret>")
+            | .[0:160];
+        map(
+            if (.error? != null and (.error.message | type) == "string") then
+                .error.message |= sanitize_error_message
+            else
+                .
+            end
+        )'
+}
+
 
 
 
@@ -87,6 +111,7 @@ else
     provider_ids_json='[]'
     provider_metrics_json='[]'
 fi
+provider_metrics_json="$(printf '%s' "${provider_metrics_json}" | sanitize_error_message)"
 
 cache_age="null"
 cache_source="unknown"
@@ -100,7 +125,11 @@ case "${cache_source}" in
     serve|cli) ;;
     *) cache_source="unknown" ;;
 esac
-if [[ "${cache_source}" == "cli" ]]; then
+if [[ "${SHOWY_QUOTA_DEGRADED_CLI:-}" == "1" ]]; then
+    degraded_flag=true
+elif [[ -n "${SHOWY_QUOTA_DEGRADED_CLI:-}" ]]; then
+    degraded_flag=false
+elif [[ "${cache_source}" == "cli" ]]; then
     degraded_flag=true
 else
     degraded_flag=false

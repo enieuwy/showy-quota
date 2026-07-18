@@ -58,6 +58,12 @@ done
 
 (umask 077 && mkdir -p "${SHOWY_QUOTA_CACHE_DIR}")
 chmod 700 "${SHOWY_QUOTA_CACHE_DIR}" 2>/dev/null || true
+# Refuse to publish into a cache dir another user could tamper with: a
+# world/group-writable or foreign-owned dir lets a local attacker inject
+# usage.json/status.url that drive SketchyBar clicks and automation consumers.
+if ! showy_quota_dir_is_private "${SHOWY_QUOTA_CACHE_DIR}"; then
+    showy_quota_die "refusing to use unsafe cache dir: ${SHOWY_QUOTA_CACHE_DIR} (must be owned by you and not group/other-writable)"
+fi
 SHOWY_QUOTA_MANAGED_SERVE_RESTART_ATTEMPTED=0
 
 stop_managed_serve() {
@@ -861,6 +867,10 @@ run_codexbar_cli_provider() {
         showy_quota_log "codexbar usage --provider ${provider} failed (rc=${rc})"
         return 1
     fi
+    if (( ${#out} > SHOWY_QUOTA_MAX_USAGE_JSON_BYTES )); then
+        showy_quota_log "codexbar usage --provider ${provider} exceeded ${SHOWY_QUOTA_MAX_USAGE_JSON_BYTES}-byte cap"
+        return 1
+    fi
     if ! provider_payload_is_publishable "${provider}" "${out}"; then
         showy_quota_log "codexbar usage --provider ${provider} returned no renderable record"
         return 1
@@ -1019,7 +1029,19 @@ codexbar_bin_abs() {
         printf '%s\n' "${bin}"
         return 0
     fi
-    command -v "${bin}" 2>/dev/null || printf '%s\n' "${bin}"
+    local resolved canon
+    resolved=$(command -v "${bin}" 2>/dev/null) || { printf '%s\n' "${bin}"; return 0; }
+    # Pin the real file so a PATH/symlink swap between resolution and the serve
+    # spawn cannot substitute a different codexbar. Only adopt the canonical path
+    # when it keeps the same basename, so the managed-serve ps basename match
+    # (managed_serve_expected_basename) still holds.
+    if canon=$(realpath "${resolved}" 2>/dev/null) || canon=$(readlink -f "${resolved}" 2>/dev/null); then
+        if [[ -n "${canon}" && "${canon##*/}" == "${resolved##*/}" ]]; then
+            printf '%s\n' "${canon}"
+            return 0
+        fi
+    fi
+    printf '%s\n' "${resolved}"
 }
 
 # Build version of the installed codexbar binary (cheap, bounded fresh process).
@@ -1280,9 +1302,26 @@ start_managed_serve() {
     fi
     local pid=$! start_epoch=""
     start_epoch=$(managed_serve_pid_start_epoch_for_record "${pid}")
-    rm -f -- "${SHOWY_QUOTA_CODEXBAR_SERVE_PID_FILE}"
-    (umask 077 && printf '%s:%s:%s\n' "${pid}" "${start_epoch}" "$(managed_serve_expected_basename)" > "${SHOWY_QUOTA_CODEXBAR_SERVE_PID_FILE}")
-    chmod 600 "${SHOWY_QUOTA_CODEXBAR_SERVE_PID_FILE}" 2>/dev/null || true
+    # Publish the pidfile as one atomic rename so a concurrent reader never sees
+    # a torn/partial record. mktemp in the pidfile's own directory keeps the
+    # rename on the same filesystem; fall back to a direct write if mktemp fails.
+    local pid_record pid_dir pid_tmp
+    pid_record=$(printf '%s:%s:%s' "${pid}" "${start_epoch}" "$(managed_serve_expected_basename)")
+    pid_dir=$(dirname -- "${SHOWY_QUOTA_CODEXBAR_SERVE_PID_FILE}")
+    if pid_tmp=$(mktemp "${pid_dir}/codexbar-serve.pid.XXXXXX" 2>/dev/null); then
+        (umask 077 && printf '%s\n' "${pid_record}" > "${pid_tmp}") \
+            && chmod 600 "${pid_tmp}" 2>/dev/null
+        if ! mv -f "${pid_tmp}" "${SHOWY_QUOTA_CODEXBAR_SERVE_PID_FILE}" 2>/dev/null; then
+            rm -f -- "${pid_tmp}"
+            rm -f -- "${SHOWY_QUOTA_CODEXBAR_SERVE_PID_FILE}"
+            (umask 077 && printf '%s\n' "${pid_record}" > "${SHOWY_QUOTA_CODEXBAR_SERVE_PID_FILE}")
+            chmod 600 "${SHOWY_QUOTA_CODEXBAR_SERVE_PID_FILE}" 2>/dev/null || true
+        fi
+    else
+        rm -f -- "${SHOWY_QUOTA_CODEXBAR_SERVE_PID_FILE}"
+        (umask 077 && printf '%s\n' "${pid_record}" > "${SHOWY_QUOTA_CODEXBAR_SERVE_PID_FILE}")
+        chmod 600 "${SHOWY_QUOTA_CODEXBAR_SERVE_PID_FILE}" 2>/dev/null || true
+    fi
     disown "${pid}" 2>/dev/null || true
     showy_quota_log "started managed codexbar serve pid ${pid} on port ${port}"
 }
@@ -1378,6 +1417,25 @@ serve_payload_is_publishable() {
                     and all([.usage.primary, .usage.secondary, .usage.tertiary][];
                         . == null
                         or (type == "object" and (.usedPercent | type) == "number")
+                    )
+                    and (
+                        (.usage.extraRateWindows // null) == null
+                        or (
+                            (.usage.extraRateWindows | type) == "array"
+                            and all(.usage.extraRateWindows[];
+                                type == "object"
+                                and (
+                                    (.window // null) == null
+                                    or (
+                                        (.window | type) == "object"
+                                        and (
+                                            (.window.usedPercent // null) == null
+                                            or (.window.usedPercent | type) == "number"
+                                        )
+                                    )
+                                )
+                            )
+                        )
                     )
                 )
             )
@@ -1668,19 +1726,25 @@ publish_cache_payload() {
             showy_quota_log "could not write temporary source file"
             return 1
         }
-        mv "${tmp}" "${SHOWY_QUOTA_USAGE_FILE}" || {
-            rm -f "${tmp}" "${stamp_tmp}" "${source_tmp}"
-            showy_quota_log "could not publish cache file"
-            return 1
-        }
+        # Publish metadata (stamp, source) BEFORE the usage payload, and rename
+        # the payload LAST. Combined with the payload-first reader
+        # (read_cache_from_env reads usage.json, then source/mtime), this
+        # guarantees a reader that observes a new payload also observes the
+        # matching-or-newer source/stamp — closing the mixed-generation window
+        # where a fresh payload could be paired with a stale source marker.
         mv "${stamp_tmp}" "${SHOWY_QUOTA_USAGE_STAMP}" || {
-            rm -f "${stamp_tmp}" "${source_tmp}"
+            rm -f "${tmp}" "${stamp_tmp}" "${source_tmp}"
             showy_quota_log "could not publish stamp file"
             return 1
         }
         mv "${source_tmp}" "${SHOWY_QUOTA_SOURCE_FILE}" || {
-            rm -f "${source_tmp}"
+            rm -f "${tmp}" "${source_tmp}"
             showy_quota_log "could not publish source file"
+            return 1
+        }
+        mv "${tmp}" "${SHOWY_QUOTA_USAGE_FILE}" || {
+            rm -f "${tmp}"
+            showy_quota_log "could not publish cache file"
             return 1
         }
         chmod 600 "${SHOWY_QUOTA_USAGE_FILE}" "${SHOWY_QUOTA_USAGE_STAMP}" "${SHOWY_QUOTA_SOURCE_FILE}" 2>/dev/null || true

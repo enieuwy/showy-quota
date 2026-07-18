@@ -1063,9 +1063,10 @@ grant_content="$(< "${grant_perms}")"
 assert_contains "grant writes bare absolute path key" "\"${grant_plugin}\" {" "${grant_content}"
 assert_contains "grant writes file: url key" "\"file:${grant_plugin}\" {" "${grant_content}"
 assert_contains "grant writes home-relative file:~ key" '"file:~/.config/zellij/plugins/showy-quota-zellij-chezmoi.wasm" {' "${grant_content}"
-assert_contains "grant requests RunCommands" "RunCommands" "${grant_content}"
+assert_contains "grant requests WebAccess by default" "WebAccess" "${grant_content}"
 assert_contains "grant preserves unrelated plugin block" '"/other/plugin.wasm" {' "${grant_content}"
 assert_contains "grant preserves unrelated permission" "ReadApplicationState" "${grant_content}"
+assert_not_contains "grant omits RunCommands by default" "RunCommands" "${grant_content}"
 
 # Re-running must not duplicate our own blocks (idempotent + self-healing).
 run_grant "${grant_plugin}" >/dev/null
@@ -1073,15 +1074,33 @@ grant_dupes=$(grep -c -F "\"${grant_plugin}\" {" "${grant_perms}" || true)
 assert_equals "grant is idempotent for the bare key block" "1" "${grant_dupes}"
 assert_contains "idempotent re-run keeps unrelated block" '"/other/plugin.wasm" {' "$(< "${grant_perms}")"
 
-# A missing plugin file still grants (warns, exits 0) so deploys can pre-grant.
+# Opt-in flags widen the grant to the capabilities the plugin actually uses.
+run_grant --manage-serve --cli-fallback "${grant_plugin}" >/dev/null
+grant_optin="$(< "${grant_perms}")"
+assert_contains "grant --cli-fallback adds RunCommands" "RunCommands" "${grant_optin}"
+assert_contains "grant --manage-serve adds OpenTerminalsOrPlugins" "OpenTerminalsOrPlugins" "${grant_optin}"
+# Restore the default (minimal) grant for the remaining assertions.
+run_grant "${grant_plugin}" >/dev/null
+
+# A missing plugin file is refused (blocks the pre-seed-then-swap attack) unless
+# --force is passed for intentional pre-provisioning.
 grant_missing="${grant_home}/nope/ghost.wasm"
 grant_rc=0
 run_grant "${grant_missing}" >/dev/null 2>&1 || grant_rc=$?
-assert_equals "grant succeeds even when plugin file is absent" "0" "${grant_rc}"
-assert_contains "grant writes key for absent plugin" "\"${grant_missing}\" {" "$(< "${grant_perms}")"
+assert_equals "grant refuses absent plugin without --force" "1" "${grant_rc}"
+if grep -qF "\"${grant_missing}\" {" "${grant_perms}"; then
+    fail "grant does not write absent plugin without --force"
+else
+    ok "grant does not write absent plugin without --force"
+fi
+grant_force_rc=0
+run_grant --force "${grant_missing}" >/dev/null 2>&1 || grant_force_rc=$?
+assert_equals "grant --force pre-provisions absent plugin" "0" "${grant_force_rc}"
+assert_contains "grant --force writes key for absent plugin" "\"${grant_missing}\" {" "$(< "${grant_perms}")"
 
 # No-arg grant targets the default installed wasm under ZELLIJ_PLUGINS.
 grant_default_perms="${grant_home}/default-permissions.kdl"
+: > "${grant_home}/.config/zellij/plugins/showy-quota-zellij.wasm"
 env \
     PATH="${stub_dir}:${PATH}" \
     HOME="${grant_home}" \
@@ -1140,8 +1159,13 @@ jq '
 ' "$(fixture_path codexbar-mixed.json)" > "${mixed_error_fixture}"
 
 sanitized_error_fixture="${TMP}/codexbar-error-sanitize.json"
-sanitized_padding=$(printf '%*s' 200 '')
-sanitized_padding="${sanitized_padding// /x}"
+# Padding that exceeds the 160-char truncation cap without forming a long
+# alphanumeric run (which the secret-redaction pass collapses): short
+# space-separated tokens keep this exercising truncation, not redaction.
+sanitized_padding=""
+while (( ${#sanitized_padding} < 200 )); do
+    sanitized_padding+="word "
+done
 sanitized_raw_message=$'Token\x01bad  '"${sanitized_padding}"
 jq -n --arg message "${sanitized_raw_message}" \
     '[{"provider":"cursor","error":{"code":1,"kind":"provider","message":$message}}]' \
@@ -1845,6 +1869,15 @@ assert_equals "state exclude keeps renderable providers empty" "[]" "$(printf '%
 
 out=$(run_state "${sanitized_error_fixture}")
 assert_equals "state sanitizes and truncates provider error message" "160|true|true" "$(printf '%s' "${out}" | jq -r '.providerMetrics[] | select(.provider == "cursor") | .error.message | [(length | tostring), (contains("\u0001") | not | tostring), (startswith("Tokenbad ") | tostring)] | join("|")')"
+
+# Provider error messages are redacted before export so pasted --diagnose/state
+# output cannot leak auth/session material (emails, bearer/token-shaped runs).
+redact_error_fixture="${TMP}/codexbar-error-redact.json"
+jq -n '[{"provider":"cursor","error":{"code":1,"kind":"provider","message":"auth failed for alice@example.test token 0123456789abcdef0123456789abcdef01234567"}}]' \
+    > "${redact_error_fixture}"
+redact_out=$(run_state "${redact_error_fixture}" | jq -r '.providerMetrics[] | select(.provider == "cursor") | .error.message')
+assert_not_contains "state redacts email in provider error message" "alice@example.test" "${redact_out}"
+assert_not_contains "state redacts token in provider error message" "0123456789abcdef0123456789abcdef01234567" "${redact_out}"
 
 out=$(run_state codexbar-antigravity-quad.json SHOWY_QUOTA_NOW_EPOCH=4070908800)
 assert_equals "state extraRateWindows exposes known window metrics" "Gemini Session|true|35|65|300|180" "$(printf '%s' "${out}" | jq -r '.providerMetrics[] | select(.provider == "antigravity") | .extraRateWindows[0] | [.title, .usageKnown, .usedPercent, .remainingPercent, .windowMinutes, .minutesUntilReset] | map(tostring) | join("|")')"

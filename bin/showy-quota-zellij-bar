@@ -72,11 +72,16 @@ fi
 showy_quota_export_config
 
 if [[ -n "${json_input}" ]]; then
-    if [[ "${json_input}" != "-" ]]; then
-        [[ -f "${json_input}" ]] || showy_quota_die "JSON input is not a regular file: ${json_input}"
-        showy_quota_json_valid "${json_input}" || showy_quota_die "JSON input is not valid quota data: ${json_input}"
+    json_source="${json_input}"
+    if [[ "${json_input}" == "-" ]]; then
+        json_input="$(mktemp "${TMPDIR:-/tmp}/showy-quota-json.XXXXXX")"
+        trap 'rm -f -- "${json_input}"' EXIT
+        cat > "${json_input}"
     fi
-    exec "${RENDER_BIN}" --format zellij --json "${json_input}"
+    [[ -f "${json_input}" ]] || showy_quota_die "JSON input is not a regular file: ${json_source}"
+    showy_quota_json_valid "${json_input}" || showy_quota_die "JSON input is not valid quota data: ${json_source}"
+    "${RENDER_BIN}" --format zellij --json "${json_input}"
+    exit 0
 fi
 
 "${FETCH}" >/dev/null 2>&1 || true

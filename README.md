@@ -69,6 +69,10 @@ bin/showy-quota-fetch     ←  shared cache + source marker + flock + last-known
    VERSION=$(curl -fsSL https://api.github.com/repos/enieuwy/showy-quota/releases/latest | jq -r '.tag_name | sub("^v"; "")')
    TARGET=macos-arm64
    curl -LO "https://github.com/enieuwy/showy-quota/releases/download/v${VERSION}/showy-quota-${VERSION}-${TARGET}.tar.gz"
+   curl -LO "https://github.com/enieuwy/showy-quota/releases/download/v${VERSION}/showy-quota-${VERSION}-${TARGET}.tar.gz.sha256"
+   shasum -a 256 -c "showy-quota-${VERSION}-${TARGET}.tar.gz.sha256"
+   # If your system uses GNU coreutils, use:
+   # sha256sum -c "showy-quota-${VERSION}-${TARGET}.tar.gz.sha256"
    tar xzf "showy-quota-${VERSION}-${TARGET}.tar.gz"
    cd "showy-quota-${VERSION}"
    make install-copy             # copies runtime files into ~/.local/share/showy-quota

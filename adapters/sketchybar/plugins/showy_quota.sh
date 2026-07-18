@@ -34,12 +34,47 @@ REPO_ROOT="$(resolve_repo_root)"
 # shellcheck disable=SC1091
 . "${REPO_ROOT}/lib/strip.sh"
 
+DEFAULT_CLICK="open -b com.steipete.codexbar"
+
+click_command_is_safe() {
+    local click="${1:-}"
+
+    case "${click}" in
+        *';'*|*'|'*|*'&'*|*'`'*|*'$'*|*'('*|*')'*|*'<'*|*'>'*)
+            return 1
+            ;;
+    esac
+    [[ ! "${click}" =~ [[:cntrl:]] ]]
+}
+
+validated_codexbar_resources() {
+    local resources="${SHOWY_QUOTA_CODEXBAR_RESOURCES:-}" resolved
+
+    [[ "${resources}" == /* && ${#resources} -le 1024 ]] || return 1
+    [[ ! "${resources}" =~ [[:cntrl:]] ]] || return 1
+    [[ -d "${resources}" && -r "${resources}" ]] || return 1
+    if command -v realpath >/dev/null 2>&1; then
+        resolved=$(realpath "${resources}" 2>/dev/null) || return 1
+    else
+        resolved=$(cd -- "${resources}" && pwd -P) || return 1
+    fi
+    [[ "${resolved}" == /* && -d "${resolved}" && -r "${resolved}" ]] || return 1
+    [[ ! "${resolved}" =~ [[:cntrl:]] ]] || return 1
+    printf '%s\n' "${resolved}"
+}
+
 FETCH="${SHOWY_QUOTA_FETCH_BIN:-${REPO_ROOT}/bin/showy-quota-fetch}"
 FETCH="$(showy_quota_valid_bin "${FETCH}")" || FETCH="${REPO_ROOT}/bin/showy-quota-fetch"
 CACHE_DIR="${SHOWY_QUOTA_SKETCHYBAR_IMAGE_CACHE}"
-mkdir -p "${CACHE_DIR}" || exit 0
+mkdir -p -- "${CACHE_DIR}" || exit 0
+chmod 700 "${CACHE_DIR}" 2>/dev/null || true
 STATE_FILE="${CACHE_DIR}/providers.txt"
-CLICK="${SHOWY_QUOTA_SKETCHYBAR_CLICK}"
+if click_command_is_safe "${SHOWY_QUOTA_SKETCHYBAR_CLICK}"; then
+    CLICK="${SHOWY_QUOTA_SKETCHYBAR_CLICK}"
+else
+    CLICK="${DEFAULT_CLICK}"
+fi
+CODEXBAR_RESOURCES="$(validated_codexbar_resources || true)"
 RENDER_LOCK_DIR="${CACHE_DIR}/render.lock"
 RENDER_LOCK_OWNER="${RENDER_LOCK_DIR}/owner.pid"
 ICON_TMP_FILES=()
@@ -74,47 +109,62 @@ release_render_lock() {
 }
 
 acquire_render_lock() {
-    if mkdir -- "${RENDER_LOCK_DIR}" 2>/dev/null; then
-        printf '%s\n' "$$" > "${RENDER_LOCK_OWNER}" || {
-            rmdir -- "${RENDER_LOCK_DIR}" 2>/dev/null || true
-            return 1
-        }
-        trap release_render_lock EXIT
-        return 0
-    fi
+    local owner_pid lock_age
+    local max_ownerless_age=30 malformed_owner attempt=0 max_attempts=3
 
-    local owner_pid="" lock_age="" max_ownerless_age=30 malformed_owner=0
-    if [[ -r "${RENDER_LOCK_OWNER}" ]]; then
-        IFS= read -r owner_pid < "${RENDER_LOCK_OWNER}" || owner_pid=""
-        if [[ "${owner_pid}" =~ ^[0-9]+$ ]]; then
-            if kill -0 "${owner_pid}" 2>/dev/null; then
-                showy_quota_log "sketchybar render already in flight (pid ${owner_pid}); skipping"
+    while (( attempt < max_attempts )); do
+        if mkdir -- "${RENDER_LOCK_DIR}" 2>/dev/null; then
+            printf '%s\n' "$$" > "${RENDER_LOCK_OWNER}" || {
+                rmdir -- "${RENDER_LOCK_DIR}" 2>/dev/null || true
+                return 1
+            }
+            trap release_render_lock EXIT
+            return 0
+        fi
+
+        owner_pid=""
+        lock_age=""
+        malformed_owner=0
+        if [[ -r "${RENDER_LOCK_OWNER}" ]]; then
+            IFS= read -r owner_pid < "${RENDER_LOCK_OWNER}" || owner_pid=""
+            if [[ "${owner_pid}" =~ ^[0-9]+$ ]]; then
+                if kill -0 "${owner_pid}" 2>/dev/null; then
+                    showy_quota_log "sketchybar render already in flight (pid ${owner_pid}); skipping"
+                    return 1
+                fi
+                rm -f -- "${RENDER_LOCK_OWNER}"
+                if ! rmdir -- "${RENDER_LOCK_DIR}" 2>/dev/null; then
+                    return 1
+                fi
+                ((attempt += 1))
+                (( attempt < max_attempts )) && sleep "0.$((attempt * 5))"
+                continue
+            else
+                malformed_owner=1
+            fi
+        fi
+
+        # A future-dated lock mtime (clock skew, hand-touched dir) yields a
+        # negative age that would never satisfy the threshold and wedge rendering
+        # forever; judge staleness by absolute distance from now instead.
+        if lock_age=$(render_lock_age_seconds) \
+            && { (( lock_age >= max_ownerless_age )) || (( lock_age <= -max_ownerless_age )); }; then
+            if (( malformed_owner )); then
+                rm -f -- "${RENDER_LOCK_OWNER}"
+            fi
+            if ! rmdir -- "${RENDER_LOCK_DIR}" 2>/dev/null; then
                 return 1
             fi
-            rm -f -- "${RENDER_LOCK_OWNER}"
-            if rmdir -- "${RENDER_LOCK_DIR}" 2>/dev/null; then
-                acquire_render_lock
-                return $?
-            fi
+        else
+            showy_quota_log "sketchybar render lock is ownerless; skipping"
             return 1
         fi
-        malformed_owner=1
-    fi
 
-    # A future-dated lock mtime (clock skew, hand-touched dir) yields a
-    # negative age that would never satisfy the threshold and wedge rendering
-    # forever; judge staleness by absolute distance from now instead.
-    if lock_age=$(render_lock_age_seconds) \
-        && { (( lock_age >= max_ownerless_age )) || (( lock_age <= -max_ownerless_age )); }; then
-        if (( malformed_owner )); then
-            rm -f -- "${RENDER_LOCK_OWNER}"
-        fi
-        rmdir -- "${RENDER_LOCK_DIR}" 2>/dev/null || true
-        acquire_render_lock
-        return $?
-    fi
+        ((attempt += 1))
+        (( attempt < max_attempts )) && sleep "0.$((attempt * 5))"
+    done
 
-    showy_quota_log "sketchybar render lock is ownerless; skipping"
+    showy_quota_log "sketchybar render lock retry limit reached; skipping"
     return 1
 }
 
@@ -454,6 +504,7 @@ clear_declared_items() {
 
 if ! RENDER_BIN="$(showy_quota_resolve_render_bin "${REPO_ROOT}/bin" "${REPO_ROOT}")"; then
     showy_quota_log "showy-quota-render required for sketchybar plugin; run make render-bin"
+    acquire_render_lock || exit 0
     clear_declared_items
     exit 0
 fi
@@ -515,7 +566,11 @@ shell_quote() {
 }
 
 status_url_is_openable() {
-    local url="${1:-}" rest authority host lower_host
+    local url="${1:-}" rest authority host port lower_host
+
+    [[ ${#url} -le 2048 ]] || return 1
+    [[ ! "${url}" =~ [[:cntrl:][:space:]] ]] || return 1
+    [[ "${url}" != *\\* ]] || return 1
     case "${url}" in
         http://*|https://*) ;;
         *)                  return 1 ;;
@@ -523,18 +578,21 @@ status_url_is_openable() {
 
     rest="${url#*://}"
     authority="${rest%%[/?#]*}"
-    [[ -n "${authority}" ]] || return 1
-    host="${authority##*@}"
-    if [[ "${host}" == \[*\]* ]]; then
-        host="${host#\[}"
-        host="${host%%\]*}"
+    [[ -n "${authority}" && "${authority}" != *@* ]] || return 1
+    if [[ "${authority}" == *:* ]]; then
+        host="${authority%:*}"
+        port="${authority##*:}"
+        [[ "${host}" != *:* && "${port}" =~ ^[0-9]{1,5}$ ]] || return 1
+        (( 10#${port} >= 1 && 10#${port} <= 65535 )) || return 1
     else
-        host="${host%%:*}"
+        host="${authority}"
     fi
+    [[ "${host}" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*$ ]] || return 1
+    [[ ! "${host}" =~ ^[0-9.]+$ ]] || return 1
+
     lower_host="${host,,}"
-    [[ -n "${lower_host}" ]] || return 1
     case "${lower_host}" in
-        localhost|localhost.|*.localhost|*.localhost.|127.*|0.0.0.0|169.254.*|::1|fe80:*) return 1 ;;
+        localhost|localhost.|*.localhost|*.localhost.) return 1 ;;
         *) return 0 ;;
     esac
 }
@@ -631,8 +689,9 @@ provider_icon_png() {
     normal_tmp=$(mktemp "${CACHE_DIR}/.icon-${pid}.normal.XXXXXX") || return 1
     ICON_TMP_FILES+=("${normal_tmp}")
 
-    local svg="${SHOWY_QUOTA_CODEXBAR_RESOURCES}/ProviderIcon-${pid}.svg"
-    if [[ ! -r "${svg}" ]]; then
+    local svg=""
+    [[ -n "${CODEXBAR_RESOURCES}" ]] && svg="${CODEXBAR_RESOURCES}/ProviderIcon-${pid}.svg"
+    if [[ -z "${svg}" || ! -r "${svg}" ]]; then
         if ! render_fallback_icon_png "${pid}" "${normal_tmp}"; then
             rm -f "${normal_tmp}"; return 1
         fi

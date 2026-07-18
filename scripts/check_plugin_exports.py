@@ -14,7 +14,9 @@ DEFAULT_WASM = "target/wasm32-wasip1/release/showy-quota-zellij.wasm"
 def main(argv):
     wasm = Path(argv[1] if len(argv) > 1 else DEFAULT_WASM)
     data = wasm.read_bytes()
-    assert data[:8] == b"\0asm\x01\0\0\0", "not a WebAssembly module"
+    if data[:8] != b"\0asm\x01\0\0\0":
+        print("not a WebAssembly module", file=sys.stderr)
+        sys.exit(1)
 
     def uleb(offset):
         value = 0
@@ -47,7 +49,9 @@ def main(argv):
 
     required = {"_start", "load", "update", "render", "plugin_version"}
     missing = required - exports
-    assert not missing, f"missing WASM exports: {sorted(missing)}"
+    if missing:
+        print(f"missing WASM exports: {sorted(missing)}", file=sys.stderr)
+        sys.exit(1)
     print(f"check plugin exports: ok ({wasm})")
 
 

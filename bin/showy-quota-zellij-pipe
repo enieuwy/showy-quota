@@ -8,6 +8,9 @@
 
 set -euo pipefail
 
+child=""
+trap 'kill "${child:-}" 2>/dev/null; wait "${child:-}" 2>/dev/null; exit' INT TERM EXIT
+
 SCRIPT_PATH="${BASH_SOURCE[0]}"
 while [[ -L "${SCRIPT_PATH}" ]]; do
     link=$(readlink "${SCRIPT_PATH}")
@@ -101,10 +104,16 @@ truncate_pipe_output() {
 
 
 send_pipe() {
-    local payload="$1" child waited=0
+    local payload="$1" waited=0 requested_plugin="${plugin}"
     local args=(pipe --name "${pipe_name}")
-    if [[ -n "${plugin}" ]]; then
-        args+=(--plugin "${plugin}")
+    if [[ ! "${requested_plugin}" =~ ^[A-Za-z0-9_.-]+$ ]] ||
+        ((${#requested_plugin} > 128)) ||
+        [[ "${requested_plugin}" == -* ]] ||
+        [[ "${requested_plugin}" == *::* ]]; then
+        requested_plugin=""
+    fi
+    if [[ -n "${requested_plugin}" ]]; then
+        args+=(--plugin "${requested_plugin}")
     fi
     args+=(-- "${payload}")
 
@@ -113,12 +122,18 @@ send_pipe() {
     while kill -0 "${child}" 2>/dev/null; do
         if (( waited >= pipe_timeout_tenths )); then
             reap_timed_out_pipe "${child}"
+            child=""
             return 1
         fi
         sleep 0.1
         waited=$((waited + 1))
     done
-    wait "${child}" >/dev/null 2>&1
+    if wait "${child}" >/dev/null 2>&1; then
+        child=""
+        return 0
+    fi
+    child=""
+    return 1
 }
 
 # zjstatus consumes the protocol from the payload itself:
@@ -126,12 +141,30 @@ send_pipe() {
 # Broadcast by default because zjstatus pipe widgets are configured per plugin
 # instance. Bound each helper so another plugin's CLI-pipe backpressure cannot
 # pin this feeder after an early or unlucky update.
+consecutive_failures=0
 while :; do
+    sleep_delay="${interval}"
     if output=$("${BAR}" 2>/dev/null) && [[ -n "${output}" ]]; then
         # Cap the payload well under OS ARG_MAX so a pathologically long render
         # (e.g. a giant cache) cannot make the `zellij pipe` call fail silently.
         ((${#output} <= 4096)) || output="$(truncate_pipe_output "${output}")"
-        send_pipe "zjstatus::pipe::${widget}::${output}" || true
+        if send_pipe "zjstatus::pipe::${widget}::${output}"; then
+            consecutive_failures=0
+        else
+            consecutive_failures=$((consecutive_failures + 1))
+            if (( consecutive_failures < 5 )); then
+                backoff_multiplier=$((1 << consecutive_failures))
+            else
+                backoff_multiplier=30
+            fi
+            jitter=$((RANDOM % 21 - 10))
+            sleep_delay="$(awk -v interval="${interval}" -v multiplier="${backoff_multiplier}" -v jitter="${jitter}" 'BEGIN {
+                delay = interval * multiplier * (1 + jitter / 100)
+                ceiling = interval * 30
+                if (delay > ceiling) delay = ceiling
+                printf "%.3f", delay
+            }')"
+        fi
     fi
-    sleep "${interval}"
+    sleep "${sleep_delay}"
 done

@@ -6,6 +6,61 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Security
+- Config/theme `.env` files are now dot-sourced only when the resolved target is
+  a regular file owned by the current user and not writable by group or other
+  (SSH-style). Symlinks are still followed (chezmoi-style deployment keeps
+  working), but a foreign-owned or group/world-writable config can no longer
+  inject shell code; the file is skipped with a stderr warning.
+- `showy-quota-fetch` refuses to publish into a cache dir that is not private
+  (foreign-owned or group/other-writable), closing a local cache-poisoning path
+  into `usage.json`/`status.url`. The SketchyBar image cache dir is created
+  `0700`.
+- The standalone Zellij plugin's loopback-serve URL check parses the authority
+  before `?`/`#`, so `http://evil.com?@localhost` no longer bypasses the
+  loopback guard (SSRF).
+- The plugin keeps `permissions_granted` false until `PermissionRequestResult`,
+  so no WebAccess/RunCommands/OpenTerminals work runs during the consent prompt.
+  `--grant-zellij` now emits the minimal permission set (WebAccess only unless
+  `--manage-serve`/`--cli-fallback` opt in) and refuses to write permissions for
+  an absent `.wasm` without `--force`.
+- `SHOWY_QUOTA_SKETCHYBAR_CLICK`, cached CodexBar `status.url`, and
+  `SHOWY_QUOTA_CODEXBAR_RESOURCES` are validated before reaching `sh -c`,
+  `open`, or ImageMagick; the agent-CLI statusline routes `SHOWY_QUOTA_BAR_BIN`
+  through `showy_quota_valid_bin`; `SHOWY_QUOTA_ZELLIJ_PLUGIN` is validated
+  before `zellij pipe --plugin`.
+- Provider error messages are redacted (emails, token/cookie/Authorization
+  fragments, `$HOME` username) before appearing in `showy-quota-state` JSON and
+  `--diagnose` output that users paste into bug reports.
+- A shared 5 MiB usage-JSON cap now bounds the CLI-fallback capture, cache
+  validation, and the native `parse_usage_payload`, matching the existing
+  `/usage` HTTP cap. CI runs `cargo audit` on every matrix leg and before every
+  release tarball build.
+
+### Fixed
+- Cache publish renames the `usage.json` payload last (after stamp/source) so a
+  reader that observes a new payload always sees matching-or-newer metadata,
+  closing the mixed-generation window that could pair fresh data with a stale
+  source marker. The managed-serve pidfile is now written via temp-file +
+  atomic rename.
+- The shell provider-id validators and the Rust `valid_provider_id` both cap ids
+  at 64 characters; `showy_quota_json_valid` and the serve publish gate validate
+  `extraRateWindows`. Shell reset-description parsing now honors
+  `SHOWY_QUOTA_RESET_DESCRIPTION_TIMEZONE_OFFSET`, matching the native renderer.
+- `elapsed_marker_cell` widens to `i128` before subtraction, avoiding overflow
+  at extreme `SHOWY_QUOTA_NOW_EPOCH`. The managed `codexbar` binary is
+  canonicalized (basename-preserving) before launch.
+- Zellij plugin: version-probe in-flight guard resets on permission transition
+  and expires stale, provider fallback rejects orphaned/pruned callbacks,
+  permission re-grant clears provider backoff, the eligible-provider inventory
+  de-duplicates, and watchdog/version-probe subshells reap their `sleep`
+  children. The `showy-quota-zellij-pipe` feeder traps teardown, backs off on
+  repeated pipe failures, and validates the plugin name.
+- `scripts/check_plugin_exports.py` no longer relies on `assert` (bypassed under
+  `python -O`). `make install-plugin` verifies a `.sha256` sidecar when present;
+  `make uninstall FORCE_PLUGIN_REMOVE=1` removes an orphaned plugin. The README
+  release-tarball install documents checksum verification.
+
 ## [0.6.0] — 2026-07-13
 
 ### Changed

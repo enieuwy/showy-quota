@@ -106,6 +106,63 @@ showy_quota_valid_glyph() {
     printf '%s' "${value}"
 }
 
+# Return 0 only when PATH is safe to dot-source. Config/theme .env files are
+# executed as shell, so a file another user can write is arbitrary code
+# execution in our context. Require a readable regular file (FIFOs/devices fail
+# `-f`); symlinks are intentionally followed and the resolved target is checked,
+# so chezmoi-style symlinked configs keep working. Reject targets owned by a
+# different uid or writable by group/other (SSH-style), warning to stderr so the
+# caller skips the file and keeps rendering with defaults.
+showy_quota_safe_source_file() {
+    local path="$1" owner mode
+    [[ -f "${path}" && -r "${path}" ]] || return 1
+    if owner=$(stat -f %u "${path}" 2>/dev/null); then
+        mode=$(stat -f %Lp "${path}" 2>/dev/null)
+    elif owner=$(stat -c %u "${path}" 2>/dev/null); then
+        mode=$(stat -c %a "${path}" 2>/dev/null)
+    else
+        # No usable stat(1): fall back to the regular-file/readable check only.
+        return 0
+    fi
+    if [[ -n "${owner}" && "${owner}" != "${EUID}" ]]; then
+        printf 'showy-quota: refusing to source %q (owned by uid %s, not %s)\n' \
+            "${path}" "${owner}" "${EUID}" >&2
+        return 1
+    fi
+    if [[ -n "${mode}" ]]; then
+        local grp="${mode: -2:1}" oth="${mode: -1}"
+        if (( (grp & 2) || (oth & 2) )); then
+            printf 'showy-quota: refusing to source %q (group/other-writable, mode %s)\n' \
+                "${path}" "${mode}" >&2
+            return 1
+        fi
+    fi
+    return 0
+}
+
+# Return 0 when DIR is owned by the current user and not writable by group or
+# other. Guards the cache tree against local poisoning: a pre-existing
+# world-writable dir (where the `chmod 700` after mkdir silently failed, or an
+# attacker-owned parent) must not be trusted to hold usage.json / status.url
+# that drive clicks and automation.
+showy_quota_dir_is_private() {
+    local dir="$1" owner mode
+    [[ -d "${dir}" ]] || return 1
+    if owner=$(stat -f %u "${dir}" 2>/dev/null); then
+        mode=$(stat -f %Lp "${dir}" 2>/dev/null)
+    elif owner=$(stat -c %u "${dir}" 2>/dev/null); then
+        mode=$(stat -c %a "${dir}" 2>/dev/null)
+    else
+        return 0
+    fi
+    [[ -z "${owner}" || "${owner}" == "${EUID}" ]] || return 1
+    if [[ -n "${mode}" ]]; then
+        local grp="${mode: -2:1}" oth="${mode: -1}"
+        (( (grp & 2) || (oth & 2) )) && return 1
+    fi
+    return 0
+}
+
 # ── config loading ─────────────────────────────────────────────────────
 
 showy_quota_load_config() {
@@ -115,7 +172,7 @@ showy_quota_load_config() {
     local theme_path=""
     local repo_root
 
-    if [[ -z "${SHOWY_QUOTA_NO_CONFIG:-}" && -f "${config_file}" && -r "${config_file}" ]]; then
+    if [[ -z "${SHOWY_QUOTA_NO_CONFIG:-}" ]] && showy_quota_safe_source_file "${config_file}"; then
         # shellcheck disable=SC1090
         . "${config_file}"
     fi
@@ -138,7 +195,7 @@ showy_quota_load_config() {
         "${config_dir}/themes/${theme}.env" \
         "${repo_root}/share/themes/${theme}.env"
     do
-        if [[ -f "${theme_path}" && -r "${theme_path}" ]]; then
+        if showy_quota_safe_source_file "${theme_path}"; then
             # shellcheck disable=SC1090
             . "${theme_path}"
             return 0
@@ -154,6 +211,11 @@ showy_quota_load_config
 
 : "${SHOWY_QUOTA_REFRESH_SECONDS:=120}"
 : "${SHOWY_QUOTA_LOCK_WAIT_TENTHS:=100}"
+# Upper bound (bytes) on a CodexBar usage payload the shell data plane will
+# validate/publish. Mirrors the native parser's MAX_USAGE_JSON_BYTES and the
+# `--max-filesize` cap on the /usage probe so the CLI-fallback and cache parse
+# paths are bounded too (default 5 MiB).
+: "${SHOWY_QUOTA_MAX_USAGE_JSON_BYTES:=5242880}"
 : "${SHOWY_QUOTA_CACHE_DIR:=${XDG_CACHE_HOME:-${HOME}/.cache}/showy-quota}"
 : "${SHOWY_QUOTA_CODEXBAR_BIN:=codexbar}"
 : "${SHOWY_QUOTA_CODEXBAR_SERVE_URL=http://127.0.0.1:8080}"
@@ -396,6 +458,7 @@ showy_quota_provider_ids_from_payload() {
     jq -r '
         def valid_provider_id:
             type == "string"
+            and (length <= 64)
             and test("^[A-Za-z0-9_.-]+$")
             and . != "."
             and . != ".."
@@ -432,6 +495,45 @@ showy_quota_parse_local_epoch() {
     date -d "${value}" '+%s' 2>/dev/null
 }
 
+# Parse SHOWY_QUOTA_RESET_DESCRIPTION_TIMEZONE_OFFSET into signed minutes east of
+# UTC, byte-for-byte with the Rust core: "utc"/"UTC"/"Z"/"+00:00"/"-00:00" -> 0;
+# otherwise exactly ±HH:MM (HH 00-23, MM 00-59). Prints minutes on success;
+# returns 1 (no output) when unset/empty/malformed so callers use host-local time.
+showy_quota_reset_tz_offset_minutes() {
+    local raw="${SHOWY_QUOTA_RESET_DESCRIPTION_TIMEZONE_OFFSET:-}"
+    [[ -n "${raw}" ]] || return 1
+    raw="${raw#"${raw%%[![:space:]]*}"}"
+    raw="${raw%"${raw##*[![:space:]]}"}"
+    case "${raw}" in
+        [Uu][Tt][Cc]|Z|+00:00|-00:00) printf '0\n'; return 0 ;;
+    esac
+    [[ "${raw}" =~ ^([+-])([0-9]{2}):([0-9]{2})$ ]] || return 1
+    local sign="${BASH_REMATCH[1]}" hh mm total
+    hh=$((10#${BASH_REMATCH[2]}))
+    mm=$((10#${BASH_REMATCH[3]}))
+    (( hh <= 23 && mm <= 59 )) || return 1
+    total=$(( hh * 60 + mm ))
+    [[ "${sign}" == "-" ]] && total=$(( -total ))
+    printf '%s\n' "${total}"
+}
+
+# Parse VALUE with FMT at a fixed UTC offset (minutes) when OFF_MIN is nonempty,
+# else host-local. For the fixed-offset case the wall clock is parsed as UTC and
+# shifted back by the offset (epoch = utc_epoch - off_min*60), mirroring the Rust
+# core's assume_offset. Prints the epoch on success.
+showy_quota_parse_epoch_at_offset() {
+    local fmt="$1" value="$2" off_min="$3" epoch
+    if [[ -z "${off_min}" ]]; then
+        showy_quota_parse_local_epoch "${fmt}" "${value}"
+        return $?
+    fi
+    if epoch=$(TZ=UTC0 date -j -f "${fmt}" "${value}" '+%s' 2>/dev/null); then :
+    elif showy_quota_have gdate && epoch=$(TZ=UTC0 gdate -d "${value}" '+%s' 2>/dev/null); then :
+    elif epoch=$(TZ=UTC0 date -d "${value}" '+%s' 2>/dev/null); then :
+    else return 1; fi
+    printf '%s\n' "$(( epoch - off_min * 60 ))"
+}
+
 showy_quota_reset_description_epoch() {
     local raw="$1"
     [[ -n "${raw}" && "${raw}" != "null" ]] || return 1
@@ -441,6 +543,11 @@ showy_quota_reset_description_epoch() {
     local desc="${raw#Resets }"
     [[ "${desc}" != "${raw}" ]] || desc="${raw#resets }"
     [[ "${desc}" != "${raw}" ]] || return 1
+
+    # Honor a configured fixed timezone offset (empty => host-local), matching
+    # the Rust core's SHOWY_QUOTA_RESET_DESCRIPTION_TIMEZONE_OFFSET handling.
+    local off_min
+    off_min=$(showy_quota_reset_tz_offset_minutes) || off_min=""
 
     local epoch
     # Only attempt full-date parsing when the description carries a 4-digit
@@ -454,20 +561,31 @@ showy_quota_reset_description_epoch() {
     # second apart disagree.
     if [[ "${desc}" == *[0-9][0-9][0-9][0-9]* ]]; then
         for fmt in '%b %d, %Y %I:%M %p' '%B %d, %Y %I:%M %p'; do
-            if epoch=$(showy_quota_parse_local_epoch "${fmt}" "${desc}"); then
+            if epoch=$(showy_quota_parse_epoch_at_offset "${fmt}" "${desc}" "${off_min}"); then
                 printf '%s\n' "$(( epoch - epoch % 60 ))"
                 return 0
             fi
         done
     fi
 
-    local today now
+    local today now anchor
     now=$(showy_quota_now_epoch)
-    if today=$(date -r "${now}" '+%Y-%m-%d' 2>/dev/null); then :
-    elif showy_quota_have gdate && today=$(gdate -d "@${now}" '+%Y-%m-%d' 2>/dev/null); then :
-    elif today=$(date -d "@${now}" '+%Y-%m-%d' 2>/dev/null); then :
-    else return 1; fi
-    if epoch=$(showy_quota_parse_local_epoch '%Y-%m-%d %I:%M %p' "${today} ${desc}"); then
+    # Resolve "today" in the configured timezone (parse in UTC, shift by offset)
+    # when an offset is set, otherwise use the host-local calendar day, so a bare
+    # time attaches to the correct date.
+    if [[ -n "${off_min}" ]]; then
+        anchor=$(( now + off_min * 60 ))
+        if today=$(TZ=UTC0 date -r "${anchor}" '+%Y-%m-%d' 2>/dev/null); then :
+        elif showy_quota_have gdate && today=$(TZ=UTC0 gdate -d "@${anchor}" '+%Y-%m-%d' 2>/dev/null); then :
+        elif today=$(TZ=UTC0 date -d "@${anchor}" '+%Y-%m-%d' 2>/dev/null); then :
+        else return 1; fi
+    else
+        if today=$(date -r "${now}" '+%Y-%m-%d' 2>/dev/null); then :
+        elif showy_quota_have gdate && today=$(gdate -d "@${now}" '+%Y-%m-%d' 2>/dev/null); then :
+        elif today=$(date -d "@${now}" '+%Y-%m-%d' 2>/dev/null); then :
+        else return 1; fi
+    fi
+    if epoch=$(showy_quota_parse_epoch_at_offset '%Y-%m-%d %I:%M %p' "${today} ${desc}" "${off_min}"); then
         epoch=$(( epoch - epoch % 60 ))
         if (( epoch < now )); then
             epoch=$((epoch + 86400))
@@ -728,14 +846,29 @@ showy_quota_shared_cycle() {
     (( count >= 2 ))
 }
 
+# Return 0 when FILE is within SHOWY_QUOTA_MAX_USAGE_JSON_BYTES. Bounds the
+# CLI-fallback and cache parse paths so a buggy/compromised codexbar emitting
+# gigabytes of JSON cannot exhaust jq on every refresh. No usable stat(1): do
+# not block (the -s check still requires a nonempty file).
+showy_quota_file_within_size_cap() {
+    local file="$1" size
+    if size=$(stat -f %z "${file}" 2>/dev/null); then :
+    elif size=$(stat -c %s "${file}" 2>/dev/null); then :
+    else return 0; fi
+    [[ -n "${size}" ]] || return 0
+    (( size <= SHOWY_QUOTA_MAX_USAGE_JSON_BYTES ))
+}
+
 # Validate that codexbar JSON looks like an array of provider objects.
 showy_quota_json_valid() {
     local file="$1"
     [[ -s "${file}" ]] || return 1
+    showy_quota_file_within_size_cap "${file}" || return 1
     showy_quota_have jq || return 1
     jq -e '
         def valid_provider_id:
             type == "string"
+            and (length <= 64)
             and test("^[A-Za-z0-9_.-]+$")
             and . != "."
             and . != ".."
@@ -751,8 +884,27 @@ showy_quota_json_valid() {
                         . == null
                         or (type == "object" and (.usedPercent | type) == "number")
                     )
-                )
+                    and (
+                        (.usage.extraRateWindows // null) == null
+                        or (
+                            (.usage.extraRateWindows | type) == "array"
+                            and all(.usage.extraRateWindows[];
+                                type == "object"
+                                and (
+                                    (.window // null) == null
+                                    or (
+                                        (.window | type) == "object"
+                                        and (
+                                            (.window.usedPercent // null) == null
+                                            or (.window.usedPercent | type) == "number"
+                                        )
+                                    )
+                                )
+                            )
+                        )
+                    )
             )
         )
+    )
     ' "${file}" >/dev/null 2>&1
 }

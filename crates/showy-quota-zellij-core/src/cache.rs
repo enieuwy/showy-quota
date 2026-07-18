@@ -49,6 +49,10 @@ pub struct CachePaths {
 
 pub fn read_cache_from_env(now_epoch: i64) -> Result<CacheSnapshot, CacheReadError> {
     let paths = cache_paths_from_env();
+    // Read the payload FIRST, then the freshness metadata (mtime + source).
+    // The fetcher publishes stamp+source before renaming usage.json last, so a
+    // payload we observe is always paired with matching-or-newer metadata; do
+    // not reorder these two reads or the mixed-generation race reopens.
     let payload = fs::read(&paths.usage_file).map_err(|source| CacheReadError {
         path: paths.usage_file.clone(),
         source,
