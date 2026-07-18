@@ -217,7 +217,7 @@ install-plugin: plugin ## Install the standalone Zellij WASM plugin (pre-grants 
 	@checksum="$(PLUGIN_WASM).sha256"; \
 	if [ -f "$$checksum" ]; then \
 		printf 'verifying %s\n' "$$checksum"; \
-		(cd "$$(dirname "$(PLUGIN_WASM)")" && shasum -a 256 -c "$$(basename "$$checksum")); \
+		(cd "$$(dirname "$(PLUGIN_WASM)")" && shasum -a 256 -c "$$(basename "$$checksum")"); \
 	fi
 	@if [ -e "$(PLUGIN_TARGET)" ] && ! cmp -s "$(PLUGIN_WASM)" "$(PLUGIN_TARGET)"; then \
 		if [ "$(FORCE)" != "1" ]; then \
