@@ -36,6 +36,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   validation, and the native `parse_usage_payload`, matching the existing
   `/usage` HTTP cap. CI runs `cargo audit` on every matrix leg and before every
   release tarball build.
+- The Rust core metrics renderer now redacts credentials and identity material
+  (emails, bearer/token/hex runs, `Cookie:`/`Authorization:` headers, and the
+  `$HOME` path) from provider error messages, so `--emit metrics` and plugin
+  output match the shell-state redaction instead of leaking through a second
+  path.
+- The `showy-quota` guard/prompt provider-id parser applies the same strict rule
+  as the data plane (rejects leading `-`, `.`/`..`, and ids over 64 chars) via a
+  shared `showy_quota_valid_provider_id` helper.
 
 ### Fixed
 - Cache publish renames the `usage.json` payload last (after stamp/source) so a
@@ -60,6 +68,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `python -O`). `make install-plugin` verifies a `.sha256` sidecar when present;
   `make uninstall FORCE_PLUGIN_REMOVE=1` removes an orphaned plugin. The README
   release-tarball install documents checksum verification.
+- `showy-quota-fetch --stop-serve` now runs under the fetch lock, so it no
+  longer races a concurrent fetcher into orphaning a just-started serve daemon.
+- The SketchyBar plugin schedules a background refresh only when the cache is
+  actually stale (age vs the serve/shell refresh cadence) instead of spawning a
+  fetch on every UI event — no process storm on hover/move bursts.
+- The Zellij plugin's managed `codexbar serve` refresh interval is configurable
+  via a `serve_refresh_seconds` KDL knob (default 120) instead of hardcoded.
+- Shell prompts share the palette's configurable severity thresholds
+  (`good_min_remaining`/`warn_min_remaining`) instead of a hardcoded 50/20, so
+  prompt colors match multiplexer status lines even at the defaults (40/15).
+- Inverted `good_min_remaining` < `warn_min_remaining` thresholds are swapped in
+  both config loaders so the Warn band stays reachable.
 
 ## [0.6.0] — 2026-07-13
 

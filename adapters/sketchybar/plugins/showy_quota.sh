@@ -750,7 +750,17 @@ slider_click_script() {
 acquire_render_lock || exit 0
 refresh_in_background=0
 if "${FETCH}" --cache-only >/dev/null 2>&1; then
-    refresh_in_background=1
+    if [[ -n "${SHOWY_QUOTA_CODEXBAR_SERVE_URL:-}" ]]; then
+        refresh_threshold="${SHOWY_QUOTA_CODEXBAR_SERVE_REFRESH_SECONDS:-60}"
+        [[ "${refresh_threshold}" =~ ^[0-9]+$ ]] || refresh_threshold=60
+    else
+        refresh_threshold="${SHOWY_QUOTA_REFRESH_SECONDS:-120}"
+        [[ "${refresh_threshold}" =~ ^[0-9]+$ ]] || refresh_threshold=120
+    fi
+    cache_age=$(showy_quota_age_seconds "${SHOWY_QUOTA_USAGE_FILE}")
+    if [[ "${cache_age}" =~ ^[0-9]+$ ]] && (( cache_age >= refresh_threshold )); then
+        refresh_in_background=1
+    fi
 else
     "${FETCH}" >/dev/null 2>&1 || true
 fi

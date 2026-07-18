@@ -18,6 +18,17 @@ impl RenderConfig {
         }
     }
 
+    /// ANSI SGR color code (32 green / 33 yellow / 31 red) for a remaining
+    /// percentage, using the SAME configured thresholds as `color_key`. Shared
+    /// with the prompt renderer so shell prompts and multiplexer bars agree.
+    pub fn severity_ansi_code(&self, remaining: i32) -> i32 {
+        match self.color_key(remaining) {
+            Severity::Good => 32,
+            Severity::Warn => 33,
+            Severity::Bad => 31,
+        }
+    }
+
     /// Color for a usage window: the severity palette, dimmed when the window
     /// is a long-horizon (weekly/monthly) cap rather than a live short tier.
     pub fn window_color(&self, remaining: i32, is_long: bool) -> String {

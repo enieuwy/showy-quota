@@ -790,7 +790,7 @@ parse_provider_list() {
         part="${part#"${part%%[![:space:]]*}"}"
         part="${part%"${part##*[![:space:]]}"}"
         [[ -n "${part}" ]] || continue
-        [[ "${part}" =~ ^[A-Za-z0-9_.-]+$ ]] || return 1
+        showy_quota_valid_provider_id "${part}" || return 1
         PROVIDER_IDS+=("${part}")
     done
     (( ${#PROVIDER_IDS[@]} > 0 )) || return 1

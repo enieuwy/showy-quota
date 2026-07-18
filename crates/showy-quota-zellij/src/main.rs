@@ -227,6 +227,7 @@ struct State {
     manage_serve: bool,
     serve_command: String,
     serve_port: String,
+    serve_refresh_seconds: u64,
     cli_fallback: CliFallback,
     cli_command: String,
     // backoff window between repeated per-provider retries after a failure;
@@ -306,6 +307,7 @@ impl Default for State {
             manage_serve: true,
             serve_command: "codexbar".into(),
             serve_port: "8080".into(),
+            serve_refresh_seconds: 120,
             cli_fallback: CliFallback::Degraded,
             cli_command: "codexbar".into(),
             provider_failure_backoff_seconds: 120.0,
@@ -396,6 +398,13 @@ impl ZellijPlugin for State {
             .map(str::to_string)
             .or_else(|| derive_port_from_url(&self.serve_url))
             .unwrap_or_else(|| "8080".into());
+        self.serve_refresh_seconds = parse_positive_u64(
+            configuration
+                .get("serve_refresh_seconds")
+                .or_else(|| configuration.get("SHOWY_QUOTA_REFRESH_SECONDS"))
+                .map(String::as_str),
+            120,
+        );
         self.cli_command = configuration
             .get("cli_command")
             .or_else(|| configuration.get("fallback_command"))
@@ -901,10 +910,9 @@ impl State {
                 "--port".into(),
                 self.serve_port.clone(),
                 "--refresh-interval".into(),
-                // Align managed-serve collection with the shell data plane's
-                // freshness contract default (SHOWY_QUOTA_REFRESH_SECONDS=120)
-                // so it does not matter which side started the serve.
-                "120".into(),
+                // Configurable managed-serve collection cadence; defaults to
+                // the shell data plane freshness contract (120 seconds).
+                self.serve_refresh_seconds.to_string(),
             ],
             cwd: None,
         };
@@ -1741,6 +1749,13 @@ fn parse_positive_f64(value: Option<&str>, default: f64) -> f64 {
         .unwrap_or(default)
 }
 
+fn parse_positive_u64(value: Option<&str>, default: u64) -> u64 {
+    value
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(default)
+}
+
 fn parse_nonnegative_f64(value: Option<&str>, default: f64) -> f64 {
     value
         .and_then(|value| value.parse::<f64>().ok())
@@ -2073,6 +2088,22 @@ mod tests {
         state.load(configuration);
 
         assert_eq!(state.serve_port, "8080");
+    }
+
+    #[test]
+    fn load_configures_managed_serve_refresh_seconds() {
+        let mut configuration = BTreeMap::new();
+        configuration.insert("serve_refresh_seconds".to_string(), "45".to_string());
+        let mut state = State::default();
+
+        state.load(configuration);
+
+        assert_eq!(state.serve_refresh_seconds, 45);
+
+        let mut default_state = State::default();
+        default_state.load(BTreeMap::new());
+
+        assert_eq!(default_state.serve_refresh_seconds, 120);
     }
 
     #[test]

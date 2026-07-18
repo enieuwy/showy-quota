@@ -252,20 +252,159 @@ fn error_raw(error: &Value) -> &Value {
     }
 }
 
+fn is_email_local(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '%' | '+' | '-')
+}
+
+fn is_email_domain(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '.' | '-')
+}
+
+// Character class for a credential-shaped run (base64/base64url/hex/token bodies).
+fn is_secret_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '_' | '-' | '=')
+}
+
+// Redact `Cookie:`/`Authorization:` header fragments (through end of line),
+// case-insensitively, on a word boundary. Runs before control-stripping so the
+// end-of-line bound is still meaningful.
+fn redact_headers(input: &str) -> String {
+    const KEYWORDS: [&[char]; 2] = [
+        &['c', 'o', 'o', 'k', 'i', 'e'],
+        &[
+            'a', 'u', 't', 'h', 'o', 'r', 'i', 'z', 'a', 't', 'i', 'o', 'n',
+        ],
+    ];
+    let chars: Vec<char> = input.chars().collect();
+    let mut out = String::with_capacity(input.len());
+    let mut i = 0;
+    'outer: while i < chars.len() {
+        for kw in KEYWORDS {
+            if i + kw.len() <= chars.len()
+                && (i == 0 || !chars[i - 1].is_ascii_alphanumeric())
+                && chars[i..i + kw.len()]
+                    .iter()
+                    .zip(kw.iter())
+                    .all(|(c, k)| c.to_ascii_lowercase() == *k)
+            {
+                let mut j = i + kw.len();
+                while j < chars.len() && (chars[j] == ' ' || chars[j] == '\t') {
+                    j += 1;
+                }
+                if j < chars.len() && chars[j] == ':' {
+                    let mut k = j + 1;
+                    while k < chars.len() && chars[k] != '\r' && chars[k] != '\n' {
+                        k += 1;
+                    }
+                    out.push_str("<redacted-header>");
+                    i = k;
+                    continue 'outer;
+                }
+            }
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    out
+}
+
+// Replace email addresses (local@domain.tld, tld >= 2 alpha) with a placeholder.
+fn redact_emails(input: &str) -> String {
+    let chars: Vec<char> = input.chars().collect();
+    let mut out = String::with_capacity(input.len());
+    let mut i = 0;
+    while i < chars.len() {
+        if let Some(end) = match_email(&chars, i) {
+            out.push_str("<redacted-email>");
+            i = end;
+        } else {
+            out.push(chars[i]);
+            i += 1;
+        }
+    }
+    out
+}
+
+fn match_email(chars: &[char], start: usize) -> Option<usize> {
+    let mut i = start;
+    while i < chars.len() && is_email_local(chars[i]) {
+        i += 1;
+    }
+    if i == start || i >= chars.len() || chars[i] != '@' {
+        return None;
+    }
+    let domain_start = i + 1;
+    let mut end = domain_start;
+    while end < chars.len() && is_email_domain(chars[end]) {
+        end += 1;
+    }
+    // Backtrack the greedy domain run until it ends in `.<alpha>{2,}`.
+    while end > domain_start + 1 {
+        let domain = &chars[domain_start..end];
+        if let Some(dot) = domain.iter().rposition(|&c| c == '.') {
+            let tld = &domain[dot + 1..];
+            if tld.len() >= 2 && tld.iter().all(|c| c.is_ascii_alphabetic()) {
+                return Some(end);
+            }
+        }
+        end -= 1;
+    }
+    None
+}
+
+// Replace maximal runs of >= 20 credential-shaped chars with a placeholder.
+// A superset of the shell's hex/base64/bearer-token redactions.
+fn redact_secret_runs(input: &str) -> String {
+    let chars: Vec<char> = input.chars().collect();
+    let mut out = String::with_capacity(input.len());
+    let mut i = 0;
+    while i < chars.len() {
+        if is_secret_char(chars[i]) {
+            let start = i;
+            while i < chars.len() && is_secret_char(chars[i]) {
+                i += 1;
+            }
+            if i - start >= 20 {
+                out.push_str("<redacted-secret>");
+            } else {
+                out.extend(&chars[start..i]);
+            }
+        } else {
+            out.push(chars[i]);
+            i += 1;
+        }
+    }
+    out
+}
+
+// Redact the current user's home-directory prefix from paths.
+fn redact_home(input: &str) -> String {
+    match std::env::var("HOME") {
+        Ok(home) if home.len() >= 2 && home != "/" => input.replace(&home, "<redacted-home>"),
+        _ => input.to_string(),
+    }
+}
+
+// Strip credential/identity material from a provider error message before it
+// crosses the CLI/plugin output boundary (logs, pasted diagnostics). Mirrors the
+// shell `sanitize_error_message` in bin/showy-quota-state so every consumer of
+// the metrics renderer is protected, not only the shell-state wrapper.
 fn sanitize_error_message(value: &Value) -> String {
     let raw = match value {
         Value::Null => String::new(),
         Value::String(message) => message.clone(),
         other => serde_json::to_string(other).unwrap_or_default(),
     };
-    let without_controls: String = raw.chars().filter(|ch| !ch.is_control()).collect();
-    without_controls
+    let headers = redact_headers(&raw);
+    let without_controls: String = headers.chars().filter(|ch| !ch.is_control()).collect();
+    let collapsed = without_controls
         .split_whitespace()
         .collect::<Vec<_>>()
-        .join(" ")
-        .chars()
-        .take(160)
-        .collect()
+        .join(" ");
+    let no_home = redact_home(&collapsed);
+    let no_email = redact_emails(&no_home);
+    let redacted = redact_secret_runs(&no_email);
+    redacted.chars().take(160).collect()
 }
 
 fn error_kind(message: &str) -> ErrorKind {
@@ -332,6 +471,42 @@ mod tests {
         }
     }
 
+    #[test]
+    fn sanitize_error_message_redacts_secrets_email_and_headers() {
+        let raw = Value::String(
+            "auth failed for alice@example.test token \
+             0123456789abcdef0123456789abcdef01234567; Authorization: Bearer abc"
+                .to_string(),
+        );
+        let out = sanitize_error_message(&raw);
+        assert!(!out.contains("alice@example.test"), "email leaked: {out}");
+        assert!(
+            !out.contains("0123456789abcdef0123456789abcdef01234567"),
+            "token leaked: {out}"
+        );
+        assert!(
+            out.contains("<redacted-email>"),
+            "no email placeholder: {out}"
+        );
+        assert!(
+            out.contains("<redacted-secret>"),
+            "no secret placeholder: {out}"
+        );
+        assert!(
+            out.contains("<redacted-header>"),
+            "no header placeholder: {out}"
+        );
+    }
+
+    #[test]
+    fn sanitize_error_message_leaves_ordinary_text() {
+        let raw = Value::String("network timeout after 3 retries".to_string());
+        assert_eq!(
+            sanitize_error_message(&raw),
+            "network timeout after 3 retries"
+        );
+    }
+
     fn emit(payload: &[u8]) -> String {
         emit_provider_metrics(payload, &config(), NOW).expect("metrics json")
     }
@@ -378,7 +553,10 @@ mod tests {
 
     #[test]
     fn error_message_is_sanitized_and_truncated() {
-        let long = format!("  alpha\u{0007}   beta \n gamma {}  ", "x".repeat(200));
+        // Space-separated words exceed the 160-char cap without forming a >=20
+        // credential-shaped run (which the redactor would collapse), so this
+        // exercises truncation, not redaction.
+        let long = format!("  alpha\u{0007}   beta \n gamma {}  ", "word ".repeat(45));
         let payload =
             serde_json::to_vec(&json!([{ "provider": "codex", "error": { "message": long } }]))
                 .expect("payload");

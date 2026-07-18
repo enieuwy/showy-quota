@@ -106,6 +106,20 @@ showy_quota_valid_glyph() {
     printf '%s' "${value}"
 }
 
+# Validate a CodexBar provider id with the SAME rules as the data plane's jq
+# `valid_provider_id` and the Rust core: non-empty, <= 64 chars, charset
+# [A-Za-z0-9_.-], and never ".", "..", or a leading-dash value (which would be
+# read as a flag downstream). Pure bash, no subprocess. Returns 0 when valid.
+showy_quota_valid_provider_id() {
+    local value="$1"
+    [[ -n "${value}" ]] || return 1
+    (( ${#value} <= 64 )) || return 1
+    [[ "${value}" =~ ^[A-Za-z0-9_.-]+$ ]] || return 1
+    [[ "${value}" != "." && "${value}" != ".." ]] || return 1
+    [[ "${value}" != -* ]] || return 1
+    return 0
+}
+
 # Return 0 only when PATH is safe to dot-source. Config/theme .env files are
 # executed as shell, so a file another user can write is arbitrary code
 # execution in our context. Require a readable regular file (FIFOs/devices fail
@@ -316,6 +330,14 @@ SHOWY_QUOTA_REFRESH_SECONDS=$(showy_quota_uint "${SHOWY_QUOTA_REFRESH_SECONDS}" 
 SHOWY_QUOTA_LOCK_WAIT_TENTHS=$(showy_quota_uint "${SHOWY_QUOTA_LOCK_WAIT_TENTHS}" 100 36000)
 SHOWY_QUOTA_GOOD_MIN_REMAINING=$(showy_quota_uint "${SHOWY_QUOTA_GOOD_MIN_REMAINING}" 40)
 SHOWY_QUOTA_WARN_MIN_REMAINING=$(showy_quota_uint "${SHOWY_QUOTA_WARN_MIN_REMAINING}" 15)
+# Keep the Warn band reachable (parity with the Rust core color_key): swap the
+# thresholds if a user inverts them, so `good` is never below `warn`.
+if (( SHOWY_QUOTA_GOOD_MIN_REMAINING < SHOWY_QUOTA_WARN_MIN_REMAINING )); then
+    _swq_tmp="${SHOWY_QUOTA_GOOD_MIN_REMAINING}"
+    SHOWY_QUOTA_GOOD_MIN_REMAINING="${SHOWY_QUOTA_WARN_MIN_REMAINING}"
+    SHOWY_QUOTA_WARN_MIN_REMAINING="${_swq_tmp}"
+    unset _swq_tmp
+fi
 SHOWY_QUOTA_TIME_WARN_MINUTES=$(showy_quota_uint "${SHOWY_QUOTA_TIME_WARN_MINUTES}" 30)
 SHOWY_QUOTA_DIM_WINDOW_MINUTES=$(showy_quota_uint "${SHOWY_QUOTA_DIM_WINDOW_MINUTES}" 10080)
 SHOWY_QUOTA_ZELLIJ_PIPE_INTERVAL=$(showy_quota_uint "${SHOWY_QUOTA_ZELLIJ_PIPE_INTERVAL}" 10 86400)

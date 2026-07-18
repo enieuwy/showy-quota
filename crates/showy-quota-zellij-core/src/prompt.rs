@@ -47,7 +47,7 @@ fn render_prompt_segment(
     let mut out = if options.ansi && std::env::var_os("NO_COLOR").is_none() {
         format!(
             "\u{1b}[{}m{}\u{1b}[0m",
-            severity_code(candidate.remaining),
+            config.severity_ansi_code(candidate.remaining),
             segment
         )
     } else {
@@ -99,16 +99,6 @@ fn candidate<'a>(provider: &'a str, window: &WindowMetric) -> PromptCandidate<'a
         used: window.used_percent,
         remaining: window.remaining_percent,
         minutes: window.minutes_until_reset,
-    }
-}
-
-fn severity_code(remaining: i32) -> i32 {
-    if remaining >= 50 {
-        32
-    } else if remaining >= 20 {
-        33
-    } else {
-        31
     }
 }
 
@@ -197,11 +187,14 @@ mod tests {
     }
 
     #[test]
-    fn severity_codes_match_prompt_palette() {
-        assert_eq!(severity_code(50), 32);
-        assert_eq!(severity_code(49), 33);
-        assert_eq!(severity_code(20), 33);
-        assert_eq!(severity_code(19), 31);
+    fn severity_codes_track_configured_thresholds() {
+        // Defaults: good_min_remaining = 40, warn_min_remaining = 15. The prompt
+        // shares these with the palette, so colors match the multiplexer bar.
+        let config = config();
+        assert_eq!(config.severity_ansi_code(40), 32);
+        assert_eq!(config.severity_ansi_code(39), 33);
+        assert_eq!(config.severity_ansi_code(15), 33);
+        assert_eq!(config.severity_ansi_code(14), 31);
     }
 
     #[test]

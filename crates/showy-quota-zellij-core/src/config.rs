@@ -232,6 +232,13 @@ impl RenderConfig {
             "SHOWY_QUOTA_WARN_MIN_REMAINING",
             self.warn_min_remaining,
         );
+        // Keep the Warn band reachable: if a user inverts the thresholds
+        // (good_min < warn_min), the `remaining >= good_min` test in color_key
+        // would win first and Warn could never fire. Swap them so both
+        // thresholds stay meaningful instead of silently dropping a state.
+        if self.good_min_remaining < self.warn_min_remaining {
+            std::mem::swap(&mut self.good_min_remaining, &mut self.warn_min_remaining);
+        }
         self.time_warn_minutes = get_i64(
             &get,
             "SHOWY_QUOTA_TIME_WARN_MINUTES",
@@ -613,6 +620,16 @@ mod tests {
         let mut kdl = BTreeMap::new();
         kdl.insert(key.to_string(), "77".to_string());
         assert_eq!(RenderConfig::from_kdl_config(&kdl).good_min_remaining, 77);
+    }
+
+    #[test]
+    fn inverted_thresholds_are_swapped_to_keep_warn_reachable() {
+        let mut kdl = BTreeMap::new();
+        kdl.insert("SHOWY_QUOTA_GOOD_MIN_REMAINING".into(), "15".into());
+        kdl.insert("SHOWY_QUOTA_WARN_MIN_REMAINING".into(), "40".into());
+        let config = RenderConfig::from_kdl_config(&kdl);
+        assert_eq!(config.good_min_remaining, 40);
+        assert_eq!(config.warn_min_remaining, 15);
     }
 
     #[test]
