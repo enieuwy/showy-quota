@@ -85,7 +85,7 @@ jobs:
         with:
           subject-path: showy-quota-zellij.wasm
       - name: Attach plugin artifact
-        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
           body_path: release-notes.md
           generate_release_notes: true
@@ -150,7 +150,7 @@ jobs:
             dist/showy-quota-${{ steps.version.outputs.version }}-${{ matrix.package_target }}.tar.gz
             dist/showy-quota-${{ steps.version.outputs.version }}-${{ matrix.package_target }}.tar.gz.sha256
       - name: Attach package artifact
-        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
           fail_on_unmatched_files: true
           files: |
