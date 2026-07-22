@@ -73,6 +73,66 @@ track_temp_file() {
     TEMP_FILES+=("$1")
 }
 
+# Serialize read-modify-write updates to one file. A dead owner is safe to
+# recover because its PID-specific marker cannot belong to a later lock holder.
+recover_dead_file_write_lock() {
+    local lock_dir="$1" owner_file owner_pid
+
+    for owner_file in "${lock_dir}"/owner.*; do
+        [[ -f "${owner_file}" ]] || continue
+        owner_pid="${owner_file##*.}"
+        [[ "${owner_pid}" =~ ^[0-9]+$ ]] || return 1
+        kill -0 "${owner_pid}" 2>/dev/null && return 1
+        rm -f -- "${owner_file}"
+        rmdir -- "${lock_dir}" 2>/dev/null
+        return $?
+    done
+
+    return 1
+}
+
+release_file_write_lock() {
+    local lock_dir="$1" owner_file="$2"
+
+    [[ -f "${owner_file}" ]] || return 0
+    rm -f -- "${owner_file}"
+    rmdir -- "${lock_dir}" 2>/dev/null || true
+}
+
+with_file_write_lock() {
+    local target="$1"
+    shift
+    local lock_dir="${target}.lock"
+    local max_wait_tenths=50
+    local waited=0
+
+    (
+        local owner_pid="${BASHPID:-$$}"
+        local owner_file="${lock_dir}/owner.${owner_pid}"
+        trap 'release_file_write_lock "${lock_dir}" "${owner_file}"; cleanup_temp_files' EXIT
+
+        while ! mkdir -- "${lock_dir}" 2>/dev/null; do
+            if recover_dead_file_write_lock "${lock_dir}"; then
+                continue
+            fi
+            if (( waited >= max_wait_tenths )); then
+                printf 'showy-quota: timed out waiting for write lock on %s\n' "${target}" >&2
+                exit 1
+            fi
+            sleep 0.1
+            (( waited += 1 ))
+        done
+
+        if ! printf '%s\n' "${owner_pid}" > "${owner_file}"; then
+            rmdir -- "${lock_dir}" 2>/dev/null || true
+            printf 'showy-quota: cannot record write-lock owner for %s\n' "${target}" >&2
+            exit 1
+        fi
+
+        "$@"
+    )
+}
+
 
 list_theme_names() {
     local dir path name
@@ -235,12 +295,12 @@ set_theme() {
     local name="$1"
     validate_theme_or_die "${name}"
     (umask 077 && mkdir -p -- "${CONFIG_DIR}") || die "cannot create ${CONFIG_DIR}"
-    write_config_lines set "${name}"
+    with_file_write_lock "${CONFIG_FILE}" write_config_lines set "${name}"
 }
 
 unset_theme() {
-    [[ -e "${CONFIG_FILE}" ]] || return 0
-    write_config_lines unset
+    [[ -d "${CONFIG_DIR}" ]] || return 0
+    with_file_write_lock "${CONFIG_FILE}" write_config_lines unset
 }
 
 ordered_theme_names() {
@@ -628,6 +688,74 @@ resolve_abs_path() {
     printf '%s' "${path}"
 }
 
+# Rebuild a permissions file from the snapshot held under its write lock.
+write_zellij_permissions() {
+    local perms_file="$1" section="keys" value
+    shift
+    local block_re='^[[:space:]]*"?([^"{]*[^"[:space:]{])"?[[:space:]]*\{[[:space:]]*$'
+    local close_re='^[[:space:]]*\}[[:space:]]*$'
+    local -a keys=() permissions=() kept=()
+    local skipping=0 line name key managed last permission tmp
+
+    while (($#)); do
+        value="$1"
+        shift
+        if [[ "${value}" == "--" && "${section}" == "keys" ]]; then
+            section="permissions"
+        elif [[ "${section}" == "keys" ]]; then
+            keys+=("${value}")
+        else
+            permissions+=("${value}")
+        fi
+    done
+
+    if [[ -f "${perms_file}" ]]; then
+        while IFS= read -r line || [[ -n "${line}" ]]; do
+            if (( skipping )); then
+                [[ "${line}" =~ ${close_re} ]] && skipping=0
+                continue
+            fi
+            if [[ "${line}" =~ ${block_re} ]]; then
+                name="${BASH_REMATCH[1]}"
+                managed=0
+                for key in "${keys[@]}"; do
+                    [[ "${name}" == "${key}" ]] && { managed=1; break; }
+                done
+                if (( managed )); then
+                    skipping=1
+                    continue
+                fi
+            fi
+            kept+=("${line}")
+        done < "${perms_file}"
+    fi
+
+    # Drop trailing blank lines so appended blocks sit flush.
+    while ((${#kept[@]})); do
+        last=$(( ${#kept[@]} - 1 ))
+        [[ -z "${kept[$last]}" ]] || break
+        unset "kept[$last]"
+    done
+
+    tmp="$(umask 077 && mktemp "${perms_file}.tmp.XXXXXX")" || die "cannot create temporary file next to ${perms_file}"
+    track_temp_file "${tmp}"
+    if ! {
+        if ((${#kept[@]})); then printf '%s\n' "${kept[@]}"; fi
+        for key in "${keys[@]}"; do
+            printf '"%s" {\n' "${key}"
+            for permission in "${permissions[@]}"; do
+                printf '    %s\n' "${permission}"
+            done
+            printf '}\n'
+        done
+    } > "${tmp}"; then
+        die "cannot write temporary file next to ${perms_file}"
+    fi
+    if ! mv -f -- "${tmp}" "${perms_file}"; then
+        die "cannot replace ${perms_file}"
+    fi
+}
+
 # Pre-grant the standalone Zellij plugin's permissions so it never prompts on
 # first launch. The grant lives in Zellij's permissions.kdl (a cache file that
 # macOS may purge), keyed by the plugin's location; re-running this is safe and
@@ -694,56 +822,7 @@ grant_zellij() {
     perms_dir="${perms_file%/*}"
     mkdir -p -- "${perms_dir}" || die "cannot create ${perms_dir}"
 
-    # Rebuild the file: drop any block we own (idempotent), preserve the rest.
-    local block_re='^[[:space:]]*"?([^"{]*[^"[:space:]{])"?[[:space:]]*\{[[:space:]]*$'
-    local close_re='^[[:space:]]*\}[[:space:]]*$'
-    local -a kept=()
-    local skipping=0 line name key managed last permission
-    if [[ -f "${perms_file}" ]]; then
-        while IFS= read -r line || [[ -n "${line}" ]]; do
-            if (( skipping )); then
-                [[ "${line}" =~ ${close_re} ]] && skipping=0
-                continue
-            fi
-            if [[ "${line}" =~ ${block_re} ]]; then
-                name="${BASH_REMATCH[1]}"
-                managed=0
-                for key in "${keys[@]}"; do
-                    [[ "${name}" == "${key}" ]] && { managed=1; break; }
-                done
-                if (( managed )); then
-                    skipping=1
-                    continue
-                fi
-            fi
-            kept+=("${line}")
-        done < "${perms_file}"
-    fi
-    # Drop trailing blank lines so appended blocks sit flush.
-    while ((${#kept[@]})); do
-        last=$(( ${#kept[@]} - 1 ))
-        [[ -z "${kept[$last]}" ]] || break
-        unset "kept[$last]"
-    done
-
-    local tmp
-    tmp="$(umask 077 && mktemp "${perms_file}.tmp.XXXXXX")" || die "cannot create temporary file next to ${perms_file}"
-    track_temp_file "${tmp}"
-    if ! {
-        if ((${#kept[@]})); then printf '%s\n' "${kept[@]}"; fi
-        for key in "${keys[@]}"; do
-            printf '"%s" {\n' "${key}"
-            for permission in "${permissions[@]}"; do
-                printf '    %s\n' "${permission}"
-            done
-            printf '}\n'
-        done
-    } > "${tmp}"; then
-        die "cannot write temporary file next to ${perms_file}"
-    fi
-    if ! mv -f -- "${tmp}" "${perms_file}"; then
-        die "cannot replace ${perms_file}"
-    fi
+    with_file_write_lock "${perms_file}" write_zellij_permissions "${perms_file}" "${keys[@]}" -- "${permissions[@]}"
 
     printf 'showy-quota: pre-granted Zellij plugin permissions\n'
     printf '  permissions file: %s\n' "${perms_file}"

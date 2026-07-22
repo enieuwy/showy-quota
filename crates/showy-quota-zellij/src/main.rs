@@ -23,6 +23,10 @@ const SERVE_FAILURES_BEFORE_CLI: u8 = 3;
 const MANAGED_SERVE_RETRY_COOLDOWN_SECONDS: f64 = 30.0;
 const PROVIDER_DISCOVERY_BACKOFF_SECONDS_DEFAULT: f64 = 60.0;
 const PROVIDER_COMMAND_TIMEOUT_SECONDS: u64 = 15;
+const MAX_SUBPROCESS_STDOUT_BYTES: usize = 5 * 1024 * 1024;
+const MANAGED_SERVE_SPAWN_JITTER_SECONDS: f64 = 2.0;
+const MANAGED_SERVE_KIND: &str = "showy-quota-serve";
+const MANAGED_SERVE_ATTEMPT_KEY: &str = "showy-quota-serve-attempt";
 // While an outage hold is active the bar wakes on this short cadence to re-probe
 // serve, so a fast managed-serve restart is detected within seconds instead of a
 // full `interval_seconds`.
@@ -51,15 +55,86 @@ const ONDISK_VERSION_TTL_SECONDS: f64 = 300.0;
 // match them (bold, countdown-warn fg, bar bg).
 const BUILD_STALE_MARKER: &str = "⚠ver";
 
-/// POSIX-sh watchdog that runs `"$@"` but guarantees the spawned process cannot
-/// outlive `timeout_secs`. Zellij exposes no API to cancel a `run_command`, so a
-/// CLI fallback that wedges on an interactive prompt (e.g. the macOS login
-/// keychain for Claude credentials) would otherwise leak as a zellij-server
-/// child and queue a fresh prompt on every retry. The watchdog reaps it instead.
-fn watchdog_script(timeout_secs: u64) -> String {
+/// POSIX-sh watchdog that runs an argv command in a separate process session,
+/// bounds its captured stdout, and terminates the entire command tree on
+/// timeout. Zellij exposes no cancellation API for `run_command`, so CLI
+/// fallback work must clean up interactive helpers as well as its direct child.
+fn watchdog_script_with_child(timeout_secs: u64, child_script: &str) -> String {
+    let capture_limit = MAX_SUBPROCESS_STDOUT_BYTES.saturating_add(1);
     format!(
-        "\"$@\" & __p=$!; (sleep {t} & __s=$!; trap 'kill \"$__s\" 2>/dev/null' EXIT; wait \"$__s\"; kill \"$__p\" 2>/dev/null; sleep 2 & __s=$!; wait \"$__s\"; kill -9 \"$__p\" 2>/dev/null) & __k=$!; wait \"$__p\"; __r=$?; kill \"$__k\" 2>/dev/null; wait \"$__k\" 2>/dev/null; exit \"$__r\"",
-        t = timeout_secs
+        r#"__d=$(mktemp -d "${{TMPDIR:-/tmp}}/showy-quota.XXXXXX") || exit 125
+umask 077
+__fifo="$__d/stdout"
+__out="$__d/output"
+mkfifo "$__fifo" || {{ rm -rf "$__d"; exit 125; }}
+trap 'rm -rf "$__d"' EXIT
+__setsid=0
+if command -v setsid >/dev/null 2>&1; then
+    setsid /bin/sh -c '{child_script}' showy-quota-child "$@" >"$__fifo" 2>/dev/null &
+    __p=$!
+    __setsid=1
+else
+    /bin/sh -c '{child_script}' showy-quota-child "$@" >"$__fifo" 2>/dev/null &
+    __p=$!
+fi
+__kill_descendants() {{
+    __children=$(pgrep -P "$1" 2>/dev/null || true)
+    [ -n "$__children" ] || return 0
+    while IFS= read -r __child; do
+        [ -n "$__child" ] || continue
+        __kill_descendants "$__child" "$2"
+        kill "-$2" "$__child" 2>/dev/null || true
+    done <<EOF
+$__children
+EOF
+}}
+__stop() {{
+    __signal=$1
+    if [ "$__setsid" -eq 1 ]; then
+        kill "-$__signal" -- "-$__p" 2>/dev/null || true
+    else
+        __kill_descendants "$__p" "$__signal"
+        if command -v pkill >/dev/null 2>&1; then
+            pkill "-$__signal" -P "$__p" 2>/dev/null || true
+        fi
+        kill "-$__signal" "$__p" 2>/dev/null || true
+    fi
+}}
+(sleep {timeout_secs} & __s=$!; trap 'kill "$__s" 2>/dev/null' EXIT; wait "$__s"; __stop TERM; sleep 2 & __s=$!; wait "$__s"; __stop KILL) &
+__k=$!
+dd if="$__fifo" of="$__out" bs=1 count={capture_limit} 2>/dev/null
+__bytes=$(wc -c <"$__out" | tr -d '[:space:]')
+if [ "$__bytes" -gt {max_stdout} ]; then
+    __stop TERM
+    sleep 2
+    __stop KILL
+    kill "$__k" 2>/dev/null
+    wait "$__k" 2>/dev/null
+    wait "$__p" 2>/dev/null
+    exit 125
+fi
+cat "$__out"
+wait "$__p"
+__r=$?
+kill "$__k" 2>/dev/null
+wait "$__k" 2>/dev/null
+exit "$__r""#,
+        max_stdout = MAX_SUBPROCESS_STDOUT_BYTES,
+    )
+}
+
+fn watchdog_script(timeout_secs: u64) -> String {
+    watchdog_script_with_child(timeout_secs, r#"exec "$@""#)
+}
+
+/// Like `watchdog_script`, but first resolves the binary in `$1` to an absolute
+/// path: CodexBar reads its version from the app bundle via `argv[0]`, so a bare
+/// command name reports no version. The binary still rides in `$1` (never
+/// interpolated), so this is injection-safe like `watchdog_script`.
+fn version_probe_script(timeout_secs: u64) -> String {
+    watchdog_script_with_child(
+        timeout_secs,
+        r#"case $1 in */*) b=$1;; *) b=$(command -v "$1" 2>/dev/null) || b=$1;; esac; exec "$b" --version"#,
     )
 }
 
@@ -70,19 +145,6 @@ fn watchdog_argv<'a>(script: &'a str, command: &[&'a str]) -> Vec<&'a str> {
     let mut argv = vec!["/bin/sh", "-c", script, "showy-quota-watchdog"];
     argv.extend_from_slice(command);
     argv
-}
-
-/// Like `watchdog_script`, but first resolves the binary in `$1` to an absolute
-/// path: CodexBar reads its version from the app bundle via `argv[0]`, so a bare
-/// command name reports no version. Mirrors the shell `codexbar_bin_abs` — a
-/// value containing a slash is trusted as-is, otherwise `command -v` resolves
-/// it. The binary still rides in `$1` (never interpolated), so this is
-/// injection-safe like `watchdog_script`.
-fn version_probe_script(timeout_secs: u64) -> String {
-    format!(
-        "case $1 in */*) b=$1;; *) b=$(command -v \"$1\" 2>/dev/null) || b=$1;; esac; \"$b\" --version & __p=$!; (sleep {t} & __s=$!; trap 'kill \"$__s\" 2>/dev/null' EXIT; wait \"$__s\"; kill \"$__p\" 2>/dev/null; sleep 2 & __s=$!; wait \"$__s\"; kill -9 \"$__p\" 2>/dev/null) & __k=$!; wait \"$__p\"; __r=$?; kill \"$__k\" 2>/dev/null; wait \"$__k\" 2>/dev/null; exit \"$__r\"",
-        t = timeout_secs
-    )
 }
 
 /// Build the argv for a version probe: the binary rides in `$1` (never
@@ -230,12 +292,20 @@ struct State {
     serve_refresh_seconds: u64,
     cli_fallback: CliFallback,
     cli_command: String,
-    // backoff window between repeated per-provider retries after a failure;
-    // defaults to cli_interval_seconds so backoff scales with the same cadence
-    // that drives the bar.
+    // Backoff window between repeated per-provider retries after a failure;
+    // defaults to cli_interval_seconds so backoff scales with the cadence that
+    // drives the bar.
     provider_failure_backoff_seconds: f64,
     source: Source,
+    // A managed serve is a Zellij background command pane shared by every
+    // plugin instance that targets this loopback port. Keep the exact pane and
+    // command-attempt identity until Zellij reports that pane exited; a
+    // transient HTTP/CLI failure cannot safely prove it is gone.
     managed_serve_requested: bool,
+    managed_serve_pane: Option<PaneId>,
+    managed_serve_attempt_token: Option<String>,
+    managed_serve_spawn_after_seconds: Option<f64>,
+    managed_serve_attempt_counter: u64,
     managed_serve_last_attempt_seconds: Option<f64>,
     consecutive_serve_failures: u8,
     last_payload: Option<Vec<u8>>,
@@ -289,6 +359,9 @@ struct State {
     // used to disperse the degraded-fallback hold and per-provider retry backoff
     // across the N same-config tab instances without any shared state or RNG.
     instance_hash: u64,
+    // Monotonic per-instance discriminator for every subprocess context token.
+    // Time records scheduling, but never participates in identity.
+    subprocess_attempt_counter: u64,
     // Max per-instance random hold (seconds) before the first CLI fallback after
     // a serve outage; 0 disables the hold (legacy immediate-fallback behavior).
     fallback_jitter_seconds: f64,
@@ -313,6 +386,10 @@ impl Default for State {
             provider_failure_backoff_seconds: 120.0,
             source: Source::Unknown,
             managed_serve_requested: false,
+            managed_serve_pane: None,
+            managed_serve_attempt_token: None,
+            managed_serve_spawn_after_seconds: None,
+            managed_serve_attempt_counter: 0,
             managed_serve_last_attempt_seconds: None,
             consecutive_serve_failures: 0,
             last_payload: None,
@@ -345,6 +422,7 @@ impl Default for State {
             version_probe_started_at: None,
             show_build_marker: false,
             instance_hash: 0,
+            subprocess_attempt_counter: 0,
             fallback_jitter_seconds: 60.0,
             cli_hold_until: None,
         }
@@ -364,8 +442,8 @@ impl ZellijPlugin for State {
         // an SSRF / exfiltration vector (e.g. a shared KDL layout pointing the
         // plugin at an internal or metadata endpoint), so drop it and fall back
         // to the CLI path instead.
-        if !self.serve_url.trim().is_empty() && !is_loopback_serve_url(&self.serve_url) {
-            self.serve_url = String::new();
+        if !is_loopback_serve_url(&self.serve_url) {
+            self.serve_url.clear();
         }
         // Serve /usage poll cadence. `codexbar serve` only re-collects once
         // per its --refresh-interval, so polling much faster than that just
@@ -451,6 +529,7 @@ impl ZellijPlugin for State {
             EventType::Visible,
             EventType::WebRequestResult,
             EventType::RunCommandResult,
+            EventType::CommandPaneExited,
         ]);
 
         // Runtime work begins only after Zellij explicitly grants the requested
@@ -527,6 +606,7 @@ impl ZellijPlugin for State {
                         self.active_health_generation = None;
                         self.web_flight_started_at = None;
                         if status == 200 {
+                            self.adopt_healthy_serve();
                             self.update_serve_build_version(&body);
                             self.kick_usage();
                         } else {
@@ -550,6 +630,10 @@ impl ZellijPlugin for State {
                     }
                     _ => false,
                 }
+            }
+            Event::CommandPaneExited(pane_id, _exit, context) => {
+                self.handle_managed_serve_exit(pane_id, &context);
+                false
             }
             Event::RunCommandResult(exit, stdout, _stderr, context) => {
                 match context.get("kind").map(String::as_str) {
@@ -591,9 +675,6 @@ impl ZellijPlugin for State {
 
 impl State {
     fn set_source(&mut self, source: Source) {
-        if matches!(source, Source::Cli | Source::Unavailable) {
-            self.managed_serve_requested = false;
-        }
         // Returning to the serve HTTP path makes any pending degraded-fallback
         // hold moot: the outage we were holding through is over.
         if source == Source::Serve {
@@ -613,7 +694,68 @@ impl State {
     fn should_start_managed_serve(&self, now_seconds: f64) -> bool {
         self.manage_serve
             && !self.managed_serve_requested
+            && self.managed_serve_pane.is_none()
             && self.managed_serve_retry_allowed(now_seconds)
+    }
+
+    fn next_subprocess_attempt_token(&mut self) -> String {
+        self.subprocess_attempt_counter = self.subprocess_attempt_counter.saturating_add(1);
+        format!(
+            "{:016x}-{}",
+            self.instance_hash, self.subprocess_attempt_counter
+        )
+    }
+
+    /// A short, stable phase keeps tabs that share one loopback port from
+    /// opening competing command panes after observing the same outage.
+    fn managed_serve_spawn_delay_seconds(&self) -> f64 {
+        unit_from(splitmix64(self.instance_hash ^ 0xa5a5_a5a5_a5a5_a5a5))
+            * MANAGED_SERVE_SPAWN_JITTER_SECONDS
+    }
+
+    /// The preceding failed /health response is only the first half of a
+    /// startup attempt. Wait for this instance's deterministic phase, then
+    /// probe once more before opening a pane so a concurrently started serve is
+    /// always adopted rather than duplicated.
+    fn arm_managed_serve_start(&mut self, now: f64) {
+        self.managed_serve_requested = true;
+        self.managed_serve_last_attempt_seconds = Some(now);
+        self.managed_serve_spawn_after_seconds =
+            Some(now + self.managed_serve_spawn_delay_seconds());
+        self.set_source(Source::ManagedServeStarting);
+        self.schedule_timer();
+    }
+
+    /// A healthy responder owns the endpoint regardless of who launched it
+    /// (another plugin instance, the shell integration, or the user). Stand
+    /// down from any pending spawn immediately. A tracked pane remains only as
+    /// a lifecycle identity: it is not cleared until Zellij confirms exit.
+    fn adopt_healthy_serve(&mut self) {
+        self.managed_serve_requested = false;
+        self.managed_serve_spawn_after_seconds = None;
+        if self.managed_serve_pane.is_none() {
+            self.managed_serve_attempt_token = None;
+        }
+    }
+
+    /// Command-pane exit is the only lifecycle signal that lets this instance
+    /// relinquish its managed-serve identity. A stale exit event is ignored by
+    /// both the pane id and the attempt token.
+    fn handle_managed_serve_exit(&mut self, pane_id: u32, context: &BTreeMap<String, String>) {
+        if context.get("kind").map(String::as_str) != Some(MANAGED_SERVE_KIND)
+            || context.get(MANAGED_SERVE_ATTEMPT_KEY).map(String::as_str)
+                != self.managed_serve_attempt_token.as_deref()
+            || !matches!(self.managed_serve_pane, Some(PaneId::Terminal(id)) if id == pane_id)
+        {
+            return;
+        }
+        self.managed_serve_pane = None;
+        self.managed_serve_attempt_token = None;
+        self.managed_serve_requested = false;
+        self.managed_serve_spawn_after_seconds = None;
+        // Re-check the shared endpoint before considering a replacement: the
+        // exiting pane may have lost a bind race to a healthy foreign serve.
+        self.kick_health_probe();
     }
 
     /// Late per-provider results from a previous CLI burst must be discarded
@@ -627,18 +769,23 @@ impl State {
         shim_set_timeout(self.next_timeout_seconds(now_seconds()));
     }
 
-    /// Single scheduling chokepoint. While an outage hold is active, wake on a
-    /// short cadence to re-probe serve; otherwise use the normal bar cadence.
-    /// Centralized so the hold never spawns a second, overlapping timer stream.
+    /// Single scheduling chokepoint. Outage holds and deferred managed-serve
+    /// starts both wake only when their next bounded re-probe is due.
     fn next_timeout_seconds(&self, now: f64) -> f64 {
+        let mut next = self.interval_seconds;
         if let Some(until) = self.cli_hold_until {
             if now < until {
                 let remaining = (until - now).max(0.1);
                 let reprobe = HOLD_REPROBE_INTERVAL_SECONDS.min(self.interval_seconds);
-                return remaining.min(reprobe);
+                next = next.min(remaining.min(reprobe));
             }
         }
-        self.interval_seconds
+        if let Some(spawn_after) = self.managed_serve_spawn_after_seconds {
+            if now < spawn_after {
+                next = next.min((spawn_after - now).max(0.1));
+            }
+        }
+        next
     }
 
     fn web_response_matches(&self, kind: &str, context: &BTreeMap<String, String>) -> bool {
@@ -686,7 +833,7 @@ impl State {
             self.discovery_started_at = Some(now);
             return;
         };
-        if (now - started_at).max(0.0) < self.discovery_failure_backoff_seconds {
+        if (now - started_at).max(0.0) < PROVIDER_COMMAND_TIMEOUT_SECONDS as f64 {
             return;
         }
         self.discovery_in_flight = false;
@@ -866,8 +1013,25 @@ impl State {
 
     fn handle_serve_unavailable(&mut self) {
         self.serve_build_version = None;
-        if self.should_start_managed_serve(now_seconds()) {
-            self.start_managed_serve();
+        let now = now_seconds();
+        if self.managed_serve_requested {
+            if self.managed_serve_pane.is_none()
+                && self
+                    .managed_serve_spawn_after_seconds
+                    .is_some_and(|spawn_after| now >= spawn_after)
+            {
+                // This failure is the post-jitter confirmation probe. A healthy
+                // responder would already have been adopted by the 200 path.
+                self.start_managed_serve();
+                return;
+            }
+            if self.managed_serve_spawn_after_seconds.is_some() {
+                self.schedule_timer();
+                return;
+            }
+        }
+        if self.should_start_managed_serve(now) {
+            self.arm_managed_serve_start(now);
             return;
         }
         self.kick_cli_fallback_or_render_failure();
@@ -898,11 +1062,21 @@ impl State {
     }
 
     fn start_managed_serve(&mut self) {
+        if self.managed_serve_pane.is_some() {
+            return;
+        }
         self.managed_serve_requested = true;
+        self.managed_serve_spawn_after_seconds = None;
         self.managed_serve_last_attempt_seconds = Some(now_seconds());
+        self.managed_serve_attempt_counter = self.managed_serve_attempt_counter.saturating_add(1);
+        let attempt_token = format!(
+            "{:016x}-{}",
+            self.instance_hash, self.managed_serve_attempt_counter
+        );
         self.set_source(Source::ManagedServeStarting);
         let mut context = BTreeMap::new();
-        context.insert("kind".to_string(), "showy-quota-serve".to_string());
+        context.insert("kind".to_string(), MANAGED_SERVE_KIND.to_string());
+        context.insert(MANAGED_SERVE_ATTEMPT_KEY.to_string(), attempt_token.clone());
         let command = CommandToRun {
             path: self.serve_command.clone().into(),
             args: vec![
@@ -916,8 +1090,20 @@ impl State {
             ],
             cwd: None,
         };
-        if shim_open_command_pane_background(command, context).is_none() {
-            self.kick_cli_fallback_or_render_failure();
+        match shim_open_command_pane_background(command, context) {
+            Some(pane) => {
+                self.managed_serve_pane = Some(pane);
+                self.managed_serve_attempt_token = Some(attempt_token);
+                // Verify the endpoint after the spawn. If another process won
+                // the bind race, its successful /health response is adopted;
+                // our tracked pane is still retained until its own exit event.
+                self.kick_health_probe();
+            }
+            None => {
+                self.managed_serve_requested = false;
+                self.managed_serve_attempt_token = None;
+                self.kick_cli_fallback_or_render_failure();
+            }
         }
     }
 
@@ -1035,8 +1221,9 @@ impl State {
         {
             return;
         }
-        let attempt_token = format!("{:.6}", now_seconds());
-        self.discovery_started_at = Some(now_seconds());
+        let started_at = now_seconds();
+        let attempt_token = self.next_subprocess_attempt_token();
+        self.discovery_started_at = Some(started_at);
         self.discovery_attempt_token = Some(attempt_token.clone());
         self.discovery_in_flight = true;
         let mut context = BTreeMap::new();
@@ -1060,7 +1247,7 @@ impl State {
         stdout: Vec<u8>,
         attempt: Option<&str>,
     ) {
-        if attempt != self.discovery_attempt_token.as_deref() {
+        if !self.discovery_in_flight || attempt != self.discovery_attempt_token.as_deref() {
             return;
         }
         self.discovery_in_flight = false;
@@ -1069,7 +1256,7 @@ impl State {
         let now = now_seconds();
         let resume_usage = self.usage_after_discovery;
         self.usage_after_discovery = false;
-        if exit != Some(0) {
+        if exit != Some(0) || stdout.len() > MAX_SUBPROCESS_STDOUT_BYTES {
             self.discovery_failed_at = Some(now);
             if resume_usage {
                 self.discovered_providers_at = None;
@@ -1165,7 +1352,7 @@ impl State {
 
     fn kick_version_probe(&mut self, now: f64) {
         self.version_probe_in_flight = true;
-        let attempt_token = format!("{:.6}", now);
+        let attempt_token = self.next_subprocess_attempt_token();
         self.version_probe_started_at = Some(now);
         self.version_probe_token = Some(attempt_token.clone());
         let mut context = BTreeMap::new();
@@ -1180,14 +1367,14 @@ impl State {
     /// last-known on-disk version is kept (no marker flapping); only the check
     /// timestamp advances.
     fn handle_version_result(&mut self, exit: Option<i32>, stdout: Vec<u8>, attempt: Option<&str>) {
-        if attempt != self.version_probe_token.as_deref() {
+        if !self.version_probe_in_flight || attempt != self.version_probe_token.as_deref() {
             return;
         }
         self.version_probe_in_flight = false;
         self.version_probe_token = None;
         self.version_probe_started_at = None;
         self.ondisk_version_checked_at = Some(now_seconds());
-        if exit != Some(0) {
+        if exit != Some(0) || stdout.len() > MAX_SUBPROCESS_STDOUT_BYTES {
             return;
         }
         let raw = String::from_utf8_lossy(&stdout);
@@ -1313,7 +1500,7 @@ impl State {
 
     fn kick_provider_call(&mut self, provider: &str) {
         let now = now_seconds();
-        let attempt_token = format!("{now:.6}");
+        let attempt_token = self.next_subprocess_attempt_token();
         let entry = self
             .provider_states
             .entry(provider.to_string())
@@ -1358,16 +1545,11 @@ impl State {
         let Some(state) = self.provider_states.get(provider) else {
             return false;
         };
-        // Strict attempt matching, same rule as handle_discovery_result: a
-        // result is accepted only for the exact live attempt (or on the legacy
-        // tokenless path). A tokened result arriving when no attempt is active
-        // is late, orphaned (its token was cleared by
-        // clear_all_provider_in_flight), or a duplicate — accepting it could
-        // overwrite a newer success with stale data. Rejection is cheap: the
-        // next tick simply re-kicks the provider.
+        // Every launched attempt has a token. A missing, late, or mismatched
+        // completion cannot clear a newer in-flight command or overwrite
+        // fresher data.
         match (attempt, state.active_attempt_token.as_deref()) {
             (Some(result_token), Some(active)) if state.in_flight && result_token == active => {}
-            (None, None) if state.in_flight => {}
             _ => return false,
         }
         if let Some(state) = self.provider_states.get_mut(provider) {
@@ -1378,7 +1560,7 @@ impl State {
             return false;
         }
         let now = now_seconds();
-        if exit != Some(0) {
+        if exit != Some(0) || stdout.len() > MAX_SUBPROCESS_STDOUT_BYTES {
             self.record_provider_failure(provider, now);
             let mut changed = self.refresh_output();
             changed |= self.render_cli_failure_if_all_terminal();
@@ -1502,6 +1684,9 @@ impl State {
         self.last_output != previous_output
     }
 
+    /// A provider remains in flight for its actual watchdog lifetime. Retry
+    /// backoff begins only after the attempt has completed or this deadline has
+    /// expired, so a tiny configured backoff cannot pile up live subprocesses.
     fn expire_stale_provider_flights(&mut self, now: f64) {
         for state in self.provider_states.values_mut() {
             if !state.in_flight {
@@ -1510,7 +1695,7 @@ impl State {
             let Some(started_at) = state.last_attempt_seconds else {
                 continue;
             };
-            if (now - started_at).max(0.0) < self.provider_failure_backoff_seconds {
+            if (now - started_at).max(0.0) < PROVIDER_COMMAND_TIMEOUT_SECONDS as f64 {
                 continue;
             }
             state.in_flight = false;
@@ -1897,35 +2082,30 @@ fn derive_port_from_url(url: &str) -> Option<String> {
     }
 }
 
-/// True when `url` is an `http(s)://` URL whose host is a loopback literal
-/// (`127.0.0.1`, `localhost`, or `::1`). Mirrors the shell `serve_base_url`
-/// regex so the plugin honors the same localhost-only serve contract.
+/// True only for the documented local serve authority:
+/// `http://(127.0.0.1|localhost|[::1]):1..65535`. Unlike a general URL parser,
+/// this deliberately rejects credentials, paths, queries, fragments, HTTPS,
+/// and implicit ports so `serve_url` cannot silently describe a different
+/// endpoint than the shell integration uses.
 fn is_loopback_serve_url(url: &str) -> bool {
-    let rest = match url
-        .trim()
-        .strip_prefix("http://")
-        .or_else(|| url.trim().strip_prefix("https://"))
-    {
-        Some(rest) => rest,
-        None => return false,
+    let Some(authority) = url.strip_prefix("http://") else {
+        return false;
     };
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
-    let authority = authority
-        .rsplit_once('@')
-        .map(|(_, authority)| authority)
-        .unwrap_or(authority);
-    let host = if let Some(after) = authority.strip_prefix('[') {
-        match after.split_once(']') {
-            Some((host, _)) => host,
-            None => return false,
-        }
+    if authority.is_empty() || authority.contains(['/', '?', '#', '@']) {
+        return false;
+    }
+    let (host, port) = if let Some(port) = authority.strip_prefix("[::1]:") {
+        ("[::1]", port)
     } else {
-        authority
-            .rsplit_once(':')
-            .map(|(host, _)| host)
-            .unwrap_or(authority)
+        let Some((host, port)) = authority.split_once(':') else {
+            return false;
+        };
+        if host.contains(':') || port.contains(':') {
+            return false;
+        }
+        (host, port)
     };
-    matches!(host, "127.0.0.1" | "localhost" | "::1")
+    matches!(host, "127.0.0.1" | "localhost" | "[::1]") && valid_port(port)
 }
 
 fn now_epoch() -> i64 {
@@ -1991,11 +2171,26 @@ mod tests {
         state.usage_in_flight = true;
     }
 
+    const TEST_PROVIDER_ATTEMPT: &str = "test-provider-attempt";
+
+    fn arm_provider_attempt(state: &mut State, provider: &str) {
+        let entry = state
+            .provider_states
+            .entry(provider.to_string())
+            .or_default();
+        entry.in_flight = true;
+        entry.active_attempt_token = Some(TEST_PROVIDER_ATTEMPT.to_string());
+    }
+
     fn provider_fallback_context(provider: &str) -> BTreeMap<String, String> {
         let mut context = event_context(FALLBACK_PROVIDER_KIND);
         context.insert(
             FALLBACK_PROVIDER_CONTEXT_KEY.to_string(),
             provider.to_string(),
+        );
+        context.insert(
+            FALLBACK_PROVIDER_ATTEMPT_KEY.to_string(),
+            TEST_PROVIDER_ATTEMPT.to_string(),
         );
         context
     }
@@ -2031,6 +2226,10 @@ mod tests {
             .cloned()
             .collect();
         serde_json::to_vec(&serde_json::Value::Array(filtered)).expect("re-serialize")
+    }
+
+    fn oversized_stdout() -> Vec<u8> {
+        vec![b'x'; MAX_SUBPROCESS_STDOUT_BYTES + 1]
     }
 
     #[test]
@@ -2395,20 +2594,94 @@ mod tests {
     }
 
     #[test]
-    fn is_loopback_serve_url_matches_localhost_only() {
-        assert!(is_loopback_serve_url("http://127.0.0.1:8080"));
-        assert!(is_loopback_serve_url("http://localhost:8080/"));
-        assert!(is_loopback_serve_url("http://[::1]:8080"));
-        assert!(is_loopback_serve_url("https://127.0.0.1"));
-        assert!(!is_loopback_serve_url("http://169.254.169.254/"));
-        assert!(!is_loopback_serve_url(
-            "https://internal-service.corp/secret"
+    fn is_loopback_serve_url_requires_strict_local_http_authority() {
+        for url in [
+            "http://127.0.0.1:1",
+            "http://localhost:8080",
+            "http://[::1]:65535",
+        ] {
+            assert!(is_loopback_serve_url(url), "{url:?} should be accepted");
+        }
+        for url in [
+            "http://localhost",
+            "http://localhost:0",
+            "http://localhost:65536",
+            "http://localhost:not-a-port",
+            "http://localhost:8080/",
+            "http://localhost:8080?x=1",
+            "http://localhost:8080#fragment",
+            "http://user:pass@localhost:8080",
+            "https://127.0.0.1:8080",
+            "http://::1:8080",
+            "http://127.0.0.1.evil.com:8080",
+            "ftp://127.0.0.1:8080",
+            " http://127.0.0.1:8080",
+            "",
+        ] {
+            assert!(!is_loopback_serve_url(url), "{url:?} should be rejected");
+        }
+    }
+
+    #[test]
+    fn oversized_discovery_output_fails_without_replacing_inventory() {
+        let mut state = State {
+            source: Source::Cli,
+            discovery_in_flight: true,
+            discovery_attempt_token: Some("discover-1".to_string()),
+            discovered_providers: vec!["codex".to_string()],
+            discovered_providers_at: Some(now_seconds()),
+            ..State::default()
+        };
+
+        state.handle_discovery_result(Some(0), oversized_stdout(), Some("discover-1"));
+
+        assert!(!state.discovery_in_flight);
+        assert_eq!(state.discovered_providers, vec!["codex".to_string()]);
+        assert!(state.discovery_failed_at.is_some());
+    }
+
+    #[test]
+    fn oversized_provider_output_fails_without_replacing_last_known_record() {
+        let last_record = serde_json::json!({"provider": "codex"});
+        let mut state = State {
+            source: Source::Cli,
+            discovered_providers: vec!["codex".to_string()],
+            discovered_providers_at: Some(now_seconds()),
+            ..State::default()
+        };
+        let provider = state
+            .provider_states
+            .entry("codex".to_string())
+            .or_default();
+        provider.in_flight = true;
+        provider.active_attempt_token = Some("provider-1".to_string());
+        provider.last_record = Some(last_record.clone());
+
+        assert!(!state.handle_provider_fallback_result(
+            "codex",
+            Some("provider-1"),
+            Some(0),
+            oversized_stdout(),
         ));
-        assert!(!is_loopback_serve_url("http://127.0.0.1.evil.com"));
-        assert!(!is_loopback_serve_url("ftp://127.0.0.1"));
-        assert!(!is_loopback_serve_url("http://evil.com?@localhost"));
-        assert!(!is_loopback_serve_url("http://evil.com#@localhost"));
-        assert!(!is_loopback_serve_url(""));
+
+        let provider = state.provider_states.get("codex").expect("provider state");
+        assert_eq!(provider.last_record.as_ref(), Some(&last_record));
+        assert!(provider.last_failure_seconds.is_some());
+    }
+
+    #[test]
+    fn oversized_version_output_keeps_last_known_version() {
+        let mut state = State {
+            ondisk_version: Some("1.0.0".to_string()),
+            version_probe_in_flight: true,
+            version_probe_token: Some("version-1".to_string()),
+            ..State::default()
+        };
+
+        state.handle_version_result(Some(0), oversized_stdout(), Some("version-1"));
+
+        assert_eq!(state.ondisk_version.as_deref(), Some("1.0.0"));
+        assert!(state.ondisk_version_checked_at.is_some());
     }
 
     #[test]
@@ -2453,11 +2726,7 @@ mod tests {
             ..State::default()
         };
         // Seed a Cli payload so the initial output carries the degraded marker.
-        state
-            .provider_states
-            .entry("codex".into())
-            .or_default()
-            .in_flight = true;
+        arm_provider_attempt(&mut state, "codex");
         state.last_payload = Some(mixed_payload());
         assert!(state.refresh_output());
         assert!(state.last_output.contains("⚠cli"));
@@ -2646,13 +2915,14 @@ mod tests {
             permissions_granted: true,
             source: Source::Serve,
             discovery_in_flight: true,
+            discovery_attempt_token: Some("attempt".to_string()),
             usage_after_discovery: true,
             discovered_providers: vec!["claude".to_string(), "antigravity".to_string()],
             discovered_providers_at: Some(now_seconds() - 120.0),
             ..State::default()
         };
 
-        state.handle_discovery_result(Some(7), Vec::new(), None);
+        state.handle_discovery_result(Some(7), Vec::new(), Some("attempt"));
 
         assert!(state.discovered_providers_at.is_none());
         assert!(state.usage_in_flight);
@@ -2679,6 +2949,28 @@ mod tests {
         assert!(state.discovered_providers_at.is_none());
         assert!(state.discovery_failed_at.is_some());
         assert!(state.usage_in_flight);
+    }
+
+    #[test]
+    fn discovery_in_flight_uses_watchdog_deadline_not_retry_backoff() {
+        let mut state = State {
+            discovery_in_flight: true,
+            discovery_attempt_token: Some("discover-1".to_string()),
+            discovery_started_at: Some(now_seconds() - 1.0),
+            discovery_failure_backoff_seconds: 0.1,
+            ..State::default()
+        };
+
+        state.expire_stale_discovery();
+        assert!(state.discovery_in_flight);
+        assert_eq!(state.discovery_attempt_token.as_deref(), Some("discover-1"));
+
+        state.discovery_started_at =
+            Some(now_seconds() - PROVIDER_COMMAND_TIMEOUT_SECONDS as f64 - 1.0);
+        state.expire_stale_discovery();
+        assert!(!state.discovery_in_flight);
+        assert!(state.discovery_attempt_token.is_none());
+        assert!(state.discovery_failed_at.is_some());
     }
 
     #[test]
@@ -2713,11 +3005,7 @@ mod tests {
             source: Source::Probing,
             ..State::default()
         };
-        state
-            .provider_states
-            .entry("codex".into())
-            .or_default()
-            .in_flight = true;
+        arm_provider_attempt(&mut state, "codex");
 
         assert!(state.update(Event::RunCommandResult(
             Some(0),
@@ -2796,20 +3084,68 @@ mod tests {
     }
 
     #[test]
-    fn managed_serve_retry_rearms_after_cli_or_unavailable_transition() {
+    fn managed_serve_ownership_survives_cli_and_unavailable_transitions() {
         let mut state = State {
             managed_serve_requested: true,
+            managed_serve_pane: Some(PaneId::Terminal(17)),
+            managed_serve_attempt_token: Some("managed-1".to_string()),
             managed_serve_last_attempt_seconds: Some(100.0),
             ..State::default()
         };
 
         state.set_source(Source::Cli);
-        assert!(!state.managed_serve_requested);
-        assert!(!state.should_start_managed_serve(129.9));
-        assert!(state.should_start_managed_serve(130.0));
+        assert!(state.managed_serve_requested);
+        assert_eq!(state.managed_serve_pane, Some(PaneId::Terminal(17)));
+        assert!(!state.should_start_managed_serve(1_000.0));
 
-        state.managed_serve_requested = true;
         state.set_source(Source::Unavailable);
+        assert!(state.managed_serve_requested);
+        assert_eq!(
+            state.managed_serve_attempt_token.as_deref(),
+            Some("managed-1")
+        );
+    }
+
+    #[test]
+    fn healthy_serve_adoption_cancels_pending_spawn_without_dropping_pane_identity() {
+        let mut state = State {
+            managed_serve_requested: true,
+            managed_serve_pane: Some(PaneId::Terminal(17)),
+            managed_serve_attempt_token: Some("managed-1".to_string()),
+            managed_serve_spawn_after_seconds: Some(now_seconds() + 1.0),
+            ..State::default()
+        };
+
+        state.adopt_healthy_serve();
+
+        assert!(!state.managed_serve_requested);
+        assert!(state.managed_serve_spawn_after_seconds.is_none());
+        assert_eq!(state.managed_serve_pane, Some(PaneId::Terminal(17)));
+        assert_eq!(
+            state.managed_serve_attempt_token.as_deref(),
+            Some("managed-1")
+        );
+    }
+
+    #[test]
+    fn managed_serve_exit_releases_only_the_matching_pane_identity() {
+        let mut state = State {
+            managed_serve_requested: true,
+            managed_serve_pane: Some(PaneId::Terminal(17)),
+            managed_serve_attempt_token: Some("managed-1".to_string()),
+            ..State::default()
+        };
+        let mut context = event_context(MANAGED_SERVE_KIND);
+        context.insert(
+            MANAGED_SERVE_ATTEMPT_KEY.to_string(),
+            "managed-1".to_string(),
+        );
+
+        state.handle_managed_serve_exit(18, &context);
+        assert_eq!(state.managed_serve_pane, Some(PaneId::Terminal(17)));
+
+        state.handle_managed_serve_exit(17, &context);
+        assert!(state.managed_serve_pane.is_none());
         assert!(!state.managed_serve_requested);
     }
 
@@ -2967,7 +3303,10 @@ mod tests {
         assert_eq!(argv[2], script.as_str());
         assert_eq!(&argv[4..], &["codexbar", "usage", "--provider", "claude"]);
         assert!(script.contains("sleep 15"));
-        assert!(script.contains("kill -9"));
+        assert!(script.contains("setsid /bin/sh"));
+        assert!(script.contains("kill \"-$__signal\" -- \"-$__p\""));
+        assert!(script.contains("pkill \"-$__signal\" -P \"$__p\""));
+        assert!(script.contains("count=5242881"));
         assert!(script.contains("trap 'kill \"$__s\" 2>/dev/null' EXIT"));
         assert!(script.contains("wait \"$__k\""));
         // Provider ids and the binary path ride in "$@", never the shell string.
@@ -2993,16 +3332,8 @@ mod tests {
             last_payload: Some(mixed_payload()),
             ..State::default()
         };
-        state
-            .provider_states
-            .entry("codex".into())
-            .or_default()
-            .in_flight = true;
-        state
-            .provider_states
-            .entry("claude".into())
-            .or_default()
-            .in_flight = true;
+        arm_provider_attempt(&mut state, "codex");
+        arm_provider_attempt(&mut state, "claude");
 
         // codex returns a fresh record → it lands.
         assert!(state.update(Event::RunCommandResult(
@@ -3074,8 +3405,13 @@ mod tests {
             ..State::default()
         };
         state.serve_url.clear();
+        state.kick_discovery();
+        let attempt = state
+            .discovery_attempt_token
+            .clone()
+            .expect("discovery attempt");
         // Simulate a malformed discovery payload → records a failure stamp.
-        state.handle_discovery_result(Some(0), b"{\"providers\":[]}".to_vec(), None);
+        state.handle_discovery_result(Some(0), b"{\"providers\":[]}".to_vec(), Some(&attempt));
         assert!(state.discovery_failed_at.is_some());
         // Without discovery, the eligible inventory comes from cache ids.
         let providers = state.eligible_provider_inventory();
@@ -3091,6 +3427,11 @@ mod tests {
             ..State::default()
         };
         state.serve_url.clear();
+        state.kick_discovery();
+        let attempt = state
+            .discovery_attempt_token
+            .clone()
+            .expect("discovery attempt");
         // Pre-seed a provider that the next discovery payload will not list.
         state
             .provider_states
@@ -3102,7 +3443,7 @@ mod tests {
             {"provider": "claude", "enabled": true}
         ]"#
         .to_vec();
-        state.handle_discovery_result(Some(0), payload, None);
+        state.handle_discovery_result(Some(0), payload, Some(&attempt));
         assert!(!state.provider_states.contains_key("antigravity"));
         assert_eq!(state.discovered_providers, vec!["claude".to_string()]);
     }
@@ -3147,12 +3488,17 @@ mod tests {
             ..State::default()
         };
         state.serve_url.clear();
+        state.kick_discovery();
+        let attempt = state
+            .discovery_attempt_token
+            .clone()
+            .expect("discovery attempt");
         let payload = br#"[
             {"provider": "claude", "enabled": true}
         ]"#
         .to_vec();
 
-        state.handle_discovery_result(Some(0), payload, None);
+        state.handle_discovery_result(Some(0), payload, Some(&attempt));
 
         let payload = state.last_payload.as_deref().expect("payload");
         let records = parse_usage_payload(payload).expect("valid payload");
@@ -3169,11 +3515,7 @@ mod tests {
             last_payload: Some(mixed_payload()),
             ..State::default()
         };
-        state
-            .provider_states
-            .entry("claude".into())
-            .or_default()
-            .in_flight = true;
+        arm_provider_attempt(&mut state, "claude");
 
         assert!(state.update(Event::RunCommandResult(
             Some(0),
@@ -3196,11 +3538,7 @@ mod tests {
             discovered_providers_at: Some(now_seconds()),
             ..State::default()
         };
-        state
-            .provider_states
-            .entry("codex".into())
-            .or_default()
-            .in_flight = true;
+        arm_provider_attempt(&mut state, "codex");
 
         assert!(state.update(Event::RunCommandResult(
             Some(0),
@@ -3228,11 +3566,7 @@ mod tests {
             last_payload: Some(mixed_payload()),
             ..State::default()
         };
-        state
-            .provider_states
-            .entry("codex".into())
-            .or_default()
-            .in_flight = true;
+        arm_provider_attempt(&mut state, "codex");
 
         assert!(state.update(Event::RunCommandResult(
             Some(0),
@@ -3260,10 +3594,16 @@ mod tests {
         };
         let entry = state.provider_states.entry("codex".into()).or_default();
         entry.in_flight = true;
-        entry.last_attempt_seconds = Some(0.0);
+        entry.last_attempt_seconds = Some(100.0);
         entry.active_attempt_token = Some("old".to_string());
 
-        state.expire_stale_provider_flights(2.0);
+        state.expire_stale_provider_flights(101.0);
+        assert!(state
+            .provider_states
+            .get("codex")
+            .is_some_and(|entry| entry.in_flight));
+
+        state.expire_stale_provider_flights(100.0 + PROVIDER_COMMAND_TIMEOUT_SECONDS as f64 + 1.0);
 
         let entry = state.provider_states.get("codex").expect("provider state");
         assert!(!entry.in_flight);

@@ -390,6 +390,7 @@ where
 {
     get(name)
         .and_then(|value| value.parse().ok())
+        .filter(|value: &i32| *value >= 0)
         .unwrap_or(default)
 }
 
@@ -399,6 +400,7 @@ where
 {
     get(name)
         .and_then(|value| value.parse().ok())
+        .filter(|value: &i64| *value >= 0)
         .unwrap_or(default)
 }
 
@@ -620,6 +622,32 @@ mod tests {
         let mut kdl = BTreeMap::new();
         kdl.insert(key.to_string(), "77".to_string());
         assert_eq!(RenderConfig::from_kdl_config(&kdl).good_min_remaining, 77);
+    }
+
+    #[test]
+    fn negative_threshold_and_duration_overrides_fall_back_to_defaults() {
+        let mut env = BTreeMap::new();
+        let mut kdl = BTreeMap::new();
+        for name in [
+            "GOOD_MIN_REMAINING",
+            "WARN_MIN_REMAINING",
+            "TIME_WARN_MINUTES",
+            "DIM_WINDOW_MINUTES",
+        ] {
+            env.insert(format!("SHOWY_QUOTA_{name}"), "-1".into());
+            kdl.insert(name.to_ascii_lowercase(), "-1".into());
+        }
+        let defaults = RenderConfig::default();
+
+        for config in [
+            RenderConfig::from_env_map(&env),
+            RenderConfig::from_kdl_config(&kdl),
+        ] {
+            assert_eq!(config.good_min_remaining, defaults.good_min_remaining);
+            assert_eq!(config.warn_min_remaining, defaults.warn_min_remaining);
+            assert_eq!(config.time_warn_minutes, defaults.time_warn_minutes);
+            assert_eq!(config.dim_window_minutes, defaults.dim_window_minutes);
+        }
     }
 
     #[test]

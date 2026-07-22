@@ -229,7 +229,25 @@ showy_quota_load_config
 # validate/publish. Mirrors the native parser's MAX_USAGE_JSON_BYTES and the
 # `--max-filesize` cap on the /usage probe so the CLI-fallback and cache parse
 # paths are bounded too (default 5 MiB).
-: "${SHOWY_QUOTA_MAX_USAGE_JSON_BYTES:=5242880}"
+if [[ -z "${SHOWY_QUOTA_MAX_USAGE_JSON_BYTES+x}" ]]; then
+    SHOWY_QUOTA_MAX_USAGE_JSON_BYTES=5242880
+else
+    _swq_max_usage_json_bytes="${SHOWY_QUOTA_MAX_USAGE_JSON_BYTES}"
+    if [[ ! "${_swq_max_usage_json_bytes}" =~ ^[0-9]+$ ]] \
+        || (( ${#_swq_max_usage_json_bytes} > 18 )); then
+        printf 'showy-quota: invalid SHOWY_QUOTA_MAX_USAGE_JSON_BYTES %q; using default 5242880\n' "${_swq_max_usage_json_bytes}" >&2
+        SHOWY_QUOTA_MAX_USAGE_JSON_BYTES=5242880
+    else
+        _swq_max_usage_json_bytes=$((10#${_swq_max_usage_json_bytes}))
+        if (( _swq_max_usage_json_bytes == 0 || _swq_max_usage_json_bytes > 5242880 )); then
+            printf 'showy-quota: invalid SHOWY_QUOTA_MAX_USAGE_JSON_BYTES %q; using default 5242880\n' "${SHOWY_QUOTA_MAX_USAGE_JSON_BYTES}" >&2
+            SHOWY_QUOTA_MAX_USAGE_JSON_BYTES=5242880
+        else
+            SHOWY_QUOTA_MAX_USAGE_JSON_BYTES="${_swq_max_usage_json_bytes}"
+        fi
+    fi
+    unset _swq_max_usage_json_bytes
+fi
 : "${SHOWY_QUOTA_CACHE_DIR:=${XDG_CACHE_HOME:-${HOME}/.cache}/showy-quota}"
 : "${SHOWY_QUOTA_CODEXBAR_BIN:=codexbar}"
 : "${SHOWY_QUOTA_CODEXBAR_SERVE_URL=http://127.0.0.1:8080}"
@@ -427,9 +445,23 @@ showy_quota_die() {
 
 showy_quota_have() { command -v "$1" >/dev/null 2>&1; }
 
+# Normalize a nonnegative epoch in the supported range. Limiting all shell
+# arithmetic inputs through 2100 keeps date offsets and countdown subtraction
+# bounded even when values originate in an environment override or payload.
+showy_quota_epoch_value() {
+    local raw="$1" value
+    [[ "${raw}" =~ ^[0-9]+$ ]] || return 1
+    (( ${#raw} <= 18 )) || return 1
+    value=$((10#${raw}))
+    (( value <= 4102444800 )) || return 1
+    printf '%s\n' "${value}"
+}
+
 showy_quota_now_epoch() {
-    if [[ -n "${SHOWY_QUOTA_NOW_EPOCH:-}" && "${SHOWY_QUOTA_NOW_EPOCH}" =~ ^[0-9]+$ ]]; then
-        printf '%s\n' "${SHOWY_QUOTA_NOW_EPOCH}"
+    local now
+    if [[ -n "${SHOWY_QUOTA_NOW_EPOCH:-}" ]] \
+        && now=$(showy_quota_epoch_value "${SHOWY_QUOTA_NOW_EPOCH}"); then
+        printf '%s\n' "${now}"
     else
         date +%s
     fi
@@ -546,14 +578,17 @@ showy_quota_reset_tz_offset_minutes() {
 showy_quota_parse_epoch_at_offset() {
     local fmt="$1" value="$2" off_min="$3" epoch
     if [[ -z "${off_min}" ]]; then
-        showy_quota_parse_local_epoch "${fmt}" "${value}"
-        return $?
+        epoch=$(showy_quota_parse_local_epoch "${fmt}" "${value}") || return 1
+        showy_quota_epoch_value "${epoch}"
+        return
     fi
     if epoch=$(TZ=UTC0 date -j -f "${fmt}" "${value}" '+%s' 2>/dev/null); then :
     elif showy_quota_have gdate && epoch=$(TZ=UTC0 gdate -d "${value}" '+%s' 2>/dev/null); then :
     elif epoch=$(TZ=UTC0 date -d "${value}" '+%s' 2>/dev/null); then :
     else return 1; fi
-    printf '%s\n' "$(( epoch - off_min * 60 ))"
+    epoch=$(showy_quota_epoch_value "${epoch}") || return 1
+    epoch=$(( epoch - off_min * 60 ))
+    showy_quota_epoch_value "${epoch}"
 }
 
 showy_quota_reset_description_epoch() {
@@ -591,12 +626,14 @@ showy_quota_reset_description_epoch() {
     fi
 
     local today now anchor
-    now=$(showy_quota_now_epoch)
+    now=$(showy_quota_now_epoch) || return 1
+    now=$(showy_quota_epoch_value "${now}") || return 1
     # Resolve "today" in the configured timezone (parse in UTC, shift by offset)
     # when an offset is set, otherwise use the host-local calendar day, so a bare
     # time attaches to the correct date.
     if [[ -n "${off_min}" ]]; then
         anchor=$(( now + off_min * 60 ))
+        anchor=$(showy_quota_epoch_value "${anchor}") || return 1
         if today=$(TZ=UTC0 date -r "${anchor}" '+%Y-%m-%d' 2>/dev/null); then :
         elif showy_quota_have gdate && today=$(TZ=UTC0 gdate -d "@${anchor}" '+%Y-%m-%d' 2>/dev/null); then :
         elif today=$(TZ=UTC0 date -d "@${anchor}" '+%Y-%m-%d' 2>/dev/null); then :
@@ -612,6 +649,7 @@ showy_quota_reset_description_epoch() {
         if (( epoch < now )); then
             epoch=$((epoch + 86400))
         fi
+        epoch=$(showy_quota_epoch_value "${epoch}") || return 1
         printf '%s\n' "${epoch}"
         return 0
     fi
@@ -622,28 +660,31 @@ showy_quota_reset_description_epoch() {
 # Convert ISO8601 'resetsAt' (with Z, fractional seconds, ±HH:MM offset, etc.)
 # to a unix epoch. Prints nothing on failure.
 showy_quota_reset_epoch() {
-    local raw="$1"
+    local raw="$1" cleaned epoch
     [[ -n "${raw}" && "${raw}" != "null" ]] || return 1
     (( ${#raw} <= 64 )) || return 1
 
     # Normalize: strip fractional seconds (regardless of suffix style),
     # collapse +HH:MM → +HHMM, replace Z with +0000.
-    local cleaned
     cleaned=$(printf '%s' "${raw}" \
         | sed -E 's/\.[0-9]+(Z|[+-][0-9]{2}:?[0-9]{2})?$/\1/' \
         | sed -E 's/Z$/+0000/' \
         | sed -E 's/([+-][0-9]{2}):([0-9]{2})$/\1\2/')
 
     # macOS BSD date.
-    if date -j -f '%Y-%m-%dT%H:%M:%S%z' "${cleaned}" '+%s' 2>/dev/null; then
-        return 0
+    if epoch=$(date -j -f '%Y-%m-%dT%H:%M:%S%z' "${cleaned}" '+%s' 2>/dev/null); then
+        showy_quota_epoch_value "${epoch}"
+        return
     fi
     # GNU date (Linux).
-    if showy_quota_have gdate; then
-        gdate -d "${raw}" '+%s' 2>/dev/null && return 0
+    if showy_quota_have gdate \
+        && epoch=$(gdate -d "${raw}" '+%s' 2>/dev/null); then
+        showy_quota_epoch_value "${epoch}"
+        return
     fi
-    if date -d "${raw}" '+%s' 2>/dev/null; then
-        return 0
+    if epoch=$(date -d "${raw}" '+%s' 2>/dev/null); then
+        showy_quota_epoch_value "${epoch}"
+        return
     fi
     showy_quota_reset_description_epoch "${raw}" && return 0
     return 1
@@ -652,14 +693,16 @@ showy_quota_reset_epoch() {
 # Minutes (rounded down) until reset. Prints '' on failure, '0' if already
 # past.
 showy_quota_minutes_until() {
-    local reset_at="$1"
-    local epoch
+    local reset_at="$1" epoch now
     epoch=$(showy_quota_reset_epoch "${reset_at}") || return 1
-    local now
-    now=$(showy_quota_now_epoch)
-    local diff=$(( epoch - now ))
-    (( diff < 0 )) && diff=0
-    printf '%s\n' $((diff / 60))
+    epoch=$(showy_quota_epoch_value "${epoch}") || return 1
+    now=$(showy_quota_now_epoch) || return 1
+    now=$(showy_quota_epoch_value "${now}") || return 1
+    if (( epoch < now )); then
+        printf '0\n'
+    else
+        printf '%s\n' $(((epoch - now) / 60))
+    fi
 }
 
 # Compact countdown: 'now' / '12m' / '3h' / '3:45' / '2d' / '5w'.
@@ -719,6 +762,19 @@ showy_quota_normalize_hex() {
     hex="${hex#\#}"
     [[ "${hex}" =~ ^[[:xdigit:]]{6}$ ]] || showy_quota_die "invalid palette hex: $1"
     printf '%s' "${hex,,}"
+}
+
+# Normalize HEX when possible; otherwise issue a render-safe warning and return
+# FALLBACK. Explicit palette-authoring paths continue to use the fatal helper.
+showy_quota_normalize_hex_or_default() {
+    local hex="$1" fallback="$2"
+    hex="${hex#\#}"
+    if [[ "${hex}" =~ ^[[:xdigit:]]{6}$ ]]; then
+        printf '%s' "${hex,,}"
+    else
+        printf 'showy-quota: invalid palette hex %q; using default %s\n' "$1" "${fallback}" >&2
+        printf '%s' "${fallback,,}"
+    fi
 }
 
 showy_quota_scale_hex() {
@@ -895,38 +951,55 @@ showy_quota_json_valid() {
             and . != "."
             and . != ".."
             and (startswith("-") | not);
+        def optional_string:
+            . == null or type == "string";
+        def optional_boolean:
+            . == null or type == "boolean";
+        def optional_number:
+            . == null or type == "number";
+        def valid_usage_window:
+            type == "object"
+            and (.usedPercent | optional_number)
+            and (.remainingPercent | optional_number)
+            and (.resetsAt | optional_string)
+            and (.resetDescription | optional_string)
+            and (.windowMinutes | optional_number);
         type == "array" and
         all(.[]; type == "object"
             and (.provider | valid_provider_id)
             and (
-                (.usage // null) == null
+                .status == null
+                or (
+                    (.status | type) == "object"
+                    and (.status.indicator | optional_string)
+                    and (.status.url | optional_string)
+                )
+            )
+            and (
+                .usage == null
                 or (
                     (.usage | type) == "object"
                     and all([.usage.primary, .usage.secondary, .usage.tertiary][];
-                        . == null
-                        or (type == "object" and (.usedPercent | type) == "number")
+                        . == null or valid_usage_window
                     )
                     and (
-                        (.usage.extraRateWindows // null) == null
+                        (.usage | has("extraRateWindows") | not)
                         or (
                             (.usage.extraRateWindows | type) == "array"
                             and all(.usage.extraRateWindows[];
                                 type == "object"
+                                and (.id | optional_string)
+                                and (.title | optional_string)
+                                and (.usageKnown | optional_boolean)
                                 and (
-                                    (.window // null) == null
-                                    or (
-                                        (.window | type) == "object"
-                                        and (
-                                            (.window.usedPercent // null) == null
-                                            or (.window.usedPercent | type) == "number"
-                                        )
-                                    )
+                                    .window == null
+                                    or (.window | valid_usage_window)
                                 )
                             )
                         )
                     )
+                )
             )
         )
-    )
     ' "${file}" >/dev/null 2>&1
 }

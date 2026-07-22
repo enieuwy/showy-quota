@@ -1,9 +1,11 @@
 use std::env;
 use std::fmt;
 use std::fs;
-use std::io;
+use std::io::{self, Read};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+use crate::codexbar::MAX_USAGE_JSON_BYTES;
 
 pub const MISSING_AGE_SECONDS: i64 = 999_999_999;
 const DEFAULT_REFRESH_SECONDS: i64 = 120;
@@ -53,12 +55,31 @@ pub fn read_cache_from_env(now_epoch: i64) -> Result<CacheSnapshot, CacheReadErr
     // The fetcher publishes stamp+source before renaming usage.json last, so a
     // payload we observe is always paired with matching-or-newer metadata; do
     // not reorder these two reads or the mixed-generation race reopens.
-    let payload = fs::read(&paths.usage_file).map_err(|source| CacheReadError {
+    let payload = read_usage_payload(&paths.usage_file).map_err(|source| CacheReadError {
         path: paths.usage_file.clone(),
         source,
     })?;
     let freshness = freshness_for_paths(&paths, now_epoch);
     Ok(CacheSnapshot { payload, freshness })
+}
+
+fn read_usage_payload(path: &PathBuf) -> io::Result<Vec<u8>> {
+    let file = fs::File::open(path)?;
+    read_bounded_payload(file)
+}
+
+fn read_bounded_payload(reader: impl Read) -> io::Result<Vec<u8>> {
+    let mut payload = Vec::new();
+    reader
+        .take((MAX_USAGE_JSON_BYTES + 1) as u64)
+        .read_to_end(&mut payload)?;
+    if payload.len() > MAX_USAGE_JSON_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "CodexBar usage payload exceeds size cap",
+        ));
+    }
+    Ok(payload)
 }
 
 pub fn cache_paths_from_env() -> CachePaths {
@@ -208,6 +229,14 @@ mod tests {
         let empty_derives =
             freshness_from_parts(Some(1_000), 1_000, 120, "cli".into(), Some(String::new()));
         assert!(empty_derives.degraded_cli);
+    }
+
+    #[test]
+    fn bounded_payload_reader_rejects_oversize_input() {
+        let payload = vec![b' '; MAX_USAGE_JSON_BYTES + 1];
+        let error = read_bounded_payload(std::io::Cursor::new(payload))
+            .expect_err("oversize payload must fail");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     }
 
     #[test]

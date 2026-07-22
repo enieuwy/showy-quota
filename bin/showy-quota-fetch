@@ -67,12 +67,15 @@ fi
 SHOWY_QUOTA_MANAGED_SERVE_RESTART_ATTEMPTED=0
 
 stop_managed_serve() {
-    local pid="" start_epoch="" _basename=""
-    if ! managed_serve_valid_pidfile pid start_epoch _basename; then
+    local pid="" start_epoch="" basename_rec=""
+    if ! managed_serve_valid_pidfile pid start_epoch basename_rec; then
         rm -f -- "${SHOWY_QUOTA_CODEXBAR_SERVE_PID_FILE}"
         return 0
     fi
-    kill "${pid}" 2>/dev/null || true
+    if ! terminate_managed_serve_pid "${pid}" "${start_epoch}" "${basename_rec}"; then
+        showy_quota_log "managed codexbar serve pid ${pid} did not exit; retaining pidfile"
+        return 1
+    fi
     rm -f -- "${SHOWY_QUOTA_CODEXBAR_SERVE_PID_FILE}"
     showy_quota_log "stopped managed codexbar serve pid ${pid}"
     return 0
@@ -90,10 +93,10 @@ fi
 
 # ── locking primitives ────────────────────────────────────────────────
 
-# Use flock when available (Linux, Homebrew util-linux); else fall back to
-# an owner-scoped `mkdir` lock. The fallback recovers lock directories whose
-# owner is dead, stopped/zombied, or older than the refresh hard ceiling so
-# renderers do not repaint stale cache forever.
+# The mkdir lease is authoritative on every host. It serializes fetchers even
+# when one has flock installed and another does not. The lease owner updates a
+# heartbeat during long refresh work; live owners are not reclaimed merely
+# because a refresh exceeds its normal cadence.
 #
 # Returns:
 #   0 = lock was held and the callee ran;
@@ -102,14 +105,28 @@ fi
 SHOWY_QUOTA_HELD_LOCK_DIR=""
 SHOWY_QUOTA_CACHE_TMP_FILES=()
 
+showy_quota_touch_mkdir_lock_heartbeat() {
+    local lock_dir="${SHOWY_QUOTA_HELD_LOCK_DIR:-}"
+    local owner_file="" heartbeat_file="" owner_pid=""
+    [[ -n "${lock_dir}" ]] || return 0
+    owner_file="${lock_dir}/owner.pid"
+    heartbeat_file="${lock_dir}/owner.heartbeat"
+    if [[ -r "${owner_file}" ]] \
+        && IFS= read -r owner_pid < "${owner_file}" \
+        && [[ "${owner_pid}" == "$$" ]]
+    then
+        : > "${heartbeat_file}" 2>/dev/null || true
+    fi
+}
 showy_quota_release_mkdir_lock() {
     if [[ -n "${SHOWY_QUOTA_HELD_LOCK_DIR:-}" ]]; then
         local owner_file="${SHOWY_QUOTA_HELD_LOCK_DIR}/owner.pid"
+        local heartbeat_file="${SHOWY_QUOTA_HELD_LOCK_DIR}/owner.heartbeat"
         local owner_pid=""
         if [[ ! -e "${owner_file}" ]]; then
             showy_quota_log "not releasing mkdir lock without owner.pid"
         elif [[ -r "${owner_file}" ]] && IFS= read -r owner_pid < "${owner_file}" && [[ "${owner_pid}" == "$$" ]]; then
-            rm -f -- "${owner_file}"
+            rm -f -- "${owner_file}" "${heartbeat_file}"
             rmdir -- "${SHOWY_QUOTA_HELD_LOCK_DIR}" 2>/dev/null || true
         else
             showy_quota_log "not releasing mkdir lock now owned by pid ${owner_pid:-unknown}"
@@ -170,6 +187,7 @@ showy_quota_run_with_mkdir_lock() {
         return 1
     fi
     SHOWY_QUOTA_HELD_LOCK_DIR="${lock_dir}"
+    showy_quota_touch_mkdir_lock_heartbeat
     local rc=0
     "$@" || rc=$?
     showy_quota_release_mkdir_lock
@@ -179,39 +197,54 @@ showy_quota_run_with_mkdir_lock() {
 showy_quota_recover_mkdir_lock() {
     local lock_dir="$1"
     local owner_file="${lock_dir}/owner.pid"
+    local heartbeat_file="${lock_dir}/owner.heartbeat"
     local owner_pid=""
     local stale_reason="ownerless"
-    local lock_age=""
-    local hard_max_age="${SHOWY_QUOTA_REFRESH_SECONDS:-120}"
-    [[ "${hard_max_age}" =~ ^[0-9]+$ ]] || hard_max_age=120
-    (( hard_max_age < 60 )) && hard_max_age=60
+    local lock_age="" heartbeat_age=""
+    # A live owner may perform one bounded CLI request per configured provider.
+    # Only a stalled heartbeat beyond this much larger absolute lease can be
+    # reclaimed; normal refresh cadence is never evidence of owner death.
+    local hard_max_age=$((SHOWY_QUOTA_REFRESH_SECONDS * 10))
+    local heartbeat_max_age=$((SHOWY_QUOTA_REFRESH_SECONDS * 2))
+    (( hard_max_age < 1800 )) && hard_max_age=1800
+    (( heartbeat_max_age < 240 )) && heartbeat_max_age=240
 
     if [[ -r "${owner_file}" ]]; then
         IFS= read -r owner_pid < "${owner_file}" || owner_pid=""
         if [[ "${owner_pid}" =~ ^[0-9]+$ ]]; then
             if ! kill -0 "${owner_pid}" 2>/dev/null; then
-                rm -f -- "${owner_file}"
+                rm -f -- "${owner_file}" "${heartbeat_file}"
                 if rmdir -- "${lock_dir}" 2>/dev/null; then
                     showy_quota_log "recovered dead mkdir lock owned by pid ${owner_pid}"
                     return 0
                 fi
             fi
-
             local owner_state=""
             owner_state=$(showy_quota_process_state "${owner_pid}" || true)
+            # Stopped and zombie owners cannot renew their lease or publish a
+            # cache generation. Treat them as non-running owners so renderers
+            # recover promptly instead of waiting for the long live-owner
+            # heartbeat ceiling.
             if [[ "${owner_state}" == [TZ]* ]]; then
-                rm -f -- "${owner_file}"
+                rm -f -- "${owner_file}" "${heartbeat_file}"
                 if rmdir -- "${lock_dir}" 2>/dev/null; then
-                    showy_quota_log "recovered stopped mkdir lock owned by pid ${owner_pid} (state ${owner_state})"
+                    showy_quota_log "recovered non-running mkdir lock owned by pid ${owner_pid} (state ${owner_state})"
                     return 0
                 fi
             fi
 
-            if lock_age=$(showy_quota_lock_age_seconds "${lock_dir}") && (( lock_age >= hard_max_age )); then
-                rm -f -- "${owner_file}"
-                if rmdir -- "${lock_dir}" 2>/dev/null; then
-                    showy_quota_log "recovered aged mkdir lock owned by pid ${owner_pid} (age ${lock_age}s)"
-                    return 0
+
+            if lock_age=$(showy_quota_lock_age_seconds "${lock_dir}") \
+                && (( lock_age >= hard_max_age ))
+            then
+                heartbeat_age=$(showy_quota_lock_age_seconds "${heartbeat_file}" 2>/dev/null) \
+                    || heartbeat_age="${lock_age}"
+                if (( heartbeat_age >= heartbeat_max_age )); then
+                    rm -f -- "${owner_file}" "${heartbeat_file}"
+                    if rmdir -- "${lock_dir}" 2>/dev/null; then
+                        showy_quota_log "recovered unresponsive mkdir lock owned by live pid ${owner_pid} (lock ${lock_age}s, heartbeat ${heartbeat_age}s)"
+                        return 0
+                    fi
                 fi
             fi
             return 1
@@ -228,7 +261,7 @@ showy_quota_recover_mkdir_lock() {
     max_age=$(( (SHOWY_QUOTA_LOCK_WAIT_TENTHS + 9) / 10 ))
     (( max_age < 1 )) && max_age=1
     if lock_age=$(showy_quota_lock_age_seconds "${lock_dir}") && (( lock_age >= max_age )); then
-        rm -f -- "${owner_file}"
+        rm -f -- "${owner_file}" "${heartbeat_file}"
         if rmdir -- "${lock_dir}" 2>/dev/null; then
             showy_quota_log "recovered ${stale_reason} mkdir lock"
             return 0
@@ -239,21 +272,6 @@ showy_quota_recover_mkdir_lock() {
 }
 
 showy_quota_with_lock() {
-    if [[ -z "${SHOWY_QUOTA_FORCE_NO_FLOCK:-}" ]] && showy_quota_have flock; then
-        local rc=2
-        # subshell + fd 9 so the lock releases on exit.
-        (
-            exec 9>"${SHOWY_QUOTA_USAGE_LOCK}"
-            if flock -n 9; then
-                "$@"
-            else
-                showy_quota_log "another fetch in flight (flock); will wait"
-                exit 2
-            fi
-        ) && rc=$? || rc=$?
-        return "${rc}"
-    fi
-
     local lock_dir="${SHOWY_QUOTA_USAGE_LOCK}.d"
     if mkdir -- "${lock_dir}" 2>/dev/null; then
         showy_quota_run_with_mkdir_lock "${lock_dir}" "$@"
@@ -279,15 +297,20 @@ showy_quota_with_lock() {
     return 2
 }
 
+cache_payload_marker() {
+    [[ -s "${SHOWY_QUOTA_USAGE_FILE}" ]] || { printf '\n'; return; }
+    stat -f 'file:%i:%m:%z' "${SHOWY_QUOTA_USAGE_FILE}" 2>/dev/null \
+        || stat -c 'file:%i:%Y:%s' "${SHOWY_QUOTA_USAGE_FILE}" 2>/dev/null \
+        || printf 'file:unknown\n'
+}
+
 cache_token() {
     [[ -s "${SHOWY_QUOTA_USAGE_FILE}" ]] || { printf '\n'; return; }
     if [[ -s "${SHOWY_QUOTA_USAGE_STAMP}" ]]; then
         printf 'stamp:%s\n' "$(< "${SHOWY_QUOTA_USAGE_STAMP}")"
         return
     fi
-    stat -f 'file:%i:%m:%z' "${SHOWY_QUOTA_USAGE_FILE}" 2>/dev/null \
-        || stat -c 'file:%i:%Y:%s' "${SHOWY_QUOTA_USAGE_FILE}" 2>/dev/null \
-        || printf 'file:unknown\n'
+    cache_payload_marker
 }
 
 quarantine_invalid_cache_if_present() {
@@ -333,14 +356,15 @@ fi
 # Block up to N tenths of a second for the cache file to appear or refresh.
 # Used by callers that lost the lock; protects against the cold-start case
 # where there is no cache yet. With require_fresh=1, a changed token is not
-# enough: the cache file mtime must also satisfy cache_is_fresh. This avoids
-# forced-refresh losers returning an old-but-token-different cache on slow or
-# odd filesystem/stat combinations.
+# enough: the cache file mtime must also satisfy cache_is_fresh. A fresh
+# payload marker that changed since the contender began also proves the holder
+# published, even if the contender sampled its final token before losing lock.
 showy_quota_wait_for_cache() {
     local max_tenths="${1:-50}"   # 5.0 s
     local previous_token="${2:-}"
     local require_fresh="${3:-0}"
-    local i token
+    local previous_payload_marker="${4:-}"
+    local i token payload_marker
     for (( i=0; i<max_tenths; i++ )); do
         if [[ -s "${SHOWY_QUOTA_USAGE_FILE}" ]] && showy_quota_json_valid "${SHOWY_QUOTA_USAGE_FILE}"; then
             if [[ -z "${previous_token}" ]]; then
@@ -349,6 +373,11 @@ showy_quota_wait_for_cache() {
             token=$(cache_token)
             if [[ "${token}" != "${previous_token}" ]]; then
                 if [[ "${require_fresh}" != "1" ]] || cache_is_fresh; then
+                    return 0
+                fi
+            elif [[ "${require_fresh}" == "1" ]] && cache_is_fresh; then
+                payload_marker=$(cache_payload_marker)
+                if [[ -n "${previous_payload_marker}" && "${payload_marker}" != "${previous_payload_marker}" ]]; then
                     return 0
                 fi
             fi
@@ -600,16 +629,41 @@ discover_providers() {
     if config_providers_backoff_active; then
         return 1
     fi
-    local timeout_seconds raw type_check ids rc=0 enabled_count=0 valid_count=0 id_line
+    local LC_ALL=C
+    local timeout_seconds discovery_max_bytes raw schema_check ids rc=0 enabled_count=0 valid_count=0 id_line
     timeout_seconds=$(codexbar_config_providers_timeout_seconds)
-    raw=$(run_with_hard_timeout "${timeout_seconds}" "${SHOWY_QUOTA_CODEXBAR_BIN}" config providers --format json --pretty) || rc=$?
+    # Provider configuration is metadata, not a usage payload. Bound it to a
+    # small fraction of the existing payload ceiling while preserving one
+    # source of truth for the maximum data-plane allocation.
+    discovery_max_bytes=$((SHOWY_QUOTA_MAX_USAGE_JSON_BYTES / 80))
+    (( discovery_max_bytes > 0 )) || discovery_max_bytes=1
+    raw=$(run_with_hard_timeout "${timeout_seconds}" "${discovery_max_bytes}" "${SHOWY_QUOTA_CODEXBAR_BIN}" config providers --format json --pretty) || rc=$?
     if (( rc != 0 )) || [[ -z "${raw}" ]]; then
         record_config_providers_failure
         return 1
     fi
+    if (( ${#raw} > discovery_max_bytes )); then
+        showy_quota_log "codexbar config providers exceeded ${discovery_max_bytes}-byte cap"
+        record_config_providers_failure
+        return 1
+    fi
     showy_quota_have jq || { record_config_providers_failure; return 1; }
-    type_check=$(printf '%s' "${raw}" | jq -r 'if type == "array" then "ok" else "no" end' 2>/dev/null) || type_check="no"
-    if [[ "${type_check}" != "ok" ]]; then
+    # Match Rust's ProviderConfigRecord deserialization: every entry must be
+    # an object with a string provider; enabled is optional (default false)
+    # but, when supplied, must be a JSON boolean.
+    schema_check=$(printf '%s' "${raw}" | jq -r '
+        if type == "array"
+           and all(.[];
+               if type == "object" then
+                   (.provider | type == "string")
+                   and (if has("enabled") then (.enabled | type == "boolean") else true end)
+               else
+                   false
+               end)
+        then "ok" else "no" end
+    ' 2>/dev/null) || schema_check="no"
+    if [[ "${schema_check}" != "ok" ]]; then
+        showy_quota_log "codexbar config providers returned malformed records"
         record_config_providers_failure
         return 1
     fi
@@ -618,15 +672,13 @@ discover_providers() {
     # or missing ids in enabled records are invalid inventory, not canonical
     # empty inventory.
     enabled_count=$(printf '%s' "${raw}" | jq -r '
-        [.[] | select(type == "object") | select(.enabled == true)] | length
+        [.[] | select(.enabled == true)] | length
     ' 2>/dev/null) || enabled_count=0
     [[ "${enabled_count}" =~ ^[0-9]+$ ]] || enabled_count=0
     ids=$(printf '%s' "${raw}" | jq -r '
         .[]
-        | select(type == "object")
         | select(.enabled == true)
         | .provider
-        | select(type == "string")
     ' 2>/dev/null) || ids=""
     # Keep only ids the shell predicate accepts: the jq regex alone would
     # still pass '.'/'..' and leading-dash ids; those escape the
@@ -851,6 +903,7 @@ provider_payload_is_publishable() {
 # validates as a single-provider record; returns 1 otherwise.
 run_codexbar_cli_provider() {
     local provider="$1"
+    local LC_ALL=C
     local timeout_seconds out rc=0
     valid_provider_id "${provider}" || return 1
     if ! command -v "${SHOWY_QUOTA_CODEXBAR_BIN}" >/dev/null 2>&1; then
@@ -862,7 +915,7 @@ run_codexbar_cli_provider() {
         args+=(--status)
     fi
     timeout_seconds=$(codexbar_cli_timeout_seconds)
-    out=$(run_with_hard_timeout "${timeout_seconds}" "${SHOWY_QUOTA_CODEXBAR_BIN}" "${args[@]}") || rc=$?
+    out=$(run_with_hard_timeout "${timeout_seconds}" "${SHOWY_QUOTA_MAX_USAGE_JSON_BYTES}" "${SHOWY_QUOTA_CODEXBAR_BIN}" "${args[@]}") || rc=$?
     if (( rc != 0 )); then
         showy_quota_log "codexbar usage --provider ${provider} failed (rc=${rc})"
         return 1
@@ -904,7 +957,9 @@ carry_forward_provider_record() {
 run_codexbar_cli_per_provider() {
     local providers=""
     local rc=0
+    showy_quota_touch_mkdir_lock_heartbeat
     providers=$(provider_inventory_for_fallback) || rc=$?
+    showy_quota_touch_mkdir_lock_heartbeat
     if (( rc == 2 )); then
         printf '[]'
         return 0
@@ -919,14 +974,17 @@ run_codexbar_cli_per_provider() {
     local out=""
     while IFS= read -r provider; do
         [[ -n "${provider}" ]] || continue
+        showy_quota_touch_mkdir_lock_heartbeat
         if provider_failure_backoff_active "${provider}"; then
             if out=$(carry_forward_provider_record "${provider}"); then
                 accumulated+=("${out}")
             fi
+            showy_quota_touch_mkdir_lock_heartbeat
             continue
         fi
         provider_rc=0
         out=$(run_codexbar_cli_provider "${provider}") || provider_rc=$?
+        showy_quota_touch_mkdir_lock_heartbeat
         if (( provider_rc == 127 )); then
             return 1
         fi
@@ -935,11 +993,13 @@ run_codexbar_cli_per_provider() {
             if out=$(carry_forward_provider_record "${provider}"); then
                 accumulated+=("${out}")
             fi
+            showy_quota_touch_mkdir_lock_heartbeat
             continue
         fi
         clear_provider_failure "${provider}"
         accumulated+=("${out}")
         fresh_count=$((fresh_count + 1))
+        showy_quota_touch_mkdir_lock_heartbeat
     done < <(printf '%s\n' "${providers}")
 
     (( fresh_count > 0 )) || return 1
@@ -1051,27 +1111,56 @@ serve_ondisk_version() {
     local bin
     bin=$(codexbar_bin_abs)
     showy_quota_have "${bin}" || return 1
-    run_with_hard_timeout 5 "${bin}" --version 2>/dev/null \
+    run_with_hard_timeout 5 1024 "${bin}" --version 2>/dev/null \
         | codexbar_version_token
 }
 
 # Free the configured serve port so ensure_serve_running can start a fresh
-# serve. A serve we manage is terminated via its pidfile (waits for exit so the
-# port is released before restart). Without a pidfile we inspect the listeners
-# holding our port (lsof) and signal ONLY those verified as a codexbar serve
-# (serve_listener_is_codexbar); foreign listeners are never touched. Returns 0
-# only when the port was actually freed (managed terminate, or every listener
-# verified and killed). Returns non-zero when a foreign/unverified listener is
-# present, when lsof (or the port) is unavailable, or when nothing verified
-# could be freed, so the caller keeps the stale serve rather than killing an
-# unrelated process. The old name-based `pkill -f 'codexbar serve'` fallback is
-# gone: it could kill serves belonging to other sessions that never held our
-# port.
+# serve. A serve we manage is terminated through its identity-checked record.
+# Without a valid record, listeners are inspected and only verified codexbar
+# serves are signaled. Foreign listeners are never touched.
+wait_for_serve_port_release() {
+    local port="$1" listeners="" i
+    showy_quota_have lsof || return 1
+    for (( i=0; i<30; i++ )); do
+        listeners=$(lsof -ti "tcp:${port}" -sTCP:LISTEN 2>/dev/null) || listeners=""
+        [[ -z "${listeners}" ]] && return 0
+        sleep 0.1
+    done
+    return 1
+}
+
+terminate_verified_serve_listener() {
+    local pid="$1" i
+    serve_listener_is_codexbar "${pid}" || return 1
+    if ! kill "${pid}" 2>/dev/null; then
+        kill -0 "${pid}" 2>/dev/null || return 0
+        return 1
+    fi
+    for (( i=0; i<10; i++ )); do
+        kill -0 "${pid}" 2>/dev/null || return 0
+        # Do not escalate after an exec/reuse we can no longer verify.
+        serve_listener_is_codexbar "${pid}" || return 0
+        sleep 0.1
+    done
+    serve_listener_is_codexbar "${pid}" || return 0
+    kill -9 "${pid}" 2>/dev/null || return 1
+    for (( i=0; i<10; i++ )); do
+        kill -0 "${pid}" 2>/dev/null || return 0
+        serve_listener_is_codexbar "${pid}" || return 0
+        sleep 0.1
+    done
+    return 1
+}
+
 serve_recycle_stale() {
     local pid="" start_epoch="" basename_rec=""
     if managed_serve_valid_pidfile pid start_epoch basename_rec; then
         showy_quota_log "recycling stale managed codexbar serve pid ${pid}"
-        terminate_managed_serve_pid "${pid}" "${start_epoch}" "${basename_rec}" || true
+        if ! terminate_managed_serve_pid "${pid}" "${start_epoch}" "${basename_rec}"; then
+            showy_quota_log "managed codexbar serve pid ${pid} did not exit; reusing"
+            return 1
+        fi
         rm -f -- "${SHOWY_QUOTA_CODEXBAR_SERVE_PID_FILE}"
         return 0
     fi
@@ -1096,17 +1185,20 @@ serve_recycle_stale() {
     local listener_pid="" killed=0 unverified=0
     while IFS= read -r listener_pid; do
         [[ -n "${listener_pid}" ]] || continue
-        if serve_listener_is_codexbar "${listener_pid}"; then
-            kill "${listener_pid}" 2>/dev/null || true
+        if terminate_verified_serve_listener "${listener_pid}"; then
             killed=$(( killed + 1 ))
         else
-            showy_quota_log "refusing to recycle foreign listener pid ${listener_pid} on port ${port} (not a codexbar serve)"
+            showy_quota_log "refusing to recycle foreign listener pid ${listener_pid} on port ${port} (not a terminable codexbar serve)"
             unverified=1
         fi
     done <<<"${listeners}"
 
     if (( unverified || killed == 0 )); then
         showy_quota_log "cannot recycle foreign codexbar serve on port ${port}: no verified codexbar listener freed; reusing"
+        return 1
+    fi
+    if ! wait_for_serve_port_release "${port}"; then
+        showy_quota_log "foreign codexbar listeners did not release port ${port}; reusing"
         return 1
     fi
     showy_quota_log "recycled foreign codexbar serve on port ${port} (${listeners//$'\n'/ })"
@@ -1144,9 +1236,14 @@ wait_for_serve_health() {
     (( max_tenths > 3000 )) && max_tenths=3000
     local i
     for (( i=0; i<max_tenths; i++ )); do
-        serve_health_ok && return 0
+        if serve_health_ok; then
+            showy_quota_touch_mkdir_lock_heartbeat
+            return 0
+        fi
+        (( i % 10 == 0 )) && showy_quota_touch_mkdir_lock_heartbeat
         sleep 0.1
     done
+    showy_quota_touch_mkdir_lock_heartbeat
     return 1
 }
 
@@ -1251,6 +1348,37 @@ managed_serve_pid_alive() {
     local pid="" start_epoch="" _basename=""
     managed_serve_valid_pidfile pid start_epoch _basename
 }
+showy_quota_pid_descends_from() {
+    local ancestor="$2" current="$1" parent="" i
+    for (( i=0; i<32; i++ )); do
+        [[ "${current}" == "${ancestor}" ]] && return 0
+        parent=$(ps -p "${current}" -o ppid= 2>/dev/null) || return 1
+        parent="${parent#"${parent%%[![:space:]]*}"}"
+        parent="${parent%%[[:space:]]*}"
+        [[ "${parent}" =~ ^[0-9]+$ ]] || return 1
+        (( parent > 1 )) || return 1
+        [[ "${parent}" != "${current}" ]] || return 1
+        current="${parent}"
+    done
+    return 1
+}
+
+managed_serve_owns_configured_port() {
+    local pid="" start_epoch="" basename_rec="" port="" listeners="" listener_pid=""
+    managed_serve_valid_pidfile pid start_epoch basename_rec || return 1
+    showy_quota_have lsof || return 2
+    port=$(serve_port_from_base_url) || return 1
+    listeners=$(lsof -ti "tcp:${port}" -sTCP:LISTEN 2>/dev/null) || listeners=""
+    while IFS= read -r listener_pid; do
+        if [[ "${listener_pid}" == "${pid}" ]] \
+            || showy_quota_pid_descends_from "${listener_pid}" "${pid}"
+        then
+            return 0
+        fi
+    done <<<"${listeners}"
+    return 1
+}
+
 
 managed_serve_pid_start_epoch_for_record() {
     local pid="$1" start_epoch="" i
@@ -1264,24 +1392,37 @@ managed_serve_pid_start_epoch_for_record() {
     showy_quota_now_epoch
 }
 
+managed_serve_termination_complete() {
+    local pid="$1" recorded_start_epoch="$2" recorded_basename="$3" state=""
+    kill -0 "${pid}" 2>/dev/null || return 0
+    state=$(showy_quota_process_state "${pid}" 2>/dev/null) || state=""
+    [[ "${state}" == Z* ]] && return 0
+    ! managed_serve_pid_matches_record "${pid}" "${recorded_start_epoch}" "${recorded_basename}"
+}
+
 terminate_managed_serve_pid() {
     local pid="$1" recorded_start_epoch="$2" recorded_basename="$3" i
     managed_serve_pid_matches_record "${pid}" "${recorded_start_epoch}" "${recorded_basename}" || return 1
     kill "${pid}" 2>/dev/null || true
     for (( i=0; i<10; i++ )); do
-        kill -0 "${pid}" 2>/dev/null || return 0
-        if ! managed_serve_pid_matches_record "${pid}" "${recorded_start_epoch}" "${recorded_basename}"; then
-            showy_quota_log "not escalating managed serve termination; pid ${pid} no longer matches pidfile record"
-            return 1
-        fi
+        managed_serve_termination_complete "${pid}" "${recorded_start_epoch}" "${recorded_basename}" && return 0
         sleep 0.1
     done
-    managed_serve_pid_matches_record "${pid}" "${recorded_start_epoch}" "${recorded_basename}" || return 1
+    # Only escalate while the exact managed process still owns this identity.
+    managed_serve_pid_matches_record "${pid}" "${recorded_start_epoch}" "${recorded_basename}" || return 0
     kill -9 "${pid}" 2>/dev/null || true
-    return 0
+    for (( i=0; i<10; i++ )); do
+        managed_serve_termination_complete "${pid}" "${recorded_start_epoch}" "${recorded_basename}" && return 0
+        sleep 0.1
+    done
+    return 1
 }
 
 start_managed_serve() {
+    if serve_health_ok; then
+        showy_quota_log "adopting healthy codexbar serve before managed startup"
+        return 0
+    fi
     local bin
     bin=$(codexbar_bin_abs)
     showy_quota_have "${bin}" || return 1
@@ -1290,15 +1431,10 @@ start_managed_serve() {
     port=$(serve_port_from_base_url) || return 1
     [[ "${refresh_interval}" =~ ^[0-9]+$ ]] || refresh_interval=120
 
-    # Close the flock descriptor (fd 9, opened by showy_quota_with_lock) in the
-    # long-lived daemon: setsid/nohup detach the session but still inherit open
-    # fds, so a serve started while we hold the lock would keep fd 9 open and
-    # pin the advisory lock for its whole life, starving every later fetch
-    # (the mkdir fallback path has no fd to leak, so this only bit flock hosts).
     if showy_quota_have setsid; then
-        setsid "${bin}" serve --port "${port}" --refresh-interval "${refresh_interval}" </dev/null >/dev/null 2>&1 9>&- &
+        setsid "${bin}" serve --port "${port}" --refresh-interval "${refresh_interval}" </dev/null >/dev/null 2>&1 &
     else
-        nohup "${bin}" serve --port "${port}" --refresh-interval "${refresh_interval}" </dev/null >/dev/null 2>&1 9>&- &
+        nohup "${bin}" serve --port "${port}" --refresh-interval "${refresh_interval}" </dev/null >/dev/null 2>&1 &
     fi
     local pid=$! start_epoch=""
     start_epoch=$(managed_serve_pid_start_epoch_for_record "${pid}")
@@ -1325,6 +1461,26 @@ start_managed_serve() {
     disown "${pid}" 2>/dev/null || true
     showy_quota_log "started managed codexbar serve pid ${pid} on port ${port}"
 }
+adopt_healthy_serve_after_spawn() {
+    local pid="" start_epoch="" basename_rec="" ownership_rc=0
+    serve_health_ok || return 1
+    if ! managed_serve_valid_pidfile pid start_epoch basename_rec; then
+        showy_quota_log "adopting healthy codexbar serve after managed startup"
+        return 0
+    fi
+    if managed_serve_owns_configured_port; then
+        return 0
+    else
+        ownership_rc=$?
+    fi
+    if (( ownership_rc == 1 )); then
+        showy_quota_log "managed codexbar serve pid ${pid} lost port race; adopting healthy responder"
+        terminate_managed_serve_pid "${pid}" "${start_epoch}" "${basename_rec}" || return 1
+        rm -f -- "${SHOWY_QUOTA_CODEXBAR_SERVE_PID_FILE}"
+    fi
+    return 0
+}
+
 
 restart_managed_serve_once() {
     if (( SHOWY_QUOTA_MANAGED_SERVE_RESTART_ATTEMPTED )); then
@@ -1335,9 +1491,9 @@ restart_managed_serve_once() {
     local pid="" start_epoch="" _basename=""
     if managed_serve_valid_pidfile pid start_epoch _basename; then
         showy_quota_log "restarting unhealthy managed codexbar serve pid ${pid}"
-        terminate_managed_serve_pid "${pid}" "${start_epoch}" "${_basename}" || true
+        terminate_managed_serve_pid "${pid}" "${start_epoch}" "${_basename}" || return 1
+        rm -f -- "${SHOWY_QUOTA_CODEXBAR_SERVE_PID_FILE}"
     fi
-    rm -f -- "${SHOWY_QUOTA_CODEXBAR_SERVE_PID_FILE}"
     start_managed_serve
 }
 
@@ -1371,27 +1527,30 @@ ensure_serve_running() {
             return 0
         fi
         restart_managed_serve_once || return 1
-        wait_for_serve_health
-        return $?
+        if wait_for_serve_health && adopt_healthy_serve_after_spawn; then
+            return 0
+        fi
+        return 1
     fi
     rm -f -- "${SHOWY_QUOTA_CODEXBAR_SERVE_PID_FILE}"
     start_managed_serve || return 1
-    if wait_for_serve_health; then
+    if wait_for_serve_health && adopt_healthy_serve_after_spawn; then
         return 0
     fi
     if managed_serve_pid_alive; then
         restart_managed_serve_once || return 1
-        wait_for_serve_health
-        return $?
+        if wait_for_serve_health && adopt_healthy_serve_after_spawn; then
+            return 0
+        fi
     fi
     return 1
 }
 if (( stop_serve )); then
-    showy_quota_with_lock stop_managed_serve || true
+    if ! showy_quota_with_lock stop_managed_serve; then
+        exit 1
+    fi
     exit 0
 fi
-
-quarantine_invalid_cache_if_present
 
 run_codexbar_serve() {
     local base
@@ -1401,38 +1560,62 @@ run_codexbar_serve() {
         return 127
     }
 
-    curl --fail --silent --show-error --max-time "$(serve_usage_timeout)" --max-filesize 5242880 "${base}/usage" 2>/dev/null
+    curl --fail --silent --show-error --max-time "$(serve_usage_timeout)" --max-filesize "${SHOWY_QUOTA_MAX_USAGE_JSON_BYTES}" "${base}/usage" 2>/dev/null
 }
 
 serve_payload_is_publishable() {
     local payload="$1" ids="" id
     printf '%s' "${payload}" | jq -e '
-        type == "array"
-        and all(.[]; type == "object"
-            and (.provider | type == "string" and test("^[A-Za-z0-9_.-]+$"))
+        def valid_provider_id:
+            type == "string"
+            and (length <= 64)
+            and test("^[A-Za-z0-9_.-]+$")
+            and . != "."
+            and . != ".."
+            and (startswith("-") | not);
+        def optional_string:
+            . == null or type == "string";
+        def optional_boolean:
+            . == null or type == "boolean";
+        def optional_number:
+            . == null or type == "number";
+        def valid_usage_window:
+            type == "object"
+            and (.usedPercent | optional_number)
+            and (.remainingPercent | optional_number)
+            and (.resetsAt | optional_string)
+            and (.resetDescription | optional_string)
+            and (.windowMinutes | optional_number);
+        type == "array" and
+        all(.[]; type == "object"
+            and (.provider | valid_provider_id)
             and (
-                (.usage // null) == null
+                .status == null
+                or (
+                    (.status | type) == "object"
+                    and (.status.indicator | optional_string)
+                    and (.status.url | optional_string)
+                )
+            )
+            and (
+                .usage == null
                 or (
                     (.usage | type) == "object"
                     and all([.usage.primary, .usage.secondary, .usage.tertiary][];
-                        . == null
-                        or (type == "object" and (.usedPercent | type) == "number")
+                        . == null or valid_usage_window
                     )
                     and (
-                        (.usage.extraRateWindows // null) == null
+                        (.usage | has("extraRateWindows") | not)
                         or (
                             (.usage.extraRateWindows | type) == "array"
                             and all(.usage.extraRateWindows[];
                                 type == "object"
+                                and (.id | optional_string)
+                                and (.title | optional_string)
+                                and (.usageKnown | optional_boolean)
                                 and (
-                                    (.window // null) == null
-                                    or (
-                                        (.window | type) == "object"
-                                        and (
-                                            (.window.usedPercent // null) == null
-                                            or (.window.usedPercent | type) == "number"
-                                        )
-                                    )
+                                    .window == null
+                                    or (.window | valid_usage_window)
                                 )
                             )
                         )
@@ -1582,24 +1765,34 @@ run_codexbar_serve_with_recovery() {
     return 1
 }
 
+# Run a command in its own process group with a deadline while streaming no
+# more than MAX_BYTES + 1 bytes to the caller. The extra byte makes overflow a
+# failure before a command substitution can retain an unbounded response.
 run_with_hard_timeout() {
     local timeout_seconds="$1"
-    shift
+    local max_bytes="$2"
+    shift 2
+    [[ "${max_bytes}" =~ ^[0-9]+$ ]] || return 2
+    local capture_bytes=$((max_bytes + 1))
 
     if showy_quota_have python3; then
         python3 -c '
 import os
+import select
 import signal
 import subprocess
 import sys
+import time
 
 timeout = float(sys.argv[1])
-argv = sys.argv[2:]
+max_bytes = int(sys.argv[2])
+argv = sys.argv[3:]
+capture_bytes = max_bytes + 1
 
 try:
     proc = subprocess.Popen(
         argv,
-        stdout=sys.stdout.buffer,
+        stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
         stdin=subprocess.DEVNULL,
         start_new_session=True,
@@ -1607,9 +1800,7 @@ try:
 except OSError:
     sys.exit(127)
 
-try:
-    sys.exit(proc.wait(timeout=timeout))
-except subprocess.TimeoutExpired:
+def terminate_process():
     try:
         os.killpg(proc.pid, signal.SIGTERM)
     except ProcessLookupError:
@@ -1622,17 +1813,46 @@ except subprocess.TimeoutExpired:
         except ProcessLookupError:
             pass
         proc.wait()
+
+deadline = time.monotonic() + timeout
+written = 0
+fd = proc.stdout.fileno()
+while True:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        terminate_process()
+        sys.exit(124)
+    readable, _, _ = select.select([fd], [], [], remaining)
+    if not readable:
+        if proc.poll() is not None:
+            continue
+        terminate_process()
+        sys.exit(124)
+    chunk = os.read(fd, min(65536, capture_bytes - written))
+    if not chunk:
+        break
+    os.write(sys.stdout.fileno(), chunk)
+    written += len(chunk)
+    if written == capture_bytes:
+        terminate_process()
+        sys.exit(125)
+
+try:
+    sys.exit(proc.wait(timeout=max(0, deadline - time.monotonic())))
+except subprocess.TimeoutExpired:
+    terminate_process()
     sys.exit(124)
-' "${timeout_seconds}" "$@"
+' "${timeout_seconds}" "${max_bytes}" "$@"
         return $?
     fi
 
-    if showy_quota_have timeout; then
-        timeout --kill-after=5s "${timeout_seconds}" "$@" 2>/dev/null
-        return $?
+    if showy_quota_have timeout && showy_quota_have head; then
+        timeout --kill-after=5s "${timeout_seconds}" "$@" 2>/dev/null | head -c "${capture_bytes}"
+        local producer_rc="${PIPESTATUS[0]}"
+        return "${producer_rc}"
     fi
 
-    showy_quota_log "python3/timeout not found; refusing unbounded command"
+    showy_quota_log "python3 or timeout/head not found; refusing uncapped command"
     return 127
 }
 
@@ -1685,7 +1905,7 @@ run_codexbar() {
 }
 
 publish_cache_payload() {
-    local out="$1" source="${2:-unknown}" tmp stamp_tmp source_tmp
+    local out="$1" source="${2:-unknown}" tmp stamp_tmp source_tmp payload_marker=""
     SHOWY_QUOTA_CACHE_TMP_FILES=()
     trap showy_quota_exit_cleanup EXIT
     trap 'showy_quota_exit_cleanup; exit 130' INT
@@ -1697,65 +1917,66 @@ publish_cache_payload() {
     SHOWY_QUOTA_CACHE_TMP_FILES=("${tmp}")
 
     if [[ -z "${out}" || "${out:0:1}" != '[' ]]; then
-        rm -f "${tmp}"
+        rm -f -- "${tmp}"
         showy_quota_log "codexbar produced no usable output"
         return 1
     fi
 
     printf '%s' "${out}" > "${tmp}"
-    if showy_quota_json_valid "${tmp}"; then
-        if ! stamp_tmp=$(mktemp "${SHOWY_QUOTA_CACHE_DIR}/usage-stamp.XXXXXX"); then
-            rm -f "${tmp}"
-            showy_quota_log "could not create temporary stamp file"
-            return 1
-        fi
-        SHOWY_QUOTA_CACHE_TMP_FILES+=("${stamp_tmp}")
-        if ! source_tmp=$(mktemp "${SHOWY_QUOTA_CACHE_DIR}/source.XXXXXX"); then
-            rm -f "${tmp}" "${stamp_tmp}"
-            showy_quota_log "could not create temporary source file"
-            return 1
-        fi
-        SHOWY_QUOTA_CACHE_TMP_FILES+=("${source_tmp}")
-        printf '%s.%s.%s\n' "$(date +%s)" "$$" "${RANDOM}" > "${stamp_tmp}" || {
-            rm -f "${tmp}" "${stamp_tmp}" "${source_tmp}"
-            showy_quota_log "could not write temporary stamp file"
-            return 1
-        }
-        printf '%s\n' "${source}" > "${source_tmp}" || {
-            rm -f "${tmp}" "${stamp_tmp}" "${source_tmp}"
-            showy_quota_log "could not write temporary source file"
-            return 1
-        }
-        # Publish metadata (stamp, source) BEFORE the usage payload, and rename
-        # the payload LAST. Combined with the payload-first reader
-        # (read_cache_from_env reads usage.json, then source/mtime), this
-        # guarantees a reader that observes a new payload also observes the
-        # matching-or-newer source/stamp — closing the mixed-generation window
-        # where a fresh payload could be paired with a stale source marker.
-        mv "${stamp_tmp}" "${SHOWY_QUOTA_USAGE_STAMP}" || {
-            rm -f "${tmp}" "${stamp_tmp}" "${source_tmp}"
-            showy_quota_log "could not publish stamp file"
-            return 1
-        }
-        mv "${source_tmp}" "${SHOWY_QUOTA_SOURCE_FILE}" || {
-            rm -f "${tmp}" "${source_tmp}"
-            showy_quota_log "could not publish source file"
-            return 1
-        }
-        mv "${tmp}" "${SHOWY_QUOTA_USAGE_FILE}" || {
-            rm -f "${tmp}"
-            showy_quota_log "could not publish cache file"
-            return 1
-        }
-        chmod 600 "${SHOWY_QUOTA_USAGE_FILE}" "${SHOWY_QUOTA_USAGE_STAMP}" "${SHOWY_QUOTA_SOURCE_FILE}" 2>/dev/null || true
-        SHOWY_QUOTA_CACHE_TMP_FILES=()
-        showy_quota_log "cache refreshed from ${source} (${#out} bytes)"
-        return 0
+    if ! showy_quota_json_valid "${tmp}"; then
+        rm -f -- "${tmp}"
+        showy_quota_log "codexbar JSON failed validation"
+        return 1
+    fi
+    if ! source_tmp=$(mktemp "${SHOWY_QUOTA_CACHE_DIR}/source.XXXXXX"); then
+        rm -f -- "${tmp}"
+        showy_quota_log "could not create temporary source file"
+        return 1
+    fi
+    SHOWY_QUOTA_CACHE_TMP_FILES+=("${source_tmp}")
+    if ! printf '%s\n' "${source}" > "${source_tmp}"; then
+        rm -f -- "${tmp}" "${source_tmp}"
+        showy_quota_log "could not write temporary source file"
+        return 1
     fi
 
-    rm -f "${tmp}"
-    showy_quota_log "codexbar JSON failed validation"
-    return 1
+    # Commit order is payload, source, then generation token. In particular,
+    # a failed payload rename cannot expose any new metadata, and a token is
+    # minted only after the visible payload has a stable filesystem identity.
+    if ! mv -- "${tmp}" "${SHOWY_QUOTA_USAGE_FILE}"; then
+        rm -f -- "${tmp}" "${source_tmp}"
+        showy_quota_log "could not publish cache file"
+        return 1
+    fi
+    if ! mv -- "${source_tmp}" "${SHOWY_QUOTA_SOURCE_FILE}"; then
+        rm -f -- "${source_tmp}"
+        showy_quota_log "could not publish source file"
+        return 1
+    fi
+    payload_marker=$(cache_payload_marker)
+    if [[ -z "${payload_marker}" ]]; then
+        showy_quota_log "could not derive published cache generation"
+        return 1
+    fi
+    if ! stamp_tmp=$(mktemp "${SHOWY_QUOTA_CACHE_DIR}/usage-stamp.XXXXXX"); then
+        showy_quota_log "could not create temporary stamp file"
+        return 1
+    fi
+    SHOWY_QUOTA_CACHE_TMP_FILES+=("${stamp_tmp}")
+    if ! printf '%s.%s.%s.%s\n' "${payload_marker}" "$(showy_quota_now_epoch)" "$$" "${RANDOM}" > "${stamp_tmp}"; then
+        rm -f -- "${stamp_tmp}"
+        showy_quota_log "could not write temporary stamp file"
+        return 1
+    fi
+    if ! mv -- "${stamp_tmp}" "${SHOWY_QUOTA_USAGE_STAMP}"; then
+        rm -f -- "${stamp_tmp}"
+        showy_quota_log "could not publish stamp file"
+        return 1
+    fi
+    chmod 600 "${SHOWY_QUOTA_USAGE_FILE}" "${SHOWY_QUOTA_USAGE_STAMP}" "${SHOWY_QUOTA_SOURCE_FILE}" 2>/dev/null || true
+    SHOWY_QUOTA_CACHE_TMP_FILES=()
+    showy_quota_log "cache refreshed from ${source} (${#out} bytes)"
+    return 0
 }
 
 refresh_cache_from_serve() {
@@ -1814,6 +2035,18 @@ refresh_cache() {
     [[ "${source}" == "cli" ]] && record_cli_failure
     return 1
 }
+refresh_cache_with_quarantine() {
+    showy_quota_touch_mkdir_lock_heartbeat
+    quarantine_invalid_cache_if_present || return 1
+    refresh_cache
+}
+
+refresh_cache_from_serve_with_quarantine() {
+    showy_quota_touch_mkdir_lock_heartbeat
+    quarantine_invalid_cache_if_present || return 1
+    refresh_cache_from_serve
+}
+
 
 cache_is_valid() {
     [[ -s "${SHOWY_QUOTA_USAGE_FILE}" ]] || return 1
@@ -1842,7 +2075,7 @@ serve_cache_is_fresh() {
 retry_refresh_after_lock_wait() {
     lock_rc=0
     showy_quota_log "retrying refresh after lock wait"
-    showy_quota_with_lock refresh_cache || lock_rc=$?
+    showy_quota_with_lock refresh_cache_with_quarantine || lock_rc=$?
     if (( lock_rc == 2 || lock_rc == 3 )); then
         showy_quota_wait_for_cache "${SHOWY_QUOTA_LOCK_WAIT_TENTHS}" || true
     fi
@@ -1850,12 +2083,13 @@ retry_refresh_after_lock_wait() {
 
 lock_rc=0
 pre_refresh_token=$(cache_token)
+pre_refresh_payload_marker=$(cache_payload_marker)
 if (( force_refresh )); then
-    showy_quota_with_lock refresh_cache || lock_rc=$?
+    showy_quota_with_lock refresh_cache_with_quarantine || lock_rc=$?
 elif ! cache_is_fresh; then
-    showy_quota_with_lock refresh_cache || lock_rc=$?
+    showy_quota_with_lock refresh_cache_with_quarantine || lock_rc=$?
 elif [[ -n "${SHOWY_QUOTA_CODEXBAR_SERVE_URL}" ]] && ! serve_cache_is_fresh; then
-    showy_quota_with_lock refresh_cache_from_serve || lock_rc=$?
+    showy_quota_with_lock refresh_cache_from_serve_with_quarantine || lock_rc=$?
 fi
 
 # Lost the lock contest? Forced callers wait for the holder and retry once
@@ -1864,7 +2098,7 @@ fi
 # cache paths wait for the holder or retry recovery.
 if (( lock_rc == 2 || lock_rc == 3 )); then
     if (( force_refresh )); then
-        if ! showy_quota_wait_for_cache "${SHOWY_QUOTA_LOCK_WAIT_TENTHS}" "${pre_refresh_token}" "${force_refresh}"; then
+        if ! showy_quota_wait_for_cache "${SHOWY_QUOTA_LOCK_WAIT_TENTHS}" "${pre_refresh_token}" "${force_refresh}" "${pre_refresh_payload_marker}"; then
             retry_refresh_after_lock_wait
             if cache_is_valid; then
                 if [[ "$(cache_token)" == "${pre_refresh_token}" ]]; then

@@ -46,11 +46,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   shared `showy_quota_valid_provider_id` helper.
 
 ### Fixed
-- Cache publish renames the `usage.json` payload last (after stamp/source) so a
-  reader that observes a new payload always sees matching-or-newer metadata,
-  closing the mixed-generation window that could pair fresh data with a stale
-  source marker. The managed-serve pidfile is now written via temp-file +
-  atomic rename.
+- Cache publish is payload-first: `usage.json` is renamed into place, then the
+  source marker, then a generation stamp minted from the visible payload — a
+  failed payload rename publishes no new metadata, and forced-refresh waiters
+  only trust a stamp that implies the payload is already live. The
+  managed-serve pidfile is still written via temp-file + atomic rename.
 - The shell provider-id validators and the Rust `valid_provider_id` both cap ids
   at 64 characters; `showy_quota_json_valid` and the serve publish gate validate
   `extraRateWindows`. Shell reset-description parsing now honors
@@ -80,6 +80,52 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   prompt colors match multiplexer status lines even at the defaults (40/15).
 - Inverted `good_min_remaining` < `warn_min_remaining` thresholds are swapped in
   both config loaders so the Warn band stays reachable.
+- The native renderer errors (nonzero) on structurally invalid usage payloads
+  (non-array JSON, wrong field types, oversize input) instead of emitting empty
+  metrics or a header-only SketchyBar frame; null/absent measurements remain
+  valid unknown state. The shared 5 MiB cap now bounds every ingest path
+  (stdin, file, and cache reads), and `--provider` filtering applies to the
+  `metrics` and `sketchybar` emit modes, not just `prompt`.
+- `--emit prompt` now considers `extraRateWindows` when picking the worst
+  window (excluding `usageKnown: false` extras), so a model-pool window worse
+  than every positional window is no longer hidden.
+- Extra-window pooling dedups on the full reset identity (`resetsAt` or the
+  `resetDescription` fallback), and `usageKnown: false` extras can no longer
+  subsume measured positional windows.
+- Negative values for numeric KDL/env thresholds and duration knobs fall back
+  to their defaults in the Rust config loader, matching the shell's unsigned
+  parsing. `docs/plugin.md` now documents the actual host-local default for
+  reset-description timezone interpretation.
+- Shell renderers bound epoch arithmetic (out-of-range reset or now epochs take
+  the unknown-reset path instead of wrapping), a malformed palette hex degrades
+  to the default color with a warning instead of aborting the Zellij fallback
+  strip, and a malformed `SHOWY_QUOTA_MAX_USAGE_JSON_BYTES` warns and uses the
+  default cap instead of quarantining valid cache data.
+- The refresh lock is a single authoritative mkdir lease with an owner
+  heartbeat: mixed flock/mkdir fetchers can no longer refresh concurrently, a
+  live long refresh is no longer stolen at the old hard age, and invalid-cache
+  quarantine runs under the lock. Discovery and CLI-fallback captures are
+  byte-capped at the source, and provider-discovery payloads with malformed
+  records are rejected like the Rust parser instead of silently filtered.
+- Managed `codexbar serve` is adoption-first everywhere: shell fetcher and the
+  Zellij plugin probe `/health` before spawning, adopt a healthy foreign serve,
+  and stand down after losing a port race — no more duplicate serves from
+  concurrent tabs or fetcher-vs-plugin races. `--stop-serve` escalates
+  SIGTERM→SIGKILL and removes the pidfile only after confirmed exit; foreign
+  recycling waits for the port to actually release.
+- Zellij plugin: in-flight subprocess attempts are token-tracked and expire on
+  the watchdog deadline (not the retry backoff), the watchdog terminates the
+  whole process tree via `setsid`/process-group kill, captured subprocess
+  output is capped at 5 MiB before parsing, and the loopback-serve URL check
+  now requires an explicit valid port with no userinfo.
+- Theme `set`/`unset` and Zellij permission grant/block writes serialize on a
+  config-scoped lock, so concurrent writers no longer erase each other. The
+  SketchyBar render lock records PID + start-time identity with a bounded
+  lease, so a reused PID can no longer hold it forever.
+- Shell payload validators enforce the same field types the Rust structs
+  require (`status` indicator/url, extra-window id/title/`usageKnown`, window
+  reset/`windowMinutes` metadata), so the shell can no longer publish cache
+  data the native renderer rejects.
 
 ## [0.6.0] — 2026-07-13
 

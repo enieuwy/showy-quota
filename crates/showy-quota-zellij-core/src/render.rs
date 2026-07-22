@@ -939,11 +939,12 @@ struct Family<'a> {
 /// Group a provider's quota pools into per-family duals (top = short/live
 /// horizon, bottom = long/cap horizon). Present `extraRateWindows` are paired
 /// two-at-a-time in CodexBar's per-family session→weekly emission order;
-/// positional slots not already carried by an extra (matched on the
+/// positional slots not already carried by a known extra (matched on the
 /// render-window dedup key) form a leading "main" family. A provider whose
 /// pools live entirely in the extras (e.g. Antigravity) yields one family per
 /// pool; a provider with a secondary extra pool (e.g. Codex + Spark) yields its
-/// main slots plus the extra pool. `usageKnown:false` windows render empty.
+/// main slots plus the extra pool. `usageKnown:false` windows keep their empty
+/// visual lane but cannot replace a measured positional slot.
 fn pool_families<'a>(
     slots: &[Option<&'a UsageWindow>; 3],
     extras: &'a [NamedWindow],
@@ -981,14 +982,24 @@ fn pool_families<'a>(
     families
 }
 
-/// True when a positional slot is already carried by a present extra window,
-/// matched on the render-window dedup key (windowMinutes + resetsAt).
+/// True when an extra carries a numeric, measured usage value.
+fn has_known_extra_usage(named: &NamedWindow) -> bool {
+    named.usage_known != Some(false)
+        && named
+            .window
+            .as_ref()
+            .is_some_and(|window| window.used_percent.is_some())
+}
+
+/// True when a positional slot is already carried by a known extra window,
+/// matched on the render-window dedup key (windowMinutes + canonical reset).
 fn extra_contains(extras: &[&NamedWindow], slot: &UsageWindow) -> bool {
     extras.iter().any(|named| {
-        named.window.as_ref().is_some_and(|window| {
-            window.window_minutes() == slot.window_minutes()
-                && window.resets_at.as_deref() == slot.resets_at.as_deref()
-        })
+        has_known_extra_usage(named)
+            && named.window.as_ref().is_some_and(|window| {
+                window.window_minutes() == slot.window_minutes()
+                    && window.reset_value() == slot.reset_value()
+            })
     })
 }
 
@@ -1039,12 +1050,12 @@ fn distinct_render_windows<'a>(
         }
     }
     for named in extras {
+        if !has_known_extra_usage(named) {
+            continue;
+        }
         let Some(window) = named.window.as_ref() else {
             continue;
         };
-        if window.used_percent.is_none() || named.usage_known == Some(false) {
-            continue;
-        }
         out.push(window);
         if out.len() >= max {
             return out;
@@ -1053,28 +1064,24 @@ fn distinct_render_windows<'a>(
     out
 }
 
-/// A provider is model-pooled in `auto` mode when its `extraRateWindows` carry
-/// every present positional slot (matched on windowMinutes + resetsAt): the
-/// extras are then the canonical, complete dataset, so per-pool families drive
-/// the bar instead of the (possibly cross-family) positional slots.
+/// A provider is model-pooled in `auto` mode when known `extraRateWindows`
+/// carry every present positional slot (matched on windowMinutes + canonical
+/// reset): the extras are then the canonical, complete dataset, so per-pool
+/// families drive the bar instead of the (possibly cross-family) positional
+/// slots.
 fn pooled_auto(slots: &[Option<&UsageWindow>; 3], extras: &[NamedWindow]) -> bool {
     let present_extras: Vec<&NamedWindow> = extras
         .iter()
-        .filter(|named| {
-            named
-                .window
-                .as_ref()
-                .is_some_and(|window| window.used_percent.is_some())
-        })
+        .filter(|named| has_known_extra_usage(named))
         .collect();
     if present_extras.is_empty() {
         return false;
     }
-    // A coincidental (windowMinutes, resetsAt) collision between a positional
-    // slot and a single extra (e.g. Codex's main weekly vs its Spark weekly)
-    // is not model pooling. Require the extras to carry MORE pools than the
-    // positional view exposes, so they are genuinely the canonical superset
-    // rather than a same-shaped parallel pool.
+    // A coincidental (windowMinutes, reset) collision between a positional slot
+    // and a single extra (e.g. Codex's main weekly vs its Spark weekly) is not
+    // model pooling. Require the extras to carry MORE pools than the positional
+    // view exposes, so they are genuinely the canonical superset rather than a
+    // same-shaped parallel pool.
     let present_positional = slots.iter().flatten().count();
     if present_extras.len() <= present_positional {
         return false;
@@ -1089,7 +1096,7 @@ fn pooled_auto(slots: &[Option<&UsageWindow>; 3], extras: &[NamedWindow]) -> boo
 /// synthetic `dual` provider per pool (top = short/live, bottom = long/cap).
 /// Mirrors `pool_families` grouping but yields cloned `UsageWindow`s so each
 /// record flows through the normal `dual` path. `usageKnown:false` placeholders
-/// keep their pairing slot but render empty (used_percent cleared).
+/// keep their visual pairing slot but cannot replace a positional measurement.
 struct FamilyWindows {
     label: char,
     primary: UsageWindow,
@@ -1957,6 +1964,99 @@ mod tests {
             reset_description: None,
             window_minutes: Some(minutes),
         }
+    }
+
+    #[test]
+    fn extra_contains_uses_reset_description_when_timestamp_is_absent() {
+        let slot = UsageWindow {
+            used_percent: Some(10.0),
+            resets_at: None,
+            reset_description: Some("Resets Monday at noon".into()),
+            window_minutes: Some(10_080),
+        };
+        let different_reset = NamedWindow {
+            id: None,
+            title: None,
+            window: Some(UsageWindow {
+                used_percent: Some(20.0),
+                resets_at: None,
+                reset_description: Some("Resets Friday at noon".into()),
+                window_minutes: Some(10_080),
+            }),
+            usage_known: None,
+        };
+        let matching_reset = NamedWindow {
+            id: None,
+            title: None,
+            window: Some(UsageWindow {
+                used_percent: Some(30.0),
+                resets_at: None,
+                reset_description: Some("Resets Monday at noon".into()),
+                window_minutes: Some(10_080),
+            }),
+            usage_known: None,
+        };
+
+        assert!(!extra_contains(&[&different_reset], &slot));
+        assert!(extra_contains(&[&matching_reset], &slot));
+
+        let other_slot = UsageWindow {
+            used_percent: Some(15.0),
+            resets_at: None,
+            reset_description: Some("Resets Tuesday at noon".into()),
+            window_minutes: Some(10_080),
+        };
+        let unrelated_one = NamedWindow {
+            id: None,
+            title: None,
+            window: Some(UsageWindow {
+                used_percent: Some(40.0),
+                resets_at: None,
+                reset_description: Some("Resets Wednesday at noon".into()),
+                window_minutes: Some(10_080),
+            }),
+            usage_known: None,
+        };
+        let unrelated_two = NamedWindow {
+            id: None,
+            title: None,
+            window: Some(UsageWindow {
+                used_percent: Some(50.0),
+                resets_at: None,
+                reset_description: Some("Resets Thursday at noon".into()),
+                window_minutes: Some(10_080),
+            }),
+            usage_known: None,
+        };
+        let slots = [Some(&slot), Some(&other_slot), None];
+        let extras = vec![matching_reset, unrelated_one, unrelated_two];
+
+        assert!(!pooled_auto(&slots, &extras));
+    }
+
+    #[test]
+    fn unknown_extra_cannot_pool_or_replace_measured_slot() {
+        let measured = cycle_window("2099-01-15T00:00:00Z", 300);
+        let unknown_duplicate = NamedWindow {
+            id: None,
+            title: Some("Unknown".into()),
+            window: Some(measured.clone()),
+            usage_known: Some(false),
+        };
+        let known_other_pool = NamedWindow {
+            id: None,
+            title: Some("Known".into()),
+            window: Some(cycle_window("2099-01-22T00:00:00Z", 10_080)),
+            usage_known: None,
+        };
+        let slots = [Some(&measured), None, None];
+        let extras = vec![unknown_duplicate, known_other_pool];
+
+        assert!(!pooled_auto(&slots, &extras));
+
+        let families = family_windows("antigravity", &slots, &extras);
+        assert_eq!(families[0].primary.used_percent, Some(10.0));
+        assert_eq!(families[1].primary.used_percent, None);
     }
 
     #[test]

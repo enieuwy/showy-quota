@@ -86,10 +86,12 @@ pane size=1 borderless=true {
 }
 ```
 
-Each tab that includes this pane gets its own plugin instance. That is expected:
-every instance probes CodexBar serve on a one-shot timer, asks Zellij to keep a
-hidden background command pane for `codexbar serve` if the probe fails, and keeps
-its own in-memory last-known-good output.
+Each tab that includes this pane gets its own plugin instance and in-memory
+last-known-good output. All instances treat a healthy configured loopback serve
+as authoritative, whether it was started by another tab, the shell integration,
+or the user. On an outage, managed startup uses a short deterministic per-tab
+delay and re-probes before opening a background `codexbar serve` pane; the
+creator keeps that pane's identity until Zellij confirms its exit.
 
 ## Permissions
 
@@ -241,7 +243,7 @@ Common options:
 |`cli_interval_seconds`|`120`|Slow cadence while fallback is active; the plugin still probes serve every tick and switches back when it recovers.|
 |`provider_failure_backoff_seconds`|`cli_interval_seconds`|Base window to skip a provider after a CLI call fails. The window escalates exponentially per consecutive failure (capped at 30 min), so a provider that keeps wedging is probed rarely.|
 |`fallback_jitter_seconds`|`min(cli_interval_seconds, 60)`|Per-instance random hold (re-probing serve) before the first CLI fallback after a serve outage. Each plugin instance derives a distinct, stable offset from its Zellij plugin id, so multiple tabs do not stampede `codexbar usage` at the same instant when serve blips; a fast managed-serve restart is usually seen during the hold, so most instances skip CLI entirely. `0` disables the hold (immediate fallback, legacy behavior).|
-|`reset_description_timezone_offset`|`UTC`|Optional fixed offset (`UTC`, `+HH:MM`, or `-HH:MM`) used only when CodexBar provides local-time `resetDescription` text without an ISO `resetsAt`. The WASM plugin cannot infer the host timezone reliably, so set this explicitly if CodexBar emits local-time descriptions and your local zone is not UTC. Prefer ISO timestamps when available; this fallback cannot model DST transitions.|
+|`reset_description_timezone_offset`|`host-local`|Optional fixed offset (`UTC`, `+HH:MM`, or `-HH:MM`) used only when CodexBar provides local-time `resetDescription` text without an ISO `resetsAt`. When unset, the plugin interprets that text in its host-local timezone; set this explicitly when CodexBar runs in a different timezone. Prefer ISO timestamps when available; this fallback cannot model DST transitions.|
 |`provider_discovery_backoff_seconds`|`60`|How long to skip provider discovery after failure, and how long a successful CodexBar provider inventory is reused before refresh.|
 |`providers`|empty|Comma-separated allow-list and render order. When set, it also constrains the per-provider fallback work list.|
 |`providers_exclude`|empty|Comma-separated deny-list. Excluded providers are dropped from the per-provider fallback work list before any CLI call.|

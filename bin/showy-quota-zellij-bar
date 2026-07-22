@@ -56,7 +56,9 @@ zellij_fg() {
 }
 
 print_ai_fallback() {
-    zellij_fg "$(showy_quota_primary_palette unknown)"
+    local color
+    color="$(showy_quota_normalize_hex_or_default "${SHOWY_QUOTA_PALETTE_PRIMARY_UNKNOWN}" "6c7086")"
+    zellij_fg "${color}"
     printf 'AI ?'
     (( want_color )) && printf '\033[0m'
     printf '\n'

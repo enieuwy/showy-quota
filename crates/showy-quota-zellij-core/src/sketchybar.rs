@@ -22,15 +22,16 @@
 //! lanes render remaining `0` with the bad-severity highlight; a shared cycle
 //! only suppresses the secondary/tertiary markers).
 
-use serde_json::Value;
-
 use crate::codexbar::{is_renderable, NamedWindow, ProviderRecord, UsageWindow};
 use crate::config::RenderConfig;
+use crate::metrics::parse_display_payload;
 use crate::render::{format_countdown, RenderError};
 use crate::reset::{minutes_until, reset_epoch};
 
 const FIELD_SEP: char = '\u{001f}';
 const LANE_COUNT: usize = 4;
+const MIN_BAR_WIDTH: i64 = 2;
+const MAX_BAR_WIDTH: i64 = 4_096;
 
 #[derive(Debug, Clone, Copy)]
 pub struct SketchybarOptions {
@@ -57,13 +58,12 @@ pub fn emit_sketchybar(
     now_epoch: i64,
     options: SketchybarOptions,
 ) -> Result<String, RenderError> {
-    let value: Value = serde_json::from_slice(payload).map_err(|_| RenderError::InvalidPayload)?;
-    let mut out = header(options);
-    let Value::Array(records) = value else {
-        return Ok(out);
+    let options = SketchybarOptions {
+        bar_width: options.bar_width.clamp(MIN_BAR_WIDTH, MAX_BAR_WIDTH),
+        ..options
     };
-    let records: Vec<ProviderRecord> =
-        serde_json::from_value(Value::Array(records)).map_err(|_| RenderError::InvalidPayload)?;
+    let records = parse_display_payload(payload)?;
+    let mut out = header(options);
 
     let mut renderable: Vec<&ProviderRecord> = records
         .iter()
@@ -394,7 +394,9 @@ fn marker_percentage_from_x(marker: i64, bar_width: i64) -> Option<i64> {
         return None;
     }
     let marker = marker.clamp(0, bar_width - 1);
-    Some((marker * 100 + (bar_width - 1) / 2) / (bar_width - 1))
+    let denominator = bar_width.checked_sub(1)?;
+    let numerator = marker.checked_mul(100)?.checked_add(denominator / 2)?;
+    Some((numerator / denominator).clamp(0, 100))
 }
 
 #[cfg(test)]
@@ -436,6 +438,36 @@ mod tests {
             },
         );
         assert_eq!(rendered, format!("1{FIELD_SEP}0"));
+    }
+
+    #[test]
+    fn rejects_non_array_payloads() {
+        let config = RenderConfig::default();
+        for payload in ["{}", "null", "\"quota\"", "42"] {
+            assert!(matches!(
+                emit_sketchybar(payload.as_bytes(), &config, 1_700_000_000, options()),
+                Err(RenderError::InvalidPayload)
+            ));
+        }
+    }
+
+    #[test]
+    fn clamps_public_bar_width_and_keeps_markers_bounded() {
+        let config = RenderConfig::default();
+        let payload = r#"[{"provider":"codex","usage":{"primary":{"usedPercent":25,"resetsAt":"2023-11-14T23:53:20Z","windowMinutes":300}}}]"#;
+        for bar_width in [-1, 0, 2, 4_096, i64::MAX] {
+            let rendered = emit(
+                payload,
+                &config,
+                1_700_000_000,
+                SketchybarOptions {
+                    bar_width,
+                    ..options()
+                },
+            );
+            let marker = lines(&rendered)[1][7].parse::<i64>().expect("marker");
+            assert!((0..=100).contains(&marker));
+        }
     }
 
     #[test]

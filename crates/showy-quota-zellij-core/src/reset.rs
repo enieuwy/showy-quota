@@ -10,7 +10,7 @@ pub(crate) fn minutes_until(
     reset_description_offset_minutes: Option<i16>,
 ) -> Option<i64> {
     let epoch = reset_epoch(raw, now_epoch, reset_description_offset_minutes)?;
-    Some(((epoch - now_epoch).max(0)) / 60)
+    Some(epoch.checked_sub(now_epoch)?.max(0) / 60)
 }
 
 pub(crate) fn reset_epoch(
@@ -159,5 +159,13 @@ mod tests {
     fn rejects_overlong_reset_strings() {
         let raw = format!("Resets {}", "1".repeat(65));
         assert_eq!(reset_epoch(&raw, 0, Some(0)), None);
+    }
+
+    #[test]
+    fn overflowed_countdown_is_unknown() {
+        assert_eq!(
+            minutes_until("1970-01-01T00:00:00Z", i64::MIN, Some(0)),
+            None
+        );
     }
 }

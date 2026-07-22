@@ -95,26 +95,61 @@ render_lock_age_seconds() {
     fi
     return 1
 }
+render_process_start_time() {
+    local pid="$1" start_time
+
+    [[ "${pid}" =~ ^[0-9]+$ ]] || return 1
+    start_time=$(ps -p "${pid}" -o lstart= 2>/dev/null) || return 1
+    [[ -n "${start_time}" ]] || return 1
+    printf '%s\n' "${start_time}"
+}
+
+render_lock_age_exceeds() {
+    local max_age="$1" lock_age
+
+    lock_age=$(render_lock_age_seconds) || return 1
+    (( lock_age >= max_age || lock_age <= -max_age ))
+}
+
+read_render_lock_owner() {
+    local owner_record
+
+    RENDER_LOCK_OWNER_PID=""
+    RENDER_LOCK_OWNER_START_TIME=""
+    [[ -r "${RENDER_LOCK_OWNER}" ]] || return 1
+    IFS= read -r owner_record < "${RENDER_LOCK_OWNER}" || return 1
+    IFS=$'\t' read -r RENDER_LOCK_OWNER_PID RENDER_LOCK_OWNER_START_TIME <<< "${owner_record}"
+    [[ "${RENDER_LOCK_OWNER_PID}" =~ ^[0-9]+$ ]]
+}
+
+reclaim_render_lock() {
+    rm -f -- "${RENDER_LOCK_OWNER}"
+    rmdir -- "${RENDER_LOCK_DIR}" 2>/dev/null
+}
+
+write_render_lock_owner() {
+    local start_time=""
+
+    start_time=$(render_process_start_time "$$" || true)
+    printf '%s\t%s\n' "$$" "${start_time}" > "${RENDER_LOCK_OWNER}"
+}
+
 
 release_render_lock() {
     cleanup_icon_tmp_files
-    local owner_pid=""
-    if [[ -r "${RENDER_LOCK_OWNER}" ]]; then
-        IFS= read -r owner_pid < "${RENDER_LOCK_OWNER}" || owner_pid=""
-    fi
-    if [[ "${owner_pid}" == "$$" ]]; then
+    if read_render_lock_owner && [[ "${RENDER_LOCK_OWNER_PID}" == "$$" ]]; then
         rm -f -- "${RENDER_LOCK_OWNER}"
         rmdir -- "${RENDER_LOCK_DIR}" 2>/dev/null || true
     fi
 }
 
 acquire_render_lock() {
-    local owner_pid lock_age
-    local max_ownerless_age=30 malformed_owner attempt=0 max_attempts=3
+    local owner_pid owner_start_time current_start_time
+    local max_ownerless_age=30 max_render_age=300 malformed_owner attempt=0 max_attempts=3
 
     while (( attempt < max_attempts )); do
         if mkdir -- "${RENDER_LOCK_DIR}" 2>/dev/null; then
-            printf '%s\n' "$$" > "${RENDER_LOCK_OWNER}" || {
+            write_render_lock_owner || {
                 rmdir -- "${RENDER_LOCK_DIR}" 2>/dev/null || true
                 return 1
             }
@@ -123,32 +158,41 @@ acquire_render_lock() {
         fi
 
         owner_pid=""
-        lock_age=""
+        owner_start_time=""
+        current_start_time=""
         malformed_owner=0
-        if [[ -r "${RENDER_LOCK_OWNER}" ]]; then
-            IFS= read -r owner_pid < "${RENDER_LOCK_OWNER}" || owner_pid=""
-            if [[ "${owner_pid}" =~ ^[0-9]+$ ]]; then
-                if kill -0 "${owner_pid}" 2>/dev/null; then
+        if read_render_lock_owner; then
+            owner_pid="${RENDER_LOCK_OWNER_PID}"
+            owner_start_time="${RENDER_LOCK_OWNER_START_TIME}"
+            if kill -0 "${owner_pid}" 2>/dev/null; then
+                current_start_time=$(render_process_start_time "${owner_pid}" || true)
+                if [[ -n "${owner_start_time}" && -n "${current_start_time}" \
+                    && "${owner_start_time}" != "${current_start_time}" ]]; then
+                    showy_quota_log "reclaiming sketchybar render lock from reused pid ${owner_pid}"
+                elif render_lock_age_exceeds "${max_render_age}"; then
+                    showy_quota_log "reclaiming expired sketchybar render lock (pid ${owner_pid})"
+                else
                     showy_quota_log "sketchybar render already in flight (pid ${owner_pid}); skipping"
                     return 1
                 fi
-                rm -f -- "${RENDER_LOCK_OWNER}"
-                if ! rmdir -- "${RENDER_LOCK_DIR}" 2>/dev/null; then
-                    return 1
-                fi
-                ((attempt += 1))
-                (( attempt < max_attempts )) && sleep "0.$((attempt * 5))"
-                continue
             else
-                malformed_owner=1
+                showy_quota_log "reclaiming stale sketchybar render lock (pid ${owner_pid})"
             fi
+
+            if ! reclaim_render_lock; then
+                return 1
+            fi
+            ((attempt += 1))
+            (( attempt < max_attempts )) && sleep "0.$((attempt * 5))"
+            continue
+        elif [[ -r "${RENDER_LOCK_OWNER}" ]]; then
+            malformed_owner=1
         fi
 
         # A future-dated lock mtime (clock skew, hand-touched dir) yields a
         # negative age that would never satisfy the threshold and wedge rendering
         # forever; judge staleness by absolute distance from now instead.
-        if lock_age=$(render_lock_age_seconds) \
-            && { (( lock_age >= max_ownerless_age )) || (( lock_age <= -max_ownerless_age )); }; then
+        if render_lock_age_exceeds "${max_ownerless_age}"; then
             if (( malformed_owner )); then
                 rm -f -- "${RENDER_LOCK_OWNER}"
             fi

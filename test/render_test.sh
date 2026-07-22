@@ -1765,6 +1765,63 @@ printf '%s\n' '[{"provider":"codex","usage":{"primary":{"usedPercent":1}}}]' > "
 out=$(run_renderer showy-quota-zellij-bar "${safe_provider_file}" NO_COLOR=1 SHOWY_QUOTA_FORCE_COLOR=0)
 assert_contains "provider id validator still renders normal id" "CX" "${out}"
 
+# ── serde payload validator parity ────────────────────────────────────
+printf '\nserde payload validator parity\n'
+
+validator_case_names=(
+    numeric-status-indicator
+    object-status-url
+    numeric-extra-title
+    string-extra-usage-known
+    numeric-window-resets-at
+    string-window-minutes
+)
+validator_case_payloads=(
+    '[{"provider":"codex","status":{"indicator":1},"usage":{"primary":{"usedPercent":1}}}]'
+    '[{"provider":"codex","status":{"url":{}},"usage":{"primary":{"usedPercent":1}}}]'
+    '[{"provider":"codex","usage":{"primary":{"usedPercent":1},"extraRateWindows":[{"title":1,"window":{"usedPercent":1}}]}}]'
+    '[{"provider":"codex","usage":{"primary":{"usedPercent":1},"extraRateWindows":[{"usageKnown":"false","window":{"usedPercent":1}}]}}]'
+    '[{"provider":"codex","usage":{"primary":{"usedPercent":1,"resetsAt":123}}}]'
+    '[{"provider":"codex","usage":{"primary":{"usedPercent":1,"windowMinutes":"300"}}}]'
+)
+validator_common_results=()
+validator_fetch_results=()
+validator_serve_url="http://127.0.0.1:18080"
+for validator_case_index in "${!validator_case_names[@]}"; do
+    validator_case_file="${TMP}/codexbar-${validator_case_names[validator_case_index]}.json"
+    printf '%s\n' "${validator_case_payloads[validator_case_index]}" > "${validator_case_file}"
+    # shellcheck disable=SC2016  # eval body; $-vars expand in run_common_eval's sub-shell
+    validator_common_results+=("$(run_common_eval 'showy_quota_json_valid "${SHOWY_QUOTA_TEST_FILE}" && printf valid || printf reject' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_TEST_FILE="${validator_case_file}")")
+
+    validator_cache=$(mk_cache)
+    validator_rc=0
+    validator_out=$(
+        PATH="${stub_dir}:${PATH}" \
+        SHOWY_QUOTA_NO_CONFIG=1 \
+        SHOWY_QUOTA_CACHE_DIR="${validator_cache}" \
+        SHOWY_QUOTA_CODEXBAR_BIN="${TMP}/no-such-codexbar-validator" \
+        SHOWY_QUOTA_CODEXBAR_SERVE_URL="${validator_serve_url}" \
+        SHOWY_QUOTA_TEST_SERVE_URL="${validator_serve_url}" \
+        SHOWY_QUOTA_TEST_SERVE_FIXTURE="${validator_case_file}" \
+        "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
+    ) || validator_rc=$?
+    if (( validator_rc != 0 )) && [[ -z "${validator_out}" ]] && [[ ! -e "${validator_cache}/usage.json" ]]; then
+        validator_fetch_results+=("reject")
+    else
+        validator_fetch_results+=("publish")
+    fi
+done
+assert_equals "json validator rejects serde-incompatible typed fields" "reject,reject,reject,reject,reject,reject" "$(IFS=,; printf '%s' "${validator_common_results[*]}")"
+assert_equals "serve validator rejects serde-incompatible typed fields before publication" "reject,reject,reject,reject,reject,reject" "$(IFS=,; printf '%s' "${validator_fetch_results[*]}")"
+
+validator_nullable_file="${TMP}/codexbar-nullable-optional-fields.json"
+printf '%s\n' \
+    '[{"provider":"codex","status":{"indicator":null},"usage":{"primary":{"usedPercent":null,"resetsAt":null,"windowMinutes":null},"extraRateWindows":[{"id":null,"usageKnown":null,"window":{"remainingPercent":null,"resetDescription":null}}]}}]' \
+    > "${validator_nullable_file}"
+# shellcheck disable=SC2016  # eval body; $-vars expand in run_common_eval's sub-shell
+out=$(run_common_eval 'showy_quota_json_valid "${SHOWY_QUOTA_TEST_FILE}" && printf valid || printf reject' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_TEST_FILE="${validator_nullable_file}")
+assert_equals "json validator accepts null and absent serde optionals" "valid" "${out}"
+
 # ── state surface ─────────────────────────────────────────────────────
 printf '\ncodexbar state\n'
 
@@ -2584,7 +2641,7 @@ fi
 
 # 3b. Fresh but invalid cache must not be emitted as success.
 cache=$(mk_cache)
-printf '%s\n' '[{"provider":"codex","usage":{"primary":{}}}]' > "${cache}/usage.json"
+printf '%s\n' '[{"provider":"codex","usage":{"primary":{"usedPercent":"invalid"}}}]' > "${cache}/usage.json"
 rc=0
 out=$(
     SHOWY_QUOTA_NO_CONFIG=1 \
@@ -2615,7 +2672,7 @@ else
 fi
 
 cache=$(mk_cache)
-printf '%s\n' '[{"provider":"codex","usage":{"primary":{}}}]' > "${cache}/usage.json"
+printf '%s\n' '[{"provider":"codex","usage":{"primary":{"usedPercent":"invalid"}}}]' > "${cache}/usage.json"
 race_log="${cache}/race.log"
 (
     SHOWY_QUOTA_NO_CONFIG=1 \
@@ -2647,7 +2704,7 @@ cache=$(mk_cache)
 for idx in 1 2 3 4 5; do
     printf '%s\n' 'invalid' > "${cache}/usage.json.corrupt.000${idx}.${idx}"
 done
-printf '%s\n' '[{"provider":"codex","usage":{"primary":{}}}]' > "${cache}/usage.json"
+printf '%s\n' '[{"provider":"codex","usage":{"primary":{"usedPercent":"invalid"}}}]' > "${cache}/usage.json"
 rc=0
 out=$(
     SHOWY_QUOTA_NO_CONFIG=1 \

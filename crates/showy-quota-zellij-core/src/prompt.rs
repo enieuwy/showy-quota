@@ -89,6 +89,27 @@ fn select_candidate<'a>(
                 selected = Some(candidate);
             }
         }
+        for extra in metric
+            .extra_rate_windows
+            .iter()
+            .filter(|extra| extra.usage_known)
+        {
+            let (Some(used), Some(remaining)) = (extra.used_percent, extra.remaining_percent)
+            else {
+                continue;
+            };
+            let candidate = PromptCandidate {
+                provider: metric.provider.as_str(),
+                used,
+                remaining,
+                minutes: extra.minutes_until_reset,
+            };
+            if selected
+                .is_none_or(|current: PromptCandidate<'_>| candidate.remaining < current.remaining)
+            {
+                selected = Some(candidate);
+            }
+        }
     }
     selected
 }
@@ -118,6 +139,24 @@ mod tests {
 
     fn prompt(payload: &[u8], options: PromptOptions<'_>) -> String {
         emit_prompt_segment(payload, &config(), NOW, options).expect("prompt")
+    }
+
+    #[test]
+    fn prompt_selects_known_extra_window_when_it_is_worst() {
+        let output = prompt(
+            br#"[{"provider":"codex","usage":{"primary":{"usedPercent":40},"extraRateWindows":[{"title":"Model pool","window":{"usedPercent":90,"resetsAt":"2099-01-01T01:00:00Z"}},{"title":"Unknown","usageKnown":false,"window":{"usedPercent":100}}]}}]"#,
+            options(&[]),
+        );
+        assert_eq!(output, "CX 90% 1h");
+    }
+
+    #[test]
+    fn prompt_uses_known_extra_window_without_positional_usage() {
+        let output = prompt(
+            br#"[{"provider":"codex","usage":{"extraRateWindows":[{"title":"Model pool","window":{"usedPercent":75}}]}}]"#,
+            options(&[]),
+        );
+        assert_eq!(output, "CX 75%");
     }
 
     fn options<'a>(provider_filter: &'a [String]) -> PromptOptions<'a> {

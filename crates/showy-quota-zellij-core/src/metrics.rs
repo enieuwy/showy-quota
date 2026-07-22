@@ -1,7 +1,9 @@
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::codexbar::{valid_provider_id, NamedWindow, ProviderRecord, UsageWindow};
+use crate::codexbar::{
+    valid_provider_id, NamedWindow, ProviderRecord, UsageWindow, MAX_USAGE_JSON_BYTES,
+};
 use crate::config::RenderConfig;
 use crate::render::RenderError;
 use crate::reset::minutes_until;
@@ -11,7 +13,7 @@ pub(crate) struct ProviderMetric {
     pub(crate) provider: String,
     pub(crate) windows: WindowsMetric,
     #[serde(rename = "extraRateWindows")]
-    extra_rate_windows: Vec<ExtraWindowMetric>,
+    pub(crate) extra_rate_windows: Vec<ExtraWindowMetric>,
     error: Option<ErrorMetric>,
 }
 
@@ -39,14 +41,14 @@ pub(crate) struct WindowMetric {
 }
 
 #[derive(Serialize)]
-struct ExtraWindowMetric {
-    title: Option<String>,
+pub(crate) struct ExtraWindowMetric {
+    pub(crate) title: Option<String>,
     #[serde(rename = "usageKnown")]
-    usage_known: bool,
+    pub(crate) usage_known: bool,
     #[serde(rename = "usedPercent")]
-    used_percent: Option<i32>,
+    pub(crate) used_percent: Option<i32>,
     #[serde(rename = "remainingPercent")]
-    remaining_percent: Option<i32>,
+    pub(crate) remaining_percent: Option<i32>,
     #[serde(rename = "resetsAt")]
     resets_at: Option<String>,
     #[serde(rename = "resetDescription")]
@@ -54,7 +56,7 @@ struct ExtraWindowMetric {
     #[serde(rename = "windowMinutes")]
     window_minutes: Option<i64>,
     #[serde(rename = "minutesUntilReset")]
-    minutes_until_reset: Option<i64>,
+    pub(crate) minutes_until_reset: Option<i64>,
 }
 
 #[derive(Serialize)]
@@ -86,12 +88,7 @@ pub(crate) fn provider_metrics(
     config: &RenderConfig,
     now_epoch: i64,
 ) -> Result<Vec<ProviderMetric>, RenderError> {
-    let value: Value = serde_json::from_slice(payload).map_err(|_| RenderError::InvalidPayload)?;
-    let Value::Array(records) = value else {
-        return Ok(Vec::new());
-    };
-    let records: Vec<ProviderRecord> =
-        serde_json::from_value(Value::Array(records)).map_err(|_| RenderError::InvalidPayload)?;
+    let records = parse_display_payload(payload)?;
     let mut metrics: Vec<ProviderMetric> = records
         .iter()
         .filter(|record| passes_provider_filters(record, config))
@@ -102,12 +99,31 @@ pub(crate) fn provider_metrics(
     Ok(metrics)
 }
 
+/// Parse the array transport and provider identity contract shared by the
+/// display emitters. Positional windows with no measurement are valid unknown
+/// state; their typed shape is still enforced by serde.
+pub(crate) fn parse_display_payload(payload: &[u8]) -> Result<Vec<ProviderRecord>, RenderError> {
+    if payload.len() > MAX_USAGE_JSON_BYTES {
+        return Err(RenderError::InvalidPayload);
+    }
+    let records: Vec<ProviderRecord> =
+        serde_json::from_slice(payload).map_err(|_| RenderError::InvalidPayload)?;
+    if records
+        .iter()
+        .all(|record| valid_provider_id(&record.provider))
+    {
+        Ok(records)
+    } else {
+        Err(RenderError::InvalidPayload)
+    }
+}
+
 fn provider_metric(
     record: &ProviderRecord,
     config: &RenderConfig,
     now_epoch: i64,
 ) -> Option<ProviderMetric> {
-    let has_renderable_window = has_positional_renderable_window(record);
+    let has_renderable_window = has_renderable_window(record);
     match (record.error.as_ref(), has_renderable_window) {
         (None, true) => Some(renderable_metric(record, config, now_epoch)),
         (Some(error), false) => Some(error_metric(&record.provider, error)),
@@ -163,7 +179,7 @@ fn passes_provider_filters(record: &ProviderRecord, config: &RenderConfig) -> bo
         && !contains(&config.providers_exclude, &record.provider)
 }
 
-fn has_positional_renderable_window(record: &ProviderRecord) -> bool {
+fn has_renderable_window(record: &ProviderRecord) -> bool {
     record.usage.as_ref().is_some_and(|usage| {
         [
             usage.primary.as_ref(),
@@ -173,6 +189,13 @@ fn has_positional_renderable_window(record: &ProviderRecord) -> bool {
         .into_iter()
         .flatten()
         .any(|window| numeric_percent(window.used_percent).is_some())
+            || usage.extra_rate_windows.iter().any(|extra| {
+                extra.usage_known != Some(false)
+                    && extra
+                        .window
+                        .as_ref()
+                        .is_some_and(|window| numeric_percent(window.used_percent).is_some())
+            })
     })
 }
 
@@ -627,17 +650,29 @@ mod tests {
     }
 
     #[test]
-    fn strict_provider_ids_are_rejected() {
-        let value = emit_value(
-            br#"[
-                {"provider":".","usage":{"primary":{"usedPercent":10}}},
-                {"provider":"..","error":"bad"},
-                {"provider":"-codex","error":"bad"},
-                {"provider":"good","usage":{"primary":{"usedPercent":1}}}
-            ]"#,
-        );
+    fn rejects_non_array_and_wrongly_typed_windows() {
+        for payload in [
+            br#"{}"#.as_slice(),
+            br#""quota""#.as_slice(),
+            br#"42"#.as_slice(),
+            br#"[{"provider":"codex","usage":{"primary":"invalid"}}]"#.as_slice(),
+        ] {
+            assert!(matches!(
+                emit_provider_metrics(payload, &config(), NOW),
+                Err(RenderError::InvalidPayload)
+            ));
+        }
+    }
 
-        assert_eq!(value.as_array().expect("array").len(), 1);
-        assert_eq!(value[0]["provider"], "good");
+    #[test]
+    fn rejects_invalid_provider_ids() {
+        assert!(matches!(
+            emit_provider_metrics(
+                br#"[{"provider":".","usage":{"primary":{"usedPercent":10}}}]"#,
+                &config(),
+                NOW,
+            ),
+            Err(RenderError::InvalidPayload)
+        ));
     }
 }
