@@ -452,6 +452,23 @@ mod tests {
     }
 
     #[test]
+    fn ignores_invalid_records_and_keeps_valid_rows() {
+        let rendered = emit(
+            r#"[
+                {"provider":"codex","usage":{"primary":{"usedPercent":42}}},
+                {"provider":"-evil","usage":{"primary":{"usedPercent":13}}},
+                {"provider":"malformed","usage":{"primary":"invalid"}}
+            ]"#,
+            &RenderConfig::default(),
+            1_700_000_000,
+            options(),
+        );
+        let rows = lines(&rendered);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[1][0], "codex");
+    }
+
+    #[test]
     fn clamps_public_bar_width_and_keeps_markers_bounded() {
         let config = RenderConfig::default();
         let payload = r#"[{"provider":"codex","usage":{"primary":{"usedPercent":25,"resetsAt":"2023-11-14T23:53:20Z","windowMinutes":300}}}]"#;

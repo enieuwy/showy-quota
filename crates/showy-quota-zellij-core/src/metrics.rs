@@ -99,23 +99,22 @@ pub(crate) fn provider_metrics(
     Ok(metrics)
 }
 
-/// Parse the array transport and provider identity contract shared by the
-/// display emitters. Positional windows with no measurement are valid unknown
-/// state; their typed shape is still enforced by serde.
+/// Parse the array transport shared by display emitters. Invalid records are
+/// ignored so one bad provider cannot discard an otherwise usable snapshot;
+/// only transport-level failures are fatal.
 pub(crate) fn parse_display_payload(payload: &[u8]) -> Result<Vec<ProviderRecord>, RenderError> {
     if payload.len() > MAX_USAGE_JSON_BYTES {
         return Err(RenderError::InvalidPayload);
     }
-    let records: Vec<ProviderRecord> =
-        serde_json::from_slice(payload).map_err(|_| RenderError::InvalidPayload)?;
-    if records
-        .iter()
-        .all(|record| valid_provider_id(&record.provider))
-    {
-        Ok(records)
-    } else {
-        Err(RenderError::InvalidPayload)
-    }
+    let value: Value = serde_json::from_slice(payload).map_err(|_| RenderError::InvalidPayload)?;
+    let Value::Array(records) = value else {
+        return Err(RenderError::InvalidPayload);
+    };
+    Ok(records
+        .into_iter()
+        .filter_map(|record| serde_json::from_value::<ProviderRecord>(record).ok())
+        .filter(|record| valid_provider_id(&record.provider))
+        .collect())
 }
 
 fn provider_metric(
@@ -650,12 +649,11 @@ mod tests {
     }
 
     #[test]
-    fn rejects_non_array_and_wrongly_typed_windows() {
+    fn rejects_non_array_payloads() {
         for payload in [
             br#"{}"#.as_slice(),
             br#""quota""#.as_slice(),
             br#"42"#.as_slice(),
-            br#"[{"provider":"codex","usage":{"primary":"invalid"}}]"#.as_slice(),
         ] {
             assert!(matches!(
                 emit_provider_metrics(payload, &config(), NOW),
@@ -665,14 +663,17 @@ mod tests {
     }
 
     #[test]
-    fn rejects_invalid_provider_ids() {
-        assert!(matches!(
-            emit_provider_metrics(
-                br#"[{"provider":".","usage":{"primary":{"usedPercent":10}}}]"#,
-                &config(),
-                NOW,
-            ),
-            Err(RenderError::InvalidPayload)
-        ));
+    fn ignores_invalid_records_and_keeps_valid_providers() {
+        let value = emit_value(
+            br#"[
+                {"provider":"codex","usage":{"primary":{"usedPercent":42}}},
+                {"provider":".","usage":{"primary":{"usedPercent":10}}},
+                {"provider":"..","error":"bad"},
+                {"provider":"-evil","usage":{"primary":{"usedPercent":13}}},
+                {"provider":"malformed","usage":{"primary":"invalid"}}
+            ]"#,
+        );
+        assert_eq!(value.as_array().expect("array").len(), 1);
+        assert_eq!(value[0]["provider"], "codex");
     }
 }
