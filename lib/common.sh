@@ -957,13 +957,15 @@ showy_quota_json_valid() {
             . == null or type == "boolean";
         def optional_number:
             . == null or type == "number";
+        def optional_integer:
+            . == null or (type == "number" and floor == .);
         def valid_usage_window:
             type == "object"
             and (.usedPercent | optional_number)
             and (.remainingPercent | optional_number)
             and (.resetsAt | optional_string)
             and (.resetDescription | optional_string)
-            and (.windowMinutes | optional_number);
+            and (.windowMinutes | optional_integer);
         type == "array" and
         all(.[]; type == "object"
             and (.provider | valid_provider_id)

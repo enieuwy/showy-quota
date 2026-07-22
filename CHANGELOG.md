@@ -80,12 +80,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   prompt colors match multiplexer status lines even at the defaults (40/15).
 - Inverted `good_min_remaining` < `warn_min_remaining` thresholds are swapped in
   both config loaders so the Warn band stays reachable.
-- The native renderer errors (nonzero) on structurally invalid usage payloads
-  (non-array JSON, wrong field types, oversize input) instead of emitting empty
-  metrics or a header-only SketchyBar frame; null/absent measurements remain
-  valid unknown state. The shared 5 MiB cap now bounds every ingest path
-  (stdin, file, and cache reads), and `--provider` filtering applies to the
-  `metrics` and `sketchybar` emit modes, not just `prompt`.
+- The native renderer errors (nonzero) on transport-level invalid usage
+  payloads (non-array JSON, unparseable JSON, oversize input) instead of
+  emitting empty metrics or a header-only SketchyBar frame; records with
+  invalid provider ids or malformed fields are dropped per-record like the
+  strip renderer, and null/absent measurements remain valid unknown state.
+  The shared 5 MiB cap now bounds every ingest path (stdin, file, and cache
+  reads), and `--provider` filtering applies to the `metrics` and
+  `sketchybar` emit modes, not just `prompt`.
 - `--emit prompt` now considers `extraRateWindows` when picking the worst
   window (excluding `usageKnown: false` extras), so a model-pool window worse
   than every positional window is no longer hidden.

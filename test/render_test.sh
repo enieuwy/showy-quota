@@ -945,6 +945,23 @@ printf '%s\n' \
 run_theme "${theme_replace_xdg}" --set default
 assert_equals "theme set preserves config and coalesces active lines" $'FOO=1\n# SHOWY_QUOTA_THEME=old-comment\nexport SHOWY_QUOTA_THEME=default\nBAR=2' "$(< "${theme_config}")"
 
+theme_orphan_lock_xdg=$(mktemp -d "${TMP}/xdg-theme-orphan-lock.XXXXXX")
+mkdir -p "${theme_orphan_lock_xdg}/showy-quota"
+theme_config="${theme_orphan_lock_xdg}/showy-quota/config.env"
+mkdir -p "${theme_config}.lock"
+touch -t 202001010000 "${theme_config}.lock"
+run_theme "${theme_orphan_lock_xdg}" --set default
+assert_equals "theme set reclaims stale ownerless write lock" "SHOWY_QUOTA_THEME=default" "$(< "${theme_config}")"
+
+theme_fresh_lock_xdg=$(mktemp -d "${TMP}/xdg-theme-fresh-lock.XXXXXX")
+mkdir -p "${theme_fresh_lock_xdg}/showy-quota"
+theme_config="${theme_fresh_lock_xdg}/showy-quota/config.env"
+mkdir -p "${theme_config}.lock"
+printf '%s\n' "$$" > "${theme_config}.lock/owner.$$"
+theme_fresh_lock_rc=0
+run_theme "${theme_fresh_lock_xdg}" --set default 2>/dev/null || theme_fresh_lock_rc=$?
+assert_equals "theme set times out on live-owner write lock" "1" "${theme_fresh_lock_rc}"
+
 theme_unset_xdg=$(mktemp -d "${TMP}/xdg-theme-unset.XXXXXX")
 mkdir -p "${theme_unset_xdg}/showy-quota"
 theme_config="${theme_unset_xdg}/showy-quota/config.env"
@@ -1775,6 +1792,7 @@ validator_case_names=(
     string-extra-usage-known
     numeric-window-resets-at
     string-window-minutes
+    fractional-window-minutes
 )
 validator_case_payloads=(
     '[{"provider":"codex","status":{"indicator":1},"usage":{"primary":{"usedPercent":1}}}]'
@@ -1783,6 +1801,7 @@ validator_case_payloads=(
     '[{"provider":"codex","usage":{"primary":{"usedPercent":1},"extraRateWindows":[{"usageKnown":"false","window":{"usedPercent":1}}]}}]'
     '[{"provider":"codex","usage":{"primary":{"usedPercent":1,"resetsAt":123}}}]'
     '[{"provider":"codex","usage":{"primary":{"usedPercent":1,"windowMinutes":"300"}}}]'
+    '[{"provider":"codex","usage":{"primary":{"usedPercent":1,"windowMinutes":300.5}}}]'
 )
 validator_common_results=()
 validator_fetch_results=()
@@ -1811,8 +1830,8 @@ for validator_case_index in "${!validator_case_names[@]}"; do
         validator_fetch_results+=("publish")
     fi
 done
-assert_equals "json validator rejects serde-incompatible typed fields" "reject,reject,reject,reject,reject,reject" "$(IFS=,; printf '%s' "${validator_common_results[*]}")"
-assert_equals "serve validator rejects serde-incompatible typed fields before publication" "reject,reject,reject,reject,reject,reject" "$(IFS=,; printf '%s' "${validator_fetch_results[*]}")"
+assert_equals "json validator rejects serde-incompatible typed fields" "reject,reject,reject,reject,reject,reject,reject" "$(IFS=,; printf '%s' "${validator_common_results[*]}")"
+assert_equals "serve validator rejects serde-incompatible typed fields before publication" "reject,reject,reject,reject,reject,reject,reject" "$(IFS=,; printf '%s' "${validator_fetch_results[*]}")"
 
 validator_nullable_file="${TMP}/codexbar-nullable-optional-fields.json"
 printf '%s\n' \

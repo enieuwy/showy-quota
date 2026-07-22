@@ -77,6 +77,7 @@ track_temp_file() {
 # recover because its PID-specific marker cannot belong to a later lock holder.
 recover_dead_file_write_lock() {
     local lock_dir="$1" owner_file owner_pid
+    local now mtime
 
     for owner_file in "${lock_dir}"/owner.*; do
         [[ -f "${owner_file}" ]] || continue
@@ -87,6 +88,19 @@ recover_dead_file_write_lock() {
         rmdir -- "${lock_dir}" 2>/dev/null
         return $?
     done
+
+    # A holder that died between mkdir and recording its owner marker leaves
+    # an ownerless lock dir that would otherwise block every future writer.
+    # Reclaim it once it is old enough that a live holder would have written
+    # its marker long ago.
+    now=$(date +%s)
+    if mtime=$(stat -f %m "${lock_dir}" 2>/dev/null) \
+        || mtime=$(stat -c %Y "${lock_dir}" 2>/dev/null); then
+        if (( now - mtime > 30 || mtime - now > 30 )); then
+            rmdir -- "${lock_dir}" 2>/dev/null
+            return $?
+        fi
+    fi
 
     return 1
 }

@@ -118,6 +118,23 @@ showy_quota_touch_mkdir_lock_heartbeat() {
         : > "${heartbeat_file}" 2>/dev/null || true
     fi
 }
+
+# Publication fence: a holder whose mkdir lease was reclaimed (stale
+# heartbeat after the long absolute bound) must not publish a cache
+# generation over the new owner's work. With no held lease (direct callers
+# outside the refresh lock) publication is permitted unchanged.
+showy_quota_refresh_lease_still_owned() {
+    local lock_dir="${SHOWY_QUOTA_HELD_LOCK_DIR:-}" owner_pid=""
+    [[ -n "${lock_dir}" ]] || return 0
+    if [[ -r "${lock_dir}/owner.pid" ]] \
+        && IFS= read -r owner_pid < "${lock_dir}/owner.pid" \
+        && [[ "${owner_pid}" == "$$" ]]
+    then
+        return 0
+    fi
+    showy_quota_log "refresh lease lost (now owned by pid ${owner_pid:-unknown}); skipping publication"
+    return 1
+}
 showy_quota_release_mkdir_lock() {
     if [[ -n "${SHOWY_QUOTA_HELD_LOCK_DIR:-}" ]]; then
         local owner_file="${SHOWY_QUOTA_HELD_LOCK_DIR}/owner.pid"
@@ -1579,13 +1596,15 @@ serve_payload_is_publishable() {
             . == null or type == "boolean";
         def optional_number:
             . == null or type == "number";
+        def optional_integer:
+            . == null or (type == "number" and floor == .);
         def valid_usage_window:
             type == "object"
             and (.usedPercent | optional_number)
             and (.remainingPercent | optional_number)
             and (.resetsAt | optional_string)
             and (.resetDescription | optional_string)
-            and (.windowMinutes | optional_number);
+            and (.windowMinutes | optional_integer);
         type == "array" and
         all(.[]; type == "object"
             and (.provider | valid_provider_id)
@@ -1937,6 +1956,11 @@ publish_cache_payload() {
     if ! printf '%s\n' "${source}" > "${source_tmp}"; then
         rm -f -- "${tmp}" "${source_tmp}"
         showy_quota_log "could not write temporary source file"
+        return 1
+    fi
+
+    if ! showy_quota_refresh_lease_still_owned; then
+        rm -f -- "${tmp}" "${source_tmp}"
         return 1
     fi
 
