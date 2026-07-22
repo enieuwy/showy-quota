@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-07-22
+
 ### Security
 - Config/theme `.env` files are now dot-sourced only when the resolved target is
   a regular file owned by the current user and not writable by group or other
@@ -903,7 +905,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `bin/showy-quota-fetch`: cache dir and files now persist as `0700`/`0600`
   instead of the user's default umask. CodexBar usage JSON stays user-only.
 
-[Unreleased]: https://github.com/enieuwy/showy-quota/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/enieuwy/showy-quota/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/enieuwy/showy-quota/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/enieuwy/showy-quota/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/enieuwy/showy-quota/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/enieuwy/showy-quota/compare/v0.4.0...v0.4.1
