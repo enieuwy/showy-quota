@@ -375,13 +375,24 @@ where
     }
 }
 
+/// Canonical boolean parse shared with the shell (`showy_quota_bool` in
+/// `lib/common.sh`) and `parse_bool` in `crates/showy-quota-zellij/src/main.rs`:
+/// trimmed, case-insensitive `1|true|yes|on` -> true, `0|false|no|off` ->
+/// false, anything else (including unset) -> `default`.
 fn get_bool<F>(get: &F, name: &str, default: bool) -> bool
 where
     F: Fn(&str) -> Option<String>,
 {
-    get(name).map_or(default, |value| {
-        value == "1" || value.eq_ignore_ascii_case("true")
-    })
+    match get(name)
+        .as_deref()
+        .map(str::trim)
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("1") | Some("true") | Some("yes") | Some("on") => true,
+        Some("0") | Some("false") | Some("no") | Some("off") => false,
+        _ => default,
+    }
 }
 
 fn get_i32<F>(get: &F, name: &str, default: i32) -> i32
@@ -685,5 +696,42 @@ mod tests {
         );
         assert_eq!(config.cap_left, "#");
         assert_eq!(config.cap_right, "");
+    }
+
+    #[test]
+    fn get_bool_accepts_canonical_true_and_false_spellings() {
+        let get = |value: &'static str| move |name: &str| (name == "V").then(|| value.to_string());
+
+        for value in ["1", "true", "TRUE", "yes", "YES", "on", " on "] {
+            assert!(
+                get_bool(&get(value), "V", false),
+                "{value:?} should be true"
+            );
+        }
+        for value in ["0", "false", "FALSE", "no", "NO", "off", " off "] {
+            assert!(
+                !get_bool(&get(value), "V", true),
+                "{value:?} should be false"
+            );
+        }
+    }
+
+    #[test]
+    fn get_bool_is_case_and_whitespace_insensitive() {
+        let get = |value: &'static str| move |name: &str| (name == "V").then(|| value.to_string());
+
+        assert!(get_bool(&get("  Yes\t"), "V", false));
+        assert!(!get_bool(&get("\tOFF  "), "V", true));
+    }
+
+    #[test]
+    fn get_bool_falls_back_to_default_on_unrecognized_or_missing_value() {
+        let get = |value: &'static str| move |name: &str| (name == "V").then(|| value.to_string());
+        let missing = |_: &str| None;
+
+        assert!(get_bool(&get("garbage"), "V", true));
+        assert!(!get_bool(&get("garbage"), "V", false));
+        assert!(get_bool(&missing, "V", true));
+        assert!(!get_bool(&missing, "V", false));
     }
 }

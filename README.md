@@ -29,8 +29,8 @@ codexbar serve → http://127.0.0.1:8080/health + /usage
        ├──► showy-quota-zellij.wasm              (standalone Zellij plugin)
        │
        ▼
-bin/showy-quota-fetch     ←  shared cache + source marker + flock + last-known-good
-       │  ~/.cache/showy-quota/usage.json + source
+bin/showy-quota-fetch     ←  shared cache envelope + flock + last-known-good
+       │  ~/.cache/showy-quota/usage.json (envelope: source + providers)
        ├──► bin/showy-quota-state                 (stable provider/layout state JSON)
        ├──► adapters/sketchybar/plugins/showy_quota.sh    (native SketchyBar rows + icons)
        ├──► bin/showy-quota-tmux-bar             (tmux #[…] markup for status-right)

@@ -251,8 +251,32 @@ seed_usage_cache() {
     local cache="$1" fixture="$2" source="${3:-serve}"
     local fixture_file
     fixture_file=$(fixture_path "${fixture}")
-    cp "${fixture_file}" "${cache}/usage.json"
-    printf '%s\n' "${source}" > "${cache}/source"
+    jq -c --arg source "${source}" \
+        '{schema: "showy-quota/cache@1", source: $source, providers: .}' \
+        "${fixture_file}" > "${cache}/usage.json"
+}
+
+# Wrap an ALREADY-SEEDED "${cache}/usage.json" (bare array, e.g. from a plain
+# `cp` fixture copy) into a cache envelope carrying the given source, in
+# place. Mirrors what the real fetcher's single-rename publish produces.
+seed_usage_source() {
+    local cache="$1" source="$2" tmp
+    tmp=$(mktemp "${cache}/usage-seed.XXXXXX")
+    jq -c --arg source "${source}" \
+        '{schema: "showy-quota/cache@1", source: $source, providers: .}' \
+        "${cache}/usage.json" > "${tmp}"
+    mv -- "${tmp}" "${cache}/usage.json"
+}
+
+# Read the `source` field back out of a cache dir's envelope the way tests
+# assert on it: the raw value, not the serve/cli/unknown-normalized one
+# `showy_quota_cache_source` returns. "missing" when there is no usable
+# envelope, distinguishable from any real source value.
+cache_source_value() {
+    local cache="$1"
+    [[ -r "${cache}/usage.json" ]] || { printf 'missing'; return; }
+    jq -r 'if type == "object" and has("source") then .source else "missing" end' \
+        "${cache}/usage.json" 2>/dev/null
 }
 pid_start_epoch() {
     python3 - "$1" <<'PY'
@@ -1035,7 +1059,7 @@ fi
 diag_xdg=$(mktemp -d "${TMP}/xdg-diagnose.XXXXXX")
 diag_cache=$(mk_cache)
 cp "${FIXTURE_DIR}/codexbar-mixed.json" "${diag_cache}/usage.json"
-printf '%s\n' "cli" > "${diag_cache}/source"
+seed_usage_source "${diag_cache}" "cli"
 out=$(
     env \
         PATH="${stub_dir}:${PATH}" \
@@ -1383,7 +1407,7 @@ assert_contains "empty degraded fixture renders trailing CLI marker" "AI idle �
 
 idle_cache=$(mk_cache)
 cp "${FIXTURE_DIR}/codexbar-empty.json" "${idle_cache}/usage.json"
-printf '%s\n' "cli" > "${idle_cache}/source"
+seed_usage_source "${idle_cache}" "cli"
 touch -t 198801010000 "${idle_cache}/usage.json"
 out=$(
     env \
@@ -1415,7 +1439,7 @@ assert_contains "zellij --json stdin renders without fetch" "CL" "${out}"
 ansi_dim=$'\x1b[2m'
 assert_not_contains "zellij --json stdin skips stale dimming" "${ansi_dim}" "${out}"
 
-printf '%s\n' "cli" > "${json_cache}/source"
+printf '{"schema":"showy-quota/cache@1","source":"cli","providers":[]}' > "${json_cache}/usage.json"
 out=$(
     env \
         SHOWY_QUOTA_NO_CONFIG=1 \
@@ -1841,6 +1865,14 @@ printf '%s\n' \
 out=$(run_common_eval 'showy_quota_json_valid "${SHOWY_QUOTA_TEST_FILE}" && printf valid || printf reject' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_TEST_FILE="${validator_nullable_file}")
 assert_equals "json validator accepts null and absent serde optionals" "valid" "${out}"
 
+mixed_validity_file="${TMP}/codexbar-mixed-validity.json"
+printf '%s\n' \
+    '[{"provider":"codex","usage":{"primary":{"usedPercent":1}}},{"provider":"bad/id","usage":{"primary":{"usedPercent":1}}}]' \
+    > "${mixed_validity_file}"
+# shellcheck disable=SC2016  # eval body; $-vars expand in run_common_eval's sub-shell
+out=$(run_common_eval 'showy_quota_json_valid "${SHOWY_QUOTA_TEST_FILE}" && printf valid || printf reject' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_TEST_FILE="${mixed_validity_file}")
+assert_equals "json validator accepts a well-formed record beside a malformed sibling" "valid" "${out}"
+
 # ── state surface ─────────────────────────────────────────────────────
 printf '\ncodexbar state\n'
 
@@ -1904,11 +1936,11 @@ cat > "${state_strict_ids_fixture}" <<'EOF'
 EOF
 state_strict_ids_cache=$(mk_cache)
 cp "${state_strict_ids_fixture}" "${state_strict_ids_cache}/usage.json"
-printf 'cli\n' > "${state_strict_ids_cache}/source"
+seed_usage_source "${state_strict_ids_cache}" "cli"
 state_strict_ids_fetch="${TMP}/state-strict-provider-metrics-fetch"
 cat > "${state_strict_ids_fetch}" <<EOF
 #!/bin/sh
-cat "${state_strict_ids_cache}/usage.json"
+jq -c '.providers // .' "${state_strict_ids_cache}/usage.json"
 EOF
 chmod +x "${state_strict_ids_fetch}"
 state_strict_ids_json=$(
@@ -1930,6 +1962,24 @@ render_metrics_smoke=$(
         "${RENDER_BIN}" --emit metrics --json - < "${FIXTURE_DIR}/codexbar-mixed.json"
 )
 assert_equals "render metrics CLI emits state providerMetrics contract" "array|string|number|true" "$(printf '%s' "${render_metrics_smoke}" | jq -r '[(type), (.[0].provider | type), (.[0].windows.primary.usedPercent | type), (.[0].error == null)] | map(tostring) | join("|")')"
+
+# Rows are a structured transport for surfaces that stack chunks: the band
+# travels in `severity`/`color`, so the text must stay plain unless `--ansi`
+# asks for escapes. A consumer that strips control bytes would otherwise render
+# the escape bodies as literal text.
+render_rows_smoke=$(
+    env SHOWY_QUOTA_NOW_EPOCH=4070908800 SHOWY_QUOTA_FORCE_COLOR=1 \
+        "${RENDER_BIN}" --emit rows --json - < "${FIXTURE_DIR}/codexbar-antigravity-quad.json"
+)
+assert_equals "render rows CLI splits pooled families into one row each" "AGᴳ,AGᶜ" "$(printf '%s' "${render_rows_smoke}" | jq -r 'map(.sigil) | join(",")')"
+assert_equals "render rows CLI reports band and colour per row" "good|25be6a" "$(printf '%s' "${render_rows_smoke}" | jq -r '.[1] | [.severity, .color] | join("|")')"
+assert_equals "render rows CLI text stays plain even when colour is forced" "true" "$(printf '%s' "${render_rows_smoke}" | jq -r 'all(.[]; (.text | contains("\u001b")) | not)')"
+
+render_rows_ansi=$(
+    env SHOWY_QUOTA_NOW_EPOCH=4070908800 \
+        "${RENDER_BIN}" --emit rows --ansi --json - < "${FIXTURE_DIR}/codexbar-antigravity-quad.json"
+)
+assert_equals "render rows CLI honours explicit --ansi" "true" "$(printf '%s' "${render_rows_ansi}" | jq -r 'any(.[]; .text | contains("\u001b"))')"
 
 out=$(run_state codexbar-error-only.json)
 assert_equals "state error-only providers stay renderable-only empty" "[]" "$(printf '%s' "${out}" | jq -c '.providers')"
@@ -2199,16 +2249,17 @@ fi
 
 cache=$(mk_cache)
 cp "${FIXTURE_DIR}/codexbar-mixed.json" "${cache}/usage.json"
-printf '%s\n' "serve" > "${cache}/source"
+seed_usage_source "${cache}" "serve"
 race_fetch="${cache}/race-fetch"
 cat > "${race_fetch}" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 if [[ "${1:-}" == "--cache-only" ]]; then
-    cat "${SHOWY_QUOTA_CACHE_DIR}/usage.json"
+    jq -c '.providers // .' "${SHOWY_QUOTA_CACHE_DIR}/usage.json"
     exit 0
 fi
-printf '%s\n' "cli" > "${SHOWY_QUOTA_CACHE_DIR}/source"
+jq -c '.source = "cli"' "${SHOWY_QUOTA_CACHE_DIR}/usage.json" > "${SHOWY_QUOTA_CACHE_DIR}/usage.json.race-tmp"
+mv -- "${SHOWY_QUOTA_CACHE_DIR}/usage.json.race-tmp" "${SHOWY_QUOTA_CACHE_DIR}/usage.json"
 exit 0
 EOF
 chmod +x "${race_fetch}"
@@ -2759,7 +2810,7 @@ out=$(
     SHOWY_QUOTA_CODEXBAR_SERVE_URL='' \
     "${REPO_ROOT}/bin/showy-quota-fetch" --cache-only 2>/dev/null
 ) || rc=$?
-if (( rc == 0 )) && printf '%s' "${out}" | jq -e 'type == "array" and any(.provider == "codex")' >/dev/null 2>&1 && [[ ! -e "${cache}/source" ]] && [[ ! -e "${cache_only_marker}" ]]; then
+if (( rc == 0 )) && printf '%s' "${out}" | jq -e 'type == "array" and any(.provider == "codex")' >/dev/null 2>&1 && [[ ! -e "${cache_only_marker}" ]]; then
     ok "fetcher cache-only emits valid cache without refreshing"
 else
     fail "fetcher cache-only emits valid cache without refreshing" "rc=${rc}; out=${out}"
@@ -2862,7 +2913,7 @@ if (( rc == 0 )) && printf '%s' "${out}" | jq -e 'type == "array" and any(.provi
 else
     fail "fetcher reads codexbar serve usage endpoint" "rc=${rc}; out=${out}"
 fi
-assert_equals "fetcher records serve cache source" "serve" "$(< "${cache}/source")"
+assert_equals "fetcher records serve cache source" "serve" "$(cache_source_value "${cache}")"
 assert_equals "fetcher uses production-safe default usage probe timeout" "30" "$(< "${cache}/curl-max-time")"
 
 # A pathological serve timeout is clamped so curl --max-time stays bounded.
@@ -3124,7 +3175,7 @@ out=$(
     "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
 ) || rc=$?
 SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_CACHE_DIR="${cache}" SHOWY_QUOTA_CODEXBAR_BIN="${managed_bin_dir}/codexbar" SHOWY_QUOTA_CODEXBAR_SERVE_URL="${managed_url}" "${REPO_ROOT}/bin/showy-quota-fetch" --stop-serve >/dev/null 2>/dev/null || true
-if (( rc == 0 )) && printf '%s' "${out}" | jq -e 'type == "array" and any(.provider == "codex")' >/dev/null 2>&1 && [[ "$(< "${cache}/source")" == "serve" ]]; then
+if (( rc == 0 )) && printf '%s' "${out}" | jq -e 'type == "array" and any(.provider == "codex")' >/dev/null 2>&1 && [[ "$(cache_source_value "${cache}")" == "serve" ]]; then
     ok "fetcher auto-starts managed codexbar serve before CLI fallback"
 else
     fail "fetcher auto-starts managed codexbar serve before CLI fallback" "rc=${rc}; out=${out}"
@@ -3204,7 +3255,7 @@ out=$(
     "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
 ) || rc=$?
 SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_CACHE_DIR="${cache}" SHOWY_QUOTA_CODEXBAR_BIN="${managed_bin_dir}/codexbar" SHOWY_QUOTA_CODEXBAR_SERVE_URL="${managed_url}" "${REPO_ROOT}/bin/showy-quota-fetch" --stop-serve >/dev/null 2>/dev/null || true
-if (( rc == 0 )) && [[ "$(< "${managed_count_file}")" == "2" ]] && printf '%s' "${out}" | jq -e 'type == "array" and any(.provider == "codex")' >/dev/null 2>&1 && [[ "$(< "${cache}/source")" == "serve" ]]; then
+if (( rc == 0 )) && [[ "$(< "${managed_count_file}")" == "2" ]] && printf '%s' "${out}" | jq -e 'type == "array" and any(.provider == "codex")' >/dev/null 2>&1 && [[ "$(cache_source_value "${cache}")" == "serve" ]]; then
     ok "fetcher restarts managed serve when health is OK but usage is not publishable"
 else
     count_value="missing"
@@ -3236,12 +3287,12 @@ out=$(
     "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
 ) || rc=$?
 SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_CACHE_DIR="${cache}" SHOWY_QUOTA_CODEXBAR_BIN="${managed_bin_dir}/codexbar" SHOWY_QUOTA_CODEXBAR_SERVE_URL="${managed_url}" "${REPO_ROOT}/bin/showy-quota-fetch" --stop-serve >/dev/null 2>/dev/null || true
-if [[ "$(< "${managed_count_file}")" == "1" ]] && [[ "$(< "${cache}/source")" == "cli" ]] && printf '%s' "${out}" | jq -e 'type == "array" and any(.provider == "claude")' >/dev/null 2>&1; then
+if [[ "$(< "${managed_count_file}")" == "1" ]] && [[ "$(cache_source_value "${cache}")" == "cli" ]] && printf '%s' "${out}" | jq -e 'type == "array" and any(.provider == "claude")' >/dev/null 2>&1; then
     ok "fetcher does not restart managed serve when usage times out"
 else
     count_value="missing"
     [[ -r "${managed_count_file}" ]] && count_value=$(< "${managed_count_file}")
-    fail "fetcher does not restart managed serve when usage times out" "rc=${rc}; out=${out}; count=${count_value}; source=$(cat "${cache}/source" 2>/dev/null)"
+    fail "fetcher does not restart managed serve when usage times out" "rc=${rc}; out=${out}; count=${count_value}; source=$(cache_source_value "${cache}")"
 fi
 
 
@@ -3410,7 +3461,7 @@ version_gate_fetch "${cache}" "${managed_url}" "${count_file}" 9.9.9 9.9.9 1 --r
 rc=0
 out=$(version_gate_fetch "${cache}" "${managed_url}" "${count_file}" 9.9.9 9.9.9 1 --refresh 2>/dev/null) || rc=$?
 count_value="missing"; [[ -r "${count_file}" ]] && count_value=$(< "${count_file}")
-source_value=$(cat "${cache}/source" 2>/dev/null || true)
+source_value=$(cache_source_value "${cache}")
 version_gate_stop "${cache}" "${managed_url}"
 if (( rc == 0 )) && [[ "${count_value}" == "1" ]] && [[ "${source_value}" == "serve" ]] \
     && printf '%s' "${out}" | jq -e 'type == "array" and any(.provider == "codex")' >/dev/null 2>&1; then
@@ -3430,7 +3481,7 @@ version_gate_fetch "${cache}" "${managed_url}" "${count_file}" 1.0.0 1.0.0 1 --r
 rc=0
 out=$(version_gate_fetch "${cache}" "${managed_url}" "${count_file}" 2.0.0 2.0.0 1 --refresh 2>/dev/null) || rc=$?
 count_value="missing"; [[ -r "${count_file}" ]] && count_value=$(< "${count_file}")
-source_value=$(cat "${cache}/source" 2>/dev/null || true)
+source_value=$(cache_source_value "${cache}")
 version_gate_stop "${cache}" "${managed_url}"
 if (( rc == 0 )) && [[ "${count_value}" == "2" ]] && [[ "${source_value}" == "serve" ]] \
     && printf '%s' "${out}" | jq -e 'type == "array" and any(.provider == "codex")' >/dev/null 2>&1; then
@@ -3450,7 +3501,7 @@ version_gate_fetch "${cache}" "${managed_url}" "${count_file}" 1.0.0 1.0.0 1 --r
 rc=0
 out=$(version_gate_fetch "${cache}" "${managed_url}" "${count_file}" 1.0.0 2.0.0 0 --refresh 2>/dev/null) || rc=$?
 count_value="missing"; [[ -r "${count_file}" ]] && count_value=$(< "${count_file}")
-source_value=$(cat "${cache}/source" 2>/dev/null || true)
+source_value=$(cache_source_value "${cache}")
 version_gate_stop "${cache}" "${managed_url}"
 if (( rc == 0 )) && [[ "${count_value}" == "1" ]] && [[ "${source_value}" == "serve" ]] \
     && printf '%s' "${out}" | jq -e 'type == "array" and any(.provider == "codex")' >/dev/null 2>&1; then
@@ -3471,7 +3522,7 @@ version_gate_fetch "${cache}" "${managed_url}" "${count_file}" "CodexBar 9.9.9" 
 rc=0
 out=$(version_gate_fetch "${cache}" "${managed_url}" "${count_file}" "CodexBar 9.9.9" 9.9.9 1 --refresh 2>/dev/null) || rc=$?
 count_value="missing"; [[ -r "${count_file}" ]] && count_value=$(< "${count_file}")
-source_value=$(cat "${cache}/source" 2>/dev/null || true)
+source_value=$(cache_source_value "${cache}")
 version_gate_stop "${cache}" "${managed_url}"
 if (( rc == 0 )) && [[ "${count_value}" == "1" ]] && [[ "${source_value}" == "serve" ]] \
     && printf '%s' "${out}" | jq -e 'type == "array" and any(.provider == "codex")' >/dev/null 2>&1; then
@@ -3607,7 +3658,7 @@ argv0_gate_fetch "${cache}" "${managed_url}" "${count_file}" 1.1.1 1.1.1 --refre
 rc=0
 out=$(argv0_gate_fetch "${cache}" "${managed_url}" "${count_file}" 2.2.2 2.2.2 --refresh 2>/dev/null) || rc=$?
 count_value="missing"; [[ -r "${count_file}" ]] && count_value=$(< "${count_file}")
-source_value=$(cat "${cache}/source" 2>/dev/null || true)
+source_value=$(cache_source_value "${cache}")
 SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_CACHE_DIR="${cache}" SHOWY_QUOTA_CODEXBAR_BIN="${argv0_bin_dir}/codexbar" SHOWY_QUOTA_CODEXBAR_SERVE_URL="${managed_url}" "${REPO_ROOT}/bin/showy-quota-fetch" --stop-serve >/dev/null 2>/dev/null || true
 if (( rc == 0 )) && [[ "${count_value}" == "2" ]] && [[ "${source_value}" == "serve" ]] \
     && printf '%s' "${out}" | jq -e 'type == "array" and any(.provider == "codex")' >/dev/null 2>&1; then
@@ -3677,7 +3728,7 @@ fi
 
 cache=$(mk_cache)
 cp "${FIXTURE_DIR}/codexbar-mixed.json" "${cache}/usage.json"
-printf '%s\n' "serve" > "${cache}/source"
+seed_usage_source "${cache}" "serve"
 python3 - "${cache}/usage.json" <<'PY'
 import os
 import sys
@@ -3698,7 +3749,7 @@ out=$(
     "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
 ) || rc=$?
 source_value="missing"
-[[ -r "${cache}/source" ]] && source_value="$(< "${cache}/source")"
+source_value="$(cache_source_value "${cache}")"
 if (( rc == 0 )) \
     && [[ "${source_value}" == "serve" ]] \
     && printf '%s' "${out}" | jq -e 'type == "array" and any(.provider == "cursor")' >/dev/null 2>&1
@@ -3710,7 +3761,7 @@ fi
 
 cache=$(mk_cache)
 cp "${FIXTURE_DIR}/codexbar-mixed.json" "${cache}/usage.json"
-printf '%s\n' "serve" > "${cache}/source"
+seed_usage_source "${cache}" "serve"
 python3 - "${cache}/usage.json" <<'PY'
 import os
 import sys
@@ -3731,7 +3782,7 @@ out=$(
     "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
 ) || rc=$?
 source_value="missing"
-[[ -r "${cache}/source" ]] && source_value="$(< "${cache}/source")"
+source_value="$(cache_source_value "${cache}")"
 failure_count="missing"
 [[ -r "${cache}/serve-failed-count" ]] && failure_count="$(< "${cache}/serve-failed-count")"
 if (( rc == 0 )) \
@@ -3746,7 +3797,7 @@ fi
 
 cache=$(mk_cache)
 cp "${FIXTURE_DIR}/codexbar-mixed.json" "${cache}/usage.json"
-printf '%s\n' "serve" > "${cache}/source"
+seed_usage_source "${cache}" "serve"
 printf '%s\n' "1299" > "${cache}/serve-failed-at"
 printf '%s\n' "1" > "${cache}/serve-failed-count"
 python3 - "${cache}/usage.json" <<'PY'
@@ -3770,7 +3821,7 @@ out=$(
     "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
 ) || rc=$?
 source_value="missing"
-[[ -r "${cache}/source" ]] && source_value="$(< "${cache}/source")"
+source_value="$(cache_source_value "${cache}")"
 if (( rc == 0 )) \
     && [[ "${source_value}" == "serve" ]] \
     && [[ ! -e "${cache}/serve-failed-count" ]] \
@@ -3783,7 +3834,7 @@ fi
 
 cache=$(mk_cache)
 cp "${FIXTURE_DIR}/codexbar-mixed.json" "${cache}/usage.json"
-printf '%s\n' "serve" > "${cache}/source"
+seed_usage_source "${cache}" "serve"
 printf '%s\n' "2" > "${cache}/serve-failed-count"
 python3 - "${cache}/usage.json" <<'PY'
 import os
@@ -3805,7 +3856,7 @@ out=$(
     "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
 ) || rc=$?
 source_value="missing"
-[[ -r "${cache}/source" ]] && source_value="$(< "${cache}/source")"
+source_value="$(cache_source_value "${cache}")"
 failure_count="missing"
 [[ -r "${cache}/serve-failed-count" ]] && failure_count="$(< "${cache}/serve-failed-count")"
 if (( rc == 0 )) \
@@ -3820,7 +3871,7 @@ fi
 
 cache=$(mk_cache)
 cp "${FIXTURE_DIR}/codexbar-mixed.json" "${cache}/usage.json"
-printf '%s\n' "serve" > "${cache}/source"
+seed_usage_source "${cache}" "serve"
 printf '%s\n' "2" > "${cache}/serve-failed-count"
 python3 - "${cache}/usage.json" <<'PY'
 import os
@@ -3842,7 +3893,7 @@ out=$(
     "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
 ) || rc=$?
 source_value="missing"
-[[ -r "${cache}/source" ]] && source_value="$(< "${cache}/source")"
+source_value="$(cache_source_value "${cache}")"
 failure_count="missing"
 [[ -r "${cache}/serve-failed-count" ]] && failure_count="$(< "${cache}/serve-failed-count")"
 if (( rc == 0 )) \
@@ -3930,7 +3981,7 @@ if (( rc == 0 )) && printf '%s' "${out}" | jq -e 'type == "array" and any(.provi
 else
     fail "fetcher falls back when serve returns non-array JSON" "rc=${rc}; out=${out}"
 fi
-assert_equals "fetcher records CLI degraded cache source" "cli" "$(< "${cache}/source")"
+assert_equals "fetcher records CLI degraded cache source" "cli" "$(cache_source_value "${cache}")"
 
 cache=$(mk_cache)
 rc=0
@@ -4394,7 +4445,7 @@ out=$(
     SHOWY_QUOTA_CODEXBAR_SERVE_URL='' \
     "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
 ) || rc=$?
-if (( rc == 0 )) && [[ "${out}" == "[]" ]] && [[ "$(< "${cache}/source")" == "cli" ]]; then
+if (( rc == 0 )) && [[ "${out}" == "[]" ]] && [[ "$(cache_source_value "${cache}")" == "cli" ]]; then
     ok "fetcher publishes empty cache when codexbar reports no enabled providers"
 else
     fail "fetcher publishes empty cache when codexbar reports no enabled providers" "rc=${rc}; out=${out}"
@@ -4402,7 +4453,7 @@ fi
 
 cache=$(mk_cache)
 cp "${FIXTURE_DIR}/codexbar-mixed.json" "${cache}/usage.json"
-printf '%s\n' "cli" > "${cache}/source"
+seed_usage_source "${cache}" "cli"
 printf '%s\n' "$(date +%s)" > "${cache}/cli-failed-at"
 rc=0
 out=$(
@@ -4414,7 +4465,7 @@ out=$(
     SHOWY_QUOTA_CODEXBAR_CLI_FAILURE_BACKOFF_SECONDS=3600 \
     "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
 ) || rc=$?
-if (( rc == 0 )) && [[ "${out}" == "[]" ]] && [[ "$(< "${cache}/source")" == "cli" ]] && ! [[ -e "${cache}/cli-failed-at" ]]; then
+if (( rc == 0 )) && [[ "${out}" == "[]" ]] && [[ "$(cache_source_value "${cache}")" == "cli" ]] && ! [[ -e "${cache}/cli-failed-at" ]]; then
     ok "fetcher publishes empty inventory before CLI backoff"
 else
     fail "fetcher publishes empty inventory before CLI backoff" "rc=${rc}; out=${out}"
@@ -4434,7 +4485,7 @@ out=$(
     SHOWY_QUOTA_TEST_SERVE_FIXTURE="${FIXTURE_DIR}/codexbar-mixed.json" \
     "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
 ) || rc=$?
-if (( rc == 0 )) && [[ "${out}" == "[]" ]] && [[ "$(< "${cache}/source")" == "cli" ]]; then
+if (( rc == 0 )) && [[ "${out}" == "[]" ]] && [[ "$(cache_source_value "${cache}")" == "cli" ]]; then
     ok "fetcher rejects stale serve payload when inventory is empty"
 else
     fail "fetcher rejects stale serve payload when inventory is empty" "rc=${rc}; out=${out}"
@@ -4454,7 +4505,7 @@ out=$(
     SHOWY_QUOTA_TEST_SERVE_FIXTURE="${FIXTURE_DIR}/codexbar-empty.json" \
     "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
 ) || rc=$?
-if (( rc == 0 )) && [[ "${out}" == "[]" ]] && [[ "$(< "${cache}/source")" == "cli" ]]; then
+if (( rc == 0 )) && [[ "${out}" == "[]" ]] && [[ "$(cache_source_value "${cache}")" == "cli" ]]; then
     ok "fetcher rejects empty serve payload when inventory is empty"
 else
     fail "fetcher rejects empty serve payload when inventory is empty" "rc=${rc}; out=${out}"
@@ -4474,7 +4525,7 @@ out=$(
     SHOWY_QUOTA_TEST_SERVE_FIXTURE="${FIXTURE_DIR}/codexbar-non-array.json" \
     "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
 ) || rc=$?
-if (( rc == 0 )) && [[ "${out}" == "[]" ]] && [[ "$(< "${cache}/source")" == "cli" ]]; then
+if (( rc == 0 )) && [[ "${out}" == "[]" ]] && [[ "$(cache_source_value "${cache}")" == "cli" ]]; then
     ok "fetcher rejects invalid serve payload when inventory is empty"
 else
     fail "fetcher rejects invalid serve payload when inventory is empty" "rc=${rc}; out=${out}"
@@ -4494,7 +4545,7 @@ out=$(
     SHOWY_QUOTA_TEST_SERVE_FIXTURE="${FIXTURE_DIR}/codexbar-mixed.json" \
     "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
 ) || rc=$?
-if (( rc == 0 )) && [[ "${out}" == "[]" ]] && [[ "$(< "${cache}/source")" == "cli" ]]; then
+if (( rc == 0 )) && [[ "${out}" == "[]" ]] && [[ "$(cache_source_value "${cache}")" == "cli" ]]; then
     ok "fetcher skips unreachable serve probe when inventory is empty"
 else
     fail "fetcher skips unreachable serve probe when inventory is empty" "rc=${rc}; out=${out}"
@@ -5383,7 +5434,7 @@ run_guard() {
     local fixture="$1"; shift
     local cache; cache=$(mk_cache)
     cp "$(fixture_path "${fixture}")" "${cache}/usage.json"
-    printf 'cli\n' > "${cache}/source"
+    seed_usage_source "${cache}" "cli"
     env \
         SHOWY_QUOTA_NO_CONFIG=1 \
         SHOWY_QUOTA_MANAGE_SERVE=0 \
@@ -5463,7 +5514,7 @@ assert_equals "guard --wait-max 0 immediate breach exits 1" "1" "${rc}"
 # the fetch cannot refresh, so the stale cache is what gets evaluated.)
 guard_stale_cache=$(mk_cache)
 cp "${FIXTURE_DIR}/codexbar-mixed.json" "${guard_stale_cache}/usage.json"
-printf 'cli\n' > "${guard_stale_cache}/source"
+seed_usage_source "${guard_stale_cache}" "cli"
 touch -t 198801010000 "${guard_stale_cache}/usage.json"
 rc=0
 out=$(
@@ -5593,7 +5644,7 @@ printf '\nstate --no-fetch\n'
 
 state_nf_cache=$(mk_cache)
 cp "${FIXTURE_DIR}/codexbar-mixed.json" "${state_nf_cache}/usage.json"
-printf 'cli\n' > "${state_nf_cache}/source"
+seed_usage_source "${state_nf_cache}" "cli"
 touch -t 198801010000 "${state_nf_cache}/usage.json"
 state_nf_marker="${TMP}/state-no-fetch.marker"
 state_nf_stub="${TMP}/state-codexbar-stub"
@@ -5633,7 +5684,7 @@ STATUSLINE_BIN="${REPO_ROOT}/adapters/agent-cli/showy-quota-statusline"
 run_statusline() {
     local cache; cache=$(mk_cache)
     cp "${FIXTURE_DIR}/codexbar-mixed.json" "${cache}/usage.json"
-    printf 'cli\n' > "${cache}/source"
+    seed_usage_source "${cache}" "cli"
     printf '%s' '{"session_id":"showy-quota-test"}' | env \
         SHOWY_QUOTA_NO_CONFIG=1 \
         SHOWY_QUOTA_MANAGE_SERVE=0 \
@@ -5695,6 +5746,304 @@ rc=0
 out=$(printf '%s' '{}' | env -i PATH="/usr/bin:/bin" SHOWY_QUOTA_BAR_BIN=/nonexistent "${statusline_iso_dir}/showy-quota-statusline") || rc=$?
 assert_equals "statusline missing bar exits 0" "0" "${rc}"
 assert_equals "statusline missing bar prints the neutral segment" "AI ?" "${out}"
+
+# ── statusline forwards argv (showy-quota-5a0c988086e20528 / showy-quota-68a579f4c1af8889) ──
+# The wrapper's final `exec` previously called the bar binary with a fixed,
+# empty argv, so flags passed to the statusline adapter — `-h`/`--help`
+# included — were silently swallowed instead of reaching the renderer.
+# `exec "${BAR_BIN}" "$@"` must forward every argument through untouched.
+printf '\nstatusline argv forwarding\n'
+
+rc=0
+out=$(printf '%s' '{}' | env SHOWY_QUOTA_NO_CONFIG=1 "${STATUSLINE_BIN}" --help) || rc=$?
+assert_equals "statusline --help exits 0 through the wrapper" "0" "${rc}"
+assert_contains "statusline --help forwards through to the renderer's usage text" "Usage: showy-quota-zellij-bar" "${out}"
+
+# ── guard --wait-max never exceeds the caller's budget (showy-quota-b0578f246f2cb64b) ──
+# The wait branch previously slept (secondsUntilReset + 30) whenever that
+# fell inside the gate (secondsUntilReset <= wait_max), so a near-immediate
+# reset next to a small --wait-max could overrun the caller's stated budget
+# by up to 30s. Pin a fixture whose only window resets a few seconds from
+# now (minutesUntilReset floors to 0 either way) and assert the full guard
+# invocation — forced refresh, retry, and all — completes inside the budget
+# plus a small process-overhead allowance, well under the old 30s overrun.
+# run_with_test_timeout bounds the case so a misbehaving branch cannot hang.
+printf '\nguard --wait-max budget\n'
+
+wait_max_reset_at=$(python3 -c '
+import datetime
+now = datetime.datetime.now(datetime.timezone.utc)
+print((now + datetime.timedelta(seconds=20)).strftime("%Y-%m-%dT%H:%M:%SZ"))
+')
+
+wait_max_fixture="${TMP}/wait-max-budget.json"
+cat > "${wait_max_fixture}" <<JSON
+[
+  {
+    "provider": "waitmax",
+    "source": "api",
+    "usage": {
+      "primary":   { "usedPercent": 100, "windowMinutes": 300, "resetsAt": "${wait_max_reset_at}" },
+      "secondary": null,
+      "tertiary":  null
+    }
+  }
+]
+JSON
+
+wait_max_cache=$(mk_cache)
+cp "${wait_max_fixture}" "${wait_max_cache}/usage.json"
+seed_usage_source "${wait_max_cache}" "cli"
+
+wait_max_budget=5
+wait_max_start=$(date +%s)
+rc=0
+out=$(
+    run_with_test_timeout 20 env \
+        SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_MANAGE_SERVE=0 \
+        SHOWY_QUOTA_CACHE_DIR="${wait_max_cache}" \
+        SHOWY_QUOTA_CODEXBAR_BIN="${TMP}/no-such-codexbar-wait-max" \
+        SHOWY_QUOTA_CODEXBAR_SERVE_URL='' \
+        SHOWY_QUOTA_REFRESH_SECONDS=9999999999 \
+        "${REPO_ROOT}/bin/showy-quota" guard --provider waitmax --window primary \
+            --min-remaining 10 --wait-max "${wait_max_budget}" 2>&1
+) || rc=$?
+wait_max_elapsed=$(( $(date +%s) - wait_max_start ))
+
+assert_equals "guard --wait-max budget run breaches again after the retry (no hang/crash)" "1" "${rc}"
+if (( wait_max_elapsed <= wait_max_budget + 5 )); then
+    ok "guard --wait-max ${wait_max_budget} stays within budget (elapsed ${wait_max_elapsed}s, old grace would have taken ~30s)"
+else
+    fail "guard --wait-max ${wait_max_budget} stays within budget" "elapsed ${wait_max_elapsed}s exceeds budget+overhead; out=${out}"
+fi
+
+# ── canonical boolean parsing (showy_quota_bool) ────────────────────────
+printf '\ncanonical boolean parsing\n'
+
+bool_true_values=("true" "TRUE" " yes " "on" "1")
+bool_true_results=()
+for bool_value in "${bool_true_values[@]}"; do
+    # shellcheck disable=SC2016  # eval body; $-vars expand in run_common_eval's sub-shell
+    bool_true_results+=("$(run_common_eval 'showy_quota_bool "${SHOWY_QUOTA_TEST_VALUE}" 0 && printf true || printf false' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_TEST_VALUE="${bool_value}")")
+done
+assert_equals "showy_quota_bool recognizes true spellings" "true,true,true,true,true" "$(IFS=,; printf '%s' "${bool_true_results[*]}")"
+
+bool_false_values=("false" "no" "off" "0")
+bool_false_results=()
+for bool_value in "${bool_false_values[@]}"; do
+    # shellcheck disable=SC2016  # eval body; $-vars expand in run_common_eval's sub-shell
+    bool_false_results+=("$(run_common_eval 'showy_quota_bool "${SHOWY_QUOTA_TEST_VALUE}" 1 && printf true || printf false' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_TEST_VALUE="${bool_value}")")
+done
+assert_equals "showy_quota_bool recognizes false spellings" "false,false,false,false" "$(IFS=,; printf '%s' "${bool_false_results[*]}")"
+
+# shellcheck disable=SC2016  # eval body; $-vars expand in run_common_eval's sub-shell
+out=$(run_common_eval 'showy_quota_bool "${SHOWY_QUOTA_TEST_VALUE}" 1 && printf true || printf false' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_TEST_VALUE=)
+assert_equals "showy_quota_bool falls back to default=true on empty value" "true" "${out}"
+# shellcheck disable=SC2016  # eval body; $-vars expand in run_common_eval's sub-shell
+out=$(run_common_eval 'showy_quota_bool "${SHOWY_QUOTA_TEST_VALUE}" 0 && printf true || printf false' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_TEST_VALUE=)
+assert_equals "showy_quota_bool falls back to default=false on empty value" "false" "${out}"
+# shellcheck disable=SC2016  # eval body; $-vars expand in run_common_eval's sub-shell
+out=$(run_common_eval 'showy_quota_bool "${SHOWY_QUOTA_TEST_VALUE}" 1 && printf true || printf false' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_TEST_VALUE=garbage)
+assert_equals "showy_quota_bool falls back to default=true on garbage" "true" "${out}"
+# shellcheck disable=SC2016  # eval body; $-vars expand in run_common_eval's sub-shell
+out=$(run_common_eval 'showy_quota_bool "${SHOWY_QUOTA_TEST_VALUE}" 0 && printf true || printf false' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_TEST_VALUE=garbage)
+assert_equals "showy_quota_bool falls back to default=false on garbage" "false" "${out}"
+
+# ── provider id length parity (fetcher validation path) ─────────────────
+printf '\nprovider id length parity\n'
+
+provider_id_64=$(printf '%64s' '' | tr ' ' 'p')
+provider_id_65=$(printf '%65s' '' | tr ' ' 'p')
+# shellcheck disable=SC2016  # eval body; $-vars expand in run_common_eval's sub-shell
+out=$(run_common_eval 'showy_quota_valid_provider_id "${SHOWY_QUOTA_TEST_ID}" && printf valid || printf reject' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_TEST_ID="${provider_id_64}")
+assert_equals "64-char provider id accepted by the shared fetcher validator" "valid" "${out}"
+# shellcheck disable=SC2016  # eval body; $-vars expand in run_common_eval's sub-shell
+out=$(run_common_eval 'showy_quota_valid_provider_id "${SHOWY_QUOTA_TEST_ID}" && printf valid || printf reject' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_TEST_ID="${provider_id_65}")
+assert_equals "65-char provider id rejected by the shared fetcher validator" "reject" "${out}"
+
+# ── malformed palette hex degrades instead of dying (showy-quota-00685b1ec34e8659) ──
+# showy_quota_primary_palette/dim_palette/palette previously normalized their
+# hex inputs with the FATAL showy_quota_normalize_hex, so one bad
+# SHOWY_QUOTA_PALETTE_* override killed every shell render. They now degrade
+# to that knob's documented default (warning to stderr) and exit 0.
+printf '\nmalformed palette hex degrades instead of dying\n'
+
+hex_fallback_err="${TMP}/hex-fallback.err"
+
+rc=0
+out=$(run_common_eval 'showy_quota_primary_palette good' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_PALETTE_PRIMARY_GOOD=nothex 2>"${hex_fallback_err}") || rc=$?
+assert_equals "malformed primary override exits 0 instead of dying" "0" "${rc}"
+assert_equals "malformed primary override degrades to the documented default" "25be6a" "${out}"
+assert_contains "malformed primary override warns to stderr" "invalid palette hex" "$(cat "${hex_fallback_err}")"
+
+rc=0
+out=$(run_common_eval 'showy_quota_dim_palette good' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_PALETTE_PRIMARY_GOOD=nothex 2>"${hex_fallback_err}") || rc=$?
+assert_equals "malformed primary feeding dim palette exits 0 instead of dying" "0" "${rc}"
+assert_equals "malformed primary feeding dim palette degrades before scale_hex" "14683a" "${out}"
+assert_contains "malformed primary feeding dim palette warns to stderr" "invalid palette hex" "$(cat "${hex_fallback_err}")"
+
+rc=0
+out=$(run_common_eval 'showy_quota_dim_palette good' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_PALETTE_DIM_GOOD=nothex 2>"${hex_fallback_err}") || rc=$?
+assert_equals "malformed dim override exits 0 instead of dying" "0" "${rc}"
+assert_equals "malformed dim override degrades to the unset-override computed scale" "14683a" "${out}"
+assert_contains "malformed dim override warns to stderr" "invalid palette hex" "$(cat "${hex_fallback_err}")"
+
+rc=0
+out=$(run_common_eval 'showy_quota_palette bg' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_PALETTE_BG=nothex 2>"${hex_fallback_err}") || rc=$?
+assert_equals "malformed global palette token exits 0 instead of dying" "0" "${rc}"
+assert_equals "malformed global palette token degrades to its documented default" "161616" "${out}"
+assert_contains "malformed global palette token warns to stderr" "invalid palette hex" "$(cat "${hex_fallback_err}")"
+
+# shellcheck disable=SC2016  # eval body; $-vars expand in run_common_eval's sub-shell
+rc=0
+out=$(run_common_eval 'showy_quota_primary_palette good; showy_quota_primary_palette good' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_PALETTE_PRIMARY_GOOD=nothex 2>"${hex_fallback_err}") || rc=$?
+assert_equals "malformed primary override fallback is memoised across repeated calls" "25be6a25be6a" "${out}"
+assert_equals "malformed primary override warns only once (memoisation)" "1" "$(grep -c "invalid palette hex" "${hex_fallback_err}")"
+
+# A full render depends on showy_quota_window_color (the shared severity/dim
+# color lookup every renderer calls) to compute a row's color; previously a
+# malformed override there hard-killed the render (exit 1) instead of
+# degrading. Exercise it directly, unwrapped, exactly as production callers
+# invoke it in `set -euo pipefail` scripts.
+rc=0
+out=$(run_common_eval 'showy_quota_window_color 50 0' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_PALETTE_PRIMARY_GOOD=nothex 2>"${hex_fallback_err}") || rc=$?
+assert_equals "full render color lookup survives a malformed palette override (previously exit 1)" "0" "${rc}"
+assert_equals "full render color lookup still returns the documented default" "25be6a" "${out}"
+
+# The real SketchyBar plugin renders end-to-end with the same malformed
+# override in its environment, proving the fix holds for a production
+# renderer, not just the helper functions in isolation.
+sb_hex_fixture=$(mk_cache)
+sb_hex_log="${TMP}/sb-hex-fallback.log"
+run_sketchybar_plugin codexbar-mixed.json "${sb_hex_fixture}" "${sb_hex_log}" SHOWY_QUOTA_PALETTE_PRIMARY_WARN=nothex
+sb_hex_rc=$?
+assert_equals "sketchybar plugin full render survives a malformed palette override" "0" "${sb_hex_rc}"
+
+printf '\ncache envelope (payload+source atomicity)\n'
+
+# The fetcher must publish payload and source metadata in ONE envelope
+# object, via a single atomic rename, so a reader can never observe a NEW
+# payload paired with STALE (or absent) source metadata. No separate
+# `source` file may exist afterward.
+envelope_publish_cache=$(mk_cache)
+rc=0
+envelope_publish_out=$(
+    PATH="${stub_dir}:${PATH}" \
+    SHOWY_QUOTA_NO_CONFIG=1 \
+    SHOWY_QUOTA_CACHE_DIR="${envelope_publish_cache}" \
+    SHOWY_QUOTA_TEST_FIXTURE="${FIXTURE_DIR}/codexbar-realistic.json" \
+    SHOWY_QUOTA_CODEXBAR_SERVE_URL='' \
+    "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
+) || rc=$?
+envelope_publish_raw="$(< "${envelope_publish_cache}/usage.json")"
+if (( rc == 0 )) \
+    && printf '%s' "${envelope_publish_out}" | jq -e 'type == "array" and any(.provider == "codex")' >/dev/null 2>&1 \
+    && printf '%s' "${envelope_publish_raw}" | jq -e '
+        type == "object"
+        and .schema == "showy-quota/cache@1"
+        and (has("source") and (.source | type) == "string")
+        and (has("providers") and (.providers | type) == "array")
+    ' >/dev/null 2>&1 \
+    && [[ ! -e "${envelope_publish_cache}/source" ]]; then
+    ok "fetcher publishes one envelope with source+providers and no legacy source file"
+else
+    fail "fetcher publishes one envelope with source+providers and no legacy source file" \
+        "rc=${rc}; out=${envelope_publish_out}; usage.json=${envelope_publish_raw}"
+fi
+
+# showy-quota-state reads the source marker out of the envelope, not a
+# separate file.
+state_source_cache=$(mk_cache)
+cp "${FIXTURE_DIR}/codexbar-mixed.json" "${state_source_cache}/usage.json"
+seed_usage_source "${state_source_cache}" "serve"
+state_source_json=$(
+    SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_MANAGE_SERVE=0 \
+    SHOWY_QUOTA_CACHE_DIR="${state_source_cache}" \
+    SHOWY_QUOTA_CODEXBAR_SERVE_URL='' \
+    "${REPO_ROOT}/bin/showy-quota-state" --no-fetch --json
+)
+assert_equals "state reports the envelope's source marker" "serve" \
+    "$(printf '%s' "${state_source_json}" | jq -r '.cache.source')"
+
+# A pre-existing legacy bare-array cache (written by a prior version) is
+# still rendered, with source reported as "unknown", and self-heals into an
+# envelope on the next successful refresh.
+legacy_cache=$(mk_cache)
+cp "${FIXTURE_DIR}/codexbar-mixed.json" "${legacy_cache}/usage.json"
+legacy_json=$(
+    SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_MANAGE_SERVE=0 \
+    SHOWY_QUOTA_CACHE_DIR="${legacy_cache}" \
+    SHOWY_QUOTA_CODEXBAR_SERVE_URL='' \
+    "${REPO_ROOT}/bin/showy-quota-state" --no-fetch --json
+)
+assert_equals "legacy bare-array cache still renders as available" "true" \
+    "$(printf '%s' "${legacy_json}" | jq -r '.available')"
+assert_equals "legacy bare-array cache reports source unknown" "unknown" \
+    "$(printf '%s' "${legacy_json}" | jq -r '.cache.source')"
+
+rc=0
+legacy_refresh_out=$(
+    PATH="${stub_dir}:${PATH}" \
+    SHOWY_QUOTA_NO_CONFIG=1 \
+    SHOWY_QUOTA_CACHE_DIR="${legacy_cache}" \
+    SHOWY_QUOTA_TEST_FIXTURE="${FIXTURE_DIR}/codexbar-realistic.json" \
+    SHOWY_QUOTA_CODEXBAR_SERVE_URL='' \
+    "${REPO_ROOT}/bin/showy-quota-fetch" --refresh 2>/dev/null
+) || rc=$?
+legacy_after_refresh="$(< "${legacy_cache}/usage.json")"
+if (( rc == 0 )) && printf '%s' "${legacy_after_refresh}" | jq -e 'type == "object" and has("source") and has("providers")' >/dev/null 2>&1; then
+    ok "legacy bare-array cache upgrades to an envelope after one refresh"
+else
+    fail "legacy bare-array cache upgrades to an envelope after one refresh" \
+        "rc=${rc}; out=${legacy_refresh_out}; usage.json=${legacy_after_refresh}"
+fi
+
+# showy_quota_json_valid accepts either shape, an empty provider array is a
+# real published state, and mixed valid/invalid records stay tolerant;
+# anything that is neither an array nor an envelope is rejected.
+json_valid_case() {
+    local desc="$1" content="$2" expect="$3" f
+    f="${TMP}/json-valid-case.json"
+    printf '%s' "${content}" > "${f}"
+    # shellcheck disable=SC2016  # eval body; $-vars expand in run_common_eval's sub-shell
+    assert_equals "${desc}" "${expect}" "$(
+        run_common_eval 'showy_quota_json_valid "${SHOWY_QUOTA_TEST_JSON_VALID_FILE}" && printf ok || printf bad' \
+            SHOWY_QUOTA_TEST_JSON_VALID_FILE="${f}"
+    )"
+}
+json_valid_case "showy_quota_json_valid accepts envelope with empty providers array" '{"providers":[]}' ok
+json_valid_case "showy_quota_json_valid accepts bare empty array" '[]' ok
+json_valid_case "showy_quota_json_valid accepts mixed valid+invalid envelope" \
+    '{"providers":[{"provider":"codex"},{"provider":"bad id"}]}' ok
+json_valid_case "showy_quota_json_valid rejects non-array non-envelope" '42' bad
+
+# Contract-level proof the race is closed: the published usage.json ALONE
+# determines the reported source. Creating or deleting a stray legacy
+# `source` file (as a pre-upgrade install might still have lying around)
+# must have NO effect, because there is no second file left to race against.
+race_closed_cache=$(mk_cache)
+cp "${FIXTURE_DIR}/codexbar-mixed.json" "${race_closed_cache}/usage.json"
+seed_usage_source "${race_closed_cache}" "serve"
+state_source_for_cache() {
+    SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_MANAGE_SERVE=0 \
+        SHOWY_QUOTA_CACHE_DIR="${race_closed_cache}" \
+        SHOWY_QUOTA_CODEXBAR_SERVE_URL='' \
+        "${REPO_ROOT}/bin/showy-quota-state" --no-fetch --json | jq -r '.cache.source'
+}
+race_source_before="$(state_source_for_cache)"
+printf 'cli\n' > "${race_closed_cache}/source"
+race_source_with_stray_file="$(state_source_for_cache)"
+rm -f -- "${race_closed_cache}/source"
+race_source_after_delete="$(state_source_for_cache)"
+if [[ "${race_source_before}" == "serve" \
+    && "${race_source_with_stray_file}" == "serve" \
+    && "${race_source_after_delete}" == "serve" ]]; then
+    ok "cache.source is immune to a stray legacy source file (race closed at the contract level)"
+else
+    fail "cache.source is immune to a stray legacy source file (race closed at the contract level)" \
+        "before=${race_source_before}; with_stray_file=${race_source_with_stray_file}; after_delete=${race_source_after_delete}"
+fi
+
 
 # ── summary ──────────────────────────────────────────────────────────
 

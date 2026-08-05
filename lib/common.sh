@@ -120,6 +120,23 @@ showy_quota_valid_provider_id() {
     return 0
 }
 
+# Canonical boolean parse, byte-for-byte with `parse_bool` in
+# crates/showy-quota-zellij/src/main.rs: trims whitespace, lowercases, then
+# 1/true/yes/on -> true (0), 0/false/no/off -> false (1); anything else
+# (including empty/unset) falls back to `default` (pass "1" for true,
+# "0" for false). Returns 0 for true, 1 for false, shell-style.
+showy_quota_bool() {
+    local value="${1-}" default="${2-0}"
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+    value="${value,,}"
+    case "${value}" in
+        1|true|yes|on) return 0 ;;
+        0|false|no|off) return 1 ;;
+        *) [[ "${default}" == "1" ]] ;;
+    esac
+}
+
 # Return 0 only when PATH is safe to dot-source. Config/theme .env files are
 # executed as shell, so a file another user can write is arbitrary code
 # execution in our context. Require a readable regular file (FIFOs/devices fail
@@ -329,7 +346,6 @@ SHOWY_QUOTA_PNG_BAR_H=$(showy_quota_uint "${SHOWY_QUOTA_PNG_BAR_H}" 18 4096)
 : "${SHOWY_QUOTA_ZELLIJ_PLUGIN:=}"
 : "${SHOWY_QUOTA_USAGE_FILE:=${SHOWY_QUOTA_CACHE_DIR}/usage.json}"
 : "${SHOWY_QUOTA_USAGE_STAMP:=${SHOWY_QUOTA_CACHE_DIR}/usage.json.updated-at}"
-: "${SHOWY_QUOTA_SOURCE_FILE:=${SHOWY_QUOTA_CACHE_DIR}/source}"
 : "${SHOWY_QUOTA_CODEXBAR_SERVE_PID_FILE:=${SHOWY_QUOTA_CACHE_DIR}/codexbar-serve.pid}"
 : "${SHOWY_QUOTA_USAGE_LOCK:=${SHOWY_QUOTA_CACHE_DIR}/usage.lock}"
 : "${SHOWY_QUOTA_CODEXBAR_SERVE_FAILURE_STAMP:=${SHOWY_QUOTA_CACHE_DIR}/serve-failed-at}"
@@ -434,7 +450,7 @@ declare -gA SHOWY_QUOTA_ROLE_PALETTE_CACHE=()
 # ── small utilities ────────────────────────────────────────────────────
 
 showy_quota_log() {
-    [[ "${SHOWY_QUOTA_DEBUG:-0}" == "1" ]] || return 0
+    showy_quota_bool "${SHOWY_QUOTA_DEBUG-}" 0 || return 0
     printf '[showy-quota] %s\n' "$*" >&2
 }
 
@@ -488,8 +504,10 @@ showy_quota_age_seconds() {
 
 showy_quota_cache_source() {
     local source="unknown"
-    if [[ -r "${SHOWY_QUOTA_SOURCE_FILE}" ]]; then
-        IFS= read -r source < "${SHOWY_QUOTA_SOURCE_FILE}" || source="unknown"
+    if [[ -r "${SHOWY_QUOTA_USAGE_FILE}" ]] && showy_quota_have jq; then
+        source=$(jq -r 'if type == "object" then (.source // "unknown") else "unknown" end' \
+            "${SHOWY_QUOTA_USAGE_FILE}" 2>/dev/null) || source="unknown"
+        [[ -n "${source}" ]] || source="unknown"
     fi
     case "${source}" in
         serve|cli) printf '%s\n' "${source}" ;;
@@ -517,8 +535,9 @@ showy_quota_provider_ids_from_payload() {
             and . != "."
             and . != ".."
             and (startswith("-") | not);
-        if type == "array" then
-            reduce .[] as $r (
+        (if type == "object" then (.providers // []) else . end) as $records
+        | if ($records | type) == "array" then
+            reduce $records[] as $r (
                 [];
                 if ($r.provider? | valid_provider_id)
                    and (index($r.provider) == null)
@@ -526,7 +545,7 @@ showy_quota_provider_ids_from_payload() {
                 else .
                 end
             ) | .[]
-        else empty end
+          else empty end
     ' "${file}" 2>/dev/null
 }
 
@@ -815,62 +834,76 @@ showy_quota_scale_hex() {
 
 # Hex color (no '#') for a global palette token.
 showy_quota_palette() {
-    local value
+    local value fallback
     case "$1" in
-        bg)      value="${SHOWY_QUOTA_PALETTE_BG}" ;;
-        surface) value="${SHOWY_QUOTA_PALETTE_SURFACE}" ;;
-        track)   value="${SHOWY_QUOTA_PALETTE_TRACK}" ;;
-        icon_text)      value="${SHOWY_QUOTA_PALETTE_ICON_TEXT}" ;;
-        countdown)      value="${SHOWY_QUOTA_PALETTE_COUNTDOWN}" ;;
-        countdown_warn) value="${SHOWY_QUOTA_PALETTE_COUNTDOWN_WARN}" ;;
-        stale)          value="${SHOWY_QUOTA_PALETTE_STALE}" ;;
-        elapsed)        value="${SHOWY_QUOTA_PALETTE_ELAPSED}" ;;
-        elapsed_long)   value="${SHOWY_QUOTA_PALETTE_ELAPSED_LONG}" ;;
+        bg)      value="${SHOWY_QUOTA_PALETTE_BG}"; fallback="161616" ;;
+        surface) value="${SHOWY_QUOTA_PALETTE_SURFACE}"; fallback="2a2a2a" ;;
+        track)   value="${SHOWY_QUOTA_PALETTE_TRACK}"; fallback="3a3a4a" ;;
+        icon_text)      value="${SHOWY_QUOTA_PALETTE_ICON_TEXT}"; fallback="f2f4f8" ;;
+        countdown)      value="${SHOWY_QUOTA_PALETTE_COUNTDOWN}"; fallback="7b8496" ;;
+        countdown_warn) value="${SHOWY_QUOTA_PALETTE_COUNTDOWN_WARN}"; fallback="ee5396" ;;
+        stale)          value="${SHOWY_QUOTA_PALETTE_STALE}"; fallback="6c7086" ;;
+        elapsed)        value="${SHOWY_QUOTA_PALETTE_ELAPSED}"; fallback="be95ff" ;;
+        elapsed_long)   value="${SHOWY_QUOTA_PALETTE_ELAPSED_LONG}"; fallback="3ddbd9" ;;
         *)       showy_quota_die "unknown global palette token: $1" ;;
     esac
-    showy_quota_normalize_hex "${value}"
+    showy_quota_normalize_hex_or_default "${value}" "${fallback}"
 }
 
 # Hex color (no '#') for the primary palette at a severity.
 showy_quota_primary_palette() {
     local severity="$1"
-    local cache_key="primary:${severity}" severity_upper var_name result
+    local cache_key="primary:${severity}" severity_upper var_name result fallback
     if [[ -n "${SHOWY_QUOTA_ROLE_PALETTE_CACHE[${cache_key}]+x}" ]]; then
         printf '%s' "${SHOWY_QUOTA_ROLE_PALETTE_CACHE[${cache_key}]}"
         return 0
     fi
     case "${severity}" in
-        good|warn|bad|unknown) severity_upper="${severity^^}" ;;
+        good)    severity_upper="GOOD"; fallback="25be6a" ;;
+        warn)    severity_upper="WARN"; fallback="f0af00" ;;
+        bad)     severity_upper="BAD"; fallback="ee5396" ;;
+        unknown) severity_upper="UNKNOWN"; fallback="6c7086" ;;
         *) showy_quota_die "unknown palette severity: ${severity}" ;;
     esac
     var_name="SHOWY_QUOTA_PALETTE_PRIMARY_${severity_upper}"
-    result="$(showy_quota_normalize_hex "${!var_name}")"
+    result="$(showy_quota_normalize_hex_or_default "${!var_name}" "${fallback}")"
     SHOWY_QUOTA_ROLE_PALETTE_CACHE["${cache_key}"]="${result}"
     printf '%s' "${result}"
 }
 
 # Hex color (no '#') for the dimmed long-horizon (weekly/monthly cap) palette at
 # a severity: explicit SHOWY_QUOTA_PALETTE_DIM_<SEV> override, otherwise the
-# primary palette scaled by SHOWY_QUOTA_PALETTE_DIM_SCALE.
+# primary palette scaled by SHOWY_QUOTA_PALETTE_DIM_SCALE. A malformed primary
+# or override hex degrades to that severity's documented default (or, for the
+# override, to the scaled result the unset case would have produced) with a
+# stderr warning, rather than dying and killing the render.
 showy_quota_dim_palette() {
     local severity="$1"
     local cache_key="dim:${severity}" severity_upper override_var primary_var result
+    local primary_fallback primary_hex scaled
     if [[ -n "${SHOWY_QUOTA_ROLE_PALETTE_CACHE[${cache_key}]+x}" ]]; then
         printf '%s' "${SHOWY_QUOTA_ROLE_PALETTE_CACHE[${cache_key}]}"
         return 0
     fi
     case "${severity}" in
-        good|warn|bad|unknown) severity_upper="${severity^^}" ;;
+        good)    severity_upper="GOOD"; primary_fallback="25be6a" ;;
+        warn)    severity_upper="WARN"; primary_fallback="f0af00" ;;
+        bad)     severity_upper="BAD"; primary_fallback="ee5396" ;;
+        unknown) severity_upper="UNKNOWN"; primary_fallback="6c7086" ;;
         *) showy_quota_die "unknown palette severity: ${severity}" ;;
     esac
+    primary_var="SHOWY_QUOTA_PALETTE_PRIMARY_${severity_upper}"
+    # Validate the primary hex before it reaches scale_hex: scale_hex's own
+    # normalize_hex call is fatal, and a malformed primary must degrade here
+    # instead of dying deeper in the call chain.
+    primary_hex="$(showy_quota_normalize_hex_or_default "${!primary_var}" "${primary_fallback}")"
+    scaled="$(showy_quota_scale_hex "${primary_hex}" "${SHOWY_QUOTA_PALETTE_DIM_SCALE}")"
     override_var="SHOWY_QUOTA_PALETTE_DIM_${severity_upper}"
     if [[ -n "${!override_var:-}" ]]; then
-        result="${!override_var}"
+        result="$(showy_quota_normalize_hex_or_default "${!override_var}" "${scaled}")"
     else
-        primary_var="SHOWY_QUOTA_PALETTE_PRIMARY_${severity_upper}"
-        result="$(showy_quota_scale_hex "${!primary_var}" "${SHOWY_QUOTA_PALETTE_DIM_SCALE}")"
+        result="${scaled}"
     fi
-    result="$(showy_quota_normalize_hex "${result}")"
     SHOWY_QUOTA_ROLE_PALETTE_CACHE["${cache_key}"]="${result}"
     printf '%s' "${result}"
 }
@@ -938,6 +971,13 @@ showy_quota_file_within_size_cap() {
 }
 
 # Validate that codexbar JSON looks like an array of provider objects.
+#
+# Mixed-validity tolerant: one malformed record must not blackout the healthy
+# providers, so this asks "is at least one record usable" rather than "are all
+# records valid" — per-record filtering is the renderers' job. An EMPTY array
+# is explicitly valid: "no enabled providers" is a real, published cache state
+# (see canonical_empty_inventory_payload), and `any` over an empty array is
+# false, so it needs its own clause.
 showy_quota_json_valid() {
     local file="$1"
     [[ -s "${file}" ]] || return 1
@@ -966,8 +1006,9 @@ showy_quota_json_valid() {
             and (.resetsAt | optional_string)
             and (.resetDescription | optional_string)
             and (.windowMinutes | optional_integer);
+        (if type == "object" then .providers else . end) |
         type == "array" and
-        all(.[]; type == "object"
+        (length == 0 or any(.[]; type == "object"
             and (.provider | valid_provider_id)
             and (
                 .status == null
@@ -1002,6 +1043,6 @@ showy_quota_json_valid() {
                     )
                 )
             )
-        )
+        ))
     ' "${file}" >/dev/null 2>&1
 }

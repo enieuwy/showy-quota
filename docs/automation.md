@@ -35,7 +35,7 @@ is **not** fatal when a cache already exists), then evaluates
 | `--min-remaining PCT` | Fail when remaining quota drops below `PCT`. Default when no threshold flag is given: `--min-remaining 10`. |
 | `--max-used PCT` | Fail when used quota rises above `PCT`. Mutually exclusive with `--min-remaining` (giving both is a usage error). |
 | `--allow-stale` | Evaluate even when the cache is stale. Without it, a stale cache is unusable data. |
-| `--wait-max SECONDS` | On a breach whose worst window has a known reset within `SECONDS`, sleep until reset (+30s grace), force one refresh, and re-evaluate once. Otherwise fail immediately. |
+| `--wait-max SECONDS` | On a breach whose worst window has a known reset within `SECONDS`, sleep until reset, force one refresh, and re-evaluate once — otherwise fail immediately. The wait never exceeds `SECONDS`: reset timestamps round down to the minute, so a fixed 30s grace is added to cover the rest of that minute, but the grace is clamped so `sleep time = min(secondsUntilReset + 30, SECONDS)`. |
 | `--json` | Emit one machine-readable object (see below) on every non-usage outcome. |
 | `--quiet` | Print nothing on pass; one human line on failure (unless `--json`). |
 

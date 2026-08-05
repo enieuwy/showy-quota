@@ -523,7 +523,7 @@ diagnose_json() {
     fi
     cb_cache_count_json=null
     if [[ -n "${cache_path}" && -f "${cache_path}" ]]; then
-        cb_cache_count_json=$(jq 'if type == "array" then length else null end' "${cache_path}" 2>/dev/null || printf 'null')
+        cb_cache_count_json=$(jq '(if type == "object" then (.providers // []) else . end) | if type == "array" then length else null end' "${cache_path}" 2>/dev/null || printf 'null')
     fi
 
     env_json=$(diagnose_env_json)
@@ -662,7 +662,7 @@ diagnose() {
     elif [[ -f "${SHOWY_QUOTA_USAGE_FILE:-${HOME}/.cache/showy-quota/usage.json}" ]]; then
         local cache_file count
         cache_file="${SHOWY_QUOTA_USAGE_FILE:-${HOME}/.cache/showy-quota/usage.json}"
-        count=$(jq 'length' "${cache_file}" 2>/dev/null || printf '?')
+        count=$(jq '(if type == "object" then (.providers // []) else . end) | length' "${cache_file}" 2>/dev/null || printf '?')
         printf 'cached provider count = %s (from %s)\n' "${count}" "${cache_file}"
         printf '(skipping live %s usage probe; rerun bin/showy-quota-fetch --refresh to refresh)\n' "${cb}"
     else
@@ -1134,14 +1134,23 @@ cmd_guard() {
     guard_evaluate
 
     # --wait-max: if breaching and the worst window's reset is known and lands
-    # within the budget, sleep past it (+30s grace), force one refresh, retry once.
+    # within the budget, sleep past it, force one refresh, retry once. The
+    # sleep adds a fixed 30s grace (reset timestamps round down to the
+    # minute, so the actual reset can land up to ~59s after the reported
+    # minute), but that grace is clamped to the caller's budget rather than
+    # added on top of it: automation asked to wait "up to wait_max seconds",
+    # so spending the remainder of the budget and re-evaluating is more
+    # useful than either failing immediately or blocking past the stated
+    # deadline.
     if (( G_BREACH )) && (( wait_max > 0 )); then
-        local wmin wsecs
+        local wmin wsecs sleep_secs
         wmin="$(printf '%s' "${G_WORST_JSON}" | jq -r '.minutesUntilReset // "null"')"
         if [[ "${wmin}" =~ ^[0-9]+$ ]]; then
             wsecs=$(( wmin * 60 ))
             if (( wsecs <= wait_max )); then
-                sleep $(( wsecs + 30 ))
+                sleep_secs=$(( wsecs + 30 ))
+                (( sleep_secs > wait_max )) && sleep_secs=${wait_max}
+                sleep "${sleep_secs}"
                 "${fetch}" --refresh >/dev/null 2>&1 || true
                 guard_evaluate
             fi
@@ -1198,7 +1207,7 @@ cmd_prompt() {
         exit 0
     fi
 
-    if [[ "${SHOWY_QUOTA_PROMPT_FETCH:-}" == "1" ]]; then
+    if showy_quota_bool "${SHOWY_QUOTA_PROMPT_FETCH-}" 0; then
         local fetch; fetch="$(automation_fetch_bin)"
         "${fetch}" --refresh >/dev/null 2>&1 || true
     fi

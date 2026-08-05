@@ -101,4 +101,4 @@ if [[ "${SHOWY_QUOTA_STATUSLINE_CAPS:-1}" == "0" ]]; then
     export SHOWY_QUOTA_CAP_RIGHT=""
 fi
 
-exec "${BAR_BIN}"
+exec "${BAR_BIN}" "$@"

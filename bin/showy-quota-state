@@ -114,17 +114,10 @@ fi
 provider_metrics_json="$(printf '%s' "${provider_metrics_json}" | sanitize_error_message)"
 
 cache_age="null"
-cache_source="unknown"
 if [[ -f "${SHOWY_QUOTA_USAGE_FILE}" ]]; then
     cache_age=$(showy_quota_age_seconds "${SHOWY_QUOTA_USAGE_FILE}")
 fi
-if [[ -r "${SHOWY_QUOTA_SOURCE_FILE}" ]]; then
-    IFS= read -r cache_source < "${SHOWY_QUOTA_SOURCE_FILE}" || cache_source="unknown"
-fi
-case "${cache_source}" in
-    serve|cli) ;;
-    *) cache_source="unknown" ;;
-esac
+cache_source="$(showy_quota_cache_source)"
 if [[ "${SHOWY_QUOTA_DEGRADED_CLI:-}" == "1" ]]; then
     degraded_flag=true
 elif [[ -n "${SHOWY_QUOTA_DEGRADED_CLI:-}" ]]; then

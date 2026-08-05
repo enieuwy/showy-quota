@@ -100,15 +100,32 @@ __stop() {{
         kill "-$__signal" "$__p" 2>/dev/null || true
     fi
 }}
+__stop_timer() {{
+    # Killing the timer subshell alone orphans its `sleep` grandchild: the
+    # subshell's own EXIT trap does not reliably fire when it is signalled
+    # mid-`wait`, and an orphaned sleep keeps the inherited stdout write end
+    # open, so a caller capturing this script through a pipe would block until
+    # the timeout elapsed even though the command already finished.
+    __kill_descendants "$__k" TERM
+    kill "$__k" 2>/dev/null || true
+}}
 (sleep {timeout_secs} & __s=$!; trap 'kill "$__s" 2>/dev/null' EXIT; wait "$__s"; __stop TERM; sleep 2 & __s=$!; wait "$__s"; __stop KILL) &
 __k=$!
+# Re-arm the EXIT trap now that __k/__stop/__p exist: on unclean shutdown
+# (Zellij has no cancellation API and just signals this shell on pane
+# close/unload) stop the timer and the whole child tree before removing the
+# temp dir. Idempotent: on the normal/oversize exit paths below, $__k and
+# $__p are already reaped and __stop's kills are already-dead no-ops, so
+# this changes no exit code and emits no noise (all kill/wait output is
+# redirected to /dev/null).
+trap '__stop_timer; __stop TERM 2>/dev/null; __stop KILL 2>/dev/null; wait "$__k" 2>/dev/null; wait "$__p" 2>/dev/null; rm -rf "$__d"' EXIT
 dd if="$__fifo" of="$__out" bs=1 count={capture_limit} 2>/dev/null
 __bytes=$(wc -c <"$__out" | tr -d '[:space:]')
 if [ "$__bytes" -gt {max_stdout} ]; then
     __stop TERM
     sleep 2
     __stop KILL
-    kill "$__k" 2>/dev/null
+    __stop_timer
     wait "$__k" 2>/dev/null
     wait "$__p" 2>/dev/null
     exit 125
@@ -116,7 +133,7 @@ fi
 cat "$__out"
 wait "$__p"
 __r=$?
-kill "$__k" 2>/dev/null
+__stop_timer
 wait "$__k" 2>/dev/null
 exit "$__r""#,
         max_stdout = MAX_SUBPROCESS_STDOUT_BYTES,
@@ -3308,6 +3325,13 @@ mod tests {
         assert!(script.contains("pkill \"-$__signal\" -P \"$__p\""));
         assert!(script.contains("count=5242881"));
         assert!(script.contains("trap 'kill \"$__s\" 2>/dev/null' EXIT"));
+        assert!(script.contains(
+            "trap '__stop_timer; __stop TERM 2>/dev/null; \
+__stop KILL 2>/dev/null; wait \"$__k\" 2>/dev/null; wait \"$__p\" 2>/dev/null; \
+rm -rf \"$__d\"' EXIT"
+        ));
+        // The timer's `sleep` grandchild must be reaped too, not just the subshell.
+        assert!(script.contains("__kill_descendants \"$__k\" TERM"));
         assert!(script.contains("wait \"$__k\""));
         // Provider ids and the binary path ride in "$@", never the shell string.
         assert!(!script.contains("claude"));
@@ -3973,6 +3997,12 @@ mod tests {
         assert!(script.contains("--version"));
         assert!(script.contains("sleep 5"));
         assert!(script.contains("trap 'kill \"$__s\" 2>/dev/null' EXIT"));
+        assert!(script.contains(
+            "trap '__stop_timer; __stop TERM 2>/dev/null; \
+__stop KILL 2>/dev/null; wait \"$__k\" 2>/dev/null; wait \"$__p\" 2>/dev/null; \
+rm -rf \"$__d\"' EXIT"
+        ));
+        assert!(script.contains("__kill_descendants \"$__k\" TERM"));
         assert!(script.contains("wait \"$__k\""));
         // The binary rides in $1, never interpolated into the shell string.
         assert!(!script.contains("codexbar"));

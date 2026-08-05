@@ -26,7 +26,7 @@ codexbar serve /health + /usage  or  codexbar usage --format json
         ▲
         │ start if absent (managed pidfile)
         │
-bin/showy-quota-fetch  ← shared cache + source marker + flock + atomic publish
+bin/showy-quota-fetch  ← shared cache envelope + flock + atomic publish
         ├──► bin/showy-quota-state                 (stable provider/layout state JSON)
         ├──► adapters/sketchybar/plugins/showy_quota.sh    (native SketchyBar rows + icons)
         ├──► bin/showy-quota-tmux-bar             (thin driver → native tmux #[…] renderer)
@@ -37,18 +37,18 @@ bin/showy-quota-fetch  ← shared cache + source marker + flock + atomic publish
 
 The shell data plane is still the reliability boundary for tmux, SketchyBar, and advanced zjstatus composition.
 
-- File: `${SHOWY_QUOTA_CACHE_DIR}/usage.json` (default: `${XDG_CACHE_HOME:-$HOME/.cache}/showy-quota/usage.json`)
+- File: `${SHOWY_QUOTA_CACHE_DIR}/usage.json` (default: `${XDG_CACHE_HOME:-$HOME/.cache}/showy-quota/usage.json`) — a cache envelope object `{"schema":"showy-quota/cache@1","source":"serve"|"cli"|"unknown","providers":[...]}`, where `providers` is the verbatim CodexBar usage array. A legacy bare top-level array (pre-envelope cache) is still read, with `source` treated as `unknown`; it is upgraded to an envelope on the next successful refresh.
 - Stamp file: `${SHOWY_QUOTA_CACHE_DIR}/usage.json.updated-at`
-- Source file: `${SHOWY_QUOTA_CACHE_DIR}/source` (`serve`, `cli`, or absent/unknown); CLI source is visibly degraded as `⚠cli`.
+- Payload and source commit via a **single atomic `rename(2)`**: the fetcher builds the whole envelope (payload + source) in one temp file and publishes it with one `mv`, so a reader can never observe a NEW payload paired with STALE (or missing) source metadata — there is no second file whose independent commit order could reopen that race. The generation stamp still commits last, since `cache_payload_marker` is derived from the published payload's on-disk identity (inode/mtime/size) and can only be minted once that identity is stable. CLI source is visibly degraded as `⚠cli`.
 - `flock` path: `${SHOWY_QUOTA_CACHE_DIR}/usage.lock`
 - owner-scoped `mkdir` fallback path: `${SHOWY_QUOTA_CACHE_DIR}/usage.lock.d`
-- Validation: `jq` must accept an array of provider objects. If a usage window is present, its `usedPercent` must be numeric before publication.
+- Validation: `jq` must accept either shape — a bare array of provider objects, or an envelope whose `providers` field is one. If a usage window is present, its `usedPercent` must be numeric before publication.
 - Corrupt cache quarantine: if the existing usage cache fails validation before
   a fetcher-owned refresh path runs, it is moved to
   `usage.json.corrupt.<epoch>.<pid>` and old quarantine files are pruned
   (`SHOWY_QUOTA_CORRUPT_CACHE_RETENTION`, default `3`).
 
-The fetcher prints the cache content to stdout regardless of whether it just refreshed or served stale bytes. Callers must not differentiate; if they want freshness data they read `--age`. During non-forced lock contention, a caller with an existing valid cache may emit that snapshot immediately while the lock holder refreshes. Forced refresh callers wait for the holder and retry recovery first, but still fall back to an existing valid cache if no refreshed cache is published; this preserves the fetcher's last-known-good output contract.
+The fetcher prints the cache's bare provider array to stdout — never the envelope wrapper — regardless of whether it just refreshed or served stale bytes; this is unchanged for every caller. Callers must not differentiate; if they want freshness data they read `--age`, and if they want the source marker they read `cache.source` from `showy-quota-state` or call `showy_quota_cache_source`. During non-forced lock contention, a caller with an existing valid cache may emit that snapshot immediately while the lock holder refreshes. Forced refresh callers wait for the holder and retry recovery first, but still fall back to an existing valid cache if no refreshed cache is published; this preserves the fetcher's last-known-good output contract.
 
 Freshness is a shared render concern. A shell cache is stale when `showy_quota_age_seconds "${SHOWY_QUOTA_USAGE_FILE}"` is greater than `SHOWY_QUOTA_REFRESH_SECONDS * 2`. Shell bar drivers pass stale/degraded flags to the native renderer so tmux and advanced zjstatus show one trailing stale indicator, grey frozen data, and hide elapsed markers; `showy-quota-state` reports the boolean and threshold.
 

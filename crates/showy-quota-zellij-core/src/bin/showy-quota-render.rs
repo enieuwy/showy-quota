@@ -4,9 +4,11 @@ use std::process;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use showy_quota_zellij_core::{
-    cache::read_cache_from_env, codexbar::MAX_USAGE_JSON_BYTES, emit_prompt_segment,
-    emit_provider_metrics, emit_sketchybar, render_tmux, render_zellij, valid_provider_id,
-    PromptOptions, RenderConfig, RenderError, RenderOptions, SketchybarOptions,
+    cache::read_cache_from_env,
+    codexbar::{unwrap_cache_transport, MAX_USAGE_JSON_BYTES},
+    emit_prompt_segment, emit_provider_metrics, emit_rows, emit_sketchybar, render_tmux,
+    render_zellij, valid_provider_id, PromptOptions, RenderConfig, RenderError, RenderOptions,
+    SketchybarOptions,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18,6 +20,7 @@ enum Format {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Emit {
     Render,
+    Rows,
     Metrics,
     Prompt,
     Sketchybar,
@@ -103,6 +106,28 @@ fn run() -> Result<(), String> {
         return write_output(&rendered);
     }
 
+    if cli.emit == Emit::Rows {
+        // Rows are a structured transport: the band travels in `severity` and
+        // `color`, so the text stays plain unless `--ansi` asks otherwise. A
+        // consumer that strips control bytes (a Herdr sidebar token) would
+        // otherwise show the escape bodies as literal text.
+        let mut rendered = emit_rows(
+            &input.payload,
+            &config,
+            RenderOptions {
+                color: cli.ansi,
+                ..options
+            },
+            match cli.format {
+                Format::Zellij => showy_quota_zellij_core::OutputFormat::Zellij,
+                Format::Tmux => showy_quota_zellij_core::OutputFormat::Tmux,
+            },
+        )
+        .map_err(render_error)?;
+        rendered.push('\n');
+        return write_output(&rendered);
+    }
+
     let rendered = match cli.format {
         Format::Zellij => render_zellij(&input.payload, &config, options),
         Format::Tmux => render_tmux(&input.payload, &config, options),
@@ -171,10 +196,11 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Cli, String> {
             }
             "--emit" => {
                 let value = args.next().ok_or_else(|| {
-                    String::from("--emit requires render, metrics, prompt, or sketchybar")
+                    String::from("--emit requires render, rows, metrics, prompt, or sketchybar")
                 })?;
                 emit = match value.as_str() {
                     "render" => Emit::Render,
+                    "rows" => Emit::Rows,
                     "metrics" => Emit::Metrics,
                     "prompt" => Emit::Prompt,
                     "sketchybar" => Emit::Sketchybar,
@@ -243,11 +269,14 @@ struct InputPayload {
 
 fn read_input(cli: &Cli, now_epoch: i64) -> Result<InputPayload, String> {
     match &cli.input {
-        Input::Json(path) => Ok(InputPayload {
-            payload: read_payload(path)?,
-            stale: false,
-            degraded_cli: false,
-        }),
+        Input::Json(path) => {
+            let (payload, _source) = unwrap_cache_transport(read_payload(path)?);
+            Ok(InputPayload {
+                payload,
+                stale: false,
+                degraded_cli: false,
+            })
+        }
         Input::Cache => {
             let snapshot = read_cache_from_env(now_epoch).map_err(|err| err.to_string())?;
             Ok(InputPayload {
@@ -349,7 +378,7 @@ fn png_bar_width_from_env() -> i64 {
 
 fn print_help() {
     println!(
-        "Usage: showy-quota-render [--emit render|metrics|prompt|sketchybar] [--format zellij|tmux] [--json <path|-> | --from-cache] [--provider ID[,ID...]] [--ansi] [--stale] [--degraded-cli]\n\nPrints a rendered quota strip, providerMetrics JSON, SketchyBar row data, or shell prompt segment from CodexBar JSON."
+        "Usage: showy-quota-render [--emit render|rows|metrics|prompt|sketchybar] [--format zellij|tmux] [--json <path|-> | --from-cache] [--provider ID[,ID...]] [--ansi] [--stale] [--degraded-cli]\n\nPrints a rendered quota strip, one JSON entry per rendered chunk (rows), providerMetrics JSON, SketchyBar row data, or shell prompt segment from CodexBar JSON."
     );
 }
 

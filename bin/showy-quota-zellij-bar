@@ -46,7 +46,7 @@ done
 
 want_color=1
 if [[ -n "${NO_COLOR:-}" || "${TERM:-}" == "dumb" ]]; then want_color=0; fi
-if [[ "${SHOWY_QUOTA_FORCE_COLOR:-0}" == "1" ]]; then want_color=1; fi
+if showy_quota_bool "${SHOWY_QUOTA_FORCE_COLOR-}" 0; then want_color=1; fi
 
 zellij_fg() {
     (( want_color )) || return 0

@@ -134,6 +134,11 @@ fn slot(window: Option<&UsageWindow>) -> Option<&UsageWindow> {
 /// every render tick.
 pub const MAX_USAGE_JSON_BYTES: usize = 5 * 1024 * 1024;
 
+/// Parse the CodexBar usage array transport. Only transport-level failures
+/// (unparseable JSON, non-array top level, oversize payload) are fatal; a
+/// record failing [`valid_provider_record`] is dropped rather than
+/// discarding the whole payload, so one malformed provider cannot blank the
+/// strip for every other provider. An all-invalid array yields `Ok(vec![])`.
 pub fn parse_usage_payload(payload: &[u8]) -> Result<Vec<ProviderRecord>, serde_json::Error> {
     if payload.len() > MAX_USAGE_JSON_BYTES {
         return Err(serde_json::Error::io(std::io::Error::new(
@@ -142,14 +147,51 @@ pub fn parse_usage_payload(payload: &[u8]) -> Result<Vec<ProviderRecord>, serde_
         )));
     }
     let records: Vec<ProviderRecord> = serde_json::from_slice(payload)?;
-    if records.iter().all(valid_provider_record) {
-        Ok(records)
-    } else {
-        Err(serde_json::Error::io(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "invalid CodexBar usage payload",
-        )))
+    Ok(records.into_iter().filter(valid_provider_record).collect())
+}
+
+/// A cache file or `--json` input is either a bare CodexBar provider array
+/// (legacy transport; degrades to `source = "unknown"`) or a cache envelope
+/// object `{"schema":"showy-quota/cache@1","source":"serve"|"cli"|"unknown","providers":[...]}`.
+/// Dispatches on the first non-whitespace byte and, for an envelope,
+/// extracts `providers` via [`serde_json::value::RawValue`] so the inner
+/// array (up to [`MAX_USAGE_JSON_BYTES`]) is sliced out verbatim rather than
+/// parsed into [`ProviderRecord`]s and re-serialized — this runs on every
+/// render tick.
+///
+/// Any shape this does not recognize as a well-formed envelope — oversize
+/// input, unparseable JSON, a missing `providers` field — degrades to the
+/// original bytes with `source = "unknown"` rather than erroring: a
+/// genuinely corrupt payload is already handled by the caller's existing
+/// validity/quarantine path, and this helper must never become a new hard
+/// failure point. An envelope with an absent, null, or non-string `source`
+/// likewise degrades only the source to `"unknown"`, keeping the extracted
+/// `providers` array.
+pub fn unwrap_cache_transport(bytes: Vec<u8>) -> (Vec<u8>, String) {
+    if bytes.len() > MAX_USAGE_JSON_BYTES {
+        return (bytes, String::from("unknown"));
     }
+    match bytes.iter().find(|byte| !byte.is_ascii_whitespace()) {
+        Some(b'{') => match serde_json::from_slice::<CacheEnvelope>(&bytes) {
+            Ok(envelope) => {
+                let inner = envelope.providers.get().as_bytes().to_vec();
+                let source = match envelope.source {
+                    Some(serde_json::Value::String(value)) if !value.is_empty() => value,
+                    _ => String::from("unknown"),
+                };
+                (inner, source)
+            }
+            Err(_) => (bytes, String::from("unknown")),
+        },
+        _ => (bytes, String::from("unknown")),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct CacheEnvelope {
+    providers: Box<serde_json::value::RawValue>,
+    #[serde(default)]
+    source: Option<serde_json::Value>,
 }
 
 pub fn payload_has_renderable_provider(records: &[ProviderRecord]) -> bool {
@@ -506,23 +548,37 @@ mod tests {
     }
 
     #[test]
-    fn parse_usage_payload_rejects_empty_provider_id() {
-        assert!(parse_usage_payload(br#"[{"provider": ""}]"#).is_err());
+    fn parse_usage_payload_drops_empty_provider_id() {
+        let records = parse_usage_payload(br#"[{"provider": ""}]"#).expect("parses");
+        assert!(records.is_empty());
     }
 
     #[test]
-    fn parse_usage_payload_rejects_invalid_provider_id() {
-        assert!(parse_usage_payload(br#"[{"provider": "bad/id"}]"#).is_err());
+    fn parse_usage_payload_drops_invalid_provider_id() {
+        let records = parse_usage_payload(br#"[{"provider": "bad/id"}]"#).expect("parses");
+        assert!(records.is_empty());
     }
 
     #[test]
-    fn parse_usage_payload_rejects_window_without_used_percent() {
-        // A present window object missing usedPercent fails strict validation;
-        // the whole payload is rejected rather than silently dropping the window.
+    fn parse_usage_payload_drops_window_without_used_percent() {
+        // A present window object missing usedPercent fails per-record validation;
+        // the record is dropped rather than rejecting the whole payload.
         let payload = br#"[
             {"provider": "codex", "usage": {"secondary": {"resetsAt": "2099-01-01T00:00:00Z"}}}
         ]"#;
-        assert!(parse_usage_payload(payload).is_err());
+        let records = parse_usage_payload(payload).expect("parses");
+        assert!(records.is_empty());
+    }
+
+    #[test]
+    fn parse_usage_payload_keeps_valid_record_and_drops_invalid_sibling() {
+        let payload = br#"[
+            {"provider": "codex", "usage": {"primary": {"usedPercent": 5}}},
+            {"provider": "bad/id", "usage": {"primary": {"usedPercent": 5}}}
+        ]"#;
+        let records = parse_usage_payload(payload).expect("parses");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].provider, "codex");
     }
 
     #[test]
@@ -530,5 +586,86 @@ mod tests {
         // Error-only records and an empty array are valid by design.
         assert!(parse_usage_payload(br#"[{"provider": "codex", "error": "boom"}]"#).is_ok());
         assert!(parse_usage_payload(b"[]").is_ok());
+    }
+
+    #[test]
+    fn unwrap_cache_transport_extracts_envelope_providers_and_source() {
+        let bytes =
+            br#"{"schema":"showy-quota/cache@1","source":"cli","providers":[{"provider":"codex"}]}"#
+                .to_vec();
+        let (payload, source) = unwrap_cache_transport(bytes);
+        assert_eq!(payload, br#"[{"provider":"codex"}]"#.to_vec());
+        assert_eq!(source, "cli");
+    }
+
+    #[test]
+    fn unwrap_cache_transport_leaves_bare_array_unchanged() {
+        let bytes = br#"[{"provider":"codex"}]"#.to_vec();
+        let (payload, source) = unwrap_cache_transport(bytes.clone());
+        assert_eq!(payload, bytes);
+        assert_eq!(source, "unknown");
+    }
+
+    #[test]
+    fn unwrap_cache_transport_degrades_missing_source_to_unknown() {
+        let bytes = br#"{"schema":"showy-quota/cache@1","providers":[1,2]}"#.to_vec();
+        let (payload, source) = unwrap_cache_transport(bytes);
+        assert_eq!(payload, b"[1,2]".to_vec());
+        assert_eq!(source, "unknown");
+    }
+
+    #[test]
+    fn unwrap_cache_transport_degrades_null_source_to_unknown() {
+        let bytes = br#"{"source":null,"providers":[1,2]}"#.to_vec();
+        let (payload, source) = unwrap_cache_transport(bytes);
+        assert_eq!(payload, b"[1,2]".to_vec());
+        assert_eq!(source, "unknown");
+    }
+
+    #[test]
+    fn unwrap_cache_transport_degrades_non_string_source_to_unknown() {
+        let bytes = br#"{"source":42,"providers":[1,2]}"#.to_vec();
+        let (payload, source) = unwrap_cache_transport(bytes);
+        assert_eq!(payload, b"[1,2]".to_vec());
+        assert_eq!(source, "unknown");
+    }
+
+    #[test]
+    fn unwrap_cache_transport_malformed_object_degrades_without_panicking() {
+        // No `providers` field at all: not a well-formed envelope.
+        let bytes = br#"{"schema":"showy-quota/cache@1","source":"cli"}"#.to_vec();
+        let (payload, source) = unwrap_cache_transport(bytes.clone());
+        assert_eq!(
+            payload, bytes,
+            "malformed envelope must degrade to original bytes"
+        );
+        assert_eq!(source, "unknown");
+
+        // Truncated/invalid JSON object must not panic either.
+        let truncated = br#"{"providers":[1,2"#.to_vec();
+        let (payload, source) = unwrap_cache_transport(truncated.clone());
+        assert_eq!(payload, truncated);
+        assert_eq!(source, "unknown");
+    }
+
+    #[test]
+    fn unwrap_cache_transport_tolerates_leading_whitespace() {
+        let envelope_bytes = b"  \n\t{\"source\":\"serve\",\"providers\":[9]}".to_vec();
+        let (payload, source) = unwrap_cache_transport(envelope_bytes);
+        assert_eq!(payload, b"[9]".to_vec());
+        assert_eq!(source, "serve");
+
+        let array_bytes = b"   [9]".to_vec();
+        let (payload, source) = unwrap_cache_transport(array_bytes.clone());
+        assert_eq!(payload, array_bytes);
+        assert_eq!(source, "unknown");
+    }
+
+    #[test]
+    fn unwrap_cache_transport_respects_oversize_ceiling() {
+        let oversize = vec![b' '; MAX_USAGE_JSON_BYTES + 1];
+        let (payload, source) = unwrap_cache_transport(oversize.clone());
+        assert_eq!(payload, oversize);
+        assert_eq!(source, "unknown");
     }
 }

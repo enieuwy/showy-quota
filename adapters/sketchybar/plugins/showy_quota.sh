@@ -77,6 +77,12 @@ fi
 CODEXBAR_RESOURCES="$(validated_codexbar_resources || true)"
 RENDER_LOCK_DIR="${CACHE_DIR}/render.lock"
 RENDER_LOCK_OWNER="${RENDER_LOCK_DIR}/owner.pid"
+# Temp icon files awaiting cleanup by the EXIT trap (release_render_lock).
+# INVARIANT: only ever appended to from the current shell. Registering a temp
+# inside a command substitution or a piped loop body would push it onto a
+# subshell's copy of this array, and the trap would never see it — which is
+# exactly why provider_icon_png returns its path via a caller-named variable
+# rather than on stdout.
 ICON_TMP_FILES=()
 
 cleanup_icon_tmp_files() {
@@ -716,17 +722,23 @@ should_tint_dark_icon_png() {
 
 
 
+# Render (or reuse) the provider icon PNG and write its path into the variable
+# named by $3. It must NOT be called in a command substitution: that subshell
+# would discard the ICON_TMP_FILES registrations below and defeat EXIT-trap
+# cleanup. The local is named `dest` (not `out`) so a caller passing "out" as
+# the target name cannot have the assignment silently land on our local.
 provider_icon_png() {
     (( HAVE_MAGICK )) || return 1
 
-    local pid="$1" status="${2:-none}"
-    local status_color="" tint_color="" suffix="" out cache_key
+    local pid="$1" status="${2:-none}" out_var="$3"
+    local status_color="" tint_color="" suffix="" dest cache_key
+    [[ -n "${out_var}" ]] || return 1
     if status_color=$(status_color_for_indicator "${status}"); then
         suffix="-${status}"
     fi
     cache_key="${ICON_TEXT_HEX}-${PRIMARY_UNKNOWN_HEX}-${PRIMARY_WARN_HEX}-${PRIMARY_BAD_HEX}"
-    out="${CACHE_DIR}/icon-v${ICON_CACHE_VERSION}-${pid}-${cache_key}${suffix}.png"
-    [[ -s "${out}" ]] && { printf '%s\n' "${out}"; return 0; }
+    dest="${CACHE_DIR}/icon-v${ICON_CACHE_VERSION}-${pid}-${cache_key}${suffix}.png"
+    [[ -s "${dest}" ]] && { printf -v "${out_var}" '%s' "${dest}"; return 0; }
 
     # Per-process tmp files in the same directory so `mv` is atomic.
     local tmp normal_tmp
@@ -767,8 +779,13 @@ provider_icon_png() {
         tmp="${normal_tmp}"
     fi
 
-    mv -f "${tmp}" "${out}"
-    printf '%s\n' "${out}"
+    # Fail closed: a failed publish must not hand back a path to a file that
+    # does not exist, and must not leak the staged temp.
+    if ! mv -f "${tmp}" "${dest}"; then
+        rm -f "${tmp}"
+        return 1
+    fi
+    printf -v "${out_var}" '%s' "${dest}"
 }
 
 # ── native stacked bar helpers ───────────────────────────────────────
@@ -862,7 +879,7 @@ while IFS= read -r pid; do
     fi
 done <<< "${desired_providers}"
 
-if [[ "${SHOWY_QUOTA_SKETCHYBAR_FORCE_REDECLARE:-0}" == "1" ]]; then
+if showy_quota_bool "${SHOWY_QUOTA_SKETCHYBAR_FORCE_REDECLARE-}" 0; then
     force_redeclare=1
     declared_item_providers=""
 elif ! declared_items_present "${expected_live_providers}"; then
@@ -908,9 +925,10 @@ while IFS=$'\x1f' read -r pid label color status status_url \
     font_icon=""
     if [[ "${SHOWY_QUOTA_SKETCHYBAR_PROVIDER_ICON_MODE}" == "font" ]]; then
         font_icon=$(provider_font_icon "${pid}" || true)
-        [[ -n "${font_icon}" ]] || icon=$(provider_icon_png "${pid}" "${status}" || true)
+        # Direct call, never $( ): see the ICON_TMP_FILES invariant.
+        [[ -n "${font_icon}" ]] || provider_icon_png "${pid}" "${status}" icon || icon=""
     else
-        icon=$(provider_icon_png "${pid}" "${status}" || true)
+        provider_icon_png "${pid}" "${status}" icon || icon=""
     fi
 
     has_t=0

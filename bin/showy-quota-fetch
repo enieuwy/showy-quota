@@ -330,6 +330,21 @@ cache_token() {
     cache_payload_marker
 }
 
+# Emit the published cache payload as a bare CodexBar provider array on
+# stdout, regardless of whether the on-disk file is an envelope
+# (`{"schema":...,"source":...,"providers":[...]}`) or a legacy bare array —
+# callers of this script have always received a bare array and must keep
+# doing so.
+emit_cache_payload() {
+    local file="$1" first_byte
+    first_byte=$(head -c 1 -- "${file}" 2>/dev/null)
+    if [[ "${first_byte}" == '{' ]]; then
+        jq -c '.providers // []' "${file}"
+    else
+        cat "${file}"
+    fi
+}
+
 quarantine_invalid_cache_if_present() {
     [[ -f "${SHOWY_QUOTA_USAGE_FILE}" && -s "${SHOWY_QUOTA_USAGE_FILE}" ]] || return 0
     showy_quota_json_valid "${SHOWY_QUOTA_USAGE_FILE}" && return 0
@@ -364,7 +379,7 @@ quarantine_invalid_cache_if_present() {
 
 if [[ "${mode}" == "cache-only" ]]; then
     if [[ -s "${SHOWY_QUOTA_USAGE_FILE}" ]] && showy_quota_json_valid "${SHOWY_QUOTA_USAGE_FILE}"; then
-        cat "${SHOWY_QUOTA_USAGE_FILE}"
+        emit_cache_payload "${SHOWY_QUOTA_USAGE_FILE}"
         exit 0
     fi
     exit 1
@@ -625,16 +640,6 @@ clear_provider_failure() {
     rm -f -- "$(provider_failure_stamp_path "${provider}")" 2>/dev/null || true
 }
 
-valid_provider_id() {
-    local id="$1"
-    [[ -n "${id}" ]] || return 1
-    # '.', '..', and leading '-' match the charset below but are not safe ids:
-    # path components can escape per-provider stamp directories, and leading
-    # '-' can be interpreted as an argv flag by downstream CLIs.
-    [[ "${id}" == "." || "${id}" == ".." || "${id}" == -* ]] && return 1
-    [[ "${id}" =~ ^[A-Za-z0-9_.-]+$ ]]
-}
-
 # Run `codexbar config providers --format json [--pretty]` with a hard timeout
 # and emit enabled provider ids (one per line) on stdout. Empty stdout +
 # non-zero rc on failure. Honors a short failure backoff so a hanging
@@ -685,8 +690,8 @@ discover_providers() {
         return 1
     fi
     # Two-pass: count enabled provider records independently from provider
-    # strings, then keep only ids that pass `valid_provider_id`. Empty, null,
-    # or missing ids in enabled records are invalid inventory, not canonical
+    # strings, then keep only ids that pass `showy_quota_valid_provider_id`. Empty,
+    # null, or missing ids in enabled records are invalid inventory, not canonical
     # empty inventory.
     enabled_count=$(printf '%s' "${raw}" | jq -r '
         [.[] | select(.enabled == true)] | length
@@ -706,7 +711,7 @@ discover_providers() {
     if [[ -n "${ids}" ]]; then
         while IFS= read -r id_line; do
             [[ -n "${id_line}" ]] || continue
-            valid_provider_id "${id_line}" || continue
+            showy_quota_valid_provider_id "${id_line}" || continue
             validated_ids+="${id_line}"$'\n'
             valid_count=$((valid_count + 1))
         done < <(printf '%s\n' "${ids}")
@@ -757,7 +762,7 @@ apply_provider_filters() {
         id="${id#"${id%%[![:space:]]*}"}"
         id="${id%"${id##*[![:space:]]}"}"
         [[ -n "${id}" ]] || continue
-        valid_provider_id "${id}" || continue
+        showy_quota_valid_provider_id "${id}" || continue
 
         if (( ${#allow[@]} > 0 )); then
             in_list=0
@@ -922,13 +927,13 @@ run_codexbar_cli_provider() {
     local provider="$1"
     local LC_ALL=C
     local timeout_seconds out rc=0
-    valid_provider_id "${provider}" || return 1
+    showy_quota_valid_provider_id "${provider}" || return 1
     if ! command -v "${SHOWY_QUOTA_CODEXBAR_BIN}" >/dev/null 2>&1; then
         showy_quota_log "codexbar binary not found: ${SHOWY_QUOTA_CODEXBAR_BIN}"
         return 127
     fi
     local args=(usage --provider "${provider}" --format json --pretty)
-    if [[ "${SHOWY_QUOTA_INCLUDE_STATUS}" == "1" ]]; then
+    if showy_quota_bool "${SHOWY_QUOTA_INCLUDE_STATUS-}" 1; then
         args+=(--status)
     fi
     timeout_seconds=$(codexbar_cli_timeout_seconds)
@@ -958,7 +963,7 @@ carry_forward_provider_record() {
     [[ -s "${SHOWY_QUOTA_USAGE_FILE}" ]] || return 1
     showy_quota_json_valid "${SHOWY_QUOTA_USAGE_FILE}" || return 1
     record=$(jq -c --arg p "${provider}" \
-        '[.[] | select(type == "object" and .provider == $p)]' \
+        '(if type == "object" then (.providers // []) else . end) | [.[] | select(type == "object" and .provider == $p)]' \
         "${SHOWY_QUOTA_USAGE_FILE}" 2>/dev/null) || return 1
     [[ -n "${record}" && "${record}" != "[]" ]] || return 1
     printf '%s' "${record}"
@@ -1522,7 +1527,7 @@ ensure_serve_running() {
         # we may manage serves, both versions are known, and they differ.
         # Pre-#1703 builds expose no /health version (running_version empty)
         # and short-circuit here with zero codexbar spawn.
-        if [[ "${SHOWY_QUOTA_MANAGE_SERVE:-1}" != "1" ]]; then
+        if ! showy_quota_bool "${SHOWY_QUOTA_MANAGE_SERVE-}" 1; then
             return 0
         fi
         local running_version=""
@@ -1538,7 +1543,7 @@ ensure_serve_running() {
         showy_quota_log "codexbar serve stale: running ${running_version} but on-disk ${ondisk_version}; recycling"
         serve_recycle_stale || return 0
     fi
-    [[ "${SHOWY_QUOTA_MANAGE_SERVE:-1}" == "1" ]] || return 1
+    showy_quota_bool "${SHOWY_QUOTA_MANAGE_SERVE-}" 1 || return 1
     if managed_serve_pid_alive; then
         if wait_for_serve_health; then
             return 0
@@ -1581,7 +1586,7 @@ run_codexbar_serve() {
 }
 
 serve_payload_is_publishable() {
-    local payload="$1" ids="" id
+    local payload="$1" ids="" id found_valid_id=0
     printf '%s' "${payload}" | jq -e '
         def valid_provider_id:
             type == "string"
@@ -1606,7 +1611,7 @@ serve_payload_is_publishable() {
             and (.resetDescription | optional_string)
             and (.windowMinutes | optional_integer);
         type == "array" and
-        all(.[]; type == "object"
+        any(.[]; type == "object"
             and (.provider | valid_provider_id)
             and (
                 .status == null
@@ -1641,19 +1646,20 @@ serve_payload_is_publishable() {
                     )
                 )
             )
-        )
-        and any(.[]?;
-            (.provider? | type == "string" and length > 0)
-            and any([.usage?.primary, .usage?.secondary, .usage?.tertiary][];
-                . != null and (.usedPercent? | type == "number")
+            and (
+                (.provider? | type == "string" and length > 0)
+                and any([.usage?.primary, .usage?.secondary, .usage?.tertiary][];
+                    . != null and (.usedPercent? | type == "number")
+                )
             )
         )
     ' >/dev/null 2>&1 || return 1
-    ids=$(printf '%s' "${payload}" | jq -r '.[] | .provider' 2>/dev/null) || return 1
+    ids=$(printf '%s' "${payload}" | jq -r '.[] | .provider? | select(type == "string")' 2>/dev/null) || return 1
     while IFS= read -r id; do
         [[ -n "${id}" ]] || continue
-        valid_provider_id "${id}" || return 1
+        showy_quota_valid_provider_id "${id}" && found_valid_id=1
     done < <(printf '%s\n' "${ids}")
+    (( found_valid_id )) || return 1
     return 0
 }
 
@@ -1671,7 +1677,7 @@ serve_payload_inventory() {
     ' 2>/dev/null) || return 1
     while IFS= read -r id; do
         [[ -n "${id}" ]] || continue
-        valid_provider_id "${id}" || continue
+        showy_quota_valid_provider_id "${id}" || continue
         printf '%s\n' "${id}"
     done < <(printf '%s\n' "${ids}") | sort -u
 }
@@ -1680,7 +1686,7 @@ run_codexbar_serve_with_recovery() {
     local check_inventory="${1:-0}"
     local out attempt threshold max_attempts=1 inventory_check_available=0 inventory_drift=0 usage_timed_out=0 serve_cmd_rc=0
     threshold=$(serve_failure_restart_threshold)
-    if [[ "${SHOWY_QUOTA_MANAGE_SERVE:-1}" == "1" ]] && managed_serve_pid_alive; then
+    if showy_quota_bool "${SHOWY_QUOTA_MANAGE_SERVE-}" 1 && managed_serve_pid_alive; then
         max_attempts="${threshold}"
     fi
     if ! { (( force_refresh == 0 )) && cache_is_valid && [[ "$(showy_quota_cache_source)" == "serve" ]]; }; then
@@ -1737,7 +1743,7 @@ run_codexbar_serve_with_recovery() {
         fi
     done
 
-    if [[ "${SHOWY_QUOTA_MANAGE_SERVE:-1}" == "1" ]] \
+    if showy_quota_bool "${SHOWY_QUOTA_MANAGE_SERVE-}" 1 \
         && (( usage_timed_out == 0 )) \
         && managed_serve_pid_alive \
         && serve_health_ok
@@ -1819,48 +1825,72 @@ try:
 except OSError:
     sys.exit(127)
 
-def terminate_process():
+def signal_group(sig):
+    # Cleanup must never raise. A reaped group answers ESRCH
+    # (ProcessLookupError); a zombie-only group answers EPERM on macOS. Neither
+    # is actionable here, and letting either escape would mask the real child
+    # exit code via the finally block below (it turned the 125 output-cap path
+    # into a bare rc=1). NOTE: this program is embedded in a single-quoted
+    # shell string, so it must never contain an apostrophe.
     try:
-        os.killpg(proc.pid, signal.SIGTERM)
-    except ProcessLookupError:
+        os.killpg(proc.pid, sig)
+    except OSError:
         pass
+
+def terminate_process():
+    signal_group(signal.SIGTERM)
+    try:
+        proc.wait(timeout=1)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    signal_group(signal.SIGKILL)
     try:
         proc.wait(timeout=1)
     except subprocess.TimeoutExpired:
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        proc.wait()
+        pass
 
-deadline = time.monotonic() + timeout
-written = 0
-fd = proc.stdout.fileno()
-while True:
-    remaining = deadline - time.monotonic()
-    if remaining <= 0:
+def handle_signal(signum, _frame):
+    terminate_process()
+    sys.exit(128 + signum)
+
+signal.signal(signal.SIGINT, handle_signal)
+signal.signal(signal.SIGTERM, handle_signal)
+
+def run():
+    deadline = time.monotonic() + timeout
+    written = 0
+    fd = proc.stdout.fileno()
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            terminate_process()
+            sys.exit(124)
+        readable, _, _ = select.select([fd], [], [], remaining)
+        if not readable:
+            if proc.poll() is not None:
+                continue
+            terminate_process()
+            sys.exit(124)
+        chunk = os.read(fd, min(65536, capture_bytes - written))
+        if not chunk:
+            break
+        os.write(sys.stdout.fileno(), chunk)
+        written += len(chunk)
+        if written == capture_bytes:
+            terminate_process()
+            sys.exit(125)
+
+    try:
+        sys.exit(proc.wait(timeout=max(0, deadline - time.monotonic())))
+    except subprocess.TimeoutExpired:
         terminate_process()
         sys.exit(124)
-    readable, _, _ = select.select([fd], [], [], remaining)
-    if not readable:
-        if proc.poll() is not None:
-            continue
-        terminate_process()
-        sys.exit(124)
-    chunk = os.read(fd, min(65536, capture_bytes - written))
-    if not chunk:
-        break
-    os.write(sys.stdout.fileno(), chunk)
-    written += len(chunk)
-    if written == capture_bytes:
-        terminate_process()
-        sys.exit(125)
 
 try:
-    sys.exit(proc.wait(timeout=max(0, deadline - time.monotonic())))
-except subprocess.TimeoutExpired:
+    run()
+finally:
     terminate_process()
-    sys.exit(124)
 ' "${timeout_seconds}" "${max_bytes}" "$@"
         return $?
     fi
@@ -1924,7 +1954,7 @@ run_codexbar() {
 }
 
 publish_cache_payload() {
-    local out="$1" source="${2:-unknown}" tmp stamp_tmp source_tmp payload_marker=""
+    local out="$1" source="${2:-unknown}" tmp stamp_tmp payload_marker=""
     SHOWY_QUOTA_CACHE_TMP_FILES=()
     trap showy_quota_exit_cleanup EXIT
     trap 'showy_quota_exit_cleanup; exit 130' INT
@@ -1941,40 +1971,36 @@ publish_cache_payload() {
         return 1
     fi
 
-    printf '%s' "${out}" > "${tmp}"
+    # Payload and source are built into ONE envelope object here, so they can
+    # be published with a single atomic rename below: there is no window in
+    # which a reader could observe a payload paired with source metadata from
+    # a different generation. jq escapes `source` correctly; never
+    # string-concatenate JSON by hand.
+    if ! printf '%s' "${out}" | jq -c --arg source "${source}" \
+        '{schema: "showy-quota/cache@1", source: $source, providers: .}' \
+        > "${tmp}"; then
+        rm -f -- "${tmp}"
+        showy_quota_log "codexbar JSON failed validation"
+        return 1
+    fi
     if ! showy_quota_json_valid "${tmp}"; then
         rm -f -- "${tmp}"
         showy_quota_log "codexbar JSON failed validation"
         return 1
     fi
-    if ! source_tmp=$(mktemp "${SHOWY_QUOTA_CACHE_DIR}/source.XXXXXX"); then
-        rm -f -- "${tmp}"
-        showy_quota_log "could not create temporary source file"
-        return 1
-    fi
-    SHOWY_QUOTA_CACHE_TMP_FILES+=("${source_tmp}")
-    if ! printf '%s\n' "${source}" > "${source_tmp}"; then
-        rm -f -- "${tmp}" "${source_tmp}"
-        showy_quota_log "could not write temporary source file"
-        return 1
-    fi
 
     if ! showy_quota_refresh_lease_still_owned; then
-        rm -f -- "${tmp}" "${source_tmp}"
+        rm -f -- "${tmp}"
         return 1
     fi
 
-    # Commit order is payload, source, then generation token. In particular,
-    # a failed payload rename cannot expose any new metadata, and a token is
-    # minted only after the visible payload has a stable filesystem identity.
+    # Commit order is payload+source (one atomic rename), then generation
+    # token. A failed payload rename cannot expose any new metadata, and a
+    # token is minted only after the visible payload has a stable filesystem
+    # identity.
     if ! mv -- "${tmp}" "${SHOWY_QUOTA_USAGE_FILE}"; then
-        rm -f -- "${tmp}" "${source_tmp}"
+        rm -f -- "${tmp}"
         showy_quota_log "could not publish cache file"
-        return 1
-    fi
-    if ! mv -- "${source_tmp}" "${SHOWY_QUOTA_SOURCE_FILE}"; then
-        rm -f -- "${source_tmp}"
-        showy_quota_log "could not publish source file"
         return 1
     fi
     payload_marker=$(cache_payload_marker)
@@ -1997,7 +2023,8 @@ publish_cache_payload() {
         showy_quota_log "could not publish stamp file"
         return 1
     fi
-    chmod 600 "${SHOWY_QUOTA_USAGE_FILE}" "${SHOWY_QUOTA_USAGE_STAMP}" "${SHOWY_QUOTA_SOURCE_FILE}" 2>/dev/null || true
+    chmod 600 "${SHOWY_QUOTA_USAGE_FILE}" "${SHOWY_QUOTA_USAGE_STAMP}" 2>/dev/null || true
+    rm -f -- "${SHOWY_QUOTA_CACHE_DIR}/source" 2>/dev/null || true
     SHOWY_QUOTA_CACHE_TMP_FILES=()
     showy_quota_log "cache refreshed from ${source} (${#out} bytes)"
     return 0
@@ -2141,7 +2168,7 @@ fi
 # Always emit the most recent valid cache. Bars must never see malformed
 # payloads as successful output.
 if cache_is_valid; then
-    cat "${SHOWY_QUOTA_USAGE_FILE}"
+    emit_cache_payload "${SHOWY_QUOTA_USAGE_FILE}"
     exit 0
 fi
 

@@ -46,26 +46,43 @@ impl std::error::Error for CacheReadError {}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CachePaths {
     pub usage_file: PathBuf,
-    pub source_file: PathBuf,
 }
 
 pub fn read_cache_from_env(now_epoch: i64) -> Result<CacheSnapshot, CacheReadError> {
     let paths = cache_paths_from_env();
-    // Read the payload FIRST, then the freshness metadata (mtime + source).
-    // The fetcher publishes stamp+source before renaming usage.json last, so a
-    // payload we observe is always paired with matching-or-newer metadata; do
-    // not reorder these two reads or the mixed-generation race reopens.
-    let payload = read_usage_payload(&paths.usage_file).map_err(|source| CacheReadError {
-        path: paths.usage_file.clone(),
+    // Payload and source commit via a single atomic rename (see
+    // `bin/showy-quota-fetch`'s publish_cache_payload), so a snapshot we
+    // observe can never mix generations: there is no second file whose
+    // independent commit order could pair a NEW payload with STALE source
+    // metadata. The generation stamp still commits after this file, because
+    // it is derived from the published payload's on-disk identity
+    // (inode/mtime/size) and can only be minted once that identity is
+    // stable.
+    let (raw, mtime_epoch) =
+        read_usage_payload(&paths.usage_file).map_err(|source| CacheReadError {
+            path: paths.usage_file.clone(),
+            source,
+        })?;
+    let (payload, source) = crate::codexbar::unwrap_cache_transport(raw);
+    let freshness = freshness_from_parts(
+        mtime_epoch,
+        now_epoch,
+        refresh_seconds_from_env(),
         source,
-    })?;
-    let freshness = freshness_for_paths(&paths, now_epoch);
+        env::var("SHOWY_QUOTA_DEGRADED_CLI").ok(),
+    );
     Ok(CacheSnapshot { payload, freshness })
 }
 
-fn read_usage_payload(path: &PathBuf) -> io::Result<Vec<u8>> {
+fn read_usage_payload(path: &PathBuf) -> io::Result<(Vec<u8>, Option<i64>)> {
     let file = fs::File::open(path)?;
-    read_bounded_payload(file)
+    let mtime_epoch = file
+        .metadata()
+        .ok()
+        .and_then(|metadata| metadata.modified().ok())
+        .map(system_time_epoch);
+    let payload = read_bounded_payload(file)?;
+    Ok((payload, mtime_epoch))
 }
 
 fn read_bounded_payload(reader: impl Read) -> io::Result<Vec<u8>> {
@@ -89,21 +106,14 @@ pub fn cache_paths_from_env() -> CachePaths {
     let usage_file = env_nonempty("SHOWY_QUOTA_USAGE_FILE")
         .map(PathBuf::from)
         .unwrap_or_else(|| cache_dir.join("usage.json"));
-    let source_file = env_nonempty("SHOWY_QUOTA_SOURCE_FILE")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| cache_dir.join("source"));
-    CachePaths {
-        usage_file,
-        source_file,
-    }
+    CachePaths { usage_file }
 }
 
-pub fn freshness_for_paths(paths: &CachePaths, now_epoch: i64) -> CacheFreshness {
+pub fn freshness_for_paths(paths: &CachePaths, now_epoch: i64, source: String) -> CacheFreshness {
     let mtime_epoch = fs::metadata(&paths.usage_file)
         .ok()
         .and_then(|metadata| metadata.modified().ok())
         .map(system_time_epoch);
-    let source = read_cache_source(&paths.source_file);
     freshness_from_parts(
         mtime_epoch,
         now_epoch,
@@ -177,13 +187,6 @@ fn default_cache_dir() -> PathBuf {
         .join("showy-quota")
 }
 
-fn read_cache_source(path: &PathBuf) -> String {
-    fs::read_to_string(path)
-        .ok()
-        .and_then(|value| value.lines().next().map(str::trim).map(str::to_owned))
-        .unwrap_or_else(|| String::from("unknown"))
-}
-
 fn system_time_epoch(time: SystemTime) -> i64 {
     match time.duration_since(UNIX_EPOCH) {
         Ok(duration) => duration.as_secs().min(i64::MAX as u64) as i64,
@@ -255,5 +258,61 @@ mod tests {
         assert_eq!(parse_refresh_seconds(""), None);
         assert_eq!(parse_refresh_seconds("12x"), None);
         assert_eq!(parse_refresh_seconds("1234567890123456789"), None);
+    }
+
+    fn env_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::LazyLock<std::sync::Mutex<()>> =
+            std::sync::LazyLock::new(|| std::sync::Mutex::new(()));
+        LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn unique_temp_cache_dir(label: &str) -> PathBuf {
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!(
+            "showy-quota-cache-test-{label}-{}-{nanos}-{id}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).expect("create temp cache dir");
+        dir
+    }
+
+    #[test]
+    fn read_cache_from_env_reports_envelope_source() {
+        let _guard = env_test_lock();
+        let dir = unique_temp_cache_dir("envelope");
+        fs::write(
+            dir.join("usage.json"),
+            br#"{"schema":"showy-quota/cache@1","source":"serve","providers":[{"provider":"codex"}]}"#,
+        )
+        .expect("write envelope cache file");
+        env::set_var("SHOWY_QUOTA_CACHE_DIR", &dir);
+        env::remove_var("SHOWY_QUOTA_USAGE_FILE");
+        let snapshot = read_cache_from_env(1_000);
+        env::remove_var("SHOWY_QUOTA_CACHE_DIR");
+        fs::remove_dir_all(&dir).ok();
+        let snapshot = snapshot.expect("read envelope cache");
+        assert_eq!(snapshot.freshness.source, "serve");
+        assert_eq!(snapshot.payload, br#"[{"provider":"codex"}]"#.to_vec());
+    }
+
+    #[test]
+    fn read_cache_from_env_legacy_bare_array_reports_unknown_source() {
+        let _guard = env_test_lock();
+        let dir = unique_temp_cache_dir("legacy-array");
+        fs::write(dir.join("usage.json"), br#"[{"provider":"codex"}]"#)
+            .expect("write legacy cache file");
+        env::set_var("SHOWY_QUOTA_CACHE_DIR", &dir);
+        env::remove_var("SHOWY_QUOTA_USAGE_FILE");
+        let snapshot = read_cache_from_env(1_000);
+        env::remove_var("SHOWY_QUOTA_CACHE_DIR");
+        fs::remove_dir_all(&dir).ok();
+        let snapshot = snapshot.expect("read legacy cache");
+        assert_eq!(snapshot.freshness.source, "unknown");
+        assert_eq!(snapshot.payload, br#"[{"provider":"codex"}]"#.to_vec());
     }
 }
