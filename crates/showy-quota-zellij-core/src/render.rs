@@ -1,9 +1,11 @@
 use std::borrow::Cow;
 use std::cmp::Ordering;
 
+use serde::Serialize;
+
 use crate::codexbar::{is_errored, is_renderable, NamedWindow, ProviderRecord, Usage, UsageWindow};
 use crate::config::RenderConfig;
-use crate::palette::hex_to_rgb;
+use crate::palette::{hex_to_rgb, Severity};
 use crate::reset::{minutes_until, reset_epoch};
 
 #[derive(Debug, Clone, Copy)]
@@ -61,33 +63,144 @@ fn render_with_format(
     Ok(render_records(&records, config, options, output_format))
 }
 
+/// Parse the array transport. `render_records` filters per-record via
+/// `is_renderable`/`is_errored`, and `slot()` already drops windows lacking
+/// `usedPercent`, so this is a plain deserialize: only transport-level
+/// failures (unparseable JSON, non-array top level) are fatal here.
 fn parse_render_payload(payload: &[u8]) -> Result<Vec<ProviderRecord>, serde_json::Error> {
     let records: Vec<ProviderRecord> = serde_json::from_slice(payload)?;
-    if records.iter().all(valid_render_record) {
-        Ok(records)
-    } else {
-        Err(serde_json::Error::io(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "invalid CodexBar usage payload",
-        )))
-    }
-}
-
-fn valid_render_record(record: &ProviderRecord) -> bool {
-    record.usage.as_ref().is_none_or(|usage| {
-        valid_render_window(usage.primary.as_ref())
-            && valid_render_window(usage.secondary.as_ref())
-            && valid_render_window(usage.tertiary.as_ref())
-    })
-}
-
-fn valid_render_window(window: Option<&UsageWindow>) -> bool {
-    window.is_none_or(|window| window.used_percent.is_some())
+    Ok(records)
 }
 
 enum RenderUnit<'a> {
     Provider(Box<Cow<'a, ProviderRecord>>, String),
     Error(&'a ProviderRecord, String),
+}
+
+/// One rendered chunk of the strip, kept separate instead of concatenated.
+///
+/// `text` is byte-identical to the chunk `render_zellij` / `render_tmux` emit
+/// for the same provider, so a surface that stacks chunks as rows shows the
+/// same glyphs, caps, markers and countdown as the single-line strip. Pooled
+/// providers still expand into one row per family (`AGᴳ`, `AGᶜ`) and stacked
+/// modes (mono3/mono4) still occupy exactly one row, because rows are the
+/// renderer's own chunks rather than raw usage windows.
+///
+/// `severity` and `dim` report the band showy-quota coloured the chunk with, for
+/// surfaces that cannot carry colour inside the text: a Herdr sidebar token
+/// strips control bytes, so it needs the band by name. Strip-level state
+/// (`stale`, `degraded_cli`) stays with the caller that supplied it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RenderedRow {
+    pub provider: String,
+    pub sigil: String,
+    pub text: String,
+    /// `None` for a provider that reported an error: those chunks carry an
+    /// error label rather than a usage bar.
+    pub severity: Option<Severity>,
+    pub dim: bool,
+    /// The hex this chunk's band resolves to, so a surface needs no palette
+    /// knowledge of its own. A stale strip greys its chunks; that override is
+    /// the caller's to apply, since it also owns the `stale` flag.
+    pub color: String,
+    pub error: bool,
+}
+
+/// Serialise `render_rows` output as a JSON array, the transport shared by the
+/// display emitters.
+pub fn emit_rows(
+    payload: &[u8],
+    config: &RenderConfig,
+    options: RenderOptions,
+    output_format: OutputFormat,
+) -> Result<String, RenderError> {
+    let rows = render_rows(payload, config, options, output_format)?;
+    serde_json::to_string(&rows).map_err(|_| RenderError::InvalidPayload)
+}
+
+/// Render the strip as one entry per chunk. An empty result means the same as
+/// the strip's `AI idle`: no provider reported renderable usage.
+pub fn render_rows(
+    payload: &[u8],
+    config: &RenderConfig,
+    options: RenderOptions,
+    output_format: OutputFormat,
+) -> Result<Vec<RenderedRow>, RenderError> {
+    let records = parse_render_payload(payload).map_err(|_| RenderError::InvalidPayload)?;
+    let mut records: Vec<&ProviderRecord> = records
+        .iter()
+        .filter(|record| is_renderable(record) || is_errored(record))
+        .collect();
+    filter_and_sort(&mut records, config);
+
+    let chunk_bg = &config.palette_bg;
+    Ok(collect_units(&records, config)
+        .iter()
+        .map(|unit| {
+            let mut text = String::new();
+            match unit {
+                RenderUnit::Provider(record, sigil) => {
+                    let band =
+                        render_provider(&mut text, record, sigil, config, options, output_format);
+                    let severity = config.severity(band.remaining);
+                    RenderedRow {
+                        provider: record.provider.clone(),
+                        sigil: sigil.clone(),
+                        text,
+                        severity: Some(severity),
+                        dim: band.dim,
+                        color: config.severity_color(severity, band.dim),
+                        error: false,
+                    }
+                }
+                RenderUnit::Error(record, sigil) => {
+                    render_error_provider(
+                        &mut text,
+                        record,
+                        sigil,
+                        config,
+                        options,
+                        output_format,
+                        chunk_bg,
+                    );
+                    RenderedRow {
+                        provider: record.provider.clone(),
+                        sigil: sigil.clone(),
+                        text,
+                        severity: None,
+                        dim: false,
+                        color: config.palette_countdown_warn.clone(),
+                        error: true,
+                    }
+                }
+            }
+        })
+        .collect())
+}
+
+/// Model-pooled providers (auto-detected `dual2`) are split into one synthetic
+/// per-family `dual` provider each (`AGᴳ`, `AGᶜ`); everything else renders
+/// as-is. Each unit then flows through the normal dual path.
+fn collect_units<'a>(records: &[&'a ProviderRecord], config: &RenderConfig) -> Vec<RenderUnit<'a>> {
+    let mut units: Vec<RenderUnit<'a>> = Vec::new();
+    for record in records {
+        if is_errored(record) {
+            units.push(RenderUnit::Error(record, provider_sigil(&record.provider)));
+            continue;
+        }
+        match expand_pooled(record, config) {
+            Some(families) => {
+                for (sigil, synthetic) in families {
+                    units.push(RenderUnit::Provider(Box::new(Cow::Owned(synthetic)), sigil));
+                }
+            }
+            None => units.push(RenderUnit::Provider(
+                Box::new(Cow::Borrowed(record)),
+                provider_sigil(&record.provider),
+            )),
+        }
+    }
+    units
 }
 
 fn render_records(
@@ -127,34 +240,14 @@ fn render_records(
             }
         }
     } else {
-        // Model-pooled providers (auto-detected `dual2`) are split into one
-        // synthetic per-family `dual` provider each (`AGᴳ`, `AGᶜ`); everything
-        // else renders as-is. Each unit then flows through the normal dual path.
-        let mut units: Vec<RenderUnit<'_>> = Vec::new();
-        for record in records {
-            if is_errored(record) {
-                units.push(RenderUnit::Error(record, provider_sigil(&record.provider)));
-                continue;
-            }
-            match expand_pooled(record, config) {
-                Some(families) => {
-                    for (sigil, synthetic) in families {
-                        units.push(RenderUnit::Provider(Box::new(Cow::Owned(synthetic)), sigil));
-                    }
-                }
-                None => units.push(RenderUnit::Provider(
-                    Box::new(Cow::Borrowed(record)),
-                    provider_sigil(&record.provider),
-                )),
-            }
-        }
+        let units = collect_units(&records, config);
         for (idx, unit) in units.iter().enumerate() {
             if idx > 0 {
                 separator_space(&mut out, output_format, chunk_bg, options.color);
             }
             match unit {
                 RenderUnit::Provider(record, sigil) => {
-                    render_provider(&mut out, record, sigil, config, options, output_format)
+                    render_provider(&mut out, record, sigil, config, options, output_format);
                 }
                 RenderUnit::Error(record, sigil) => render_error_provider(
                     &mut out,
@@ -261,7 +354,10 @@ fn render_error_provider(
         output_format,
         options.color,
     );
-    let label = format!("{}err", config.error_glyph);
+    let label = center_pad(
+        &format!("{}err", config.error_glyph),
+        output_format.bar_width(config),
+    );
     style_text(
         out,
         &label,
@@ -283,6 +379,34 @@ fn render_error_provider(
     );
 }
 
+/// Center `text` within a field of `width` characters by padding both sides
+/// with spaces, so a short label (e.g. the error chunk) occupies the same
+/// visual footprint as the indicator bar it replaces. Text at or beyond
+/// `width` is returned unpadded.
+fn center_pad(text: &str, width: usize) -> String {
+    let len = text.chars().count();
+    if len >= width {
+        return text.to_string();
+    }
+    let pad = width - len;
+    let left = pad / 2;
+    let right = pad - left;
+    let mut out = String::with_capacity(width);
+    out.push_str(&" ".repeat(left));
+    out.push_str(text);
+    out.push_str(&" ".repeat(right));
+    out
+}
+
+/// The severity band a chunk was coloured with, reported so surfaces that
+/// cannot carry colour inside the text itself can reproduce showy-quota's own
+/// choice. See `RenderedRow`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RowBand {
+    remaining: i32,
+    dim: bool,
+}
+
 fn render_provider(
     out: &mut String,
     record: &ProviderRecord,
@@ -290,7 +414,7 @@ fn render_provider(
     config: &RenderConfig,
     options: RenderOptions,
     output_format: OutputFormat,
-) {
+) -> RowBand {
     let chunk_bg = &config.palette_bg;
     let stale_color = &config.palette_stale;
     let usage = record
@@ -415,9 +539,15 @@ fn render_provider(
             lane.is_long = false;
         }
     }
+    let mut band = RowBand {
+        remaining: p_remaining,
+        dim: p_long,
+    };
     let mut mono_color = if mono_lanes.is_empty() {
         String::new()
     } else {
+        let (remaining, dim) = mono_chunk_band(config, &mono_lanes);
+        band = RowBand { remaining, dim };
         let color = mono_chunk_color(config, &mono_lanes);
         primary_color.clone_from(&color);
         color
@@ -546,6 +676,7 @@ fn render_provider(
         output_format,
         options.color,
     );
+    band
 }
 
 /// A window is "long-horizon" (a weekly/monthly cap, rendered dimmed) when it
@@ -777,9 +908,10 @@ impl<'a> Lane<'a> {
     }
 }
 
-/// One color for the whole stacked chunk (mono3/mono4): the representative
-/// window's severity, dimmed only when every present lane is a long-horizon cap.
-fn mono_chunk_color(config: &RenderConfig, lanes: &[Lane<'_>]) -> String {
+/// The representative window for a stacked chunk (mono3/mono4): its remaining
+/// percentage, and whether every present lane is a long-horizon cap (which is
+/// what dims the chunk).
+fn mono_chunk_band(config: &RenderConfig, lanes: &[Lane<'_>]) -> (i32, bool) {
     let remaining = if config.mono_color_mode == "primary" {
         lanes.first().map_or(0, |lane| lane.remaining)
     } else {
@@ -796,7 +928,14 @@ fn mono_chunk_color(config: &RenderConfig, lanes: &[Lane<'_>]) -> String {
         any = true;
         all_long &= lane.is_long;
     }
-    config.window_color(remaining, any && all_long)
+    (remaining, any && all_long)
+}
+
+/// One color for the whole stacked chunk (mono3/mono4): the representative
+/// window's severity, dimmed only when every present lane is a long-horizon cap.
+fn mono_chunk_color(config: &RenderConfig, lanes: &[Lane<'_>]) -> String {
+    let (remaining, dim) = mono_chunk_band(config, lanes);
+    config.window_color(remaining, dim)
 }
 
 /// Resolve the configured marker slots to (column, color) pairs. The first
@@ -1577,7 +1716,10 @@ mod tests {
         )
         .expect("rendered error-only fixture");
 
-        assert_eq!(output, "CR⚠err FA⚠err\n");
+        assert_eq!(
+            output,
+            "\u{e0b6}CR    ⚠err    \u{e0b4} \u{e0b6}FA    ⚠err    \u{e0b4}\n"
+        );
         assert!(!output.contains("AI idle"), "{output}");
     }
 
@@ -1592,13 +1734,13 @@ mod tests {
 
         assert!(
             output.contains(
-                "#[fg=#161616,bg=#ee5396,bold]CR#[default]#[fg=#ee5396,bg=#161616]⚠err#[default]"
+                "#[fg=#161616,bg=#ee5396,bold]CR#[default]#[fg=#ee5396,bg=#161616]    ⚠err    #[default]"
             ),
             "{output}"
         );
         assert!(
             output.contains(
-                "#[fg=#161616,bg=#ee5396,bold]FA#[default]#[fg=#ee5396,bg=#161616]⚠err#[default]"
+                "#[fg=#161616,bg=#ee5396,bold]FA#[default]#[fg=#ee5396,bg=#161616]    ⚠err    #[default]"
             ),
             "{output}"
         );
@@ -1617,7 +1759,7 @@ mod tests {
         let suffix = mixed
             .strip_prefix(renderable_chunk)
             .expect("mixed output keeps renderable chunk prefix unchanged");
-        assert_eq!(suffix, " CR⚠err\n");
+        assert_eq!(suffix, " \u{e0b6}CR    ⚠err    \u{e0b4}\n");
     }
 
     #[test]
@@ -1633,8 +1775,16 @@ mod tests {
         )
         .expect("rendered error-only fixture");
 
-        assert!(output.contains("CR!!err"), "{output}");
-        assert!(!output.contains("CR⚠err"), "{output}");
+        assert!(output.contains("!!err"), "{output}");
+        assert!(!output.contains("⚠err"), "{output}");
+    }
+
+    #[test]
+    fn center_pad_centers_short_text_and_leaves_long_text_untouched() {
+        assert_eq!(center_pad("ab", 6), "  ab  ");
+        assert_eq!(center_pad("abc", 6), " abc  ");
+        assert_eq!(center_pad("abcdefgh", 6), "abcdefgh");
+        assert_eq!(center_pad("⚠err", 12), "    ⚠err    ");
     }
 
     #[test]
@@ -1647,6 +1797,24 @@ mod tests {
         .expect("rendered invalid-id error payload");
 
         assert_eq!(output, "AI idle\n");
+    }
+
+    #[test]
+    fn window_missing_used_percent_on_one_record_does_not_block_the_other() {
+        // A sibling record with a present-but-empty window object (no
+        // usedPercent) must not fail the whole payload: `slot()` drops that
+        // window from its record, leaving the other provider's strip intact.
+        let output = render_zellij(
+            br#"[
+                {"provider": "codex", "usage": {"primary": {"usedPercent": 42}}},
+                {"provider": "claude", "usage": {"secondary": {"resetsAt": "2099-01-01T00:00:00Z"}}}
+            ]"#,
+            &RenderConfig::default(),
+            base_options(false),
+        )
+        .expect("malformed sibling window must not fail the whole payload");
+
+        assert!(output.contains("CX"), "{output}");
     }
 
     #[test]
@@ -2171,5 +2339,163 @@ mod tests {
         // ...but the redundant secondary marker (same column, drawn as a
         // background) is suppressed.
         assert!(!output.contains("48;2;190;149;255"), "{output}");
+    }
+    fn row_options(now_epoch: i64) -> RenderOptions {
+        RenderOptions {
+            color: false,
+            stale: false,
+            degraded_cli: false,
+            now_epoch,
+        }
+    }
+
+    #[test]
+    fn rows_are_the_renderer_own_chunks_not_raw_windows() {
+        let config = RenderConfig::default();
+        let options = row_options(4_070_908_800);
+
+        // A model-pooled provider expands to one row per family, even though it
+        // is a single record with several windows.
+        let pooled = render_rows(
+            include_bytes!("../../../test/fixtures/codexbar-antigravity-quad.json"),
+            &config,
+            options,
+            OutputFormat::Zellij,
+        )
+        .expect("rendered rows");
+        let sigils: Vec<&str> = pooled.iter().map(|row| row.sigil.as_str()).collect();
+        assert_eq!(sigils, vec!["AGᴳ", "AGᶜ"]);
+
+        // A stacked-mode provider keeps every lane inside one chunk, so it must
+        // not be split into a row per window.
+        let stacked = render_rows(
+            include_bytes!("../../../test/fixtures/codexbar-cursor.json"),
+            &config,
+            options,
+            OutputFormat::Zellij,
+        )
+        .expect("rendered rows");
+        assert_eq!(stacked.len(), 1, "{stacked:?}");
+        assert!(stacked[0].text.contains('│'), "{stacked:?}");
+        assert!(stacked.iter().all(|row| !row.text.contains('\x1b')));
+    }
+    #[test]
+    fn rows_rejoin_into_the_single_line_strip() {
+        let payload = include_bytes!("../../../test/fixtures/codexbar-realistic.json");
+        let config = RenderConfig::default();
+        let options = row_options(4_070_908_800);
+
+        let rows = render_rows(payload, &config, options, OutputFormat::Zellij)
+            .expect("rendered rows")
+            .iter()
+            .map(|row| row.text.clone())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let strip = render_zellij(payload, &config, options).expect("rendered strip");
+
+        // Rows must be the strip's own chunks: same glyphs, caps and countdown,
+        // only the separator and trailing newline belong to the strip.
+        assert_eq!(format!("{rows}\n"), strip);
+    }
+
+    #[test]
+    fn rows_report_the_band_used_to_colour_each_chunk() {
+        let payload = include_bytes!("../../../test/fixtures/codexbar-low.json");
+        let config = RenderConfig::default();
+        let plain = render_rows(
+            payload,
+            &config,
+            row_options(4_070_908_800),
+            OutputFormat::Zellij,
+        )
+        .expect("rendered rows");
+        let colored = render_rows(
+            payload,
+            &config,
+            RenderOptions {
+                color: true,
+                stale: false,
+                degraded_cli: false,
+                now_epoch: 4_070_908_800,
+            },
+            OutputFormat::Zellij,
+        )
+        .expect("rendered rows");
+
+        assert!(!plain.is_empty());
+        assert_eq!(plain.len(), colored.len());
+        for (row, drawn) in plain.iter().zip(&colored) {
+            let severity = row.severity.expect("usage chunk carries a band");
+            assert_eq!(row.color, config.severity_color(severity, row.dim));
+            // The reported colour is the one actually drawn: the sigil cell uses
+            // the chunk colour as its background.
+            let (r, g, b) = hex_to_rgb(&row.color);
+            assert!(
+                drawn.text.contains(&format!("48;2;{r};{g};{b}")),
+                "{drawn:?} missing {r};{g};{b}"
+            );
+        }
+        assert!(
+            plain.iter().any(|row| row.severity == Some(Severity::Bad)),
+            "{plain:?}"
+        );
+    }
+
+    #[test]
+    fn error_rows_carry_no_band() {
+        let rows = render_rows(
+            include_bytes!("../../../test/fixtures/codexbar-error-only.json"),
+            &RenderConfig::default(),
+            row_options(4_070_908_800),
+            OutputFormat::Zellij,
+        )
+        .expect("rendered rows");
+
+        assert!(!rows.is_empty());
+        assert!(rows.iter().all(|row| row.error && row.severity.is_none()));
+    }
+
+    #[test]
+    fn rows_are_empty_when_nothing_is_renderable() {
+        let rows = render_rows(
+            include_bytes!("../../../test/fixtures/codexbar-empty.json"),
+            &RenderConfig::default(),
+            row_options(4_070_908_800),
+            OutputFormat::Zellij,
+        )
+        .expect("rendered rows");
+
+        // The strip would print `AI idle`; rows leave that affordance to the
+        // surface instead of inventing a provider row.
+        assert!(rows.is_empty(), "{rows:?}");
+        assert!(render_zellij(
+            include_bytes!("../../../test/fixtures/codexbar-empty.json"),
+            &RenderConfig::default(),
+            row_options(4_070_908_800),
+        )
+        .expect("rendered strip")
+        .contains("AI idle"));
+    }
+
+    #[test]
+    fn stale_rows_keep_their_band_for_the_surface_to_override() {
+        let payload = include_bytes!("../../../test/fixtures/codexbar-realistic.json");
+        let config = RenderConfig::default();
+        let rows = render_rows(
+            payload,
+            &config,
+            RenderOptions {
+                color: false,
+                stale: true,
+                degraded_cli: false,
+                now_epoch: 4_070_908_800,
+            },
+            OutputFormat::Zellij,
+        )
+        .expect("rendered rows");
+
+        // Staleness greys the strip, but the band still describes the usage, so
+        // a surface can pick its own stale styling without losing the reading.
+        assert!(rows.iter().any(|row| row.severity.is_some()), "{rows:?}");
     }
 }

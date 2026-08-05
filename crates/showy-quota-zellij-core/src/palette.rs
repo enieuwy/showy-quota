@@ -1,14 +1,36 @@
 use crate::config::RenderConfig;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Severity {
+/// Severity band for a remaining percentage. Public so surfaces that cannot
+/// carry colour in their payload (a Herdr sidebar token strips control bytes,
+/// for example) can name the band showy-quota itself chose and map it to a
+/// colour on their own side, instead of re-deriving thresholds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Severity {
     Good,
     Warn,
     Bad,
 }
 
+impl Severity {
+    /// Stable lowercase identifier for serialised output.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Severity::Good => "good",
+            Severity::Warn => "warn",
+            Severity::Bad => "bad",
+        }
+    }
+}
+
 impl RenderConfig {
     fn color_key(&self, remaining: i32) -> Severity {
+        self.severity(remaining)
+    }
+
+    /// Severity band for a remaining percentage, using the configured
+    /// `good_min_remaining` / `warn_min_remaining` thresholds.
+    pub fn severity(&self, remaining: i32) -> Severity {
         if remaining >= self.good_min_remaining {
             Severity::Good
         } else if remaining >= self.warn_min_remaining {
@@ -32,7 +54,13 @@ impl RenderConfig {
     /// Color for a usage window: the severity palette, dimmed when the window
     /// is a long-horizon (weekly/monthly) cap rather than a live short tier.
     pub fn window_color(&self, remaining: i32, is_long: bool) -> String {
-        let severity = self.color_key(remaining);
+        self.severity_color(self.severity(remaining), is_long)
+    }
+
+    /// Color for an already-resolved band, so a surface handed a `Severity` can
+    /// reproduce the exact hex showy-quota would have drawn without re-deriving
+    /// thresholds or dim scaling.
+    pub fn severity_color(&self, severity: Severity, is_long: bool) -> String {
         if is_long {
             self.dim_palette(severity)
         } else {
@@ -65,15 +93,29 @@ impl RenderConfig {
     }
 }
 
+/// Fallback colour for a hex string this parser cannot understand, matching
+/// the shell side's `SHOWY_QUOTA_PALETTE_PRIMARY_UNKNOWN` default (`6c7086`)
+/// so a malformed configured hex degrades to the same "unknown" colour on
+/// both ends instead of silently rendering pure black.
+const FALLBACK_RGB: (u8, u8, u8) = (0x6c, 0x70, 0x86);
+
+/// Parse a `#`-optional 6-digit hex colour into `(r, g, b)`. The whole string
+/// is validated before any channel is decoded, so a malformed value (wrong
+/// length, non-hex characters, or a mix of both) always degrades to
+/// `FALLBACK_RGB` in full — never a partial mix of real and fallback bytes.
 pub fn hex_to_rgb(hex: &str) -> (u8, u8, u8) {
     let hex = hex.strip_prefix('#').unwrap_or(hex);
     if hex.len() != 6 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return (0, 0, 0);
+        return FALLBACK_RGB;
     }
-    let r = u8::from_str_radix(&hex[0..2], 16).unwrap_or(0);
-    let g = u8::from_str_radix(&hex[2..4], 16).unwrap_or(0);
-    let b = u8::from_str_radix(&hex[4..6], 16).unwrap_or(0);
-    (r, g, b)
+    match (
+        u8::from_str_radix(&hex[0..2], 16),
+        u8::from_str_radix(&hex[2..4], 16),
+        u8::from_str_radix(&hex[4..6], 16),
+    ) {
+        (Ok(r), Ok(g), Ok(b)) => (r, g, b),
+        _ => FALLBACK_RGB,
+    }
 }
 
 fn scale_hex(hex: &str, factor: &str) -> String {
@@ -133,11 +175,69 @@ mod tests {
     }
 
     #[test]
+    fn hex_to_rgb_parses_valid_six_digit_hex() {
+        assert_eq!(hex_to_rgb("25be6a"), (0x25, 0xbe, 0x6a));
+    }
+
+    #[test]
+    fn hex_to_rgb_degrades_to_fallback_on_malformed_input() {
+        // showy-quota-00685b1ec34e8659: malformed hex must never silently
+        // become pure black (the old per-channel `unwrap_or(0)` behaviour)
+        // and a partially-valid string must never mix real and fallback
+        // bytes — every invalid case below returns the fallback triple.
+        const FALLBACK: (u8, u8, u8) = (0x6c, 0x70, 0x86);
+        assert_eq!(hex_to_rgb("1234f"), FALLBACK, "5-digit hex");
+        assert_eq!(hex_to_rgb("1234567"), FALLBACK, "7-digit hex");
+        assert_eq!(hex_to_rgb("notahex"), FALLBACK, "non-hex string");
+        assert_eq!(hex_to_rgb(""), FALLBACK, "empty string");
+        assert_eq!(hex_to_rgb("ff00zz"), FALLBACK, "partially-valid string");
+    }
+
+    #[test]
     fn scale_hex_clamps_huge_factor_without_overflow() {
         // A pathological integer scale parses to (u64::MAX, 1); the widened
         // multiply must clamp each channel to 0xff instead of overflowing.
         assert_eq!(scale_hex("25be6a", "18446744073709551615"), "ffffff");
         // A zero channel stays zero regardless of the factor.
         assert_eq!(scale_component(0, u64::MAX, 1), 0);
+    }
+
+    #[test]
+    fn severity_bands_follow_configured_thresholds_and_match_window_color() {
+        let config = RenderConfig::default();
+
+        assert_eq!(config.severity(config.good_min_remaining), Severity::Good);
+        assert_eq!(
+            config.severity(config.good_min_remaining - 1),
+            Severity::Warn
+        );
+        assert_eq!(config.severity(config.warn_min_remaining), Severity::Warn);
+        assert_eq!(
+            config.severity(config.warn_min_remaining - 1),
+            Severity::Bad
+        );
+
+        // The exposed band must name the same choice `window_color` makes, so a
+        // surface that maps bands to colours itself cannot drift from the strip.
+        for remaining in [100, 40, 39, 15, 14, 0] {
+            let severity = config.severity(remaining);
+            assert_eq!(
+                config.window_color(remaining, false),
+                config.primary_palette(severity),
+                "bright {remaining}"
+            );
+            assert_eq!(
+                config.window_color(remaining, true),
+                config.dim_palette(severity),
+                "dim {remaining}"
+            );
+        }
+    }
+
+    #[test]
+    fn severity_identifiers_are_stable() {
+        assert_eq!(Severity::Good.as_str(), "good");
+        assert_eq!(Severity::Warn.as_str(), "warn");
+        assert_eq!(Severity::Bad.as_str(), "bad");
     }
 }

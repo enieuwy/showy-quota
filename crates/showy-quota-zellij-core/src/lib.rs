@@ -15,6 +15,10 @@ pub use codexbar::{
 };
 pub use config::RenderConfig;
 pub use metrics::emit_provider_metrics;
+pub use palette::Severity;
 pub use prompt::{emit_prompt_segment, PromptOptions};
-pub use render::{render_tmux, render_zellij, OutputFormat, RenderError, RenderOptions};
+pub use render::{
+    emit_rows, render_rows, render_tmux, render_zellij, OutputFormat, RenderError, RenderOptions,
+    RenderedRow,
+};
 pub use sketchybar::{emit_sketchybar, SketchybarOptions};
