@@ -139,7 +139,26 @@ pub const MAX_USAGE_JSON_BYTES: usize = 5 * 1024 * 1024;
 /// record failing [`valid_provider_record`] is dropped rather than
 /// discarding the whole payload, so one malformed provider cannot blank the
 /// strip for every other provider. An all-invalid array yields `Ok(vec![])`.
+///
+/// Because invalid records are dropped, the result is a strict SUBSEQUENCE of
+/// the input array. A caller that also needs the raw JSON element a record came
+/// from MUST use [`parse_usage_payload_indexed`] and index by the returned
+/// position — zipping this list against the raw array pairs record `i` with
+/// element `i`, which silently binds one provider's validated id to another
+/// record's data as soon as anything is dropped.
 pub fn parse_usage_payload(payload: &[u8]) -> Result<Vec<ProviderRecord>, serde_json::Error> {
+    Ok(parse_usage_payload_indexed(payload)?
+        .into_iter()
+        .map(|(_, record)| record)
+        .collect())
+}
+
+/// [`parse_usage_payload`], but each surviving record is paired with its index
+/// in the original JSON array so a caller can recover the exact raw element it
+/// was parsed from.
+pub fn parse_usage_payload_indexed(
+    payload: &[u8],
+) -> Result<Vec<(usize, ProviderRecord)>, serde_json::Error> {
     if payload.len() > MAX_USAGE_JSON_BYTES {
         return Err(serde_json::Error::io(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -147,7 +166,11 @@ pub fn parse_usage_payload(payload: &[u8]) -> Result<Vec<ProviderRecord>, serde_
         )));
     }
     let records: Vec<ProviderRecord> = serde_json::from_slice(payload)?;
-    Ok(records.into_iter().filter(valid_provider_record).collect())
+    Ok(records
+        .into_iter()
+        .enumerate()
+        .filter(|(_, record)| valid_provider_record(record))
+        .collect())
 }
 
 /// A cache file or `--json` input is either a bare CodexBar provider array
@@ -175,8 +198,13 @@ pub fn unwrap_cache_transport(bytes: Vec<u8>) -> (Vec<u8>, String) {
         Some(b'{') => match serde_json::from_slice::<CacheEnvelope>(&bytes) {
             Ok(envelope) => {
                 let inner = envelope.providers.get().as_bytes().to_vec();
-                let source = match envelope.source {
-                    Some(serde_json::Value::String(value)) if !value.is_empty() => value,
+                // Constrain to the tokens the publisher writes, mirroring the
+                // shell's `showy_quota_cache_source`. `usage.json` is now an
+                // attacker-shaped data document rather than a private one-token
+                // metadata file, and this value is reachable through the public
+                // `CacheFreshness.source`, so it must not carry arbitrary text.
+                let source = match envelope.source.as_ref().and_then(|v| v.as_str()) {
+                    Some(value @ ("serve" | "cli")) => String::from(value),
                     _ => String::from("unknown"),
                 };
                 (inner, source)

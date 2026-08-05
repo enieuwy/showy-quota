@@ -125,15 +125,27 @@ showy_quota_valid_provider_id() {
 # 1/true/yes/on -> true (0), 0/false/no/off -> false (1); anything else
 # (including empty/unset) falls back to `default` (pass "1" for true,
 # "0" for false). Returns 0 for true, 1 for false, shell-style.
+#
+# The fallback keeps parity with the plugin's `parse_bool` and `config.rs`'s
+# `get_bool`, which behave identically. That means a MISTYPED value silently
+# takes the default, which is the enabled side for knobs like
+# SHOWY_QUOTA_MANAGE_SERVE (the pre-parity check treated any non-"1" value as
+# disabled), so warn on a non-empty unrecognised value rather than accepting it
+# mutely. Changing the fallback itself would reintroduce cross-language drift.
 showy_quota_bool() {
-    local value="${1-}" default="${2-0}"
+    local value="${1-}" default="${2-0}" raw="${1-}"
     value="${value#"${value%%[![:space:]]*}"}"
     value="${value%"${value##*[![:space:]]}"}"
     value="${value,,}"
     case "${value}" in
         1|true|yes|on) return 0 ;;
         0|false|no|off) return 1 ;;
-        *) [[ "${default}" == "1" ]] ;;
+        "") [[ "${default}" == "1" ]] ;;
+        *)
+            printf 'showy-quota: unrecognised boolean %q; using default %s\n' \
+                "${raw}" "${default}" >&2
+            [[ "${default}" == "1" ]]
+            ;;
     esac
 }
 

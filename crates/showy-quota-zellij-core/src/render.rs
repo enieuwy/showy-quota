@@ -5,7 +5,7 @@ use serde::Serialize;
 
 use crate::codexbar::{is_errored, is_renderable, NamedWindow, ProviderRecord, Usage, UsageWindow};
 use crate::config::RenderConfig;
-use crate::palette::{hex_to_rgb, Severity};
+use crate::palette::{hex_to_rgb, normalized_hex, Severity};
 use crate::reset::{minutes_until, reset_epoch};
 
 #[derive(Debug, Clone, Copy)]
@@ -169,7 +169,7 @@ pub fn render_rows(
                         text,
                         severity: None,
                         dim: false,
-                        color: config.palette_countdown_warn.clone(),
+                        color: normalized_hex(&config.palette_countdown_warn),
                         error: true,
                     }
                 }

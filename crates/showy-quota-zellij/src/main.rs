@@ -5,9 +5,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use showy_quota_zellij_core::palette::hex_to_rgb;
 use showy_quota_zellij_core::{
-    parse_provider_config_payload, parse_usage_payload, payload_has_renderable_provider,
-    provider_ids_from_records, render_zellij, valid_provider_id, ProviderConfigError,
-    ProviderRecord, RenderConfig, RenderOptions,
+    parse_provider_config_payload, parse_usage_payload, parse_usage_payload_indexed,
+    payload_has_renderable_provider, provider_ids_from_records, render_zellij, valid_provider_id,
+    ProviderConfigError, ProviderRecord, RenderConfig, RenderOptions,
 };
 use zellij_tile::prelude::*;
 
@@ -88,7 +88,13 @@ __kill_descendants() {{
 $__children
 EOF
 }}
+__p_reaped=0
+__k_reaped=0
 __stop() {{
+    # A reaped pid is a FREE pid, so signalling it is not a harmless no-op: the
+    # id may already belong to an unrelated same-uid process, and the setsid
+    # branch signals a whole process GROUP. Refuse once the child is waited on.
+    [ "$__p_reaped" -eq 0 ] || return 0
     __signal=$1
     if [ "$__setsid" -eq 1 ]; then
         kill "-$__signal" -- "-$__p" 2>/dev/null || true
@@ -106,19 +112,21 @@ __stop_timer() {{
     # mid-`wait`, and an orphaned sleep keeps the inherited stdout write end
     # open, so a caller capturing this script through a pipe would block until
     # the timeout elapsed even though the command already finished.
+    [ "$__k_reaped" -eq 0 ] || return 0
     __kill_descendants "$__k" TERM
     kill "$__k" 2>/dev/null || true
+    wait "$__k" 2>/dev/null
+    __k_reaped=1
 }}
 (sleep {timeout_secs} & __s=$!; trap 'kill "$__s" 2>/dev/null' EXIT; wait "$__s"; __stop TERM; sleep 2 & __s=$!; wait "$__s"; __stop KILL) &
 __k=$!
 # Re-arm the EXIT trap now that __k/__stop/__p exist: on unclean shutdown
 # (Zellij has no cancellation API and just signals this shell on pane
 # close/unload) stop the timer and the whole child tree before removing the
-# temp dir. Idempotent: on the normal/oversize exit paths below, $__k and
-# $__p are already reaped and __stop's kills are already-dead no-ops, so
-# this changes no exit code and emits no noise (all kill/wait output is
-# redirected to /dev/null).
-trap '__stop_timer; __stop TERM 2>/dev/null; __stop KILL 2>/dev/null; wait "$__k" 2>/dev/null; wait "$__p" 2>/dev/null; rm -rf "$__d"' EXIT
+# temp dir. The __p_reaped/__k_reaped guards make this genuinely idempotent:
+# once a normal or oversize path has waited on a pid, the trap skips it instead
+# of signalling an id the kernel may have handed to someone else.
+trap '__stop_timer; __stop TERM; __stop KILL; wait "$__p" 2>/dev/null; rm -rf "$__d"' EXIT
 dd if="$__fifo" of="$__out" bs=1 count={capture_limit} 2>/dev/null
 __bytes=$(wc -c <"$__out" | tr -d '[:space:]')
 if [ "$__bytes" -gt {max_stdout} ]; then
@@ -126,15 +134,15 @@ if [ "$__bytes" -gt {max_stdout} ]; then
     sleep 2
     __stop KILL
     __stop_timer
-    wait "$__k" 2>/dev/null
     wait "$__p" 2>/dev/null
+    __p_reaped=1
     exit 125
 fi
 cat "$__out"
 wait "$__p"
 __r=$?
+__p_reaped=1
 __stop_timer
-wait "$__k" 2>/dev/null
 exit "$__r""#,
         max_stdout = MAX_SUBPROCESS_STDOUT_BYTES,
     )
@@ -1658,13 +1666,16 @@ impl State {
             // Providers outside the current inventory are intentionally ignored:
             // discovery is canonical, so disabled providers must not reappear.
             if let Some(payload) = self.last_payload.as_deref() {
-                if let Ok(records) = parse_usage_payload(payload) {
+                if let Ok(records) = parse_usage_payload_indexed(payload) {
                     if let Ok(value) = serde_json::from_slice::<serde_json::Value>(payload) {
                         if let Some(array) = value.as_array() {
-                            for (record, value) in records.iter().zip(array.iter()) {
+                            for (index, record) in &records {
                                 if !eligible_set.contains(record.provider.as_str()) {
                                     continue;
                                 }
+                                let Some(value) = array.get(*index) else {
+                                    continue;
+                                };
                                 let entry = self
                                     .provider_states
                                     .entry(record.provider.clone())
@@ -1765,7 +1776,7 @@ impl State {
         let eligible = self.eligible_provider_inventory();
         let eligible_set: std::collections::BTreeSet<&str> =
             eligible.iter().map(String::as_str).collect();
-        let Ok(records) = parse_usage_payload(payload) else {
+        let Ok(records) = parse_usage_payload_indexed(payload) else {
             return;
         };
         let Ok(value) = serde_json::from_slice::<serde_json::Value>(payload) else {
@@ -1775,9 +1786,13 @@ impl State {
             return;
         };
         let mut pruned: Vec<serde_json::Value> = Vec::new();
-        for (record, value) in records.iter().zip(array.iter()) {
+        // Index by original position; a positional zip would prune by one
+        // provider's eligibility while keeping another's raw record.
+        for (index, record) in &records {
             if eligible_set.contains(record.provider.as_str()) {
-                pruned.push(value.clone());
+                if let Some(value) = array.get(*index) {
+                    pruned.push(value.clone());
+                }
             }
         }
         if pruned.len() == array.len() {
@@ -1841,16 +1856,26 @@ impl State {
     }
 
     fn seed_provider_states_from_payload(&mut self, records: &[ProviderRecord], payload: &[u8]) {
+        let Ok(indexed) = parse_usage_payload_indexed(payload) else {
+            return;
+        };
+        debug_assert_eq!(indexed.len(), records.len());
         let Ok(value) = serde_json::from_slice::<serde_json::Value>(payload) else {
             return;
         };
         let Some(array) = value.as_array() else {
             return;
         };
-        for (record, value) in records.iter().zip(array.iter()) {
+        // Index by the record's ORIGINAL array position: the validated list is a
+        // subsequence, so a positional zip would store another record's raw JSON
+        // under this provider's id.
+        for (index, record) in &indexed {
             if !valid_provider_id(&record.provider) {
                 continue;
             }
+            let Some(value) = array.get(*index) else {
+                continue;
+            };
             let entry = self
                 .provider_states
                 .entry(record.provider.clone())
@@ -1922,23 +1947,34 @@ impl State {
     }
 }
 
-/// Extract the first valid record from a per-provider CLI payload whose
-/// provider id matches the requested one. Returns `Err` for malformed JSON,
-/// invalid usage shape, non-array payloads, or mismatched provider ids.
-/// Returns `Ok(None)` for a valid but empty per-provider payload.
+/// Extract the record from a per-provider CLI payload whose provider id matches
+/// the requested one. Returns `Err` for malformed JSON, invalid usage shape,
+/// non-array payloads, mismatched provider ids, or any element the validator
+/// dropped. Returns `Ok(None)` for a valid but empty per-provider payload.
 fn extract_provider_record(
     payload: &[u8],
     provider: &str,
 ) -> Result<Option<serde_json::Value>, ()> {
-    let records = parse_usage_payload(payload).map_err(|_| ())?;
-    if records.iter().any(|record| record.provider != provider) {
+    let records = parse_usage_payload_indexed(payload).map_err(|_| ())?;
+    if records
+        .iter()
+        .any(|(_, record)| record.provider != provider)
+    {
         return Err(());
     }
     let value: serde_json::Value = serde_json::from_slice(payload).map_err(|_| ())?;
     let array = value.as_array().ok_or(())?;
-    for (record, value) in records.iter().zip(array.iter()) {
+    // A record dropped by validation is invisible to the id guard above, so a
+    // payload carrying anything beyond the validated records cannot be trusted
+    // to be a response about `provider` at all: reject it rather than reach
+    // past it. Without this, a reply whose first element fails validation would
+    // hand that element back as this provider's record.
+    if array.len() != records.len() {
+        return Err(());
+    }
+    for (index, record) in &records {
         if record.provider == provider {
-            return Ok(Some(value.clone()));
+            return Ok(Some(array.get(*index).ok_or(())?.clone()));
         }
     }
     Ok(None)
@@ -3326,12 +3362,13 @@ mod tests {
         assert!(script.contains("count=5242881"));
         assert!(script.contains("trap 'kill \"$__s\" 2>/dev/null' EXIT"));
         assert!(script.contains(
-            "trap '__stop_timer; __stop TERM 2>/dev/null; \
-__stop KILL 2>/dev/null; wait \"$__k\" 2>/dev/null; wait \"$__p\" 2>/dev/null; \
-rm -rf \"$__d\"' EXIT"
+            "trap '__stop_timer; __stop TERM; __stop KILL; \
+wait \"$__p\" 2>/dev/null; rm -rf \"$__d\"' EXIT"
         ));
         // The timer's `sleep` grandchild must be reaped too, not just the subshell.
         assert!(script.contains("__kill_descendants \"$__k\" TERM"));
+        assert!(script.contains("[ \"$__p_reaped\" -eq 0 ] || return 0"));
+        assert!(script.contains("[ \"$__k_reaped\" -eq 0 ] || return 0"));
         assert!(script.contains("wait \"$__k\""));
         // Provider ids and the binary path ride in "$@", never the shell string.
         assert!(!script.contains("claude"));
@@ -3604,6 +3641,61 @@ rm -rf \"$__d\"' EXIT"
             .provider_states
             .get("codex")
             .is_some_and(|state| state.last_result_empty));
+    }
+
+    #[test]
+    fn per_provider_payload_with_an_invalid_sibling_is_rejected_not_substituted() {
+        // parse_usage_payload DROPS invalid records, so the validated list is a
+        // subsequence of the raw array. Pairing the two by position would hand
+        // back element 0 (the attacker's object) as codex's record.
+        let payload =
+            br#"[{"provider":"../../pwned","attacker":"controlled"},{"provider":"codex","usage":{"primary":{"usedPercent":7}}}]"#;
+        assert_eq!(extract_provider_record(payload, "codex"), Err(()));
+
+        // The same shape, but the decoy is itself renderable: dropped by
+        // valid_provider_record (empty `secondary`) yet renderable downstream.
+        let spoof = br#"[{"provider":"claude","usage":{"primary":{"usedPercent":99},"secondary":{}}},{"provider":"codex","usage":{"primary":{"usedPercent":3}}}]"#;
+        assert_eq!(extract_provider_record(spoof, "codex"), Err(()));
+    }
+
+    #[test]
+    fn per_provider_payload_still_accepts_clean_and_empty_replies() {
+        let clean = br#"[{"provider":"codex","usage":{"primary":{"usedPercent":42}}}]"#;
+        let got = extract_provider_record(clean, "codex").expect("clean reply accepted");
+        assert_eq!(
+            got.and_then(|value| value.get("provider").cloned()),
+            Some(serde_json::Value::String("codex".into()))
+        );
+        assert_eq!(extract_provider_record(b"[]", "codex"), Ok(None));
+    }
+
+    #[test]
+    fn seeding_binds_each_provider_to_its_own_raw_record() {
+        // First element is dropped by validation; the survivors must still be
+        // paired with their OWN raw JSON, never shifted by one.
+        let payload = br#"[{"provider":"bad/id","usage":{"primary":{"usedPercent":1}}},{"provider":"codex","usage":{"primary":{"usedPercent":11}}},{"provider":"claude","usage":{"primary":{"usedPercent":22}}}]"#;
+        let records = parse_usage_payload(payload).expect("payload parses");
+        let mut state = State::default();
+        state.seed_provider_states_from_payload(&records, payload);
+
+        for (provider, used) in [("codex", 11.0), ("claude", 22.0)] {
+            let raw = state
+                .provider_states
+                .get(provider)
+                .and_then(|entry| entry.last_record.clone())
+                .unwrap_or_else(|| panic!("{provider} seeded"));
+            assert_eq!(
+                raw.get("provider").and_then(|v| v.as_str()),
+                Some(provider),
+                "seeded record must be {provider}'s own element"
+            );
+            assert_eq!(
+                raw.pointer("/usage/primary/usedPercent")
+                    .and_then(|v| v.as_f64()),
+                Some(used)
+            );
+        }
+        assert!(!state.provider_states.contains_key("bad/id"));
     }
 
     #[test]
@@ -3998,11 +4090,12 @@ rm -rf \"$__d\"' EXIT"
         assert!(script.contains("sleep 5"));
         assert!(script.contains("trap 'kill \"$__s\" 2>/dev/null' EXIT"));
         assert!(script.contains(
-            "trap '__stop_timer; __stop TERM 2>/dev/null; \
-__stop KILL 2>/dev/null; wait \"$__k\" 2>/dev/null; wait \"$__p\" 2>/dev/null; \
-rm -rf \"$__d\"' EXIT"
+            "trap '__stop_timer; __stop TERM; __stop KILL; \
+wait \"$__p\" 2>/dev/null; rm -rf \"$__d\"' EXIT"
         ));
         assert!(script.contains("__kill_descendants \"$__k\" TERM"));
+        assert!(script.contains("[ \"$__p_reaped\" -eq 0 ] || return 0"));
+        assert!(script.contains("[ \"$__k_reaped\" -eq 0 ] || return 0"));
         assert!(script.contains("wait \"$__k\""));
         // The binary rides in $1, never interpolated into the shell string.
         assert!(!script.contains("codexbar"));

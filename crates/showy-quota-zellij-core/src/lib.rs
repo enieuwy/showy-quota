@@ -9,7 +9,7 @@ pub(crate) mod reset;
 pub mod sketchybar;
 
 pub use codexbar::{
-    is_errored, parse_provider_config_payload, parse_usage_payload,
+    is_errored, parse_provider_config_payload, parse_usage_payload, parse_usage_payload_indexed,
     payload_has_renderable_provider, provider_ids_from_records, valid_provider_id,
     ProviderConfigError, ProviderRecord,
 };

@@ -336,12 +336,17 @@ cache_token() {
 # callers of this script have always received a bare array and must keep
 # doing so.
 emit_cache_payload() {
-    local file="$1" first_byte
-    first_byte=$(head -c 1 -- "${file}" 2>/dev/null)
-    if [[ "${first_byte}" == '{' ]]; then
+    local file="$1"
+    # Dispatch with jq, not on the literal first byte: the Rust
+    # `unwrap_cache_transport` skips leading whitespace before testing for '{',
+    # and both showy_quota_json_valid and showy_quota_cache_source are
+    # whitespace-agnostic. A byte-wise test would let a whitespace-prefixed
+    # envelope validate, report its source, and then be emitted verbatim as an
+    # object to consumers that require a bare array.
+    if jq -e 'type == "object"' "${file}" >/dev/null 2>&1; then
         jq -c '.providers // []' "${file}"
     else
-        cat "${file}"
+        cat -- "${file}"
     fi
 }
 
@@ -1826,6 +1831,11 @@ except OSError:
     sys.exit(127)
 
 def signal_group(sig):
+    # Never signal a group we have already reaped: proc.pid doubles as the pgid
+    # (start_new_session=True), and once waited on that id is free for the
+    # kernel to hand to an unrelated same-uid process or group.
+    if proc.returncode is not None:
+        return
     # Cleanup must never raise. A reaped group answers ESRCH
     # (ProcessLookupError); a zombie-only group answers EPERM on macOS. Neither
     # is actionable here, and letting either escape would mask the real child
@@ -1887,10 +1897,19 @@ def run():
         terminate_process()
         sys.exit(124)
 
+# Clean up only on ABNORMAL termination. The timeout (124) and output-cap (125)
+# branches and the signal handlers already tear down the group themselves, and
+# SystemExit from the success path must NOT reach terminate_process: the child
+# runs in its own session, so killing that group on success would also kill any
+# helper the command legitimately left running behind it. A bare finally: here
+# did exactly that on every successful invocation.
 try:
     run()
-finally:
+except SystemExit:
+    raise
+except BaseException:
     terminate_process()
+    raise
 ' "${timeout_seconds}" "${max_bytes}" "$@"
         return $?
     fi

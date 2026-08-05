@@ -60,12 +60,19 @@ impl RenderConfig {
     /// Color for an already-resolved band, so a surface handed a `Severity` can
     /// reproduce the exact hex showy-quota would have drawn without re-deriving
     /// thresholds or dim scaling.
+    ///
+    /// Always returns a valid 6-digit hex. Configured palette overrides are
+    /// copied verbatim by config parsing, and this value is serialized into the
+    /// `rows` transport instead of only reaching an ANSI escape through
+    /// `hex_to_rgb`, so it has to degrade here too or a malformed override would
+    /// ship a non-hex string to a consumer that cannot render it.
     pub fn severity_color(&self, severity: Severity, is_long: bool) -> String {
-        if is_long {
+        let raw = if is_long {
             self.dim_palette(severity)
         } else {
             self.primary_palette(severity)
-        }
+        };
+        normalized_hex(&raw)
     }
 
     fn primary_palette(&self, severity: Severity) -> String {
@@ -116,6 +123,15 @@ pub fn hex_to_rgb(hex: &str) -> (u8, u8, u8) {
         (Ok(r), Ok(g), Ok(b)) => (r, g, b),
         _ => FALLBACK_RGB,
     }
+}
+
+/// Canonical lowercase 6-digit hex (no `#`) for a configured colour, degrading a
+/// value this parser cannot understand to `FALLBACK_RGB`. Use this wherever a
+/// palette string is handed to a consumer as text rather than decoded into an
+/// ANSI escape, so both surfaces degrade identically.
+pub(crate) fn normalized_hex(hex: &str) -> String {
+    let (r, g, b) = hex_to_rgb(hex);
+    format!("{r:02x}{g:02x}{b:02x}")
 }
 
 fn scale_hex(hex: &str, factor: &str) -> String {
@@ -191,6 +207,39 @@ mod tests {
         assert_eq!(hex_to_rgb("notahex"), FALLBACK, "non-hex string");
         assert_eq!(hex_to_rgb(""), FALLBACK, "empty string");
         assert_eq!(hex_to_rgb("ff00zz"), FALLBACK, "partially-valid string");
+    }
+
+    #[test]
+    fn severity_color_always_yields_a_valid_hex_for_the_rows_transport() {
+        // `severity_color` is serialized as text into the rows transport, not
+        // only decoded into an ANSI escape, so a malformed configured override
+        // must degrade here rather than shipping a non-hex string downstream.
+        let mut config = RenderConfig {
+            palette_primary_good: "garbage".into(),
+            palette_primary_warn: "#AABBCC".into(),
+            ..RenderConfig::default()
+        };
+        config.palette_dim_good = Some("nothex".into());
+
+        for (severity, is_long) in [
+            (Severity::Good, false),
+            (Severity::Good, true),
+            (Severity::Warn, false),
+            (Severity::Bad, false),
+        ] {
+            let hex = config.severity_color(severity, is_long);
+            assert_eq!(hex.len(), 6, "{severity:?}/{is_long} -> {hex}");
+            assert!(
+                hex.bytes().all(|b| b.is_ascii_hexdigit()),
+                "{severity:?}/{is_long} -> {hex}"
+            );
+        }
+
+        // A malformed value degrades to the shared fallback, and a valid
+        // `#`-prefixed override is canonicalised rather than passed through.
+        assert_eq!(config.severity_color(Severity::Good, false), "6c7086");
+        assert_eq!(config.severity_color(Severity::Good, true), "6c7086");
+        assert_eq!(config.severity_color(Severity::Warn, false), "aabbcc");
     }
 
     #[test]
