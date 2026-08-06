@@ -1387,8 +1387,8 @@ out=$(run_renderer showy-quota-zellij-bar "${mixed_error_fixture}" SHOWY_QUOTA_P
 assert_contains "zellij mixed error fixture keeps codex chunk" "CX▕" "${out}"
 assert_contains "zellij mixed error fixture keeps claude chunk" "CL▕" "${out}"
 assert_contains "zellij mixed error fixture keeps gemini chunk" "GE▕" "${out}"
-assert_contains "zellij mixed error fixture renders cursor error chunk" "CR⚠err" "${out}"
-if [[ "${out}" == *CX*CR⚠err*CL*GE* ]]; then
+assert_contains "zellij mixed error fixture renders cursor error chunk" "CR    ⚠err    " "${out}"
+if [[ "${out}" == *CX*"CR    ⚠err    "*CL*GE* ]]; then
     ok "zellij mixed error fixture follows provider order"
 else
     fail "zellij mixed error fixture follows provider order" "${out}"
@@ -1400,7 +1400,7 @@ assert_not_contains "custom error glyph replaces warning label" "⚠err" "${out}
 
 out=$(run_renderer showy-quota-zellij-bar codexbar-error-only.json SHOWY_QUOTA_PROVIDERS_EXCLUDE=cursor NO_COLOR=1 SHOWY_QUOTA_FORCE_COLOR=0)
 assert_not_contains "exclude drops cursor error chunk from strip" "CR" "${out}"
-assert_contains "exclude keeps factory error chunk in strip" "FA⚠err" "${out}"
+assert_contains "exclude keeps factory error chunk in strip" "FA    ⚠err    " "${out}"
 
 out=$(run_renderer showy-quota-zellij-bar codexbar-empty.json SHOWY_QUOTA_DEGRADED_CLI=1 NO_COLOR=1 SHOWY_QUOTA_FORCE_COLOR=0)
 assert_contains "empty degraded fixture renders trailing CLI marker" "AI idle ⚠cli" "${out}"
@@ -1628,8 +1628,8 @@ visible=$(strip_tmux_markup "${out}")
 assert_contains "tmux mixed error fixture keeps codex chunk" "CX▕" "${visible}"
 assert_contains "tmux mixed error fixture keeps claude chunk" "CL▕" "${visible}"
 assert_contains "tmux mixed error fixture keeps gemini chunk" "GE▕" "${visible}"
-assert_contains "tmux mixed error fixture renders cursor error chunk" "CR⚠err" "${visible}"
-if [[ "${visible}" == *CX*CR⚠err*CL*GE* ]]; then
+assert_contains "tmux mixed error fixture renders cursor error chunk" "CR    ⚠err    " "${visible}"
+if [[ "${visible}" == *CX*"CR    ⚠err    "*CL*GE* ]]; then
     ok "tmux mixed error fixture follows provider order"
 else
     fail "tmux mixed error fixture follows provider order" "${visible}"
