@@ -6,6 +6,107 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-08-06
+
+### Upgrading
+- **Rebuild `showy-quota-render` when you update.** The cache payload format
+  changed (see Changed), and a 0.7.x `showy-quota-render` cannot read a 0.8.0
+  envelope. On a symlink/dev install the shell scripts under `bin/` go live the
+  moment you `git pull`, while `showy-quota-render` stays stale until it is
+  rebuilt — so the fetcher starts publishing envelopes that the old binary
+  rejects. Run `make install-bin` (or `cargo build --release -p
+  showy-quota-zellij-core --bin showy-quota-render`) as part of the update.
+  Until you do, every surface degrades to its no-data state rather than showing
+  wrong numbers: the tmux and Zellij strips render `AI ?` and the SketchyBar
+  items tear down, with the stale/degraded markers still reflecting the cache.
+  `make install-copy` installs are unaffected because the binary and the scripts
+  update together.
+
+### Added
+- A rows view alongside the single-line strip renderers: `render_rows` /
+  `emit_rows` return `RenderedRow` values carrying each chunk's text plus the
+  severity band used to colour it, and rejoining the rows reproduces the strip
+  byte-for-byte. `Palette::severity_color` lets a surface reproduce a band's
+  exact hex without re-deriving thresholds or dim scaling, and `Severity` is now
+  exported so callers can name bands. `collect_units` is shared by the strip and
+  rows paths so both order units identically.
+
+### Changed
+- **Cache format.** `usage.json` is now an envelope,
+  `{"schema":"showy-quota/cache@1","source":…,"providers":[…]}`, published with a
+  single `rename(2)`. Payload and source are therefore inseparable, which makes
+  mixed-generation reads structurally impossible rather than merely unlikely. A
+  bare top-level array is still accepted everywhere a payload is read (existing
+  caches, and raw `codexbar usage --format json` passed to `--json`), reported as
+  `source=unknown` and rewritten as an envelope on the first refresh. Downgrading
+  to 0.7.x will not understand an envelope, so it re-fetches.
+- Payload validation tolerates mixed validity: a single malformed provider record
+  is dropped instead of discarding the whole payload, so one bad record can no
+  longer blank every healthy provider. Non-array, unparseable, oversize, and
+  all-records-invalid payloads are still rejected, and an empty provider array
+  stays valid because "no enabled providers" is a real published state.
+- Error chunks are centred to the lane width, so an error aligns with the data
+  chunks beside it instead of butting against its provider sigil.
+- Boolean configuration accepts `1`/`true`/`yes`/`on` and `0`/`false`/`no`/`off`
+  in Bash, the Rust core, and the plugin, which previously disagreed (Bash
+  accepted only `1`). An unrecognised value warns on stderr instead of silently
+  taking the default.
+- Malformed palette hex degrades with a stderr warning and the documented default
+  on both ends. Previously a typo in one `SHOWY_QUOTA_PALETTE_*` override aborted
+  every shell render, while the Rust side silently rendered black.
+- `guard --wait-max SECONDS` now clamps its sleep into the stated budget. It
+  previously added an unconditional 30s grace *after* the bound check, so it could
+  block ~30s past the limit callers relied on; `docs/automation.md` is corrected.
+
+### Removed
+- `SHOWY_QUOTA_SOURCE_FILE` and the separate `source` cache file. The source now
+  travels inside the payload envelope; any leftover file is cleaned up on publish.
+
+### Fixed
+- A mixed-generation cache race: the publisher wrote `usage.json` before `source`
+  while every reader read payload before source, so a client could pair a fresh
+  payload with stale metadata and classify serve-sourced data under CLI-fallback
+  rules (or the reverse). `cache.rs` also documented the opposite commit order to
+  the one the fetcher used.
+- The Zellij watchdog and the `showy-quota-fetch` timeout wrapper no longer orphan
+  processes when the parent is signalled: the watchdog's `EXIT` trap stops the
+  timer and the whole child tree before removing its temp dir, and the Python
+  wrapper cleans up on `SIGINT`/`SIGTERM` and on unhandled exceptions. Cleanup is
+  scoped to abnormal exit, so a helper a command legitimately leaves running
+  survives a successful call.
+- The watchdog timer's `sleep` grandchild is reaped too. It previously outlived the
+  script holding the inherited stdout write end, so capturing the watchdog through
+  a pipe blocked until the timeout elapsed even after the command finished.
+- Cleanup no longer signals a pid or process group it has already waited on; a
+  reaped pid is free for the kernel to reuse, and the `setsid` path signals a whole
+  group.
+- The output-cap path returns 125 again instead of a bare `rc=1`. `killpg` answers
+  `EPERM` (not `ESRCH`) on a zombie-only group on macOS, which escaped the cleanup
+  helper as an unhandled `PermissionError`.
+- SketchyBar temp icon files are registered in the parent shell, so the `EXIT`
+  trap can actually remove them; `provider_icon_png` ran in a command-substitution
+  subshell whose `ICON_TMP_FILES` writes were discarded. Its final `mv` is checked,
+  so a failed publish no longer returns a path to a nonexistent icon.
+- `showy-quota-statusline` forwards its arguments, so `--help` and option
+  overrides reach the renderer instead of being silently dropped.
+- The fetcher enforces the 64-character provider-id cap that `lib/common.sh` and
+  the Rust core already applied.
+- A whitespace-prefixed cache envelope is no longer emitted verbatim as a JSON
+  object to consumers that require a bare array.
+
+### Security
+- Relaxing payload validation to drop invalid records broke an ordering invariant
+  four call sites in the Zellij plugin relied on (`records.len() == array.len()`
+  with identical order). Because the validated list is a strict subsequence,
+  zipping it against the raw array bound one provider's validated id to another
+  record's data: a hostile reply to `codexbar usage --provider codex` could render
+  another provider's row while the queried provider's row silently disappeared.
+  Records are now paired with their original array index, and a per-provider reply
+  carrying anything beyond the validated records is rejected.
+- The envelope's `source` is constrained to `serve`/`cli`/`unknown` in the Rust
+  core as it already was in the shell, since `usage.json` is a data document and
+  `CacheFreshness.source` is public API.
+
 ## [0.7.0] — 2026-07-22
 
 ### Security
@@ -905,7 +1006,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `bin/showy-quota-fetch`: cache dir and files now persist as `0700`/`0600`
   instead of the user's default umask. CodexBar usage JSON stays user-only.
 
-[Unreleased]: https://github.com/enieuwy/showy-quota/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/enieuwy/showy-quota/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/enieuwy/showy-quota/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/enieuwy/showy-quota/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/enieuwy/showy-quota/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/enieuwy/showy-quota/compare/v0.4.1...v0.5.0
