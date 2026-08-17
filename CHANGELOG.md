@@ -6,6 +6,58 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.8.1] — 2026-08-17
+
+### Upgrading
+- **Rebuild `showy-quota-render` for the countdown-label fix.** The label fix
+  below lives in the binary, while the SketchyBar icon fixes live in the shell
+  plugin. On a symlink/dev install the plugin goes live the moment you `git
+  pull`, so a stale 0.8.0 binary keeps printing `?` for Antigravity until you run
+  `make install-bin` (or `cargo build --release -p showy-quota-zellij-core --bin
+  showy-quota-render`). No cache or config migration: `usage.json` is unchanged,
+  and the bumped icon-cache version evicts the blank PNGs on the next tick.
+
+### Fixed
+- SketchyBar provider icons no longer render as an invisible slot. ImageMagick's
+  internal `MSVG:` decoder cannot rasterize stroke-only paths (`fill="none"`),
+  which covers roughly a third of CodexBar's `ProviderIcon-*.svg` files
+  (`commandcode`, `deepseek`, `grok`, `kimi`, `mistral`, `openrouter`,
+  `perplexity`, `xai`, …); it exits 0 with a fully transparent image, so the
+  drawn-sigil fallback never fired. The plugin now prefers `rsvg-convert`
+  (librsvg) when installed and treats a fully transparent raster as a failure,
+  so a provider without a usable SVG gets its two-letter sigil icon instead of
+  nothing. `ICON_CACHE_VERSION` is bumped to `4` to evict the blank PNGs, and
+  `make doctor` / `make diagnose` now report `rsvg-convert`.
+- The drawn two-letter sigil fallback icon now renders on an ImageMagick built
+  without the fontconfig delegate (the Homebrew default), where `magick -list
+  font` is empty and bare `-annotate` failed with ``unable to read font `'``.
+  The plugin resolves a concrete font file (override with
+  `SHOWY_QUOTA_SKETCHYBAR_ICON_FONT_FILE`) and draws a plain disc when no font
+  is readable, so a provider without a usable SVG always gets a visible,
+  clickable slot. Drawn icons are also published untinted, because the recolor
+  path flattens an icon to its alpha shape and erased the sigil letters.
+- The SketchyBar countdown label no longer reads `?` for a provider that has a
+  live reset. It was taken from assembled lane 0, which the pooled layout
+  replaces with an `extraRateWindows`-derived row — and that row can be a
+  `usageKnown:false` placeholder carrying no reset, as Antigravity emits for both
+  5-hour pools once its weeklies are exhausted. The label now reads the
+  positional primary slot, the same source as the terminal strip, so SketchyBar
+  and the tmux/Zellij strips agree (`2d`, not `?`). Lane geometry is unchanged:
+  the placeholder still draws as an empty, marker-less track.
+
+### Security
+- `actions/attest-build-provenance` is repinned from `v4.1.1` to `v4.2.2`
+  (`4d10147`) in `release.yml`. This is the action that signs the WASM plugin's
+  build provenance, so its pin is refreshed deliberately rather than left to
+  drift behind upstream fixes.
+- `time` is bumped `0.3.53` → `0.3.55` (and `time-macros` `0.2.31` → `0.2.32`).
+  Upstream fixed panics on out-of-range `from_unix_timestamp_nanos` and
+  `checked_to_offset`, an overflow when deserializing timestamps, and
+  out-of-bounds deserialization input. That is the code path every CodexBar
+  `resetsAt` value reaches, so a hostile or corrupt payload had a panic surface
+  the renderer's own epoch clamping did not cover. Lockfile-only; the manifest
+  requirement is unchanged.
+
 ## [0.8.0] — 2026-08-06
 
 ### Upgrading
@@ -1006,7 +1058,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `bin/showy-quota-fetch`: cache dir and files now persist as `0700`/`0600`
   instead of the user's default umask. CodexBar usage JSON stays user-only.
 
-[Unreleased]: https://github.com/enieuwy/showy-quota/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/enieuwy/showy-quota/compare/v0.8.1...HEAD
+[0.8.1]: https://github.com/enieuwy/showy-quota/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/enieuwy/showy-quota/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/enieuwy/showy-quota/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/enieuwy/showy-quota/compare/v0.5.0...v0.6.0

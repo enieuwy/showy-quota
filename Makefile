@@ -344,7 +344,7 @@ doctor: ## Check runtime prerequisites without touching the system.
 		"$$(bash -c 'printf "%s" "$${BASH_VERSION:-unknown}"')" \
 		"$$(jq --version)" \
 		"$${source_desc}"; \
-	for tool in curl flock shellcheck magick tmux zellij sketchybar; do \
+	for tool in curl flock shellcheck magick rsvg-convert tmux zellij sketchybar; do \
 		if command -v "$$tool" >/dev/null 2>&1; then \
 			printf 'doctor: optional %-10s found: %s\n' "$$tool" "$$(command -v "$$tool")"; \
 		else \

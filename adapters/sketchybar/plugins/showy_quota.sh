@@ -561,6 +561,8 @@ fi
 
 HAVE_MAGICK=0
 showy_quota_have magick && HAVE_MAGICK=1
+HAVE_RSVG=0
+showy_quota_have rsvg-convert && HAVE_RSVG=1
 
 # Point ImageMagick at our restrictive policy.xml so a provider SVG cannot make
 # `magick` fetch a remote href (SSRF). Prepend so it wins over system configs;
@@ -662,7 +664,7 @@ click_script_for_status() {
 
 # Bump when icon rendering semantics change so stale cached PNGs are replaced
 # on the next plugin tick.
-ICON_CACHE_VERSION="3"
+ICON_CACHE_VERSION="4"
 
 # ── provider icon: native app-font experiment ────────────────────────
 provider_font_icon() {
@@ -685,16 +687,74 @@ provider_font_icon() {
 }
 
 # ── provider icon: lazily render SVG → PNG ───────────────────────────
+
+# ImageMagick built without the fontconfig delegate — the Homebrew default —
+# has an empty `magick -list font`, so bare `-annotate` dies with "unable to
+# read font `'" and the drawn fallback icon never materializes. Resolve one
+# concrete font file up front instead of trusting a font name.
+resolve_icon_font_file() {
+    local candidate
+    for candidate in \
+        "${SHOWY_QUOTA_SKETCHYBAR_ICON_FONT_FILE:-}" \
+        /System/Library/Fonts/SFNS.ttf \
+        /System/Library/Fonts/Helvetica.ttc \
+        /System/Library/Fonts/Supplemental/Arial.ttf; do
+        [[ -n "${candidate}" && -r "${candidate}" ]] || continue
+        printf '%s' "${candidate}"
+        return 0
+    done
+    return 1
+}
+ICON_FONT_FILE="$(resolve_icon_font_file || true)"
+
+# Drawn sigil icon for providers whose SVG is missing or unrenderable. The disc
+# color is passed in and the result is published untinted: the recolor path
+# flattens an icon to a single hex via its alpha shape, which would erase the
+# sigil letters it exists to show.
 render_fallback_icon_png() {
-    local pid="$1" tmp="$2"
+    local pid="$1" tmp="$2" disc_hex="${3:-${PRIMARY_UNKNOWN_HEX}}"
     local sigil
     sigil=$(showy_quota_provider_sigil "${pid}")
-    magick -size 64x64 xc:none \
-        -fill "$(mhex "${PRIMARY_UNKNOWN_HEX}")" \
-        -draw "circle 32,32 32,4" \
-        -fill "$(mhex "${ICON_TEXT_HEX}")" \
-        -gravity center -pointsize 28 -annotate 0 "${sigil}" \
-        "PNG32:${tmp}" >/dev/null 2>&1
+    local -a disc=( -size 64x64 xc:none
+        -fill "$(mhex "${disc_hex}")" -draw "circle 32,32 32,4" )
+    if [[ -n "${ICON_FONT_FILE}" ]] \
+       && magick "${disc[@]}" \
+            -font "${ICON_FONT_FILE}" -fill "$(mhex "${ICON_TEXT_HEX}")" \
+            -gravity center -pointsize 28 -annotate 0 "${sigil}" \
+            "PNG32:${tmp}" >/dev/null 2>&1; then
+        return 0
+    fi
+    # No usable font: a plain disc still gives the provider a visible,
+    # clickable slot instead of an empty gap.
+    magick "${disc[@]}" "PNG32:${tmp}" >/dev/null 2>&1
+}
+
+# A successful `magick` run is not proof of a visible icon: ImageMagick's
+# internal MSVG decoder silently rasterizes stroke-only paths (fill="none"
+# stroke="…", used by ~29 of CodexBar's provider SVGs) to a fully transparent
+# image and still exits 0. Without this check the sigil fallback never fires
+# and the provider gets an invisible icon slot.
+icon_png_has_pixels() {
+    local alpha
+    alpha=$(magick "$1" -format '%[fx:maxima.a]' info: 2>/dev/null) || return 1
+    [[ -n "${alpha}" && "${alpha}" != "0" ]]
+}
+
+# librsvg implements the full SVG spec (stroke-only paths included) and never
+# loads remote hrefs, so it preserves the SSRF property that forcing MSVG:
+# buys us — verified against librsvg 2.62. It is invoked directly rather than
+# as an ImageMagick delegate so policy.xml's `delegate rights=none` stands.
+# MSVG: stays as the fallback when rsvg-convert is absent.
+rasterize_provider_svg() {
+    local svg="$1" out="$2"
+    if (( HAVE_RSVG )) \
+       && rsvg-convert -a -w 64 -h 64 -f png -o "${out}" "${svg}" >/dev/null 2>&1 \
+       && icon_png_has_pixels "${out}"; then
+        return 0
+    fi
+    magick -background none -density 300 "MSVG:${svg}" \
+        -resize 64x64 "PNG32:${out}" >/dev/null 2>&1 \
+        && icon_png_has_pixels "${out}"
 }
 
 recolor_icon_png() {
@@ -731,7 +791,7 @@ provider_icon_png() {
     (( HAVE_MAGICK )) || return 1
 
     local pid="$1" status="${2:-none}" out_var="$3"
-    local status_color="" tint_color="" suffix="" dest cache_key
+    local status_color="" tint_color="" suffix="" dest cache_key drawn=0
     [[ -n "${out_var}" ]] || return 1
     if status_color=$(status_color_for_indicator "${status}"); then
         suffix="-${status}"
@@ -747,20 +807,17 @@ provider_icon_png() {
 
     local svg=""
     [[ -n "${CODEXBAR_RESOURCES}" ]] && svg="${CODEXBAR_RESOURCES}/ProviderIcon-${pid}.svg"
-    if [[ -z "${svg}" || ! -r "${svg}" ]]; then
-        if ! render_fallback_icon_png "${pid}" "${normal_tmp}"; then
+    if [[ -z "${svg}" || ! -r "${svg}" ]] || ! rasterize_provider_svg "${svg}" "${normal_tmp}"; then
+        drawn=1
+        if ! render_fallback_icon_png "${pid}" "${normal_tmp}" \
+                "${status_color:-${PRIMARY_UNKNOWN_HEX}}"; then
             rm -f "${normal_tmp}"; return 1
-        fi
-    else
-        if ! magick -background none -density 300 "MSVG:${svg}" \
-                    -resize 64x64 "PNG32:${normal_tmp}" >/dev/null 2>&1; then
-            if ! render_fallback_icon_png "${pid}" "${normal_tmp}"; then
-                rm -f "${normal_tmp}"; return 1
-            fi
         fi
     fi
 
-    if [[ -n "${status_color}" ]]; then
+    if (( drawn )); then
+        tint_color=""
+    elif [[ -n "${status_color}" ]]; then
         tint_color="${status_color}"
     elif should_tint_dark_icon_png "${normal_tmp}"; then
         tint_color="${ICON_TEXT_HEX}"

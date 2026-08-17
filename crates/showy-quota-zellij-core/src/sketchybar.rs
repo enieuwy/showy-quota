@@ -151,8 +151,14 @@ fn provider_line(
         })
         .collect();
 
-    // Countdown label + color from the primary lane only.
-    let (label, mut label_color) = match lanes[0].as_ref() {
+    // Countdown label + color from the positional primary slot, never from
+    // assembled lane 0. Under the pooled layout lane 0 is an extras-derived row
+    // that may be a `usageKnown:false` placeholder carrying no reset, which
+    // printed `?` for a provider that does have a live countdown (Antigravity,
+    // whose 5-hour pools go unknown once the weekly is exhausted) and disagreed
+    // with the terminal strip — `render.rs::render_chunk` always reads the
+    // positional primary.
+    let (label, mut label_color) = match label_lane(record).as_ref() {
         None => ("idle".to_string(), argb(&config.palette_countdown)),
         Some(lane) => {
             let minutes = if lane.reset.is_empty() {
@@ -304,6 +310,15 @@ fn provider_lanes(record: &ProviderRecord) -> [Option<Lane>; LANE_COUNT] {
         }
     }
     lanes
+}
+
+/// The window the countdown label reads: the positional primary slot after
+/// `render_slots` left-compaction, matching the terminal strip. Deliberately
+/// independent of `provider_lanes`, whose pooled branch replaces lane 0 with an
+/// extras-derived row that need not be the provider's live window.
+fn label_lane(record: &ProviderRecord) -> Option<Lane> {
+    let usage = record.usage.as_ref()?;
+    usage.render_slots()[0].map(lane_from)
 }
 
 /// jq `row(w)`: remaining percent plus the raw reset/window strings. The jq
@@ -612,6 +627,40 @@ mod tests {
         assert_eq!(row[14], "45");
         // Lane 4 absent.
         assert_eq!(row[17], "0");
+    }
+
+    #[test]
+    fn pooled_unknown_lane_zero_does_not_hide_the_countdown() {
+        let config = RenderConfig::default();
+        let now = 1_700_000_000; // 2023-11-14T22:13:20Z
+                                 // Antigravity with both 5-hour pools reported
+                                 // usageKnown:false because the weeklies are
+                                 // exhausted. Pooled lane 0 is then a
+                                 // placeholder with no reset; the label must
+                                 // still come from the positional weekly, which
+                                 // is what the terminal strip prints.
+        let payload = r#"[{
+            "provider": "antigravity",
+            "usage": {
+                "primary": {"usedPercent": 100, "resetsAt": "2023-11-20T22:13:20Z", "windowMinutes": 10080},
+                "secondary": {"usedPercent": 100, "resetsAt": "2023-11-22T22:13:20Z", "windowMinutes": 10080},
+                "extraRateWindows": [
+                    {"title": "Gemini 5-hour", "usageKnown": false,
+                     "window": {"usedPercent": 0, "resetsAt": "2023-11-15T02:13:20Z", "windowMinutes": 300}},
+                    {"title": "Gemini weekly", "usageKnown": true,
+                     "window": {"usedPercent": 100, "resetsAt": "2023-11-20T22:13:20Z", "windowMinutes": 10080}},
+                    {"title": "3p 5-hour", "usageKnown": false,
+                     "window": {"usedPercent": 0, "resetsAt": "2023-11-15T02:13:20Z", "windowMinutes": 300}},
+                    {"title": "3p weekly", "usageKnown": true,
+                     "window": {"usedPercent": 100, "resetsAt": "2023-11-22T22:13:20Z", "windowMinutes": 10080}}
+                ]
+            }
+        }]"#;
+        let row = &lines(&emit(payload, &config, now, options()))[1];
+        assert_eq!(row[1], "6d", "countdown tracks the positional weekly");
+        assert_eq!(row[5], "1", "pooled lane 0 still drawn");
+        assert_eq!(row[6], "0", "pooled lane 0 is the unknown placeholder");
+        assert_eq!(row[7], "", "placeholder lane carries no marker");
     }
 
     #[test]

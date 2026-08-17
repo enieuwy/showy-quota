@@ -2301,7 +2301,7 @@ assert_contains "plugin can draw provider icons from app font without magick" "-
 assert_contains "plugin maps codex provider to app font icon" "showy_quota.codex.icon drawing=on icon.drawing=on icon=:codex:" "${plugin_log}"
 assert_contains "plugin maps gemini provider to app font icon" "showy_quota.gemini.icon drawing=on icon.drawing=on icon=:gemini:" "${plugin_log}"
 assert_contains "plugin widens font icon item to make a real native bar gap" "showy_quota.claude.icon drawing=on icon.drawing=on icon=:claude: icon.font=sketchybar-app-font:Regular:14.0 icon.color=0xfff2f4f8 icon.align=center icon.width=22 icon.padding_left=0 icon.padding_right=0 label.drawing=off background.image.drawing=off background.color=0x00000000 background.height=0 padding_left=5 padding_right=0 width=24" "${plugin_log}"
-assert_not_contains "font icon mode avoids provider PNG cache paths" "icon-v3-" "${plugin_log}"
+assert_not_contains "font icon mode avoids provider PNG cache paths" "icon-v4-" "${plugin_log}"
 
 copilot_fixture="${TMP}/codexbar-copilot.json"
 printf '%s\n' '[{"provider":"copilot","usage":{"primary":{"usedPercent":0},"secondary":{"usedPercent":0}}}]' > "${copilot_fixture}"
@@ -2319,7 +2319,7 @@ run_sketchybar_plugin_without_magick codexbar-status-major.json "${cache}" "${lo
 font_status_log="$(< "${log}")"
 assert_contains "font icon mode colors degraded providers without magick" "showy_quota.codex.icon drawing=on icon.drawing=on icon=:codex: icon.font=sketchybar-app-font:Regular:14.0 icon.color=0xffee5396" "${font_status_log}"
 assert_contains "font icon mode preserves degraded provider status click without magick" "click_script=open 'https://status.openai.com/'" "${font_status_log}"
-assert_not_contains "font icon mode skips status PNG for mapped provider without magick" "icon-v3-codex-" "${font_status_log}"
+assert_not_contains "font icon mode skips status PNG for mapped provider without magick" "icon-v4-codex-" "${font_status_log}"
 
 # ── sketchybar status URL guard ───────────────────────────────────────
 printf '\nsketchybar status URL guard\n'
@@ -2407,7 +2407,7 @@ if command -v magick >/dev/null 2>&1; then
     cache=$(mk_cache)
     log="${TMP}/sb-status.log"
     run_sketchybar_plugin codexbar-status-major.json "${cache}" "${log}"
-    status_icon_path=$(compgen -G "${cache}/sb/icon-v3-codex-*-major.png" | sort | head -n 1 || true)
+    status_icon_path=$(compgen -G "${cache}/sb/icon-v4-codex-*-major.png" | sort | head -n 1 || true)
     if [[ -s "${status_icon_path}" ]]; then
         ok "plugin generates status-tinted icon"
     else
@@ -2497,7 +2497,7 @@ EOF
     cache=$(mk_cache)
     log="${TMP}/sb-opencode.log"
     run_sketchybar_plugin "${opencode_fixture}" "${cache}" "${log}" SHOWY_QUOTA_CODEXBAR_RESOURCES="${resource_dir}"
-    opencode_icon_path=$(compgen -G "${cache}/sb/icon-v3-opencode-*.png" | sort | head -n 1 || true)
+    opencode_icon_path=$(compgen -G "${cache}/sb/icon-v4-opencode-*.png" | sort | head -n 1 || true)
     if [[ -s "${opencode_icon_path}" ]]; then
         ok "plugin generates tinted dark icon"
     else
@@ -2514,7 +2514,7 @@ EOF
     log="${TMP}/sb-opencode-font-fallback.log"
     run_sketchybar_plugin "${opencode_fixture}" "${cache}" "${log}" SHOWY_QUOTA_CODEXBAR_RESOURCES="${resource_dir}" SHOWY_QUOTA_SKETCHYBAR_PROVIDER_ICON_MODE=font
     font_fallback_log="$(< "${log}")"
-    assert_contains "font icon mode falls back to SVG for unmapped opencode" "showy_quota.opencode.icon drawing=on icon.drawing=off label.drawing=off background.image=${cache}/sb/icon-v3-opencode-" "${font_fallback_log}"
+    assert_contains "font icon mode falls back to SVG for unmapped opencode" "showy_quota.opencode.icon drawing=on icon.drawing=off label.drawing=off background.image=${cache}/sb/icon-v4-opencode-" "${font_fallback_log}"
     assert_not_contains "font icon mode avoids generic code glyph for opencode" "showy_quota.opencode.icon drawing=on icon.drawing=on icon=:code:" "${font_fallback_log}"
 
     copilot_resource_dir="${TMP}/copilot-resources"
@@ -2524,8 +2524,50 @@ EOF
     log="${TMP}/sb-copilot-svg-fallback.log"
     run_sketchybar_plugin "${copilot_fixture}" "${cache}" "${log}" SHOWY_QUOTA_CODEXBAR_RESOURCES="${copilot_resource_dir}" SHOWY_QUOTA_SKETCHYBAR_PROVIDER_ICON_MODE=font
     copilot_svg_log="$(< "${log}")"
-    assert_contains "font icon mode falls back to CodexBar SVG for copilot" "showy_quota.copilot.icon drawing=on icon.drawing=off label.drawing=off background.image=${cache}/sb/icon-v3-copilot-" "${copilot_svg_log}"
+    assert_contains "font icon mode falls back to CodexBar SVG for copilot" "showy_quota.copilot.icon drawing=on icon.drawing=off label.drawing=off background.image=${cache}/sb/icon-v4-copilot-" "${copilot_svg_log}"
     assert_not_contains "font icon mode avoids pointer-like copilot app-font glyph" "showy_quota.copilot.icon drawing=on icon.drawing=on icon=:copilot:" "${copilot_svg_log}"
+
+    # ImageMagick's internal MSVG decoder rasterizes stroke-only paths to a
+    # fully transparent image and still exits 0, so "magick succeeded" is not
+    # proof of a visible icon. Roughly a third of CodexBar's provider SVGs are
+    # shaped like this one.
+    stroke_fixture="${TMP}/codexbar-stroke-only.json"
+    printf '%s\n' '[{"provider":"opencode","usage":{"primary":{"usedPercent":12,"windowMinutes":300,"resetsAt":"2099-01-01T05:40:00Z"}}}]' > "${stroke_fixture}"
+    stroke_resource_dir="${TMP}/stroke-only-resources"
+    mkdir -p "${stroke_resource_dir}"
+    printf '%s\n' '<svg width="100" height="100" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M38 38H27C20.925 38 16 33.075 16 27C16 20.925 20.925 16 27 16C33.075 16 38 20.925 38 27V73C38 79.075 33.075 84 27 84" stroke="white" stroke-width="9" stroke-linecap="round"/></svg>' > "${stroke_resource_dir}/ProviderIcon-opencode.svg"
+
+    cache=$(mk_cache)
+    log="${TMP}/sb-stroke-only.log"
+    run_sketchybar_plugin "${stroke_fixture}" "${cache}" "${log}" SHOWY_QUOTA_CODEXBAR_RESOURCES="${stroke_resource_dir}"
+    stroke_icon_path=$(compgen -G "${cache}/sb/icon-v4-opencode-*.png" | sort | head -n 1 || true)
+    stroke_alpha=$(magick "${stroke_icon_path}" -format '%[fx:maxima.a]' info: 2>/dev/null || true)
+    if [[ -s "${stroke_icon_path}" && -n "${stroke_alpha}" && "${stroke_alpha}" != "0" ]]; then
+        ok "stroke-only provider SVG never publishes an invisible icon"
+    else
+        fail "stroke-only provider SVG never publishes an invisible icon" \
+            "path=${stroke_icon_path} maxima.a=${stroke_alpha}"
+    fi
+
+    # Without librsvg the MSVG path cannot draw the icon at all, so the drawn
+    # two-letter sigil must take over rather than leaving an empty slot.
+    no_rsvg_dir="${TMP}/no-rsvg-bin"
+    mkdir -p "${no_rsvg_dir}"
+    printf '%s\n' '#!/bin/sh' 'exit 127' > "${no_rsvg_dir}/rsvg-convert"
+    chmod +x "${no_rsvg_dir}/rsvg-convert"
+    cache=$(mk_cache)
+    log="${TMP}/sb-stroke-only-no-rsvg.log"
+    run_sketchybar_plugin "${stroke_fixture}" "${cache}" "${log}" \
+        PATH="${no_rsvg_dir}:${stub_dir}:${PATH}" \
+        SHOWY_QUOTA_CODEXBAR_RESOURCES="${stroke_resource_dir}"
+    sigil_icon_path=$(compgen -G "${cache}/sb/icon-v4-opencode-*.png" | sort | head -n 1 || true)
+    sigil_alpha=$(magick "${sigil_icon_path}" -format '%[fx:maxima.a]' info: 2>/dev/null || true)
+    if [[ -s "${sigil_icon_path}" && -n "${sigil_alpha}" && "${sigil_alpha}" != "0" ]]; then
+        ok "unrenderable provider SVG falls back to the drawn sigil icon"
+    else
+        fail "unrenderable provider SVG falls back to the drawn sigil icon" \
+            "path=${sigil_icon_path} maxima.a=${sigil_alpha}"
+    fi
 else
     ok "plugin skips ImageMagick icon tests when magick is unavailable"
 fi

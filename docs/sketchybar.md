@@ -183,10 +183,26 @@ are not rasterized.
 ## Provider icons and `SHOWY_QUOTA_CODEXBAR_RESOURCES`
 
 Provider icons are rasterized from `${SHOWY_QUOTA_CODEXBAR_RESOURCES}/ProviderIcon-<id>.svg`
-(default the CodexBar app bundle's `Resources`) with ImageMagick. Point
-`SHOWY_QUOTA_CODEXBAR_RESOURCES` only at a directory you trust: a malicious SVG
-can otherwise instruct ImageMagick to fetch remote resources. As defense in
-depth the plugin runs `magick` under a bundled restrictive policy
+(default the CodexBar app bundle's `Resources`). `rsvg-convert` (librsvg) is
+preferred when installed, because ImageMagick's internal `MSVG:` decoder cannot
+rasterize stroke-only paths (`fill="none"`) and silently produces a fully
+transparent image for roughly a third of CodexBar's provider SVGs. Without
+`rsvg-convert` those providers fall back to the drawn two-letter sigil icon
+rather than rendering an invisible slot.
+
+The drawn sigil is annotated with a concrete font file, because a Homebrew
+ImageMagick has no fontconfig delegate and an empty `magick -list font`, which
+makes a bare font name fail. Candidates are tried in order:
+`${SHOWY_QUOTA_SKETCHYBAR_ICON_FONT_FILE}`, `/System/Library/Fonts/SFNS.ttf`,
+`/System/Library/Fonts/Helvetica.ttc`,
+`/System/Library/Fonts/Supplemental/Arial.ttf`. When none is readable the
+fallback degrades to a plain disc so the slot stays visible and clickable.
+
+Point `SHOWY_QUOTA_CODEXBAR_RESOURCES` only at a directory you trust: a
+malicious SVG can otherwise instruct the renderer to fetch remote resources. As
+defense in depth the plugin runs `magick` under a bundled restrictive policy
 (`adapters/sketchybar/imagemagick/policy.xml`, injected via
-`MAGICK_CONFIGURE_PATH`) that blocks the network coders, so SVG `href` fetches
-(SSRF) are denied regardless of the system ImageMagick policy.
+`MAGICK_CONFIGURE_PATH`) that blocks the network coders and delegate execution,
+so SVG `href` fetches (SSRF) are denied regardless of the system ImageMagick
+policy. `rsvg-convert` is invoked directly rather than as an ImageMagick
+delegate, so that ban still holds; librsvg refuses remote hrefs on its own.

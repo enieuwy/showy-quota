@@ -4,10 +4,13 @@
   (injected via MAGICK_CONFIGURE_PATH). It blocks the network coders,
   delegate execution, and indirect-read syntax so a provider SVG under
   SHOWY_QUOTA_CODEXBAR_RESOURCES cannot make ImageMagick fetch a remote
-  href (SSRF / data exfiltration). The plugin prefixes provider SVG reads with
-  MSVG: so ImageMagick uses its internal XML/MSVG decoder instead of delegate
-  renderers such as librsvg or inkscape; the MVG/drawing coders remain
+  href (SSRF / data exfiltration). Provider SVG reads through ImageMagick are
+  prefixed with MSVG: so it uses its internal XML/MSVG decoder instead of
+  delegate renderers such as librsvg or inkscape; the MVG/drawing coders remain
   available so drawn fallback icons keep working when a provider SVG is missing.
+  MSVG cannot rasterize stroke-only paths, so the plugin prefers rsvg-convert
+  when installed — invoked directly, never as an ImageMagick delegate, so the
+  delegate ban below still holds. librsvg refuses remote hrefs on its own.
 -->
 <policymap>
   <policy domain="coder" rights="none" pattern="URL" />

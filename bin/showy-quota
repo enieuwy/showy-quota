@@ -528,7 +528,7 @@ diagnose_json() {
 
     env_json=$(diagnose_env_json)
     required_tools_json=$(diagnose_tools_json bash jq codexbar)
-    optional_tools_json=$(diagnose_tools_json curl flock sketchybar magick zellij tmux fzf)
+    optional_tools_json=$(diagnose_tools_json curl flock sketchybar magick rsvg-convert zellij tmux fzf)
 
     jq -n \
         --arg showyQuota "${SCRIPT_PATH}" \
@@ -609,6 +609,7 @@ diagnose() {
     print_tool_path flock
     print_tool_path sketchybar
     print_tool_path magick
+    print_tool_path rsvg-convert
     print_tool_path zellij
     print_tool_path tmux
     print_tool_path fzf
