@@ -5551,6 +5551,38 @@ rc=0
 out=$(run_guard codexbar-mixed.json --provider codex --window primary --min-remaining 96 --wait-max 0 2>&1) || rc=$?
 assert_equals "guard --wait-max 0 immediate breach exits 1" "1" "${rc}"
 
+# --no-fetch reads an aged cache as-is and must not collect from codexbar.
+# --allow-stale makes the cached decision evaluable while a marker-writing
+# codexbar stub proves that neither guard nor state starts a provider refresh.
+guard_no_fetch_cache=$(mk_cache)
+seed_usage_cache "${guard_no_fetch_cache}" codexbar-mixed.json cli
+touch -t 198801010000 "${guard_no_fetch_cache}/usage.json"
+guard_no_fetch_marker="${TMP}/guard-no-fetch.marker"
+guard_no_fetch_stub="${TMP}/guard-no-fetch-codexbar-stub"
+cat > "${guard_no_fetch_stub}" <<EOF
+#!/bin/sh
+: > "${guard_no_fetch_marker}"
+exit 1
+EOF
+chmod +x "${guard_no_fetch_stub}"
+rm -f "${guard_no_fetch_marker}"
+rc=0
+out=$(
+    env SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_MANAGE_SERVE=0 \
+        SHOWY_QUOTA_CACHE_DIR="${guard_no_fetch_cache}" \
+        SHOWY_QUOTA_CODEXBAR_BIN="${guard_no_fetch_stub}" \
+        SHOWY_QUOTA_CODEXBAR_SERVE_URL='' \
+        "${REPO_ROOT}/bin/showy-quota" guard --provider codex --window primary \
+            --min-remaining 5 --no-fetch --allow-stale 2>&1
+) || rc=$?
+assert_equals "guard --no-fetch evaluates the cached quota" "0" "${rc}"
+assert_contains "guard --no-fetch reports the cached window" "codex/primary" "${out}"
+if [[ -e "${guard_no_fetch_marker}" ]]; then
+    fail "guard --no-fetch runs no provider collection" "marker present"
+else
+    ok "guard --no-fetch runs no provider collection"
+fi
+
 # Stale cache: an old-mtime cache under the default refresh window is unusable
 # without --allow-stale, and evaluable with it. (Old mtime + missing codexbar =>
 # the fetch cannot refresh, so the stale cache is what gets evaluated.)

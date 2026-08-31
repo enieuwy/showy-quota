@@ -5,7 +5,7 @@ provider metrics every bar renderer uses** (via `showy-quota-state --json`), so
 they never re-parse CodexBar's JSON:
 
 - **`showy-quota guard`** — a threshold gate for CI, cron, and agent hooks. It
-  refreshes the cache, evaluates provider quota, and returns a stable exit code.
+  refreshes by default; `--no-fetch` reads the cache as-is for hot paths.
 - **`showy-quota prompt`** — a one-line segment for shell prompts (starship,
   powerlevel10k, plain `PS1`). It reads the cache as-is and never blocks.
 
@@ -18,13 +18,13 @@ pipe, or a timer normally keeps the cache warm; see the wiring docs for those.
 
 ```
 showy-quota guard [--provider ID[,ID...]] [--window primary|secondary|tertiary|worst]
-                  [--min-remaining PCT | --max-used PCT] [--allow-stale]
+                  [--min-remaining PCT | --max-used PCT] [--no-fetch] [--allow-stale]
                   [--wait-max SECONDS] [--json] [--quiet]
 ```
 
-Guard runs a fetch first (the normal refresh-window semantics — a fetch failure
-is **not** fatal when a cache already exists), then evaluates
-`showy-quota-state` provider metrics and exits with a stable code.
+Guard runs a fetch first by default (with normal refresh-window semantics; a
+fetch failure is **not** fatal when a cache already exists). `--no-fetch`
+instead evaluates `showy-quota-state --no-fetch` without provider collection.
 
 ### Flags
 
@@ -34,8 +34,9 @@ is **not** fatal when a cache already exists), then evaluates
 | `--window WIN` | Which usage window to test: `primary`, `secondary`, `tertiary`, or `worst` (default). `worst` = the non-null slot with the least remaining, per provider. An explicit window that is null for a selected provider is unusable data. |
 | `--min-remaining PCT` | Fail when remaining quota drops below `PCT`. Default when no threshold flag is given: `--min-remaining 10`. |
 | `--max-used PCT` | Fail when used quota rises above `PCT`. Mutually exclusive with `--min-remaining` (giving both is a usage error). |
+| `--no-fetch` | Evaluate the cache as-is. Guard skips its initial fetch and any forced refresh after `--wait-max`; a separate bar or timer can update the cache. The normal stale-cache rule still applies. |
 | `--allow-stale` | Evaluate even when the cache is stale. Without it, a stale cache is unusable data. |
-| `--wait-max SECONDS` | On a breach whose worst window has a known reset within `SECONDS`, sleep until reset, force one refresh, and re-evaluate once — otherwise fail immediately. The wait never exceeds `SECONDS`: reset timestamps round down to the minute, so a fixed 30s grace is added to cover the rest of that minute, but the grace is clamped so `sleep time = min(secondsUntilReset + 30, SECONDS)`. |
+| `--wait-max SECONDS` | On a breach whose worst window has a known reset within `SECONDS`, sleep until reset and re-evaluate once — otherwise fail immediately. Guard forces a refresh before the retry unless `--no-fetch` is set. The wait never exceeds `SECONDS`: reset timestamps round down to the minute, so a fixed 30s grace is added to cover the rest of that minute, but the grace is clamped so `sleep time = min(secondsUntilReset + 30, SECONDS)`. |
 | `--json` | Emit one machine-readable object (see below) on every non-usage outcome. |
 | `--quiet` | Print nothing on pass; one human line on failure (unless `--json`). |
 
@@ -99,10 +100,11 @@ exhausted budget:
   run: showy-quota guard --provider codex,claude --min-remaining 15
 ```
 
-**Claude Code `PreToolUse` hook** — block tool calls while quota is low. Claude
-Code treats hook **exit code 2** as "block"; guard reports a breach as exit `1`,
-so the one-liner re-maps only a breach to `2` and lets missing data (exit `2`
-from guard) or usage errors pass through without blocking:
+**Claude Code `PreToolUse` hook** — block tool calls while quota is low without
+starting provider collection in the hook. `--no-fetch` reads the warm cache.
+Claude Code treats hook **exit code 2** as "block"; guard reports a breach as
+exit `1`, so the one-liner re-maps only a breach to `2` and lets missing data
+or usage errors pass through without blocking:
 
 ```json
 {
@@ -113,13 +115,21 @@ from guard) or usage errors pass through without blocking:
         "hooks": [
           {
             "type": "command",
-            "command": "showy-quota guard --provider codex --min-remaining 15 --quiet; [ \"$?\" -eq 1 ] && exit 2 || exit 0"
+            "command": "showy-quota guard --provider codex --min-remaining 15 --no-fetch --quiet; [ \"$?\" -eq 1 ] && exit 2 || exit 0"
           }
         ]
       }
     ]
   }
 }
+```
+
+Keep the cache warm outside the hot hook. A status bar or the Zellij pipe
+already does this. Without either, run `showy-quota-fetch` from a separate
+scheduler. For example, this cron entry checks the normal refresh window:
+
+```cron
+*/2 * * * * "$HOME/.local/bin/showy-quota-fetch" >/dev/null 2>&1
 ```
 
 **Cron alert** — notify (macOS example) when the worst window drops under 10%:
