@@ -945,10 +945,10 @@ def entry($pid; $slot):
 guard_help() {
     printf '%s\n' \
         'Usage: showy-quota guard [--provider ID[,ID...]] [--window primary|secondary|tertiary|worst]' \
-        '                         [--min-remaining PCT | --max-used PCT] [--allow-stale]' \
+        '                         [--min-remaining PCT | --max-used PCT] [--no-fetch] [--allow-stale]' \
         '                         [--wait-max SECONDS] [--json] [--quiet]' \
         '' \
-        'Runs a refresh-window fetch, then evaluates provider metrics.' \
+        'Runs a refresh-window fetch by default; --no-fetch evaluates the cache as-is.' \
         'Window default "worst" = the non-null slot with the least remaining per provider.' \
         'Default threshold: --min-remaining 10. The boundary is inclusive-pass:' \
         '  --min-remaining N passes when remaining >= N (breach when remaining < N);' \
@@ -966,12 +966,14 @@ guard_valid_pct() { [[ "$1" =~ ^[0-9]+$ ]] && (( 10#$1 <= 100 )); }
 guard_valid_uint() { [[ "$1" =~ ^[0-9]+$ ]]; }
 
 # Evaluate once against showy-quota-state --json. Reads globals G_WIN, G_TK,
-# G_TV, G_AS, REQUESTED_JSON, PROVIDER_IDS, STATE_BIN; sets G_EXIT, G_REASON,
+# G_TV, G_AS, G_NF, REQUESTED_JSON, PROVIDER_IDS, STATE_BIN; sets G_EXIT, G_REASON,
 # G_STALE, G_EVALUATED, G_WORST_JSON, G_BREACH.
 guard_evaluate() {
     G_BREACH=0
     local state_json facts
-    state_json="$("${STATE_BIN}" --json 2>/dev/null)" || state_json=""
+    local -a state_args=(--json)
+    (( G_NF )) && state_args+=(--no-fetch)
+    state_json="$("${STATE_BIN}" "${state_args[@]}" 2>/dev/null)" || state_json=""
     if [[ -z "${state_json}" ]] || ! printf '%s' "${state_json}" | jq -e 'type == "object"' >/dev/null 2>&1; then
         G_EXIT=2; G_REASON="no-cache"; G_STALE=false; G_EVALUATED=0; G_WORST_JSON=null; return
     fi
@@ -1081,7 +1083,7 @@ cmd_guard() {
 
     PROVIDER_IDS=()
     local window="worst" threshold_kind="" threshold_value=""
-    local allow_stale=0 wait_max=0 json_mode=0 quiet=0
+    local no_fetch=0 allow_stale=0 wait_max=0 json_mode=0 quiet=0
 
     while (($#)); do
         case "$1" in
@@ -1109,6 +1111,7 @@ cmd_guard() {
                 threshold_kind="max-used"; threshold_value=$((10#$2))
                 shift 2 ;;
             --allow-stale) allow_stale=1; shift ;;
+            --no-fetch) no_fetch=1; shift ;;
             --wait-max)
                 (($# >= 2)) || guard_usage_error '--wait-max requires a value'
                 guard_valid_uint "$2" || guard_usage_error "invalid --wait-max (seconds): $2"
@@ -1125,18 +1128,23 @@ cmd_guard() {
     fi
 
     STATE_BIN="${SCRIPT_DIR}/showy-quota-state"
-    local fetch; fetch="$(automation_fetch_bin)"
+    local fetch=""
     REQUESTED_JSON="$(providers_json)"
-    G_WIN="${window}"; G_TK="${threshold_kind}"; G_TV="${threshold_value}"; G_AS="${allow_stale}"
+    G_WIN="${window}"; G_TK="${threshold_kind}"; G_TV="${threshold_value}"; G_AS="${allow_stale}"; G_NF="${no_fetch}"
 
-    # Guard always fetches (automation wants current data): refresh-window
-    # semantics; a fetch failure is non-fatal when a cache exists.
-    "${fetch}" >/dev/null 2>&1 || true
+    # Guard fetches by default (automation wants current data). --no-fetch skips
+    # every fetch, so a hook pays only the cache-only state read: the fetch
+    # binary is not even resolved.
+    if (( ! no_fetch )); then
+        fetch="$(automation_fetch_bin)"
+        "${fetch}" >/dev/null 2>&1 || true
+    fi
     guard_evaluate
 
     # --wait-max: if breaching and the worst window's reset is known and lands
-    # within the budget, sleep past it, force one refresh, retry once. The
-    # sleep adds a fixed 30s grace (reset timestamps round down to the
+    # within the budget, sleep past it, force one refresh (unless --no-fetch,
+    # which leaves refreshing to the bar or timer), and retry once. The sleep
+    # adds a fixed 30s grace (reset timestamps round down to the
     # minute, so the actual reset can land up to ~59s after the reported
     # minute), but that grace is clamped to the caller's budget rather than
     # added on top of it: automation asked to wait "up to wait_max seconds",
@@ -1152,7 +1160,9 @@ cmd_guard() {
                 sleep_secs=$(( wsecs + 30 ))
                 (( sleep_secs > wait_max )) && sleep_secs=${wait_max}
                 sleep "${sleep_secs}"
-                "${fetch}" --refresh >/dev/null 2>&1 || true
+                if (( ! no_fetch )); then
+                    "${fetch}" --refresh >/dev/null 2>&1 || true
+                fi
                 guard_evaluate
             fi
         fi

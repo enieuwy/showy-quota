@@ -224,6 +224,9 @@ powerlevel10k, and plain `PS1`).
   showy-quota guard --provider codex,claude --min-remaining 15
   ```
 
+  Agent hooks can add `--no-fetch` to evaluate a warm cache without starting
+  provider collection.
+
 - **`showy-quota prompt`** prints a one-line segment (`CX 92% 3:02`) for the
   worst-remaining provider. It reads the cache as-is, so it never blocks a
   shell. In starship:
