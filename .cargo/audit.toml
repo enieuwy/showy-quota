@@ -1,19 +1,23 @@
 # cargo-audit configuration (read automatically by `cargo audit`, incl. CI).
 #
-# These advisories are all transitive through `zellij-tile 0.44.3`, which is the
-# latest published version (no 0.45.x exists) and pulls `zellij-utils`
-# non-optionally with no feature flags to shed it. None is independently
-# fixable; each is accepted with the rationale below. Re-evaluate when a
-# `zellij-tile > 0.44.3` release lands.
+# No advisory is waived. `zellij-tile 0.45.0` shed the three crates this file
+# used to waive for `0.44.3`: `clap` moved 3.2.25 -> 4.6.6, which drops `atty`
+# (RUSTSEC-2024-0375, RUSTSEC-2021-0145) and `proc-macro-error`
+# (RUSTSEC-2024-0370). The `wasm32-wasip1` normal-dependency count fell from 259
+# to 136. Verified by running `cargo audit` with and without an ignore list:
+# both produce identical output.
+#
+# Residual exposure, reported but not waived: RUSTSEC-2026-0221
+# (`event-listener 5.4.1`, unsound, `!Send` tags crossing thread boundaries via
+# `StackSlot`) reaches us through `isahc 1.8.2 -> zellij-utils 0.45.0 ->
+# zellij-tile 0.45.0`. `zellij-tile` pulls `zellij-utils` non-optionally with no
+# feature flag to shed it, so the HTTP client is not independently removable.
+# cargo-audit classes it as a warning, not a vulnerability, so bare `cargo audit`
+# still exits 0 and CI needs no waiver. The plugin never constructs an `isahc`
+# client and the shipped artifact is single-threaded `wasm32-wasip1`, so the
+# unsoundness is not reachable at runtime.
+#
+# Re-evaluate on every `zellij-tile` bump: if a future release makes an advisory
+# fail the build, add it here with the reachability argument, not just the ID.
 [advisories]
-ignore = [
-  # atty 0.2.14 unmaintained. Path: zellij-tile -> clap_complete/clap 3.2.25 -> atty.
-  # Shipped in the wasm32 plugin but no exploitable defect; clap 3 is owned by zellij-utils.
-  "RUSTSEC-2024-0375",
-  # atty 0.2.14 potential unaligned read (unsound). Windows-only and requires a
-  # non-default global allocator; the plugin targets wasm32-wasip1, so not reachable.
-  "RUSTSEC-2021-0145",
-  # proc-macro-error 1.0.4 unmaintained. Path: clap 3.2.25 -> clap_derive (proc-macro).
-  # Build-time only; never linked into the shipped .wasm binary.
-  "RUSTSEC-2024-0370",
-]
+ignore = []

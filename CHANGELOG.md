@@ -49,6 +49,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   snapshot now suppresses only the pacing markers — every countdown survives,
   greyed.
 
+### Changed
+- **The standalone Zellij plugin now requires Zellij 0.45 or newer.**
+  `zellij-tile` moved 0.44.3 → 0.45.0. Zellij guarantees only that a plugin
+  compiled for an *older* Zellij runs on a newer server, not the reverse, so an
+  older server is no longer supported. The bump also shrinks the plugin's
+  `wasm32-wasip1` dependency graph from 259 normal crates to 136: `clap` moves
+  3.2.25 → 4.6.6, which drops `atty` and `proc-macro-error` entirely.
+- `.cargo/audit.toml` no longer waives any advisory. All three ignores
+  (RUSTSEC-2024-0375, RUSTSEC-2021-0145, RUSTSEC-2024-0370) existed only for
+  crates `zellij-tile 0.45.0` no longer pulls. `cargo audit` produces identical
+  output with and without an ignore list.
+
+### Upgrading
+- **Rebuild and reinstall the WASM plugin.** Run `make plugin` and
+  `make install-plugin`, then `zellij action start-or-reload-plugin`, reload, or
+  open a new tab — a running session keeps the cached module. If you are on
+  Zellij 0.44, stay on showy-quota 0.8.1 until you upgrade Zellij.
+
 ## [0.8.1] — 2026-08-17
 
 ### Upgrading

@@ -6,7 +6,11 @@ It does **not** require `zjstatus`, `showy-quota-zellij-pipe`, or any installed 
 
 ## Requirements
 
-- Zellij 0.44.3 or newer.
+- Zellij 0.45 or newer. The plugin is built against `zellij-tile 0.45.0`.
+  [Zellij guarantees only that a plugin compiled for an older Zellij runs on a
+  newer one](https://zellij.dev/documentation/plugin-upgrading.html), not the
+  reverse, so an older server is unsupported. Stay on showy-quota 0.8.1 if you
+  cannot upgrade Zellij.
 - `codexbar` on the Zellij server `PATH`.
 - A font that can render the configured caps and bar glyphs. Any Nerd Font covers the defaults.
 
