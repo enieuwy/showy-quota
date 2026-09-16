@@ -25,6 +25,16 @@ trap 'rm -rf "${TMP}"' EXIT
 export SHOWY_QUOTA_MANAGE_SERVE=0
 export SHOWY_QUOTA_CODEXBAR_SERVE_URL=
 
+# Colour must never be inherited from the developer's shell. The renderer
+# disables colour when NO_COLOR is set OR when TERM is exactly "dumb"
+# (showy-quota-render.rs:334-335). An agent harness or editor terminal that
+# sets either one silently strips the ANSI that colour-sensitive assertions
+# parse, so the suite passes locally and fails in CI, which sets neither.
+# Normalise to the CI state — colour enabled — and let each test state the
+# colour it expects.
+unset NO_COLOR CLICOLOR CLICOLOR_FORCE FORCE_COLOR
+export TERM=xterm-256color
+
 
 # Build the native renderer only when the suite cannot use the repository
 # fallback path. In CI this is normally already present via the preceding cargo
@@ -2066,12 +2076,18 @@ assert_equals "render rows CLI honours explicit --ansi" "true" "$(printf '%s' "$
 # The vertical view is the same data on the other axis: one line per quota
 # window instead of one line per provider, so windows the strip packs into
 # half blocks/sextants each keep their own bar, percent and countdown.
-render_vertical_quad=$(
-    env SHOWY_QUOTA_NOW_EPOCH=4070908800 \
-        "${RENDER_BIN}" --emit vertical --json - < "${FIXTURE_DIR}/codexbar-antigravity-quad.json"
-)
+#
+# Every assertion below reads the plate as plain text, so colour is pinned off
+# here rather than inherited from the environment. The coloured path is covered
+# by the `--emit rows --ansi` test above.
+render_vertical() {
+    env NO_COLOR=1 SHOWY_QUOTA_NOW_EPOCH=4070908800 "$@" \
+        "${RENDER_BIN}" --emit vertical --json -
+}
+
+render_vertical_quad=$(render_vertical < "${FIXTURE_DIR}/codexbar-antigravity-quad.json")
 assert_equals "render vertical CLI gives every pooled window its own line" "4" "$(printf '%s\n' "${render_vertical_quad}" | grep -c '▕')"
-assert_equals "render vertical CLI labels each window horizon outside the plate" "5h,7d,5h,7d" "$(printf '%s\n' "${render_vertical_quad}" | grep '▕' | sed -E 's/.*\x1b?\[?[^ ]* ([^ ]+) *▕.*/\1/' | paste -sd, -)"
+assert_equals "render vertical CLI labels each window horizon outside the plate" "5h,7d,5h,7d" "$(printf '%s\n' "${render_vertical_quad}" | grep '▕' | sed -E 's/ *▕.*//; s/.* //' | paste -sd, -)"
 assert_equals "render vertical CLI separates provider blocks with one blank line" "1" "$(printf '%s\n' "${render_vertical_quad}" | grep -c '^$')"
 # Codepoint counts, not bytes: the family superscript and the Powerline cap are
 # multibyte, so awk's byte length would report a misalignment that is not there.
@@ -2080,42 +2096,31 @@ assert_equals "render vertical CLI aligns bars under a wide family chip" "1" "$(
 # Cursor's Total/Auto/API share one reset, horizon and usage but are three
 # separate pools: the vertical view must not collapse them into one line, and a
 # 30d/31d cycle is labelled as the month it is rather than a raw day count.
-render_vertical_cursor=$(
-    env SHOWY_QUOTA_NOW_EPOCH=4070908800 \
-        "${RENDER_BIN}" --emit vertical --json - < "${FIXTURE_DIR}/codexbar-cursor.json"
-)
-assert_equals "render vertical CLI keeps same-cycle pools on separate ordinal lines" "1mo¹,1mo²,1mo³" "$(printf '%s\n' "${render_vertical_cursor}" | sed -E 's/.* ([^ ]+) ?▕.*/\1/' | paste -sd, -)"
+render_vertical_cursor=$(render_vertical < "${FIXTURE_DIR}/codexbar-cursor.json")
+assert_equals "render vertical CLI keeps same-cycle pools on separate ordinal lines" "1mo¹,1mo²,1mo³" "$(printf '%s\n' "${render_vertical_cursor}" | sed -E 's/ *▕.*//; s/.* //' | paste -sd, -)"
 assert_equals "render vertical CLI reports each pool's own percentage" "88%,75%,100%" "$(printf '%s\n' "${render_vertical_cursor}" | grep -oE '[0-9]+%' | paste -sd, -)"
 
 # `urgency` flattens the provider blocks so the window closest to running out is
 # the first line; ties keep CodexBar's own slot order.
-assert_equals "render vertical CLI urgency order leads with the lowest remaining" "75%,88%,100%" "$(env SHOWY_QUOTA_NOW_EPOCH=4070908800 SHOWY_QUOTA_VERTICAL_SORT=urgency "${RENDER_BIN}" --emit vertical --json - < "${FIXTURE_DIR}/codexbar-cursor.json" | grep -oE '[0-9]+%' | paste -sd, -)"
-assert_equals "render vertical CLI urgency order drops the block separators" "0" "$(env SHOWY_QUOTA_NOW_EPOCH=4070908800 SHOWY_QUOTA_VERTICAL_SORT=urgency "${RENDER_BIN}" --emit vertical --json - < "${FIXTURE_DIR}/codexbar-antigravity-quad.json" | grep -c '^$')"
+assert_equals "render vertical CLI urgency order leads with the lowest remaining" "75%,88%,100%" "$(render_vertical SHOWY_QUOTA_VERTICAL_SORT=urgency < "${FIXTURE_DIR}/codexbar-cursor.json" | grep -oE '[0-9]+%' | paste -sd, -)"
+assert_equals "render vertical CLI urgency order drops the block separators" "0" "$(render_vertical SHOWY_QUOTA_VERTICAL_SORT=urgency < "${FIXTURE_DIR}/codexbar-antigravity-quad.json" | grep -c '^$')"
 
 # The clock answers "when" for rows that all read the same relative countdown, so
 # it is on by default; `0` trades it back for six columns.
-assert_equals "render vertical CLI appends the local reset clock by default" "3" "$(env SHOWY_QUOTA_NOW_EPOCH=4070908800 SHOWY_QUOTA_RESET_DESCRIPTION_TIMEZONE_OFFSET=0 "${RENDER_BIN}" --emit vertical --json - < "${FIXTURE_DIR}/codexbar-cursor.json" | grep -cE ' [0-9]{2}:[0-9]{2}$')"
-assert_equals "render vertical CLI drops the reset clock on request" "0" "$(env SHOWY_QUOTA_NOW_EPOCH=4070908800 SHOWY_QUOTA_VERTICAL_RESET_CLOCK=0 SHOWY_QUOTA_RESET_DESCRIPTION_TIMEZONE_OFFSET=0 "${RENDER_BIN}" --emit vertical --json - < "${FIXTURE_DIR}/codexbar-cursor.json" | grep -cE ' [0-9]{2}:[0-9]{2}$')"
+assert_equals "render vertical CLI appends the local reset clock by default" "3" "$(render_vertical SHOWY_QUOTA_RESET_DESCRIPTION_TIMEZONE_OFFSET=0 < "${FIXTURE_DIR}/codexbar-cursor.json" | grep -cE ' [0-9]{2}:[0-9]{2}$')"
+assert_equals "render vertical CLI drops the reset clock on request" "0" "$(render_vertical SHOWY_QUOTA_VERTICAL_RESET_CLOCK=0 SHOWY_QUOTA_RESET_DESCRIPTION_TIMEZONE_OFFSET=0 < "${FIXTURE_DIR}/codexbar-cursor.json" | grep -cE ' [0-9]{2}:[0-9]{2}$')"
 # A default line stays inside an SSH session on a phone. Its exact width depends
 # on the widest sigil and horizon label in the snapshot (a model-pooled provider
 # carries a family tag, so `AGG` costs every row a column); what is fixed is that
 # the clock is six of those columns.
-render_vertical_widest=$(
-    env SHOWY_QUOTA_NOW_EPOCH=4070908800 \
-        "${RENDER_BIN}" --emit vertical --json - < "${FIXTURE_DIR}/codexbar-realistic.json" |
-        jq -Rrn '[inputs | length] | max'
-)
+render_vertical_widest=$(render_vertical < "${FIXTURE_DIR}/codexbar-realistic.json" | jq -Rrn '[inputs | length] | max')
 assert_equals "render vertical CLI keeps a default line inside a phone's width" "ok" "$([[ ${render_vertical_widest} -le 46 ]] && echo ok || echo "too wide: ${render_vertical_widest}")"
 render_vertical_clocked=$(printf '%s\n' "${render_vertical_cursor}" | head -1 | jq -Rrn 'input | length')
-render_vertical_plain=$(
-    env SHOWY_QUOTA_NOW_EPOCH=4070908800 SHOWY_QUOTA_VERTICAL_RESET_CLOCK=0 \
-        "${RENDER_BIN}" --emit vertical --json - < "${FIXTURE_DIR}/codexbar-cursor.json" |
-        head -1 | jq -Rrn 'input | length'
-)
+render_vertical_plain=$(render_vertical SHOWY_QUOTA_VERTICAL_RESET_CLOCK=0 < "${FIXTURE_DIR}/codexbar-cursor.json" | head -1 | jq -Rrn 'input | length')
 assert_equals "render vertical CLI spends exactly six columns on the clock" "6" "$((render_vertical_clocked - render_vertical_plain))"
 
-assert_equals "render vertical CLI honours the vertical bar width" "8" "$(env SHOWY_QUOTA_NOW_EPOCH=4070908800 SHOWY_QUOTA_VERTICAL_BAR_WIDTH=8 "${RENDER_BIN}" --emit vertical --json - < "${FIXTURE_DIR}/codexbar-cursor.json" | head -1 | sed -E 's/.*▕(.*)▏.*/\1/' | jq -Rn 'input | length')"
-assert_equals "render vertical CLI renders idle when nothing is renderable" "AI idle" "$(env SHOWY_QUOTA_NOW_EPOCH=4070908800 "${RENDER_BIN}" --emit vertical --json - < "${FIXTURE_DIR}/codexbar-empty.json")"
+assert_equals "render vertical CLI honours the vertical bar width" "8" "$(render_vertical SHOWY_QUOTA_VERTICAL_BAR_WIDTH=8 < "${FIXTURE_DIR}/codexbar-cursor.json" | head -1 | sed -E 's/.*▕(.*)▏.*/\1/' | jq -Rn 'input | length')"
+assert_equals "render vertical CLI renders idle when nothing is renderable" "AI idle" "$(render_vertical < "${FIXTURE_DIR}/codexbar-empty.json")"
 
 out=$(run_state codexbar-error-only.json)
 assert_equals "state error-only providers stay renderable-only empty" "[]" "$(printf '%s' "${out}" | jq -c '.providers')"

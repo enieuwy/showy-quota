@@ -108,6 +108,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   override silently honoured would poison cache-age and stale rendering
   everywhere; each case must fall back to the real clock, and a valid override
   must still be honoured exactly.
+- `test/render_test.sh` no longer inherits colour from the shell that runs it.
+  The renderer disables colour when `NO_COLOR` is set **or** `TERM` is exactly
+  `dumb`, so a terminal or agent harness setting either one stripped the ANSI
+  that the `--emit vertical` assertions parse: the suite passed locally and
+  failed in CI, which sets neither. The harness now clears `NO_COLOR`,
+  `CLICOLOR`, `CLICOLOR_FORCE` and `FORCE_COLOR` and pins `TERM`, and the
+  vertical block states the colour it expects. Verified identical (713 passed)
+  under `NO_COLOR=1 TERM=dumb` and with both unset.
 
 ### Removed
 - **`SHOWY_QUOTA_CODEXBAR_SERVE_PORT`.** The port now always derives from
