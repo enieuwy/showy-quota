@@ -32,13 +32,6 @@
     }
     REPO_ROOT="$(resolve_repo_root)"
 
-    if [[ -z "${SHOWY_QUOTA_SKETCHYBAR_PILL_RADIUS:-}" && -n "${PILL_RADIUS:-}" ]]; then
-        export SHOWY_QUOTA_SKETCHYBAR_PILL_RADIUS="${PILL_RADIUS}"
-    fi
-    if [[ -z "${SHOWY_QUOTA_SKETCHYBAR_PILL_HEIGHT:-}" && -n "${PILL_HEIGHT:-}" ]]; then
-        export SHOWY_QUOTA_SKETCHYBAR_PILL_HEIGHT="${PILL_HEIGHT}"
-    fi
-
     # shellcheck disable=SC1091
     . "${REPO_ROOT}/lib/common.sh"
     # shellcheck disable=SC1091

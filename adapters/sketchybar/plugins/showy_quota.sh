@@ -264,7 +264,6 @@ remove_provider_items() {
     local pid="$1"
     sketchybar \
         --remove "showy_quota.${pid}.icon" \
-        --remove "showy_quota.${pid}.bar" \
         --remove "showy_quota.${pid}.primary" \
         --remove "showy_quota.${pid}.secondary" \
         --remove "showy_quota.${pid}.tertiary" \

@@ -86,7 +86,7 @@ bin/showy-quota-fetch     ←  shared cache envelope + flock + last-known-good
 
    ```sh
    git clone https://github.com/enieuwy/showy-quota && cd showy-quota
-   make doctor                   # bash 4+, jq, codexbar present
+   make doctor                   # bash 4+, jq 1.6+, codexbar present
    make install                  # symlinks bin/* into ~/.local/bin
    ```
 
@@ -253,12 +253,15 @@ powerlevel10k, and plain `PS1`).
     visible `⚠cli` fallback.
   CodexBar's web-backed providers remain macOS-only; CLI/OAuth/API/local
   providers work where CodexBar supports them.
-- Shell integrations need `bash` 4+, `jq`, and a `date` that understands either
-  `-j -f` (BSD/macOS) or `-d` (GNU coreutils).
+- Shell integrations need `bash` 4+, `jq` 1.6+, and a `date` that understands
+  either `-j -f` (BSD/macOS) or `-d` (GNU coreutils). `make check-deps` asserts
+  the `bash` and `jq` floors and is the same check CI runs, so a passing local
+  install and a passing CI leg mean the same thing.
   The standalone Zellij plugin does not need the shell scripts, `bash`, or `jq`.
 - SketchyBar integration also needs `sketchybar` on the PATH. Font icon mode
-  needs `sketchybar-app-font`; SVG fallback icons need ImageMagick 7+
-  (`magick`). Native usage rows do not need `magick`.
+  needs `sketchybar-app-font`; SVG fallback icons need ImageMagick 7.1.1+
+  (`magick`), which renders third-party provider SVGs. Native usage rows do not
+  need `magick`.
 - The Zellij/tmux renderers wrap each provider chunk in Powerline-Extra end
   caps (U+E0B6 / U+E0B4). Any Nerd Font ships these. For the standalone
   Zellij plugin with a non-Nerd font, set `cap_left ""` and `cap_right ""`
@@ -289,10 +292,9 @@ Config is optional; create it only for values you want to override. The full env
 | `SHOWY_QUOTA_PROVIDER_ORDER` | Stable render order without filtering. default=`codex,claude,copilot,opencode,gemini` |
 | `SHOWY_QUOTA_REFRESH_SECONDS` | Freshness contract: full-refresh cadence and CLI-fallback interval. Serve collection and /usage-poll defaults derive from it. default=`120` |
 | `SHOWY_QUOTA_MANAGE_SERVE` | Start `codexbar serve` automatically before CLI fallback; set `0` to disable. default=`1` |
-| `SHOWY_QUOTA_CODEXBAR_SERVE_URL` | Local `codexbar serve` base URL; set empty to skip HTTP probing. default=`http://127.0.0.1:8080` |
+| `SHOWY_QUOTA_CODEXBAR_SERVE_URL` | Local `codexbar serve` base URL; also sets the managed serve `--port`, so probing and startup always agree. Set empty to skip HTTP probing. default=`http://127.0.0.1:8080` |
 | `SHOWY_QUOTA_CODEXBAR_SERVE_TIMEOUT_SECONDS` | Bounded positive timeout for local `/health` probes. configured default=`10` |
 | `SHOWY_QUOTA_CODEXBAR_SERVE_USAGE_TIMEOUT_SECONDS` | Bounded positive timeout for local `/usage` probes. default=`30` |
-| `SHOWY_QUOTA_CODEXBAR_SERVE_PORT` | Port passed to managed `codexbar serve --port`. default=`8080` |
 | `SHOWY_QUOTA_CODEXBAR_SERVE_REFRESH_INTERVAL_SECONDS` | Collection cadence for a managed `codexbar serve`. default=`SHOWY_QUOTA_REFRESH_SECONDS` |
 | `SHOWY_QUOTA_CODEXBAR_SERVE_REFRESH_SECONDS` | /usage re-read cadence when `codexbar serve` is available. default=`SHOWY_QUOTA_REFRESH_SECONDS / 2` |
 | `SHOWY_QUOTA_TIME_WARN_MINUTES` | Urgent countdown threshold. default=`30` |

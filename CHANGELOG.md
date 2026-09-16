@@ -60,12 +60,63 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   (RUSTSEC-2024-0375, RUSTSEC-2021-0145, RUSTSEC-2024-0370) existed only for
   crates `zellij-tile 0.45.0` no longer pulls. `cargo audit` produces identical
   output with and without an ignore list.
+- `make check-deps` is the single source of truth for the `bash` and `jq`
+  version floors. `make doctor` depends on it and CI runs it, so a passing local
+  install and a passing CI leg now mean the same thing. `jq` gains a stated
+  floor of 1.6; `doctor` also reports the ImageMagick and CodexBar versions it
+  found, and advises when ImageMagick is below 7.1.1.
+- `renovate.json` carries an actual policy instead of a bare schema line:
+  `config:best-practices`, weekly grouped Cargo and GitHub Actions updates,
+  monthly lockfile maintenance, and unscheduled vulnerability alerts. A
+  `zellij-tile` bump is never batched and its PR carries the audit/graph/minimum-
+  Zellij re-review checklist that this release had to perform by hand.
+- `cargo-audit` and `shellcheck` are pinned in CI, and Renovate custom managers
+  keep both pins current. `cargo audit` decides whether a build is reported as
+  vulnerable, so it is now treated as a supply-chain input like any other.
+- `release.yml` permissions are least-privilege. `id-token: write` and
+  `attestations: write` were granted workflow-wide, letting every step in every
+  job — including third-party actions — mint an OIDC token. They are now scoped
+  to the one job that attests; `package` gets `contents: write` only, and
+  `smoke` drops to read.
+
+### Fixed
+- The 12 AM and 12 PM arms of reset-description parsing are now covered in both
+  the Rust core and the shell mirror. Both are special-cased (12 AM means hour
+  0, 12 PM means hour 12) and neither had a test, so a regression would have
+  shifted a provider's countdown by twelve hours in silence. Verified by
+  mutation: deleting either arm fails the new test.
+- A managed `codexbar serve` can no longer be started on a different port from
+  the one showy-quota probes. See the removal note below.
+
+### Removed
+- **`SHOWY_QUOTA_CODEXBAR_SERVE_PORT`.** The port now always derives from
+  `SHOWY_QUOTA_CODEXBAR_SERVE_URL`. The override was not merely redundant: it
+  fed `codexbar serve --port` while `/health` and `/usage` were probed at the
+  URL's port, so a disagreeing pair started a server on one port and polled
+  another. Put the port in the URL instead. The Zellij plugin's KDL `serve_port`
+  key is unaffected — plugin configuration is a separate plane by design.
+- **Bare `PILL_RADIUS` / `PILL_HEIGHT` forwarding in the SketchyBar bootstrap.**
+  The unprefixed names collide with other SketchyBar components and with
+  ordinary shell environment variables, which produced silent layout changes.
+  Use `SHOWY_QUOTA_SKETCHYBAR_PILL_RADIUS` / `_PILL_HEIGHT`, which were always
+  the documented knobs and still win.
+- The Zellij plugin's undocumented `fallback_command` configuration alias. Use
+  `cli_command`.
+- Dead SketchyBar `showy_quota.<provider>.bar` item teardown. No version of the
+  plugin has created that item.
+- Makefile retargeting for the long-deleted root `sketchybar/` directory, and an
+  ignored fourth argument to `showy_quota_primary_label`.
 
 ### Upgrading
 - **Rebuild and reinstall the WASM plugin.** Run `make plugin` and
   `make install-plugin`, then `zellij action start-or-reload-plugin`, reload, or
   open a new tab — a running session keeps the cached module. If you are on
   Zellij 0.44, stay on showy-quota 0.8.1 until you upgrade Zellij.
+- **Check for the two removed settings before upgrading.** Run
+  `grep -rn 'SHOWY_QUOTA_CODEXBAR_SERVE_PORT\|PILL_RADIUS\|PILL_HEIGHT' ~/.config`
+  and your `sketchybarrc`. Neither removed name warns when set — a stale
+  `SHOWY_QUOTA_CODEXBAR_SERVE_PORT` is simply ignored, and the port comes from
+  `SHOWY_QUOTA_CODEXBAR_SERVE_URL`, so fold any custom port into that URL.
 
 ## [0.8.1] — 2026-08-17
 

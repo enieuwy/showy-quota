@@ -5,14 +5,20 @@ on:
     tags:
       - 'v*'
 
+# Least privilege by default. GitHub has no step-level permissions, so the
+# tightest available scope for `id-token: write` is the single job that runs the
+# attest step, not the whole workflow. Granting it workflow-wide let every step
+# in every job — including third-party actions — mint an OIDC token.
 permissions:
-  contents: write
-  id-token: write
-  attestations: write
+  contents: read
 
 jobs:
   zellij-plugin:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write      # create the release and attach the plugin artifact
+      id-token: write      # OIDC token for provenance attestation
+      attestations: write  # write the attestation
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable as of 2026-03-27
@@ -20,8 +26,10 @@ jobs:
           toolchain: stable
           targets: wasm32-wasip1
       - name: cargo audit
+        env:
+          CARGO_AUDIT_VERSION: "0.22.2"
         run: |
-          cargo install cargo-audit --locked
+          cargo install cargo-audit --locked --version "${CARGO_AUDIT_VERSION}"
           cargo audit
       - name: Build Zellij plugin
         run: |
@@ -98,6 +106,8 @@ jobs:
     name: package (${{ matrix.package_target }})
     needs: zellij-plugin
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write  # attach the platform archive to the release
     strategy:
       fail-fast: false
       matrix:
@@ -120,8 +130,10 @@ jobs:
         with:
           toolchain: stable
       - name: cargo audit
+        env:
+          CARGO_AUDIT_VERSION: "0.22.2"
         run: |
-          cargo install cargo-audit --locked
+          cargo install cargo-audit --locked --version "${CARGO_AUDIT_VERSION}"
           cargo audit
       - name: Add Rust target
         if: matrix.cargo_target != ''
@@ -165,6 +177,9 @@ jobs:
     name: smoke (${{ matrix.package_target }})
     needs: package
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read  # checkout only
+      actions: read   # download the package artifact built by the package job
     strategy:
       fail-fast: false
       matrix:

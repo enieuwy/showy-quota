@@ -19,6 +19,15 @@ FORCE_PLUGIN_REMOVE ?= 0
 CARGO         ?= cargo
 MAKE_COMMAND  ?= $(MAKE)
 RUSTC         ?= rustc
+
+# Runtime dependency floors. `jq` and `bash` are hard requirements, so `doctor`
+# fails below them. ImageMagick is optional (SketchyBar provider icons only) and
+# is only advised on, because a missing or older `magick` costs icons, not
+# correctness. 7.1.1 is the line below which the SVG/coder hardening that this
+# repo's icon pipeline relies on is absent.
+BASH_MIN      := 4
+JQ_MIN        := 1.6
+IMAGEMAGICK_MIN := 7.1.1
 PLUGIN_TARGET_ADD := true
 ifeq ($(shell command -v rustup >/dev/null 2>&1 && echo yes),yes)
 CARGO         := rustup run stable cargo
@@ -36,7 +45,7 @@ RENDER_CRATE  := showy-quota-zellij-core
 RENDER_BIN    := $(REPO)/target/release/showy-quota-render
 RENDER_TARGET := $(BIN_DIR)/showy-quota-render
 
-.PHONY: help doctor diagnose install install-bin install-copy install-copy-sketchybar install-sketchybar plugin render-bin install-plugin grant-zellij-permissions install-all uninstall test lint ci-gates hooks clean
+.PHONY: help doctor check-deps diagnose install install-bin install-copy install-copy-sketchybar install-sketchybar plugin render-bin install-plugin grant-zellij-permissions install-all uninstall test lint ci-gates hooks clean
 
 help: ## Show this help.
 	@awk 'BEGIN{FS=":.*##"}/^[a-zA-Z_-]+:.*##/{printf "  \033[36m%-20s\033[0m %s\n",$$1,$$2}' $(MAKEFILE_LIST)
@@ -150,9 +159,9 @@ install-copy: ## Copy runtime tree into DATA_DIR and link commands into BIN_DIR.
 install-copy-sketchybar: install-copy ## Link SketchyBar integration from copied DATA_DIR.
 	@mkdir -p "$(SBAR_ITEMS)" "$(SBAR_PLUGINS)"
 	@for pair in \
-		"$(DATA_DIR)/adapters/sketchybar/items/showy_quota.sh:$(REPO)/sketchybar/items/showy_quota.sh:$(SBAR_ITEMS)/showy_quota.sh" \
-		"$(DATA_DIR)/adapters/sketchybar/plugins/showy_quota.sh:$(REPO)/sketchybar/plugins/showy_quota.sh:$(SBAR_PLUGINS)/showy_quota.sh"; do \
-		src=$${pair%%:*}; rest=$${pair#*:}; legacy_src=$${rest%%:*}; target=$${rest#*:}; \
+		"$(DATA_DIR)/adapters/sketchybar/items/showy_quota.sh:$(SBAR_ITEMS)/showy_quota.sh" \
+		"$(DATA_DIR)/adapters/sketchybar/plugins/showy_quota.sh:$(SBAR_PLUGINS)/showy_quota.sh"; do \
+		src=$${pair%%:*}; target=$${pair#*:}; \
 		chmod +x "$$src"; \
 		if [ -L "$$target" ]; then \
 			cur=$$(readlink "$$target"); \
@@ -160,14 +169,11 @@ install-copy-sketchybar: install-copy ## Link SketchyBar integration from copied
 				printf 'noop  %s -> %s (already current)\n' "$$target" "$$src"; \
 				continue; \
 			fi; \
-			if [ "$$cur" = "$$legacy_src" ]; then \
-				printf 'retarget legacy %s\n  was: %s\n  now: %s\n' "$$target" "$$cur" "$$src"; \
-			elif [ "$(FORCE)" != "1" ]; then \
+			if [ "$(FORCE)" != "1" ]; then \
 				printf 'refusing to retarget %s\n  was: %s\n  now: %s\n  set FORCE=1 to adopt this symlink\n' "$$target" "$$cur" "$$src" >&2; \
 				exit 1; \
-			else \
-				printf 'retarget %s\n  was: %s\n  now: %s\n' "$$target" "$$cur" "$$src" >&2; \
 			fi; \
+			printf 'retarget %s\n  was: %s\n  now: %s\n' "$$target" "$$cur" "$$src" >&2; \
 		elif [ -e "$$target" ]; then \
 			printf 'refusing to clobber %s\n' "$$target" >&2; exit 1; \
 		fi; \
@@ -178,9 +184,9 @@ install-copy-sketchybar: install-copy ## Link SketchyBar integration from copied
 install-sketchybar:
 	@mkdir -p "$(SBAR_ITEMS)" "$(SBAR_PLUGINS)"
 	@for pair in \
-		"$(REPO)/adapters/sketchybar/items/showy_quota.sh:$(REPO)/sketchybar/items/showy_quota.sh:$(SBAR_ITEMS)/showy_quota.sh" \
-		"$(REPO)/adapters/sketchybar/plugins/showy_quota.sh:$(REPO)/sketchybar/plugins/showy_quota.sh:$(SBAR_PLUGINS)/showy_quota.sh"; do \
-		src=$${pair%%:*}; rest=$${pair#*:}; legacy_src=$${rest%%:*}; target=$${rest#*:}; \
+		"$(REPO)/adapters/sketchybar/items/showy_quota.sh:$(SBAR_ITEMS)/showy_quota.sh" \
+		"$(REPO)/adapters/sketchybar/plugins/showy_quota.sh:$(SBAR_PLUGINS)/showy_quota.sh"; do \
+		src=$${pair%%:*}; target=$${pair#*:}; \
 		chmod +x "$$src"; \
 		if [ -L "$$target" ]; then \
 			cur=$$(readlink "$$target"); \
@@ -188,14 +194,11 @@ install-sketchybar:
 				printf 'noop  %s -> %s (already current)\n' "$$target" "$$src"; \
 				continue; \
 			fi; \
-			if [ "$$cur" = "$$legacy_src" ]; then \
-				printf 'retarget legacy %s\n  was: %s\n  now: %s\n' "$$target" "$$cur" "$$src"; \
-			elif [ "$(FORCE)" != "1" ]; then \
+			if [ "$(FORCE)" != "1" ]; then \
 				printf 'refusing to retarget %s\n  was: %s\n  now: %s\n  set FORCE=1 to adopt this symlink\n' "$$target" "$$cur" "$$src" >&2; \
 				exit 1; \
-			else \
-				printf 'retarget %s\n  was: %s\n  now: %s\n' "$$target" "$$cur" "$$src" >&2; \
 			fi; \
+			printf 'retarget %s\n  was: %s\n  now: %s\n' "$$target" "$$cur" "$$src" >&2; \
 		elif [ -e "$$target" ]; then \
 			printf 'refusing to clobber %s\n' "$$target" >&2; exit 1; \
 		fi; \
@@ -257,12 +260,12 @@ uninstall: ## Remove symlinks and copied DATA_DIR that this Makefile created.
 		fi; \
 	fi
 	@for pair in \
-		"$(REPO)/adapters/sketchybar/items/showy_quota.sh:$(REPO)/sketchybar/items/showy_quota.sh:$(SBAR_ITEMS)/showy_quota.sh" \
-		"$(REPO)/adapters/sketchybar/plugins/showy_quota.sh:$(REPO)/sketchybar/plugins/showy_quota.sh:$(SBAR_PLUGINS)/showy_quota.sh"; do \
-		src=$${pair%%:*}; rest=$${pair#*:}; legacy_src=$${rest%%:*}; target=$${rest#*:}; \
+		"$(REPO)/adapters/sketchybar/items/showy_quota.sh:$(SBAR_ITEMS)/showy_quota.sh" \
+		"$(REPO)/adapters/sketchybar/plugins/showy_quota.sh:$(SBAR_PLUGINS)/showy_quota.sh"; do \
+		src=$${pair%%:*}; target=$${pair#*:}; \
 		if [ -L "$$target" ]; then \
 			cur=$$(readlink "$$target"); \
-			if [ "$$cur" = "$$src" ] || [ "$$cur" = "$$legacy_src" ]; then \
+			if [ "$$cur" = "$$src" ]; then \
 				rm -f "$$target"; printf 'removed %s\n' "$$target"; \
 			else \
 				printf 'skip %s (points to %s)\n' "$$target" "$$cur" >&2; \
@@ -282,12 +285,12 @@ uninstall: ## Remove symlinks and copied DATA_DIR that this Makefile created.
 		fi; \
 	done
 	@for pair in \
-		"$(DATA_DIR)/adapters/sketchybar/items/showy_quota.sh:$(REPO)/sketchybar/items/showy_quota.sh:$(SBAR_ITEMS)/showy_quota.sh" \
-		"$(DATA_DIR)/adapters/sketchybar/plugins/showy_quota.sh:$(REPO)/sketchybar/plugins/showy_quota.sh:$(SBAR_PLUGINS)/showy_quota.sh"; do \
-		src=$${pair%%:*}; rest=$${pair#*:}; legacy_src=$${rest%%:*}; target=$${rest#*:}; \
+		"$(DATA_DIR)/adapters/sketchybar/items/showy_quota.sh:$(SBAR_ITEMS)/showy_quota.sh" \
+		"$(DATA_DIR)/adapters/sketchybar/plugins/showy_quota.sh:$(SBAR_PLUGINS)/showy_quota.sh"; do \
+		src=$${pair%%:*}; target=$${pair#*:}; \
 		if [ -L "$$target" ]; then \
 			cur=$$(readlink "$$target"); \
-			if [ "$$cur" = "$$src" ] || [ "$$cur" = "$$legacy_src" ]; then \
+			if [ "$$cur" = "$$src" ]; then \
 				rm -f "$$target"; printf 'removed %s\n' "$$target"; \
 			else \
 				printf 'skip %s (points to %s)\n' "$$target" "$$cur" >&2; \
@@ -316,11 +319,24 @@ uninstall: ## Remove symlinks and copied DATA_DIR that this Makefile created.
 test: ## Run the smoke-test suite against fixtures (no live codexbar).
 	@$(REPO)/test/render_test.sh
 
-doctor: ## Check runtime prerequisites without touching the system.
-	@bash -c '(( BASH_VERSINFO[0] >= 4 ))' || { \
-		printf 'showy-quota: bash 4+ required. macOS /bin/bash is 3.2; install Homebrew bash.\n' >&2; exit 1; }
+check-deps: ## Verify bash and jq meet the documented version floors.
+	@bash -c '(( BASH_VERSINFO[0] >= $(BASH_MIN) ))' || { \
+		printf 'showy-quota: bash %s+ required. macOS /bin/bash is 3.2; install Homebrew bash.\n' "$(BASH_MIN)" >&2; exit 1; }
 	@command -v jq >/dev/null || { \
-		printf 'showy-quota: jq is required (brew install jq / apt-get install jq).\n' >&2; exit 1; }
+		printf 'showy-quota: jq %s+ is required (brew install jq / apt-get install jq).\n' "$(JQ_MIN)" >&2; exit 1; }
+	@jq_raw=$$(jq --version 2>/dev/null); \
+	jq_ver=$${jq_raw#jq-}; jq_ver=$${jq_ver#jq }; \
+	jq_major=$${jq_ver%%.*}; jq_rest=$${jq_ver#*.}; jq_minor=$${jq_rest%%.*}; \
+	case "$$jq_major" in ''|*[!0-9]*) jq_major=0 ;; esac; \
+	case "$$jq_minor" in ''|*[!0-9]*) jq_minor=0 ;; esac; \
+	if [ "$$jq_major" -lt 1 ] || { [ "$$jq_major" -eq 1 ] && [ "$$jq_minor" -lt 6 ]; }; then \
+		printf 'showy-quota: jq %s+ required; found "%s".\n' "$(JQ_MIN)" "$$jq_raw" >&2; \
+		exit 1; \
+	fi; \
+	printf 'deps: bash %s, jq %s — ok (floors: bash %s, jq %s)\n' \
+		"$$(bash -c 'printf "%s" "$${BASH_VERSION:-unknown}"')" "$$jq_ver" "$(BASH_MIN)" "$(JQ_MIN)"
+
+doctor: check-deps ## Check runtime prerequisites without touching the system.
 	@if [ -x "$(RENDER_BIN)" ]; then \
 		printf 'doctor: render binary found: %s\n' "$(RENDER_BIN)"; \
 	elif command -v showy-quota-render >/dev/null 2>&1; then \
@@ -351,6 +367,19 @@ doctor: ## Check runtime prerequisites without touching the system.
 			printf 'doctor: optional %-10s missing (only needed for related integration/features)\n' "$$tool"; \
 		fi; \
 	done
+	@if command -v magick >/dev/null 2>&1; then \
+		im_raw=$$(magick -version 2>/dev/null | head -n1); \
+		im_ver=$${im_raw#*ImageMagick }; im_ver=$${im_ver%% *}; im_ver=$${im_ver%-*}; \
+		printf 'doctor: ImageMagick %s (floor %s, SketchyBar icons only)\n' "$$im_ver" "$(IMAGEMAGICK_MIN)"; \
+		im_major=$${im_ver%%.*}; \
+		case "$$im_major" in ''|*[!0-9]*) im_major=0 ;; esac; \
+		if [ "$$im_major" -lt 7 ]; then \
+			printf 'doctor: ImageMagick is below %s. It renders third-party provider SVGs, so prefer an updated build.\n' "$(IMAGEMAGICK_MIN)" >&2; \
+		fi; \
+	fi
+	@if command -v codexbar >/dev/null 2>&1; then \
+		printf 'doctor: %s\n' "$$(codexbar --version 2>/dev/null || printf 'CodexBar version unknown')"; \
+	fi
 
 diagnose: ## Print runtime state useful for bug reports.
 	@$(REPO)/bin/showy-quota --diagnose

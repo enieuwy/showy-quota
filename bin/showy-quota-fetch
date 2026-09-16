@@ -1055,21 +1055,19 @@ run_codexbar_cli_per_provider() {
 
 
 
+# The managed serve port always comes from SHOWY_QUOTA_CODEXBAR_SERVE_URL, so
+# the port we start serve on and the port we probe can never disagree. An
+# earlier SHOWY_QUOTA_CODEXBAR_SERVE_PORT override could split the two: serve
+# was started with --port from the override while /health and /usage were
+# probed at the URL's port.
 serve_port_from_base_url() {
-    local base="" url_port="" configured_port="${SHOWY_QUOTA_CODEXBAR_SERVE_PORT:-}" scheme_default="8080"
+    local base="" url_port="" scheme_default="8080"
     base=$(serve_base_url) || return 1
     if [[ "${base}" =~ ^http:// ]]; then
         scheme_default="80"
     fi
     if [[ "${base}" =~ :([0-9]+)$ ]]; then
         url_port="${BASH_REMATCH[1]}"
-    fi
-    if [[ -n "${configured_port}" ]]; then
-        if [[ "${configured_port}" =~ ^[0-9]+$ ]]; then
-            printf '%s\n' "${configured_port}"
-            return 0
-        fi
-        showy_quota_log "ignoring invalid SHOWY_QUOTA_CODEXBAR_SERVE_PORT: ${configured_port}"
     fi
     printf '%s\n' "${url_port:-${scheme_default}}"
 }

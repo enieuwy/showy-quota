@@ -2502,6 +2502,34 @@ mod tests {
     }
 
     #[test]
+    fn parses_reset_description_meridiem_boundary() {
+        // `12 AM` and `12 PM` are the two special-cased arms of the meridiem
+        // conversion: 12 AM means hour 0, 12 PM means hour 12. Every other hour
+        // takes the third arm, which the test above already covers. Pin the
+        // offset to UTC; now = 2024-01-01 06:00:00 UTC.
+        //
+        // 12 PM is noon on the same day, four hours ahead of now. Dropping the
+        // `hour != 12` guard would push it to hour 24, which `Time::from_hms`
+        // rejects, so the arm would return None instead of a later time.
+        assert_eq!(
+            reset_epoch("Resets 12:00 PM", 1_704_088_800, Some(0)),
+            Some(1_704_110_400)
+        );
+        // 12 AM is midnight, which is already behind now, so it rolls to the
+        // next day. Dropping the `hour == 12` arm would read it as noon and
+        // return 1_704_110_400 — the same value as 12 PM above, and no roll.
+        assert_eq!(
+            reset_epoch("Resets 12:00 AM", 1_704_088_800, Some(0)),
+            Some(1_704_153_600)
+        );
+        // The two must never collapse onto each other.
+        assert_ne!(
+            reset_epoch("Resets 12:00 AM", 1_704_088_800, Some(0)),
+            reset_epoch("Resets 12:00 PM", 1_704_088_800, Some(0))
+        );
+    }
+
+    #[test]
     fn parses_colonless_iso8601_offset() {
         assert_eq!(
             reset_epoch("2099-01-01T01:40:00+0000", 0, None),

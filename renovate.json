@@ -1,3 +1,108 @@
 {
-  "$schema": "https://docs.renovatebot.com/renovate-schema.json"
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:best-practices",
+    "security:openssf-scorecard"
+  ],
+  "timezone": "Etc/UTC",
+  "schedule": [
+    "before 6am on monday"
+  ],
+  "prHourlyLimit": 2,
+  "vulnerabilityAlerts": {
+    "enabled": true,
+    "schedule": [
+      "at any time"
+    ],
+    "labels": [
+      "security"
+    ]
+  },
+  "osvVulnerabilityAlerts": true,
+  "lockFileMaintenance": {
+    "enabled": true,
+    "schedule": [
+      "before 6am on the first day of the month"
+    ]
+  },
+  "packageRules": [
+    {
+      "description": "GitHub Actions stay SHA-pinned with a trailing `# vX` comment. config:best-practices already enables pinDigests; grouping keeps one PR per week instead of one per action.",
+      "matchManagers": [
+        "github-actions"
+      ],
+      "groupName": "github actions",
+      "pinDigests": true
+    },
+    {
+      "description": "Patch and minor Cargo updates carry little risk individually and are verified by the same CI gate, so batch them.",
+      "matchManagers": [
+        "cargo"
+      ],
+      "matchUpdateTypes": [
+        "patch",
+        "minor"
+      ],
+      "groupName": "rust crates"
+    },
+    {
+      "description": "Cargo majors land alone so the breaking change is reviewable on its own.",
+      "matchManagers": [
+        "cargo"
+      ],
+      "matchUpdateTypes": [
+        "major"
+      ],
+      "groupName": null
+    },
+    {
+      "description": "zellij-tile owns the plugin's whole transitive graph, the documented minimum Zellij version, and every advisory decision in .cargo/audit.toml. It is never batched, and its PR carries the re-review checklist.",
+      "matchManagers": [
+        "cargo"
+      ],
+      "matchPackageNames": [
+        "zellij-tile"
+      ],
+      "groupName": null,
+      "labels": [
+        "zellij-tile",
+        "needs-audit-review"
+      ],
+      "prBodyNotes": [
+        "### Required re-review for a zellij-tile bump",
+        "",
+        "- [ ] Run `cargo audit`, then move `.cargo/audit.toml` aside and run it again. Identical output means every entry in `ignore` is dead and must be deleted.",
+        "- [ ] Re-measure the graph: `cargo tree -p showy-quota-zellij --target wasm32-wasip1 --edges normal --prefix none | sort -u | wc -l`. Record the new count in the CHANGELOG.",
+        "- [ ] Update the minimum Zellij version in `docs/plugin.md`. Zellij guarantees only that a plugin built for an older Zellij runs on a newer server, not the reverse, so the floor tracks this crate.",
+        "- [ ] Confirm `make plugin` and `scripts/check_plugin_exports.py` still pass."
+      ]
+    }
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "cargo-audit is pinned in workflow run steps, which no built-in manager reads.",
+      "managerFilePatterns": [
+        "/^\\.github/workflows/.+\\.ya?ml$/"
+      ],
+      "matchStrings": [
+        "CARGO_AUDIT_VERSION:\\s*\"(?<currentValue>[^\"]+)\""
+      ],
+      "depNameTemplate": "cargo-audit",
+      "datasourceTemplate": "crate"
+    },
+    {
+      "customType": "regex",
+      "description": "shellcheck is installed from a pinned GitHub release tarball.",
+      "managerFilePatterns": [
+        "/^\\.github/workflows/.+\\.ya?ml$/"
+      ],
+      "matchStrings": [
+        "SHELLCHECK_VERSION:\\s*\"(?<currentValue>[^\"]+)\""
+      ],
+      "depNameTemplate": "koalaman/shellcheck",
+      "datasourceTemplate": "github-releases",
+      "extractVersionTemplate": "^v(?<version>.*)$"
+    }
+  ]
 }

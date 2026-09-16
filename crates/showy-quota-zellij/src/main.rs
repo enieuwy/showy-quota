@@ -495,7 +495,6 @@ impl ZellijPlugin for State {
             .unwrap_or_else(|| "codexbar".into());
         self.serve_port = configuration
             .get("serve_port")
-            .or_else(|| configuration.get("SHOWY_QUOTA_CODEXBAR_SERVE_PORT"))
             .map(|value| value.trim())
             .filter(|value| valid_port(value))
             .map(str::to_string)
@@ -510,7 +509,6 @@ impl ZellijPlugin for State {
         );
         self.cli_command = configuration
             .get("cli_command")
-            .or_else(|| configuration.get("fallback_command"))
             .or_else(|| configuration.get("SHOWY_QUOTA_CODEXBAR_BIN"))
             .map(|value| value.trim().to_string())
             .filter(|value| valid_command(value))

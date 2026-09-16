@@ -77,9 +77,11 @@ The bracket reads `SHOWY_QUOTA_SKETCHYBAR_PILL_RADIUS`,
 `SHOWY_QUOTA_SKETCHYBAR_PILL_HEIGHT`, and `SHOWY_QUOTA_SKETCHYBAR_PILL_COLOR`.
 Defaults are `14`, `28`, and `0xcc24273a`.
 
-For compatibility with existing sketchybarrc setups, the bootstrap item also
-forwards `PILL_RADIUS` / `PILL_HEIGHT` into those envs when the explicit
-`SHOWY_QUOTA_SKETCHYBAR_PILL_*` knobs are unset.
+Only those three envs are read. Earlier versions also forwarded bare
+`PILL_RADIUS` / `PILL_HEIGHT` from `sketchybarrc`; that forwarding is gone,
+because the unprefixed names collide with other SketchyBar components and
+produced silent layout changes. Rename any such setting to the
+`SHOWY_QUOTA_SKETCHYBAR_PILL_*` form.
 
 ## Countdown label
 

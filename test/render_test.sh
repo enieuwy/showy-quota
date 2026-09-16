@@ -831,6 +831,34 @@ else
     fail "reset_description_epoch honors pinned now" "expected minutes ${expected_reset_a}|${expected_reset_b}; got ${actual_reset_a}|${actual_reset_b}"
 fi
 
+# The 12 AM / 12 PM arms of the meridiem conversion. The shell delegates them
+# to `date`'s %I:%M %p, the Rust core hand-rolls them in parse_time_12h, and the
+# two must agree — an off-by-12h here silently shifts a provider's countdown by
+# half a day. Pinned to noon so 12 AM is behind now (rolls to the next day) and
+# 12 PM is ahead of now (same day), which makes the two values impossible to
+# confuse.
+meridiem_now=$((4070908800 + 43200))
+expected_midnight=$(expected_reset_description_epoch "${meridiem_now}" "12:00 AM")
+expected_noon=$(expected_reset_description_epoch "${meridiem_now}" "12:00 PM")
+actual_midnight=$(run_common_eval 'showy_quota_reset_description_epoch "Resets 12:00 AM"' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_NOW_EPOCH="${meridiem_now}")
+actual_noon=$(run_common_eval 'showy_quota_reset_description_epoch "Resets 12:00 PM"' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_NOW_EPOCH="${meridiem_now}")
+if (( actual_midnight / 60 == expected_midnight / 60 )); then
+    ok "reset_description_epoch reads 12 AM as midnight"
+else
+    fail "reset_description_epoch reads 12 AM as midnight" "expected ${expected_midnight}; got ${actual_midnight}"
+fi
+if (( actual_noon / 60 == expected_noon / 60 )); then
+    ok "reset_description_epoch reads 12 PM as noon"
+else
+    fail "reset_description_epoch reads 12 PM as noon" "expected ${expected_noon}; got ${actual_noon}"
+fi
+# A collapsed meridiem arm would map both spellings onto the same hour.
+if (( actual_noon != actual_midnight )); then
+    ok "reset_description_epoch keeps 12 AM and 12 PM distinct"
+else
+    fail "reset_description_epoch keeps 12 AM and 12 PM distinct" "both resolved to ${actual_noon}"
+fi
+
 marker_fixture="${TMP}/codexbar-marker-pinned.json"
 printf '%s\n' \
     '[{"provider":"codex","usage":{"primary":{"usedPercent":50,"windowMinutes":60,"resetsAt":"2099-01-01T01:00:00Z"},"secondary":null,"tertiary":null}}]' \
@@ -921,14 +949,11 @@ assert_equals "countdown clock form pads minutes" "12:05" "${out}"
 out=$(run_common_eval 'showy_quota_format_countdown 2880' SHOWY_QUOTA_NO_CONFIG=1)
 assert_equals "countdown days unchanged" "2d" "${out}"
 
-out=$(run_common_eval 'showy_quota_primary_label 12 88 "2099-01-01T00:12:00Z" 0' SHOWY_QUOTA_NO_CONFIG=1)
+out=$(run_common_eval 'showy_quota_primary_label 12 88 "2099-01-01T00:12:00Z"' SHOWY_QUOTA_NO_CONFIG=1)
 assert_equals "primary label keeps live countdown behavior" "12m" "${out}"
 
-out=$(run_common_eval 'showy_quota_primary_label "" 100 "" 0' SHOWY_QUOTA_NO_CONFIG=1)
+out=$(run_common_eval 'showy_quota_primary_label "" 100 ""' SHOWY_QUOTA_NO_CONFIG=1)
 assert_equals "primary label keeps live idle behavior" "idle" "${out}"
-
-out=$(run_common_eval 'showy_quota_primary_label 12 88 "2099-01-01T00:12:00Z" 1' SHOWY_QUOTA_NO_CONFIG=1)
-assert_equals "primary label ignores legacy stale arg" "12m" "${out}"
 
 
 # ── theme CLI ─────────────────────────────────────────────────────────
@@ -2124,10 +2149,19 @@ assert_contains "bootstrap preserves native bar width" "width=83" "${item_log}"
 
 cache=$(mk_cache)
 log="${TMP}/sb-items-pill.log"
+run_sketchybar_items codexbar-mixed.json "${cache}" "${log}" SHOWY_QUOTA_SKETCHYBAR_PILL_RADIUS=6 SHOWY_QUOTA_SKETCHYBAR_PILL_HEIGHT=18
+item_log="$(< "${log}")"
+assert_contains "bootstrap honors prefixed pill radius" "background.corner_radius=6" "${item_log}"
+assert_contains "bootstrap honors prefixed pill height" "background.height=18" "${item_log}"
+
+# Bare PILL_RADIUS / PILL_HEIGHT collide with other sketchybarrc components, so
+# the bootstrap deliberately does not forward them. The defaults must win.
+cache=$(mk_cache)
+log="${TMP}/sb-items-pill-bare.log"
 run_sketchybar_items codexbar-mixed.json "${cache}" "${log}" PILL_RADIUS=6 PILL_HEIGHT=18
 item_log="$(< "${log}")"
-assert_contains "bootstrap forwards legacy pill radius" "background.corner_radius=6" "${item_log}"
-assert_contains "bootstrap forwards legacy pill height" "background.height=18" "${item_log}"
+assert_contains "bootstrap ignores bare PILL_RADIUS" "background.corner_radius=14" "${item_log}"
+assert_contains "bootstrap ignores bare PILL_HEIGHT" "background.height=28" "${item_log}"
 
 cache=$(mk_cache)
 seed_sketchybar_state "${cache}" codex claude gemini
@@ -2141,8 +2175,7 @@ seed_sketchybar_state "${cache}" codex claude gemini
 log="${TMP}/sb-items-empty.log"
 run_sketchybar_items codexbar-mixed.json "${cache}" "${log}" SHOWY_QUOTA_PROVIDERS_EXCLUDE='claude,codex,gemini'
 item_log="$(< "${log}")"
-assert_contains "bootstrap removes stale legacy bar item when desired set is empty" "--remove showy_quota.gemini.bar" "${item_log}"
-assert_contains "bootstrap removes stale native provider items when desired set is empty" "--remove showy_quota.gemini.primary --remove showy_quota.gemini.secondary --remove showy_quota.gemini.tertiary" "${item_log}"
+assert_contains "bootstrap removes stale native provider items when desired set is empty" "--remove showy_quota.gemini.icon --remove showy_quota.gemini.primary --remove showy_quota.gemini.secondary --remove showy_quota.gemini.tertiary" "${item_log}"
 assert_contains "bootstrap removes stale native marker items when desired set is empty" "--remove showy_quota.gemini.secondary_marker --remove showy_quota.gemini.tertiary_marker --remove showy_quota.gemini.quaternary_marker --remove showy_quota.gemini.primary_marker --remove showy_quota.gemini.slot --remove showy_quota.gemini.label" "${item_log}"
 assert_contains "bootstrap removes stale bracket when desired set is empty" "--remove showy_quota_bracket" "${item_log}"
 
@@ -2681,8 +2714,7 @@ seed_sketchybar_state "${cache}" codex claude gemini
 log="${TMP}/sb-remove.log"
 run_sketchybar_plugin "${drop_fixture}" "${cache}" "${log}"
 plugin_log="$(< "${log}")"
-assert_contains "plugin removes dropped provider legacy bar" "--remove showy_quota.gemini.icon --remove showy_quota.gemini.bar" "${plugin_log}"
-assert_contains "plugin removes dropped provider native rows" "--remove showy_quota.gemini.primary --remove showy_quota.gemini.secondary --remove showy_quota.gemini.tertiary" "${plugin_log}"
+assert_contains "plugin removes dropped provider native rows" "--remove showy_quota.gemini.icon --remove showy_quota.gemini.primary --remove showy_quota.gemini.secondary --remove showy_quota.gemini.tertiary" "${plugin_log}"
 assert_contains "plugin removes dropped provider native markers" "--remove showy_quota.gemini.secondary_marker --remove showy_quota.gemini.tertiary_marker --remove showy_quota.gemini.quaternary_marker --remove showy_quota.gemini.primary_marker --remove showy_quota.gemini.slot --remove showy_quota.gemini.label" "${plugin_log}"
 
 cache=$(mk_cache)
