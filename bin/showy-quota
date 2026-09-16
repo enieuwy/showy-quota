@@ -26,7 +26,7 @@ THEME_NAME_RE='^[A-Za-z0-9._-]+$'
 
 usage() {
     printf '%s\n' \
-        'Usage: showy-quota [--set <name>|--unset|--current|--list|--preview <name>|--diagnose [--json]|--grant-zellij [opts] [path]]' \
+        'Usage: showy-quota [--set <name>|--unset|--current|--list|--preview <name>|--diagnose [--json] [--redact]|--grant-zellij [opts] [path]]' \
         '       showy-quota guard [opts]   |   showy-quota prompt [opts]   (run either with -h for details)' \
         '' \
         'With no flags, opens an interactive theme selector when fzf and a TTY are available.' \
@@ -38,7 +38,7 @@ usage() {
         '  --current         Print the persisted theme name, or (none)' \
         '  --list            Print available theme names, one per line' \
         '  --preview <name>  Print one ANSI preview strip for a theme' \
-        '  --diagnose        Print runtime state useful for bug reports (--json for machines)' \
+        '  --diagnose        Print runtime state useful for bug reports (--json for machines, --redact for paste-safe output)' \
         '  --grant-zellij [opts] [p] Pre-grant minimal Zellij permissions; opts: --manage-serve, --cli-fallback, --force' \
         '  guard [opts]      Evaluate quota thresholds for automation (exit 0/1/2/3); "guard -h" for options' \
         '  prompt [opts]     Print a one-line quota segment for shell prompts; "prompt -h" for options' \
@@ -399,10 +399,41 @@ preview_theme() {
         "${RENDERER}" --json - < <(preview_fixture_json)
 }
 
+# --diagnose output is meant to be pasted into bug reports, so every absolute
+# path and URL in it reaches whoever receives the paste. `--redact` keeps the
+# parts that help a maintainer and drops the parts that only describe this
+# machine: a path collapses to its basename, and a URL keeps its scheme and
+# port but loses the host. Values that carry no local layout (counts, provider
+# ids, theme names, booleans) are never touched.
+DIAGNOSE_REDACT=0
+
+diagnose_redact_value() {
+    local value="$1" scheme rest hostport port
+    if (( ! DIAGNOSE_REDACT )) || [[ -z "${value}" ]]; then
+        printf '%s' "${value}"
+        return 0
+    fi
+    case "${value}" in
+        *://*)
+            scheme="${value%%://*}"
+            rest="${value#*://}"
+            hostport="${rest%%/*}"
+            port="${hostport##*:}"
+            if [[ "${port}" == "${hostport}" || ! "${port}" =~ ^[0-9]+$ ]]; then
+                printf '%s://<host>' "${scheme}"
+            else
+                printf '%s://<host>:%s' "${scheme}" "${port}"
+            fi
+            ;;
+        /*) printf '<path>/%s' "${value##*/}" ;;
+        *)  printf '%s' "${value}" ;;
+    esac
+}
+
 print_tool_path() {
     local name="$1" path
     if path=$(command -v "${name}" 2>/dev/null); then
-        printf '  %-12s %s\n' "${name}" "${path}"
+        printf '  %-12s %s\n' "${name}" "$(diagnose_redact_value "${path}")"
     else
         printf '  %-12s (missing)\n' "${name}"
     fi
@@ -453,7 +484,7 @@ diagnose_env_json() {
     printf '{'
     while IFS= read -r var; do
         [[ -n "${!var:-}" ]] || continue
-        value=$(json_string "${!var}")
+        value=$(json_string "$(diagnose_redact_value "${!var}")")
         (( first )) || printf ','
         first=0
         printf '"%s":%s' "${var}" "${value}"
@@ -468,7 +499,7 @@ diagnose_tools_json() {
         (( first )) || printf ','
         first=0
         if path=$(command -v "${name}" 2>/dev/null); then
-            printf '"%s":{"available":true,"path":%s}' "${name}" "$(json_string "${path}")"
+            printf '"%s":{"available":true,"path":%s}' "${name}" "$(json_string "$(diagnose_redact_value "${path}")")"
         else
             printf '"%s":{"available":false,"path":null}' "${name}"
         fi
@@ -480,7 +511,7 @@ diagnose_json() {
     command -v jq >/dev/null 2>&1 || die 'jq is required for --diagnose --json'
 
     local fetch_bin state_bin cache_path cache_age cache_size_json state_json config_status config_readable
-    local env_json required_tools_json optional_tools_json cb cb_path cb_available cb_cache_count_json
+    local env_json required_tools_json optional_tools_json cb cb_path cb_version cb_available cb_cache_count_json
     fetch_bin="${SCRIPT_DIR}/showy-quota-fetch"
     state_bin="${SCRIPT_DIR}/showy-quota-state"
 
@@ -518,8 +549,12 @@ diagnose_json() {
     cb="${SHOWY_QUOTA_CODEXBAR_BIN:-codexbar}"
     cb_available=false
     cb_path=""
+    cb_version=""
     if cb_path=$(command -v "${cb}" 2>/dev/null); then
         cb_available=true
+        # SHOWY_QUOTA_MANAGE_SERVE spawns this exact binary, so a bug report
+        # needs to name which build was running.
+        cb_version="$("${cb}" --version 2>/dev/null | head -n1 || true)"
     fi
     cb_cache_count_json=null
     if [[ -n "${cache_path}" && -f "${cache_path}" ]]; then
@@ -531,16 +566,16 @@ diagnose_json() {
     optional_tools_json=$(diagnose_tools_json curl flock sketchybar magick rsvg-convert zellij tmux fzf)
 
     jq -n \
-        --arg showyQuota "${SCRIPT_PATH}" \
-        --arg repoRoot "${REPO_ROOT}" \
+        --arg showyQuota "$(diagnose_redact_value "${SCRIPT_PATH}")" \
+        --arg repoRoot "$(diagnose_redact_value "${REPO_ROOT}")" \
         --arg bashVersion "${BASH_VERSION:-unknown}" \
         --arg uname "$(uname -srm 2>/dev/null || printf 'unknown')" \
-        --arg configFile "${CONFIG_FILE}" \
+        --arg configFile "$(diagnose_redact_value "${CONFIG_FILE}")" \
         --arg configStatus "${config_status}" \
         --argjson configReadable "${config_readable}" \
         --arg theme "$(current_theme_value 2>/dev/null || true)" \
-        --arg fetchBin "${fetch_bin}" \
-        --arg cachePath "${cache_path}" \
+        --arg fetchBin "$(diagnose_redact_value "${fetch_bin}")" \
+        --arg cachePath "$(diagnose_redact_value "${cache_path}")" \
         --arg cacheAge "${cache_age}" \
         --argjson cacheSize "${cache_size_json}" \
         --argjson state "${state_json}" \
@@ -548,10 +583,13 @@ diagnose_json() {
         --argjson requiredTools "${required_tools_json}" \
         --argjson optionalTools "${optional_tools_json}" \
         --arg codexbarCommand "${cb}" \
-        --arg codexbarPath "${cb_path}" \
+        --arg codexbarPath "$(diagnose_redact_value "${cb_path}")" \
+        --arg codexbarVersion "${cb_version}" \
         --argjson codexbarAvailable "${cb_available}" \
         --argjson cachedProviderCount "${cb_cache_count_json}" \
+        --argjson redacted "$( (( DIAGNOSE_REDACT )) && printf 'true' || printf 'false' )" \
         '{
+            redacted: $redacted,
             paths: {
                 showyQuota: $showyQuota,
                 repoRoot: $repoRoot,
@@ -584,6 +622,7 @@ diagnose_json() {
                 command: $codexbarCommand,
                 available: $codexbarAvailable,
                 path: (if $codexbarPath == "" then null else $codexbarPath end),
+                version: (if $codexbarVersion == "" then null else $codexbarVersion end),
                 cachedProviderCount: $cachedProviderCount
             }
         }'
@@ -595,8 +634,13 @@ diagnose() {
     state_bin="${SCRIPT_DIR}/showy-quota-state"
 
     printf '## showy-quota diagnose\n'
-    printf 'showy-quota:    %s\n' "${SCRIPT_PATH}"
-    printf 'repo root:    %s\n' "${REPO_ROOT}"
+    if (( DIAGNOSE_REDACT )); then
+        printf 'redacted:     yes (paths shown as basenames, URL hosts hidden)\n'
+    else
+        printf 'redacted:     no — re-run with "--diagnose --redact" before pasting this anywhere public\n'
+    fi
+    printf 'showy-quota:    %s\n' "$(diagnose_redact_value "${SCRIPT_PATH}")"
+    printf 'repo root:    %s\n' "$(diagnose_redact_value "${REPO_ROOT}")"
     printf 'bash:         %s\n' "${BASH_VERSION:-unknown}"
     printf 'uname:        %s\n' "$(uname -srm 2>/dev/null || printf 'unknown')"
 
@@ -615,12 +659,14 @@ diagnose() {
     print_tool_path fzf
 
     printf '\n# Config\n'
+    local config_shown
+    config_shown="$(diagnose_redact_value "${CONFIG_FILE}")"
     if [[ -r "${CONFIG_FILE}" ]]; then
-        printf 'config:       %s (readable)\n' "${CONFIG_FILE}"
+        printf 'config:       %s (readable)\n' "${config_shown}"
     elif [[ -e "${CONFIG_FILE}" ]]; then
-        printf 'config:       %s (exists, unreadable)\n' "${CONFIG_FILE}"
+        printf 'config:       %s (exists, unreadable)\n' "${config_shown}"
     else
-        printf 'config:       %s (none — defaults in effect)\n' "${CONFIG_FILE}"
+        printf 'config:       %s (none — defaults in effect)\n' "${config_shown}"
     fi
     printf 'theme:        %s\n' "$(current_theme_value 2>/dev/null || printf '(none)')"
 
@@ -628,7 +674,7 @@ diagnose() {
     if [[ -x "${fetch_bin}" ]]; then
         cache_path="$("${fetch_bin}" --path 2>/dev/null || printf '(unknown)')"
         cache_age="$("${fetch_bin}" --age 2>/dev/null || printf '(unknown)')"
-        printf 'cache file:   %s\n' "${cache_path}"
+        printf 'cache file:   %s\n' "$(diagnose_redact_value "${cache_path}")"
         printf 'cache age:    %ss\n' "${cache_age}"
         if [[ -f "${cache_path}" ]]; then
             printf 'cache size:   %s bytes\n' "$(wc -c < "${cache_path}" 2>/dev/null | tr -d ' ' || printf 'unknown')"
@@ -636,21 +682,21 @@ diagnose() {
             printf 'cache size:   (file absent)\n'
         fi
     else
-        printf 'cache:        showy-quota-fetch missing or non-executable: %s\n' "${fetch_bin}"
+        printf 'cache:        showy-quota-fetch missing or non-executable: %s\n' "$(diagnose_redact_value "${fetch_bin}")"
     fi
 
     printf '\n# State\n'
     if [[ -x "${state_bin}" ]]; then
         "${state_bin}" 2>&1 | sed 's/^/  /'
     else
-        printf '  showy-quota-state missing or non-executable: %s\n' "${state_bin}"
+        printf '  showy-quota-state missing or non-executable: %s\n' "$(diagnose_redact_value "${state_bin}")"
     fi
 
     printf '\n# Env knobs (set values only)\n'
     local var
     while IFS= read -r var; do
         if [[ -n "${!var:-}" ]]; then
-            printf '  %s=%s\n' "${var}" "${!var}"
+            printf '  %s=%s\n' "${var}" "$(diagnose_redact_value "${!var}")"
         fi
     done < <(diagnose_env_vars)
 
@@ -658,16 +704,24 @@ diagnose() {
     local cb="${SHOWY_QUOTA_CODEXBAR_BIN:-codexbar}"
     if ! command -v "${cb}" >/dev/null 2>&1; then
         printf 'codexbar binary not on PATH (set SHOWY_QUOTA_CODEXBAR_BIN or install codexbar)\n'
-    elif ! command -v jq >/dev/null 2>&1; then
-        printf 'codexbar present; jq missing — cannot count providers\n'
-    elif [[ -f "${SHOWY_QUOTA_USAGE_FILE:-${HOME}/.cache/showy-quota/usage.json}" ]]; then
-        local cache_file count
-        cache_file="${SHOWY_QUOTA_USAGE_FILE:-${HOME}/.cache/showy-quota/usage.json}"
-        count=$(jq '(if type == "object" then (.providers // []) else . end) | length' "${cache_file}" 2>/dev/null || printf '?')
-        printf 'cached provider count = %s (from %s)\n' "${count}" "${cache_file}"
-        printf '(skipping live %s usage probe; rerun bin/showy-quota-fetch --refresh to refresh)\n' "${cb}"
     else
-        printf 'no cache yet; run bin/showy-quota-fetch --refresh to populate, then re-run --diagnose\n'
+        # SHOWY_QUOTA_MANAGE_SERVE (default 1) spawns this exact binary, so a
+        # bug report needs to name which build was running.
+        printf 'codexbar:     %s (%s)\n' \
+            "$("${cb}" --version 2>/dev/null | head -n1 || printf 'version unknown')" \
+            "$(diagnose_redact_value "$(command -v "${cb}")")"
+        printf 'manage serve: %s\n' "${SHOWY_QUOTA_MANAGE_SERVE:-1}"
+        if ! command -v jq >/dev/null 2>&1; then
+            printf 'jq missing — cannot count providers\n'
+        elif [[ -f "${SHOWY_QUOTA_USAGE_FILE:-${HOME}/.cache/showy-quota/usage.json}" ]]; then
+            local cache_file count
+            cache_file="${SHOWY_QUOTA_USAGE_FILE:-${HOME}/.cache/showy-quota/usage.json}"
+            count=$(jq '(if type == "object" then (.providers // []) else . end) | length' "${cache_file}" 2>/dev/null || printf '?')
+            printf 'cached provider count = %s (from %s)\n' "${count}" "$(diagnose_redact_value "${cache_file}")"
+            printf '(skipping live %s usage probe; rerun bin/showy-quota-fetch --refresh to refresh)\n' "${cb}"
+        else
+            printf 'no cache yet; run bin/showy-quota-fetch --refresh to populate, then re-run --diagnose\n'
+        fi
     fi
 }
 
@@ -1268,11 +1322,19 @@ main() {
             preview_theme "$2"
             ;;
         --diagnose)
-            if (($# == 2)); then
-                [[ "$2" == "--json" ]] || usage_error '--diagnose only accepts --json'
+            local diagnose_as_json=0
+            shift
+            while (($#)); do
+                case "$1" in
+                    --json)   diagnose_as_json=1 ;;
+                    --redact) DIAGNOSE_REDACT=1 ;;
+                    *) usage_error '--diagnose only accepts --json and --redact' ;;
+                esac
+                shift
+            done
+            if (( diagnose_as_json )); then
                 diagnose_json
             else
-                (($# == 1)) || usage_error '--diagnose only accepts --json'
                 diagnose
             fi
             ;;

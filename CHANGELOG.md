@@ -10,6 +10,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `showy-quota guard --no-fetch` now evaluates the cache as-is without starting
   provider collection. Agent hooks can use it with a separately warmed cache
   instead of paying for a synchronous CodexBar request before each tool call.
+- `showy-quota --diagnose --redact` makes diagnose output paste-safe. `--diagnose`
+  exists to be pasted into bug reports, but it prints your absolute paths, cache
+  layout and serve URL to whoever receives the paste. `--redact` collapses each
+  absolute path to `<path>/<basename>` and each URL to `<scheme>://<host>:<port>`,
+  while keeping everything a maintainer actually reads: basenames, ports,
+  versions, counts, provider ids, theme names and booleans. It covers both the
+  text and `--json` modes, including the tool-path and env-knob sections, and
+  the JSON gains `"redacted": true`. The default is unchanged — a bug report
+  needs the real layout — and the unredacted text output now says so on its
+  first line. A test asserts no absolute path survives anywhere in a redacted
+  payload.
+- `--diagnose` now reports the resolved CodexBar path and version plus the
+  effective `SHOWY_QUOTA_MANAGE_SERVE` value. With manage-serve on (the
+  default) showy-quota starts that exact binary as a long-lived process, so a
+  bug report should name which build was running.
 - `showy-quota-render --emit vertical`: the same quota data on the other axis —
   one line per quota window instead of one line per provider — for surfaces that
   own rows rather than columns (an SSH session on a phone, a tall sidebar pane).
@@ -87,6 +102,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   mutation: deleting either arm fails the new test.
 - A managed `codexbar serve` can no longer be started on a different port from
   the one showy-quota probes. See the removal note below.
+- `showy_quota_now_epoch` now has direct coverage for malformed
+  `SHOWY_QUOTA_NOW_EPOCH` values (`abc`, `-1`, `" 123 "`, empty, `1e9`, `12.5`,
+  `0x10`). It pins the clock for every freshness and stale decision, so a junk
+  override silently honoured would poison cache-age and stale rendering
+  everywhere; each case must fall back to the real clock, and a valid override
+  must still be honoured exactly.
 
 ### Removed
 - **`SHOWY_QUOTA_CODEXBAR_SERVE_PORT`.** The port now always derives from

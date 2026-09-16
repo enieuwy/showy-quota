@@ -207,7 +207,10 @@ For per-provider auto-mode selection and marker behavior, use
 
 Stuck? `bin/showy-quota --diagnose` (or `make diagnose`) prints exactly the
 state a bug report needs; `bin/showy-quota --diagnose --json` emits the same
-diagnostic surface as stable machine-readable JSON.
+diagnostic surface as stable machine-readable JSON. Both include your absolute
+paths and serve URL, so add `--redact` before pasting anywhere public: it
+collapses each path to its basename and hides URL hosts while keeping ports,
+versions and provider counts, and sets `"redacted": true` in the JSON.
 
 ## Automation & prompts
 

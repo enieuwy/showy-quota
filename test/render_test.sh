@@ -693,6 +693,23 @@ assert_equals "valid coloring threshold is still honored" "warn" "${out}"
 out=$(run_common_eval 'printf "%s|%s|%s|%s" "$(showy_quota_uint 42 7)" "$(showy_quota_uint abc 7)" "$(showy_quota_uint 99999 7 100)" "$(showy_quota_uint 09 7)"' SHOWY_QUOTA_NO_CONFIG=1)
 assert_equals "uint helper validates, clamps, and decimal-normalizes" "42|7|100|9" "${out}"
 
+# SHOWY_QUOTA_NOW_EPOCH pins the clock for every freshness and stale decision,
+# so a malformed override must fall back to the real clock rather than being
+# honoured as-is. A silently accepted junk value would poison cache-age and
+# stale rendering everywhere.
+# shellcheck disable=SC2016
+out=$(run_common_eval 'printf "%s" "$(showy_quota_now_epoch)"' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_NOW_EPOCH=4070908800)
+assert_equals "now_epoch honors a valid pinned override" "4070908800" "${out}"
+for bad_now in abc -1 ' 123 ' '' 1e9 '12.5' '0x10'; do
+    # shellcheck disable=SC2016
+    out=$(run_common_eval 'printf "%s" "$(showy_quota_now_epoch)"' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_NOW_EPOCH="${bad_now}")
+    if [[ "${out}" =~ ^[0-9]+$ ]] && (( out > 1600000000 )) && [[ "${out}" != "${bad_now}" ]]; then
+        ok "now_epoch falls back to the real clock for malformed '${bad_now}'"
+    else
+        fail "now_epoch falls back to the real clock for malformed '${bad_now}'" "got '${out}'"
+    fi
+done
+
 out=$(run_renderer showy-quota-zellij-bar codexbar-mixed.json SHOWY_QUOTA_PNG_BAR_W=09 NO_COLOR=1 SHOWY_QUOTA_FORCE_COLOR=0)
 assert_contains "leading-zero numeric config renders without octal abort" "CL" "${out}"
 
@@ -1099,6 +1116,46 @@ if printf '%s' "${out}" | jq -e '.paths.showyQuota and .tools.required.jq.availa
     ok "diagnose json exposes stable machine-readable state"
 else
     fail "diagnose json exposes stable machine-readable state" "${out}"
+fi
+
+# --diagnose output is written to be pasted into bug reports, so --redact must
+# strip what only describes this machine (absolute paths, URL hosts) while
+# keeping what a maintainer needs (basenames, ports, versions, counts).
+redact_out=$(
+    env \
+        PATH="${stub_dir}:${PATH}" \
+        XDG_CONFIG_HOME="${diag_xdg}" \
+        SHOWY_QUOTA_NO_CONFIG=1 \
+        SHOWY_QUOTA_CACHE_DIR="${diag_cache}" \
+        SHOWY_QUOTA_TEST_FIXTURE="${FIXTURE_DIR}/codexbar-mixed.json" \
+        SHOWY_QUOTA_CODEXBAR_SERVE_URL='http://127.0.0.1:9999' \
+        SHOWY_QUOTA_THEME=default \
+        "${REPO_ROOT}/bin/showy-quota" --diagnose --json --redact
+)
+if printf '%s' "${redact_out}" | jq -e '
+        .redacted == true
+        and (.paths.repoRoot | startswith("<path>/"))
+        and (.paths.cache | startswith("<path>/"))
+        and .env.SHOWY_QUOTA_CODEXBAR_SERVE_URL == "http://<host>:9999"
+        and .env.SHOWY_QUOTA_THEME == "default"
+        and .codexbarProbe.cachedProviderCount == 4
+    ' >/dev/null; then
+    ok "diagnose --redact hides local paths and URL hosts but keeps port, theme and counts"
+else
+    fail "diagnose --redact hides local paths and URL hosts but keeps port, theme and counts" "${redact_out}"
+fi
+# No absolute path may survive anywhere in a redacted paste.
+if printf '%s' "${redact_out}" | jq -r '[paths(type == "string") as $p | getpath($p)] | map(select(startswith("/"))) | length' | grep -qx 0; then
+    ok "diagnose --redact leaves no absolute path in the payload"
+else
+    fail "diagnose --redact leaves no absolute path in the payload" \
+        "$(printf '%s' "${redact_out}" | jq -c '[paths(type == "string") as $p | getpath($p)] | map(select(startswith("/")))')"
+fi
+# The default stays unredacted: bug reports need the real layout by default.
+if printf '%s' "${out}" | jq -e '.redacted == false and (.paths.repoRoot | startswith("/"))' >/dev/null; then
+    ok "diagnose json is unredacted unless --redact is passed"
+else
+    fail "diagnose json is unredacted unless --redact is passed" "${out}"
 fi
 
 # ── grant zellij permissions ──────────────────────────────────────────
