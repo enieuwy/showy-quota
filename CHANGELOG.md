@@ -10,6 +10,44 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `showy-quota guard --no-fetch` now evaluates the cache as-is without starting
   provider collection. Agent hooks can use it with a separately warmed cache
   instead of paying for a synchronous CodexBar request before each tool call.
+- `showy-quota-render --emit vertical`: the same quota data on the other axis —
+  one line per quota window instead of one line per provider — for surfaces that
+  own rows rather than columns (an SSH session on a phone, a tall sidebar pane).
+  Every window gets a full-height `█` bar, its horizon label, its own remaining
+  percent and its own countdown, so nothing is encoded in
+  half-block/sextant/octant sub-rows and no octant-capable terminal is needed. A
+  full line is 43–45 columns at the default `SHOWY_QUOTA_VERTICAL_BAR_WIDTH=16`
+  (min 8) — the widest sigil and horizon label in the snapshot set the rest — so
+  it does not wrap on a phone. The renderer prints one frame; cadence stays with
+  the caller.
+
+  Three strip conventions are dropped here, because each compresses information
+  this view has room to state outright: long-horizon windows are **not dimmed**
+  (the horizon is printed in its own column, so dim would only cost contrast on
+  the row's primary reading), pacing markers are a `│` **tick over the track**
+  rather than a coloured cell (a marker can no longer be mistaken for usage or
+  punch a hole in a full bar), and any cycle of four weeks or more is labelled
+  `1mo` rather than a raw `30d`/`31d` day count that invites a meaningless
+  comparison.
+
+  Window selection keeps every real measurement and no duplicates: positional
+  slots are never collapsed into each other (Cursor's Total/Auto/API report one
+  identical reset, horizon *and* usage yet are three pools), an extra that only
+  republishes a kept window is dropped but **hands over its title**, so
+  Antigravity's two weekly slots read `7dᴳ`/`7dᶜ` instead of losing the only
+  thing that distinguishes them. A superscript tag is added only where a horizon
+  cannot identify a window on its own.
+
+  `SHOWY_QUOTA_VERTICAL_SORT=urgency` flattens the provider blocks so the window
+  closest to running out is the first line (ties keep CodexBar's slot order);
+  `provider` (default) keeps the blocks with one blank line between them.
+  `SHOWY_QUOTA_VERTICAL_RESET_CLOCK` appends each window's local reset clock
+  (`11:54`), answering *when* for rows that all read `1d`. It is on by default:
+  the six columns it costs are columns this view has, and a clocked line still
+  fits a phone. Set it to `0` to trade the wall time back for the width.
+  Strip-level `stale`/`⚠cli` glyphs move to their own trailing line, and a stale
+  snapshot now suppresses only the pacing markers — every countdown survives,
+  greyed.
 
 ## [0.8.1] — 2026-08-17
 

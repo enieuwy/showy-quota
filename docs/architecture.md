@@ -102,6 +102,32 @@ Pools that share one billing cycle — identical `resetsAt` and `windowMinutes` 
 
 The stacked modes collapse to the densest body the data supports: `mono4` needs four assembled windows (else it falls back to `mono3`, then `dual`); `mono3` needs a tertiary slot (else `dual`). Model-pooled Antigravity carries session+weekly windows per pool, so `auto` splits it into `AGᴳ` + `AGᶜ`; if a stacked body is forced, missing lanes still collapse the body rather than leaving empty rows, matching SketchyBar dropping an absent row.
 
+### Vertical view
+
+`showy-quota-render --emit vertical` renders the same data on the other axis: one line per quota window instead of one line per provider. It exists for surfaces that own rows rather than columns — an SSH session on a phone, a tall sidebar pane — where the strip's whole reason for packing windows into one line disappears.
+
+Every mosaic trade-off inverts with it. A window gets a full-height `█` bar, its horizon label, its own remaining percent and its own countdown, so nothing is encoded in half-block/sextant/octant sub-rows and no octant-capable terminal is required. Bodies (`dual`/`mono3`/`mono4`/`dual2`) and `SHOWY_QUOTA_TERMINAL_BAR_MODE` therefore do not apply. `SHOWY_QUOTA_VERTICAL_BAR_WIDTH` (default `16`, min 8) sets the body width; a default line is 43–45 columns — the widest sigil and horizon label in the snapshot set the rest, since a model-pooled provider's family tag (`AGᴳ`) costs every row a column — so it does not wrap on a phone.
+
+A line is `⟨chip⟩ ⟨horizon⟩ ▕⟨bar⟩▏ ⟨percent⟩ ⟨countdown⟩ ⟨clock⟩`. The sigil chip is a coloured pill on the first line of each provider block only; continuation lines hold its width but stay on the page background, because a tinted letterless stub reads as the leading cells of the bar. The label sits *outside* the plate for the same reason — sharing the track's background hides where measurement begins. The percentage never inherits a dimmed band: it is the row's primary reading.
+
+Three strip conventions are deliberately dropped, because each exists to compress information this view has room to state outright:
+
+- **No dimming.** Dim says "weekly/monthly cap" in a body with no room to write it. Here the horizon is printed in its own column, so dim would restate a literal label at the cost of contrast on the glyphs that matter.
+- **Pacing markers are ticks, not cells.** The marker is `│` drawn *over* the track (the cell keeps its fill state as background), so it can never be mistaken for usage or punch a hole in a full bar. One marker per line means one `palette_elapsed`; `palette_elapsed_long` and `mono_markers` do not apply.
+- **Months, not calendar days.** A 30d and a 31d cycle are both monthly, so any horizon of four weeks or more is labelled `1mo` rather than a raw day count that invites a meaningless comparison.
+
+Windows are the strip's own inputs — positional slots plus `extraRateWindows` with known usage — with three selection rules. Positional slots are never deduplicated against each other, because Cursor's Total/Auto/API report one identical reset, horizon *and* usage yet are three distinct pools. Extras are dropped when they only republish a kept window (same horizon, reset and usage), which is how a pool CodexBar publishes both ways draws once; usage is part of that identity because distinct pools legitimately share a reset (Claude's weekly cap and its `Fable only` pool). A dropped extra still hands its **title** to the slot it republished, so Antigravity's two weekly slots render `7dᴳ`/`7dᶜ` instead of losing the only information that distinguishes them.
+
+Labels are earned, not decorative: a window whose horizon is unique renders bare (`5h`, `7d`, `1mo`). A named window sharing a horizon takes the strip's existing superscript family tag (`7dᶠ`), and a nameless slot falls back to its slot ordinal (`1mo¹`, `1mo²`, `1mo³`) — but only when another nameless slot shares that horizon, so a lone slot beside a named window stays bare.
+
+`SHOWY_QUOTA_VERTICAL_SORT` chooses the order. `provider` (default) keeps CodexBar's provider blocks with one blank line between them, which is what makes the grouping parse at a glance. `urgency` flattens the blocks so the window closest to running out is the first line, sorted by remaining then time-to-reset with ties falling back to CodexBar's own slot order; every line then carries its own chip and no separators are drawn.
+
+`SHOWY_QUOTA_VERTICAL_RESET_CLOCK` appends each window's local reset time (`11:54`), answering *when* for rows that all read `1d`. It is **on** by default: the six columns it costs are columns this view has, and a clocked line still fits an SSH session on a phone. Set it to `0` to trade the wall time back for the width. The clock uses `SHOWY_QUOTA_RESET_DESCRIPTION_TIMEZONE_OFFSET` when set, otherwise the host's local offset, so it agrees with the countdown beside it.
+
+Shared-cycle brightness and severity bands follow the strip. A stale snapshot suppresses pacing markers exactly as the strip does, but keeps every countdown — the countdown is the reading, not the pacing, and its stale colour already says the snapshot is old. Strip-level `stale`/`degraded_cli` glyphs move to their own trailing line, since a vertical view has no shared line to trail them on.
+
+Cadence is the caller's: the renderer prints one frame. A live panel is a loop that warms the cache (`showy-quota-fetch`, which stays inside `SHOWY_QUOTA_REFRESH_SECONDS`) and redraws in place.
+
 ### Bar configuration reference
 
 | Env (shell) / KDL key | Default | Meaning |
@@ -115,6 +141,9 @@ The stacked modes collapse to the densest body the data supports: `mono4` needs 
 | `SHOWY_QUOTA_DIM_WINDOW_MINUTES` / `dim_window_minutes` | `10080` | windowMinutes at/above which a window dims (weekly) |
 | `SHOWY_QUOTA_PALETTE_DIM_SCALE` / `palette_dim_scale` | `0.55` | brightness scale for dimmed (long-horizon) windows |
 | `SHOWY_QUOTA_ZELLIJ_BAR_WIDTH` / `bar_width` | `12` | bar cell width (min 8) |
+| `SHOWY_QUOTA_VERTICAL_BAR_WIDTH` / `vertical_bar_width` | `16` | `--emit vertical` bar cell width (min 8) |
+| `SHOWY_QUOTA_VERTICAL_SORT` / `vertical_sort` | `provider` | `--emit vertical` order: `provider` blocks or `urgency` |
+| `SHOWY_QUOTA_VERTICAL_RESET_CLOCK` / `vertical_reset_clock` | `1` | append each window's local reset clock (6 columns) |
 
 ## Failure semantics
 

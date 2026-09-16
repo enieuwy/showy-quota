@@ -7,8 +7,8 @@ use showy_quota_zellij_core::{
     cache::read_cache_from_env,
     codexbar::{unwrap_cache_transport, MAX_USAGE_JSON_BYTES},
     emit_prompt_segment, emit_provider_metrics, emit_rows, emit_sketchybar, render_tmux,
-    render_zellij, valid_provider_id, PromptOptions, RenderConfig, RenderError, RenderOptions,
-    SketchybarOptions,
+    render_vertical, render_zellij, valid_provider_id, PromptOptions, RenderConfig, RenderError,
+    RenderOptions, SketchybarOptions,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,6 +21,7 @@ enum Format {
 enum Emit {
     Render,
     Rows,
+    Vertical,
     Metrics,
     Prompt,
     Sketchybar,
@@ -128,6 +129,13 @@ fn run() -> Result<(), String> {
         return write_output(&rendered);
     }
 
+    if cli.emit == Emit::Vertical {
+        // The vertical view is ANSI-only: `--format tmux` markup describes one
+        // status line, and this surface is a pane of its own lines.
+        let rendered = render_vertical(&input.payload, &config, options).map_err(render_error)?;
+        return write_output(&rendered);
+    }
+
     let rendered = match cli.format {
         Format::Zellij => render_zellij(&input.payload, &config, options),
         Format::Tmux => render_tmux(&input.payload, &config, options),
@@ -196,11 +204,14 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Cli, String> {
             }
             "--emit" => {
                 let value = args.next().ok_or_else(|| {
-                    String::from("--emit requires render, rows, metrics, prompt, or sketchybar")
+                    String::from(
+                        "--emit requires render, rows, vertical, metrics, prompt, or sketchybar",
+                    )
                 })?;
                 emit = match value.as_str() {
                     "render" => Emit::Render,
                     "rows" => Emit::Rows,
+                    "vertical" => Emit::Vertical,
                     "metrics" => Emit::Metrics,
                     "prompt" => Emit::Prompt,
                     "sketchybar" => Emit::Sketchybar,
@@ -378,7 +389,7 @@ fn png_bar_width_from_env() -> i64 {
 
 fn print_help() {
     println!(
-        "Usage: showy-quota-render [--emit render|rows|metrics|prompt|sketchybar] [--format zellij|tmux] [--json <path|-> | --from-cache] [--provider ID[,ID...]] [--ansi] [--stale] [--degraded-cli]\n\nPrints a rendered quota strip, one JSON entry per rendered chunk (rows), providerMetrics JSON, SketchyBar row data, or shell prompt segment from CodexBar JSON."
+        "Usage: showy-quota-render [--emit render|rows|vertical|metrics|prompt|sketchybar] [--format zellij|tmux] [--json <path|-> | --from-cache] [--provider ID[,ID...]] [--ansi] [--stale] [--degraded-cli]\n\nPrints a rendered quota strip, one line per quota window (vertical), one JSON entry per rendered chunk (rows), providerMetrics JSON, SketchyBar row data, or shell prompt segment from CodexBar JSON."
     );
 }
 

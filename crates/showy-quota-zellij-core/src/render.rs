@@ -6,7 +6,7 @@ use serde::Serialize;
 use crate::codexbar::{is_errored, is_renderable, NamedWindow, ProviderRecord, Usage, UsageWindow};
 use crate::config::RenderConfig;
 use crate::palette::{hex_to_rgb, normalized_hex, Severity};
-use crate::reset::{minutes_until, reset_epoch};
+use crate::reset::{minutes_until, reset_clock, reset_epoch};
 
 #[derive(Debug, Clone, Copy)]
 pub struct RenderOptions {
@@ -176,6 +176,530 @@ pub fn render_rows(
             }
         })
         .collect())
+}
+
+/// One line per quota window, for a surface that owns vertical space (an SSH
+/// pane on a phone, a tall sidebar) instead of a single status-bar line.
+///
+/// The horizontal strip packs two windows into one line with half blocks and
+/// three or four into sextant/octant mosaics because it owns exactly one line
+/// and pays for every column. Here the axis inverts: rows are cheap, so every
+/// window gets its own full-height bar, horizon label, exact remaining percent
+/// and countdown. Nothing is mosaic-encoded, so this view needs no
+/// octant-capable terminal.
+///
+/// Two strip conventions are deliberately dropped. Long-horizon windows are not
+/// dimmed: dim exists to say "this is a weekly/monthly cap" in a body with no
+/// room to write it, and this view prints the horizon in its own column, so dim
+/// would spend contrast restating a literal label. Pacing markers are drawn as a
+/// `│` tick over the track rather than a colored cell, so a marker can never be
+/// mistaken for usage or punch a hole in a full bar.
+pub fn render_vertical(
+    payload: &[u8],
+    config: &RenderConfig,
+    options: RenderOptions,
+) -> Result<String, RenderError> {
+    let records = parse_render_payload(payload).map_err(|_| RenderError::InvalidPayload)?;
+    let mut records: Vec<&ProviderRecord> = records
+        .iter()
+        .filter(|record| is_renderable(record) || is_errored(record))
+        .collect();
+    filter_and_sort(&mut records, config);
+
+    let format = OutputFormat::Zellij;
+    let width = config.vertical_bar_width.clamp(8, 400);
+    let chunk_bg = &config.palette_bg;
+    let mut out = String::new();
+
+    if records.is_empty() {
+        dim(&mut out, format, options.color);
+        out.push_str("AI idle");
+        reset(&mut out, format, options.color);
+        out.push('\n');
+    }
+
+    // Units are bound rather than iterated inline: the window borrows below live
+    // until every line is rendered, because the label and chip columns are
+    // measured across all providers so each bar starts at the same column.
+    let units = collect_units(&records, config);
+    let mut groups: Vec<(&str, Vec<VerticalWindow<'_>>)> = Vec::new();
+    for unit in &units {
+        match unit {
+            RenderUnit::Error(record, sigil) => {
+                render_error_provider(&mut out, record, sigil, config, options, format, chunk_bg);
+                out.push('\n');
+            }
+            RenderUnit::Provider(record, sigil) => {
+                let windows = vertical_windows(record, config, options.now_epoch);
+                if !windows.is_empty() {
+                    groups.push((sigil.as_str(), windows));
+                }
+            }
+        }
+    }
+
+    let label_width = groups
+        .iter()
+        .flat_map(|(_, windows)| windows.iter())
+        .map(|window| window.label.chars().count())
+        .max()
+        .unwrap_or(0);
+    // Pooled providers carry a family superscript (`AGᴳ`), so the chip column is
+    // measured too: without it a three-cell chip would push one provider's bar
+    // out of the shared column.
+    let sigil_width = groups
+        .iter()
+        .map(|(sigil, _)| sigil.chars().count())
+        .max()
+        .unwrap_or(2);
+
+    // `urgency` answers "what is about to bite" by flattening the provider
+    // blocks, so every line then carries its own chip and no blank separators
+    // are drawn. `provider` keeps CodexBar's grouping with one blank line
+    // between blocks, which is what makes the grouping readable at a glance.
+    let mut lines: Vec<(&str, &VerticalWindow<'_>, bool)> = Vec::new();
+    if config.vertical_sort == "urgency" {
+        let mut flat: Vec<(&str, &VerticalWindow<'_>)> = groups
+            .iter()
+            .flat_map(|(sigil, windows)| windows.iter().map(move |window| (*sigil, window)))
+            .collect();
+        flat.sort_by(|a, b| {
+            a.1.remaining
+                .cmp(&b.1.remaining)
+                .then_with(|| {
+                    a.1.minutes
+                        .unwrap_or(i64::MAX)
+                        .cmp(&b.1.minutes.unwrap_or(i64::MAX))
+                })
+                .then_with(|| a.0.cmp(b.0))
+                // Ties fall back to the provider's own window order. Comparing
+                // labels would sort by superscript codepoint (² before ¹) and
+                // scramble same-cycle pools that CodexBar published in order.
+                .then_with(|| a.1.order.cmp(&b.1.order))
+        });
+        lines.extend(
+            flat.into_iter()
+                .map(|(sigil, window)| (sigil, window, true)),
+        );
+    } else {
+        for (sigil, windows) in &groups {
+            for (index, window) in windows.iter().enumerate() {
+                lines.push((sigil, window, index == 0));
+            }
+        }
+    }
+
+    let group_breaks = config.vertical_sort != "urgency";
+    for (index, (sigil, window, head)) in lines.iter().enumerate() {
+        if group_breaks && *head && index > 0 {
+            out.push('\n');
+        }
+        // The chip labels the provider block once. Continuation lines hold its
+        // width but not its color: a tinted, letterless stub reads as the first
+        // cells of the bar.
+        let chip = if *head {
+            format!("{sigil:<sigil_width$}")
+        } else {
+            " ".repeat(sigil_width)
+        };
+        render_vertical_line(
+            &mut out,
+            config,
+            options,
+            VerticalLine {
+                chip: &chip,
+                chip_filled: *head,
+                window,
+                width,
+                label_width,
+            },
+        );
+        out.push('\n');
+    }
+
+    // Strip-level state gets its own trailing line: a vertical view has no
+    // shared line to hang the markers on.
+    let mut glyphs: Vec<&str> = Vec::new();
+    if options.stale {
+        glyphs.push(config.stale_glyph.as_str());
+    }
+    if options.degraded_cli {
+        glyphs.push(config.degraded_cli_glyph.as_str());
+    }
+    for (index, glyph) in glyphs.iter().enumerate() {
+        if index > 0 {
+            out.push(' ');
+        }
+        style_text(
+            &mut out,
+            glyph,
+            Some(&config.palette_countdown_warn),
+            Some(chunk_bg),
+            Weight::Bold,
+            format,
+            options.color,
+        );
+    }
+    if !glyphs.is_empty() {
+        out.push('\n');
+    }
+
+    Ok(out)
+}
+
+/// One window of the vertical view, already resolved to what a line needs.
+struct VerticalWindow<'a> {
+    label: String,
+    remaining: i32,
+    reset: Option<&'a str>,
+    window: Option<i64>,
+    /// Minutes until this window's own reset, for its countdown and for
+    /// `urgency` ordering.
+    minutes: Option<i64>,
+    /// Position within the provider's own window list, so `urgency` ties keep
+    /// CodexBar's ordering.
+    order: usize,
+}
+
+/// A window selected for the view, with the name it ended up carrying. A
+/// positional slot starts nameless and can inherit the title of an extra that
+/// republishes it.
+struct PickedWindow<'a> {
+    window: &'a UsageWindow,
+    slot: Option<usize>,
+    title: Option<&'a str>,
+}
+
+fn vertical_windows<'a>(
+    record: &'a ProviderRecord,
+    config: &RenderConfig,
+    now_epoch: i64,
+) -> Vec<VerticalWindow<'a>> {
+    let Some(usage) = record.usage.as_ref() else {
+        return Vec::new();
+    };
+    let slots = usage.render_slots();
+    let extras = &usage.extra_rate_windows;
+
+    // Positional slots are distinct measurements by definition and are never
+    // deduplicated against each other: Cursor's Total/Auto/API report one
+    // identical reset, horizon and usage, yet they are three separate pools.
+    let mut picked: Vec<PickedWindow<'a>> = Vec::new();
+    for (index, slot) in slots.iter().copied().enumerate() {
+        if let Some(window) = slot {
+            picked.push(PickedWindow {
+                window,
+                slot: Some(index),
+                title: None,
+            });
+        }
+    }
+    // An extra that republishes a kept window does not earn a second line — but
+    // it does carry the name CodexBar gave that measurement (Antigravity's
+    // `Gemini weekly` / `Claude/GPT weekly`), so the title is transferred to the
+    // slot instead of discarded with the duplicate.
+    for named in extras {
+        if !has_known_extra_usage(named) {
+            continue;
+        }
+        let Some(window) = named.window.as_ref() else {
+            continue;
+        };
+        if let Some(kept) = picked
+            .iter_mut()
+            .find(|kept| same_render_window(kept.window, window))
+        {
+            if kept.title.is_none() {
+                kept.title = named.title.as_deref();
+            }
+            continue;
+        }
+        picked.push(PickedWindow {
+            window,
+            slot: None,
+            title: named.title.as_deref(),
+        });
+    }
+
+    let mut out: Vec<VerticalWindow<'a>> = Vec::with_capacity(picked.len());
+    for (order, entry) in picked.iter().enumerate() {
+        let horizon = horizon_label(entry.window.window_minutes());
+        // A tag is only earned where the horizon alone cannot identify the
+        // window. A named window sharing a horizon takes the strip's existing
+        // superscript family tag (AGᴳ / AGᶜ), because the name is real
+        // information. A nameless slot falls back to its slot ordinal, and only
+        // when another nameless slot shares the horizon (Cursor's three monthly
+        // pools): beside a named window the other tag already distinguishes it.
+        let same_horizon =
+            |other: &&PickedWindow<'_>| horizon_label(other.window.window_minutes()) == horizon;
+        let shared_horizon = picked.iter().filter(same_horizon).count() > 1;
+        let label = match (entry.title, entry.slot) {
+            (Some(title), _) if shared_horizon => {
+                format!("{horizon}{}", superscript(family_label(Some(title))))
+            }
+            (None, Some(index))
+                if picked
+                    .iter()
+                    .filter(same_horizon)
+                    .filter(|other| other.title.is_none() && other.slot.is_some())
+                    .count()
+                    > 1 =>
+            {
+                format!("{horizon}{}", ordinal_superscript(index))
+            }
+            _ => horizon,
+        };
+        let reset = entry.window.reset_value();
+        out.push(VerticalWindow {
+            label,
+            remaining: 100 - entry.window.used_pct_floor(),
+            reset,
+            window: entry.window.window_minutes(),
+            minutes: reset.and_then(|value| {
+                minutes_until(
+                    value,
+                    now_epoch,
+                    config.reset_description_timezone_offset_minutes,
+                )
+            }),
+            order,
+        });
+    }
+    out
+}
+
+/// Two records describe the same measured window: same horizon, same reset and
+/// same usage. Usage is part of the identity because distinct pools legitimately
+/// share a reset and horizon (Claude's weekly cap and its `Fable only` pool).
+fn same_render_window(a: &UsageWindow, b: &UsageWindow) -> bool {
+    a.window_minutes() == b.window_minutes()
+        && a.reset_value() == b.reset_value()
+        && a.used_pct_floor() == b.used_pct_floor()
+}
+
+/// Superscript digit for a positional slot, so same-cycle slots stay ordered
+/// and distinguishable without inventing names CodexBar did not publish.
+fn ordinal_superscript(index: usize) -> char {
+    match index {
+        0 => '¹',
+        1 => '²',
+        2 => '³',
+        _ => '⁴',
+    }
+}
+
+/// Compact horizon tag for a window length: `45m`, `5h`, `7d`, `1mo`. Cycles of
+/// four weeks or more are labelled in months rather than raw days, because a 30d
+/// and a 31d cycle are both "monthly" and printing the calendar length invites a
+/// comparison that carries no meaning. Unknown lengths render `?` rather than a
+/// guessed horizon.
+fn horizon_label(minutes: Option<i64>) -> String {
+    let Some(minutes) = minutes.filter(|minutes| *minutes > 0) else {
+        return "?".into();
+    };
+    if minutes < 60 {
+        return format!("{minutes}m");
+    }
+    if minutes < 1440 {
+        return format!("{}h", minutes / 60);
+    }
+    let days = minutes / 1440;
+    if days < 28 {
+        return format!("{days}d");
+    }
+    format!("{}mo", (days + 15) / 30)
+}
+
+struct VerticalLine<'a> {
+    chip: &'a str,
+    /// A chip carrying a sigil is filled with the window's colour; a blank
+    /// continuation chip stays on the page background, because a tinted,
+    /// letterless stub reads as the leading cells of the bar.
+    chip_filled: bool,
+    window: &'a VerticalWindow<'a>,
+    width: usize,
+    label_width: usize,
+}
+
+fn render_vertical_line(
+    out: &mut String,
+    config: &RenderConfig,
+    options: RenderOptions,
+    line: VerticalLine<'_>,
+) {
+    let format = OutputFormat::Zellij;
+    let chunk_bg = &config.palette_bg;
+    let surface = &config.palette_surface;
+    let window = line.window;
+
+    // No dim variant: the horizon is printed in its own column, so dimming would
+    // restate a literal label at the cost of contrast.
+    let color = if options.stale {
+        config.palette_stale.clone()
+    } else {
+        config.window_color(window.remaining, false)
+    };
+    // A stale snapshot cannot place a pacing marker, matching the strip's marker
+    // suppression. The countdown still renders — it is the reading, not the
+    // pacing — and its stale colour says the snapshot is old.
+    let (marker_reset, marker_window) = if options.stale {
+        (None, None)
+    } else {
+        (window.reset, window.window)
+    };
+    let countdown = primary_label(window.minutes, window.remaining, window.reset);
+    let time_color = if options.stale {
+        config.palette_stale.as_str()
+    } else if window
+        .minutes
+        .is_some_and(|value| value < config.time_warn_minutes)
+    {
+        config.palette_countdown_warn.as_str()
+    } else {
+        config.palette_countdown.as_str()
+    };
+
+    let chip_bg = if line.chip_filled { &color } else { chunk_bg };
+    style_text(
+        out,
+        cap_text(format, &config.cap_left).as_ref(),
+        Some(chip_bg),
+        Some(chunk_bg),
+        Weight::Normal,
+        format,
+        options.color,
+    );
+    style_text(
+        out,
+        line.chip,
+        Some(chunk_bg),
+        Some(chip_bg),
+        Weight::Bold,
+        format,
+        options.color,
+    );
+    // Close the chip into a pill: with the numbers now outside the plate, the
+    // right cap belongs to the chip, not to a trailing surface.
+    style_text(
+        out,
+        cap_text(format, &config.cap_right).as_ref(),
+        Some(chip_bg),
+        Some(chunk_bg),
+        Weight::Normal,
+        format,
+        options.color,
+    );
+    // The label sits outside the plate on the page background: sharing the
+    // track's background hid where measurement begins.
+    style_text(
+        out,
+        &format!(" {:<width$} ", window.label, width = line.label_width),
+        Some(&config.palette_countdown),
+        Some(chunk_bg),
+        Weight::Normal,
+        format,
+        options.color,
+    );
+    style_text(
+        out,
+        "▕",
+        Some(chunk_bg),
+        Some(surface),
+        Weight::Normal,
+        format,
+        options.color,
+    );
+
+    let fill = filled_cells(window.remaining, line.width);
+    let marker = elapsed_marker_cell(
+        marker_reset,
+        marker_window,
+        line.width,
+        options.now_epoch,
+        config.reset_description_timezone_offset_minutes,
+    );
+    for cell in 0..line.width {
+        let filled = cell < fill;
+        // The pacing marker is a tick drawn *over* the track, so it never
+        // consumes a measured cell: the cell it lands on keeps its fill state as
+        // the background.
+        let (glyph, fg) = if Some(cell) == marker {
+            ("│", config.palette_elapsed.as_str())
+        } else if filled {
+            ("█", color.as_str())
+        } else {
+            ("█", surface.as_str())
+        };
+        let bg = if filled {
+            color.as_str()
+        } else {
+            surface.as_str()
+        };
+        style_text(
+            out,
+            glyph,
+            Some(fg),
+            Some(bg),
+            Weight::Normal,
+            format,
+            options.color,
+        );
+    }
+    style_text(
+        out,
+        "▏",
+        Some(chunk_bg),
+        Some(surface),
+        Weight::Normal,
+        format,
+        options.color,
+    );
+
+    // The percentage is the primary reading, so it keeps full contrast and never
+    // inherits a dimmed band.
+    style_text(
+        out,
+        &format!(" {:>3}% ", window.remaining.clamp(0, 100)),
+        Some(&color),
+        Some(chunk_bg),
+        Weight::Bold,
+        format,
+        options.color,
+    );
+    // Countdowns are padded to the widest form (`idle`, `1:23`) so every line
+    // ends at the same column.
+    style_text(
+        out,
+        &format!("{countdown:<4}"),
+        Some(time_color),
+        Some(chunk_bg),
+        Weight::Bold,
+        format,
+        options.color,
+    );
+    // Four rows reading `1d` say nothing about *when*. This view has the columns
+    // to answer it, so the clock is on unless the caller wants the line shorter.
+    if config.vertical_reset_clock {
+        let clock = window
+            .reset
+            .and_then(|value| {
+                reset_clock(
+                    value,
+                    options.now_epoch,
+                    config.reset_description_timezone_offset_minutes,
+                )
+            })
+            .unwrap_or_else(|| "     ".into());
+        style_text(
+            out,
+            &format!(" {clock}"),
+            Some(&config.palette_countdown),
+            Some(chunk_bg),
+            Weight::Normal,
+            format,
+            options.color,
+        );
+    }
 }
 
 /// Model-pooled providers (auto-detected `dual2`) are split into one synthetic
@@ -2497,5 +3021,420 @@ mod tests {
         // Staleness greys the strip, but the band still describes the usage, so
         // a surface can pick its own stale styling without losing the reading.
         assert!(rows.iter().any(|row| row.severity.is_some()), "{rows:?}");
+    }
+
+    // One live 5h window, one weekly cap, and a distinct weekly pool that
+    // shares the cap's reset — the shape that made the horizontal strip pack
+    // windows into half blocks in the first place.
+    const VERTICAL_CLAUDE: &[u8] = br#"[
+        {
+            "provider": "claude",
+            "usage": {
+                "primary": {
+                    "usedPercent": 10,
+                    "resetsAt": "2099-01-01T01:00:00Z",
+                    "windowMinutes": 300
+                },
+                "secondary": {
+                    "usedPercent": 20,
+                    "resetsAt": "2099-01-03T00:00:00Z",
+                    "windowMinutes": 10080
+                },
+                "extraRateWindows": [
+                    {
+                        "title": "Fable only",
+                        "window": {
+                            "usedPercent": 28,
+                            "resetsAt": "2099-01-03T00:00:00Z",
+                            "windowMinutes": 10080
+                        }
+                    }
+                ]
+            }
+        }
+    ]"#;
+
+    // Cursor's Total/Auto/API: three separate pools reporting one identical
+    // reset, horizon and usage on a single monthly cycle.
+    const VERTICAL_SHARED_CYCLE: &[u8] = br#"[
+        {
+            "provider": "cursor",
+            "usage": {
+                "primary": {
+                    "usedPercent": 90,
+                    "resetsAt": "2099-01-20T00:00:00Z",
+                    "windowMinutes": 44640
+                },
+                "secondary": {
+                    "usedPercent": 90,
+                    "resetsAt": "2099-01-20T00:00:00Z",
+                    "windowMinutes": 44640
+                },
+                "tertiary": {
+                    "usedPercent": 90,
+                    "resetsAt": "2099-01-20T00:00:00Z",
+                    "windowMinutes": 44640
+                }
+            }
+        }
+    ]"#;
+
+    fn vertical_lines(
+        payload: &[u8],
+        config: &RenderConfig,
+        options: RenderOptions,
+    ) -> Vec<String> {
+        render_vertical(payload, config, options)
+            .expect("rendered vertical view")
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// Cells inside the plate, so a bar's width can be measured without caring
+    /// which glyph a cell drew (a pacing tick is a cell too).
+    fn plate_cells(line: &str) -> usize {
+        let body = line
+            .split_once('▕')
+            .and_then(|(_, rest)| rest.split_once('▏'))
+            .map(|(body, _)| body)
+            .unwrap_or_default();
+        body.chars().count()
+    }
+
+    #[test]
+    fn vertical_gives_every_window_its_own_line_with_its_own_reading() {
+        let lines = vertical_lines(
+            VERTICAL_CLAUDE,
+            &RenderConfig::default(),
+            base_options(false),
+        );
+
+        // Three windows, three lines: no half-block packing, and each line
+        // carries the percent and countdown of its own window rather than the
+        // provider's primary.
+        assert_eq!(lines.len(), 3, "{lines:?}");
+        assert!(lines[0].starts_with("\u{e0b6}CL\u{e0b4} 5h"), "{lines:?}");
+        assert!(lines[0].contains(" 90% 1h"), "{lines:?}");
+        assert!(lines[1].contains(" 80% 2d"), "{lines:?}");
+        assert!(lines[2].contains(" 72% 2d"), "{lines:?}");
+        // The chip labels the block once, and a continuation chip carries no
+        // colour: a tinted letterless stub reads as the first cells of the bar.
+        assert!(lines[1].starts_with("\u{e0b6}  \u{e0b4}"), "{lines:?}");
+        assert!(lines[2].starts_with("\u{e0b6}  \u{e0b4}"), "{lines:?}");
+    }
+
+    #[test]
+    fn vertical_keeps_the_label_outside_the_plate() {
+        let lines = vertical_lines(
+            VERTICAL_CLAUDE,
+            &RenderConfig::default(),
+            base_options(false),
+        );
+
+        // The label precedes the plate edge. Inside the plate it shared the
+        // track's background, which hid where measurement begins.
+        for line in &lines {
+            let (head, _) = line.split_once('▕').expect("plate edge");
+            assert!(head.contains('d') || head.contains('h'), "{lines:?}");
+        }
+        assert!(lines[0].contains(" 5h  ▕"), "{lines:?}");
+        assert!(lines[1].contains(" 7d  ▕"), "{lines:?}");
+        assert!(lines[2].contains(" 7dᶠ ▕"), "{lines:?}");
+    }
+
+    #[test]
+    fn vertical_tags_only_the_windows_a_horizon_cannot_identify() {
+        let lines = vertical_lines(
+            VERTICAL_CLAUDE,
+            &RenderConfig::default(),
+            base_options(false),
+        );
+
+        // The 5h window is alone on its horizon, and the weekly slot is the only
+        // nameless slot on its own, so only the named extra earns a tag.
+        assert!(lines[0].contains(" 5h  "), "{lines:?}");
+        assert!(lines[1].contains(" 7d  "), "{lines:?}");
+        assert!(lines[2].contains(" 7dᶠ "), "{lines:?}");
+    }
+
+    #[test]
+    fn vertical_names_a_slot_from_the_extra_that_republishes_it() {
+        // Antigravity's shape: two weekly slots whose only distinguishing
+        // information is the title CodexBar publishes on the matching extras.
+        const POOLED: &[u8] = br#"[
+            {
+                "provider": "antigravity",
+                "usage": {
+                    "primary": {
+                        "usedPercent": 100,
+                        "resetsAt": "2099-01-03T00:00:00Z",
+                        "windowMinutes": 10080
+                    },
+                    "secondary": {
+                        "usedPercent": 100,
+                        "resetsAt": "2099-01-05T00:00:00Z",
+                        "windowMinutes": 10080
+                    },
+                    "extraRateWindows": [
+                        {
+                            "title": "Gemini weekly",
+                            "window": {
+                                "usedPercent": 100,
+                                "resetsAt": "2099-01-03T00:00:00Z",
+                                "windowMinutes": 10080
+                            }
+                        },
+                        {
+                            "title": "Claude/GPT weekly",
+                            "window": {
+                                "usedPercent": 100,
+                                "resetsAt": "2099-01-05T00:00:00Z",
+                                "windowMinutes": 10080
+                            }
+                        }
+                    ]
+                }
+            }
+        ]"#;
+
+        let lines = vertical_lines(POOLED, &RenderConfig::default(), base_options(false));
+
+        // The duplicate extras add no lines, but their names beat slot ordinals:
+        // the distinction the reader cares about is the model family.
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(lines[0].contains(" 7dᴳ "), "{lines:?}");
+        assert!(lines[1].contains(" 7dᶜ "), "{lines:?}");
+    }
+
+    #[test]
+    fn vertical_keeps_same_cycle_slots_as_separate_ordinal_lines() {
+        let lines = vertical_lines(
+            VERTICAL_SHARED_CYCLE,
+            &RenderConfig::default(),
+            base_options(false),
+        );
+
+        // Identical reset, horizon and usage do not make these one window: they
+        // are three pools, so they keep three lines, ordered by slot. With no
+        // titles to borrow, ordinals are the only honest distinction.
+        assert_eq!(lines.len(), 3, "{lines:?}");
+        assert!(lines[0].contains(" 1mo¹ "), "{lines:?}");
+        assert!(lines[1].contains(" 1mo² "), "{lines:?}");
+        assert!(lines[2].contains(" 1mo³ "), "{lines:?}");
+    }
+
+    #[test]
+    fn vertical_labels_a_monthly_cycle_in_months_not_calendar_days() {
+        // 44640 minutes is 31 days and 43200 is 30; both are one monthly cycle,
+        // and printing the day count invites a comparison that means nothing.
+        assert_eq!(horizon_label(Some(44640)), "1mo");
+        assert_eq!(horizon_label(Some(43200)), "1mo");
+        assert_eq!(horizon_label(Some(10080)), "7d");
+        assert_eq!(horizon_label(Some(300)), "5h");
+        assert_eq!(horizon_label(Some(45)), "45m");
+        assert_eq!(horizon_label(None), "?");
+    }
+
+    #[test]
+    fn vertical_never_dims_a_long_horizon_window() {
+        let config = RenderConfig::default();
+        let lines = vertical_lines(VERTICAL_CLAUDE, &config, base_options(true));
+
+        // The weekly window (80% remaining, `dim_window_minutes` reached) prints
+        // the bright band: this view writes the horizon in its own column, so dim
+        // would only cost contrast on the row's most important glyphs.
+        let (r, g, b) = hex_to_rgb(&config.severity_color(Severity::Good, false));
+        assert!(
+            lines[1].contains(&format!("38;2;{r};{g};{b}m")),
+            "{lines:?}"
+        );
+        let (r, g, b) = hex_to_rgb(&config.severity_color(Severity::Good, true));
+        assert!(
+            !lines[1].contains(&format!("38;2;{r};{g};{b}m")),
+            "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn vertical_pacing_marker_never_consumes_a_measured_cell() {
+        const FULL: &[u8] = br#"[
+            {
+                "provider": "claude",
+                "usage": {
+                    "primary": {
+                        "usedPercent": 0,
+                        "resetsAt": "2099-01-01T02:30:00Z",
+                        "windowMinutes": 300
+                    }
+                }
+            }
+        ]"#;
+
+        let config = RenderConfig::default();
+        let lines = vertical_lines(FULL, &config, base_options(true));
+
+        // A full bar with a marker mid-body used to show a coloured hole. The
+        // tick is drawn over the track, so the cell keeps its fill as background.
+        assert!(lines[0].contains('│'), "{lines:?}");
+        let (r, g, b) = hex_to_rgb(&config.severity_color(Severity::Good, false));
+        // Count inside the plate only: the sigil chip is painted with the same
+        // fill colour and would otherwise be counted as a bar cell.
+        let plate = lines[0]
+            .split_once('▕')
+            .and_then(|(_, rest)| rest.split_once('▏'))
+            .map(|(body, _)| body)
+            .expect("plate body");
+        let filled = plate.matches(&format!("48;2;{r};{g};{b}m")).count();
+        assert_eq!(filled, config.vertical_bar_width, "{lines:?}");
+    }
+
+    #[test]
+    fn vertical_bar_width_sets_the_body_and_is_clamped_to_a_readable_floor() {
+        let mut config = RenderConfig {
+            vertical_bar_width: 8,
+            ..RenderConfig::default()
+        };
+        let lines = vertical_lines(VERTICAL_CLAUDE, &config, base_options(false));
+        assert_eq!(plate_cells(&lines[0]), 8, "{lines:?}");
+
+        // A width below the floor would render a bar too coarse to read a
+        // percentage from; the strip clamps the same way.
+        config.vertical_bar_width = 1;
+        let lines = vertical_lines(VERTICAL_CLAUDE, &config, base_options(false));
+        assert_eq!(plate_cells(&lines[0]), 8, "{lines:?}");
+    }
+
+    #[test]
+    fn vertical_separates_provider_blocks_with_one_blank_line() {
+        let payload = [
+            String::from_utf8(VERTICAL_CLAUDE.to_vec()).expect("utf8"),
+            String::from_utf8(VERTICAL_SHARED_CYCLE.to_vec()).expect("utf8"),
+        ]
+        .join(",")
+        .replace("],[", ",");
+        let lines = vertical_lines(
+            payload.as_bytes(),
+            &RenderConfig::default(),
+            base_options(false),
+        );
+
+        // Grouping is otherwise carried only by which chip has letters, which is
+        // too subtle to parse at a glance on a phone.
+        assert_eq!(lines.len(), 7, "{lines:?}");
+        assert_eq!(lines[3], "", "{lines:?}");
+        assert!(lines[4].starts_with("\u{e0b6}CR\u{e0b4}"), "{lines:?}");
+    }
+
+    #[test]
+    fn vertical_urgency_order_puts_the_window_about_to_run_out_first() {
+        let payload = [
+            String::from_utf8(VERTICAL_CLAUDE.to_vec()).expect("utf8"),
+            String::from_utf8(VERTICAL_SHARED_CYCLE.to_vec()).expect("utf8"),
+        ]
+        .join(",")
+        .replace("],[", ",");
+        let config = RenderConfig {
+            vertical_sort: "urgency".into(),
+            ..RenderConfig::default()
+        };
+        let lines = vertical_lines(payload.as_bytes(), &config, base_options(false));
+
+        // Provider blocks are flattened, so every line carries its own chip and
+        // no blank separators are drawn.
+        assert_eq!(lines.len(), 6, "{lines:?}");
+        assert!(lines.iter().all(|line| !line.is_empty()), "{lines:?}");
+        assert!(lines[0].contains("CR"), "{lines:?}");
+        assert!(lines[0].contains(" 10%"), "{lines:?}");
+        assert!(lines[5].contains("CL"), "{lines:?}");
+        assert!(lines[5].contains(" 90%"), "{lines:?}");
+        // Same-cycle ties keep CodexBar's own slot order rather than sorting by
+        // superscript codepoint.
+        assert!(lines[0].contains("1mo¹"), "{lines:?}");
+        assert!(lines[1].contains("1mo²"), "{lines:?}");
+        assert!(lines[2].contains("1mo³"), "{lines:?}");
+    }
+
+    #[test]
+    fn vertical_reset_clock_answers_when_by_default() {
+        let config = RenderConfig {
+            reset_description_timezone_offset_minutes: Some(0),
+            ..RenderConfig::default()
+        };
+        let lines = vertical_lines(VERTICAL_CLAUDE, &config, base_options(false));
+
+        // Rows that all read `2d` say nothing about *when*; the clock answers it
+        // in six columns without replacing the relative countdown. Countdowns are
+        // padded to the widest form, so `1h` carries trailing space.
+        assert!(lines[0].contains(" 90% 1h "), "{lines:?}");
+        assert!(lines[0].ends_with(" 01:00"), "{lines:?}");
+        assert!(lines[1].ends_with(" 00:00"), "{lines:?}");
+    }
+
+    #[test]
+    fn vertical_reset_clock_can_be_traded_back_for_six_columns() {
+        let plain = RenderConfig {
+            vertical_reset_clock: false,
+            reset_description_timezone_offset_minutes: Some(0),
+            ..RenderConfig::default()
+        };
+        let lines = vertical_lines(VERTICAL_CLAUDE, &plain, base_options(false));
+        let clocked = vertical_lines(
+            VERTICAL_CLAUDE,
+            &RenderConfig {
+                reset_description_timezone_offset_minutes: Some(0),
+                ..RenderConfig::default()
+            },
+            base_options(false),
+        );
+
+        // Opting out costs the wall time but nothing else: the countdown stays,
+        // and the six columns are the only difference in the line.
+        assert!(lines[0].contains(" 90% 1h"), "{lines:?}");
+        assert!(!lines[0].contains("01:00"), "{lines:?}");
+        assert_eq!(
+            clocked[0].chars().count() - lines[0].chars().count(),
+            6,
+            "{lines:?} {clocked:?}"
+        );
+    }
+
+    #[test]
+    fn vertical_puts_strip_level_state_on_its_own_trailing_line() {
+        let config = RenderConfig::default();
+        let lines = vertical_lines(
+            VERTICAL_CLAUDE,
+            &config,
+            RenderOptions {
+                color: false,
+                stale: true,
+                degraded_cli: true,
+                now_epoch: 4_070_908_800,
+            },
+        );
+
+        // Stale/degraded are properties of the snapshot, not of one window, and
+        // a vertical view has no shared line to trail them on.
+        assert_eq!(lines.len(), 4, "{lines:?}");
+        assert_eq!(
+            lines[3],
+            format!("{} {}", config.stale_glyph, config.degraded_cli_glyph),
+            "{lines:?}"
+        );
+        // A stale snapshot cannot place a pacing marker, but the countdown is the
+        // reading rather than the pacing, so it survives and only turns grey.
+        assert!(!lines[0].contains('│'), "{lines:?}");
+        assert!(lines[0].contains(" 90% 1h"), "{lines:?}");
+    }
+
+    #[test]
+    fn vertical_renders_idle_when_nothing_is_renderable() {
+        let lines = vertical_lines(
+            include_bytes!("../../../test/fixtures/codexbar-empty.json"),
+            &RenderConfig::default(),
+            base_options(false),
+        );
+
+        assert_eq!(lines, vec!["AI idle".to_string()], "{lines:?}");
     }
 }

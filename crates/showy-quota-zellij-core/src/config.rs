@@ -39,6 +39,19 @@ pub struct RenderConfig {
 
     pub zellij_bar_width: usize,
     pub tmux_bar_width: Option<usize>,
+    /// Bar body width for the vertical view. Wider than the status-bar strip
+    /// because that surface pays for width in scarce status-line columns while
+    /// the vertical view owns the pane; still narrow enough that a full line
+    /// fits an SSH session on a phone without wrapping.
+    pub vertical_bar_width: usize,
+    /// `provider` (default) keeps CodexBar's provider blocks; `urgency` flattens
+    /// them so the window closest to running out is the first line.
+    pub vertical_sort: String,
+    /// Append each window's local reset clock (`11:54`) after its countdown. On
+    /// by default: rows that all read `1d` say nothing about *when*, and the six
+    /// columns it costs are columns the vertical view has - a full line is 44,
+    /// still inside an SSH session on a phone.
+    pub vertical_reset_clock: bool,
     pub terminal_bar_mode: String,
     pub provider_modes: Vec<(String, String)>,
     pub mono_color_mode: String,
@@ -82,6 +95,9 @@ impl Default for RenderConfig {
             dim_window_minutes: 10080,
             zellij_bar_width: 12,
             tmux_bar_width: None,
+            vertical_bar_width: 16,
+            vertical_sort: "provider".into(),
+            vertical_reset_clock: true,
             terminal_bar_mode: "auto".into(),
             provider_modes: vec![
                 ("gemini".into(), "mono3".into()),
@@ -255,6 +271,24 @@ impl RenderConfig {
         self.tmux_bar_width = get("SHOWY_QUOTA_TMUX_BAR_WIDTH")
             .and_then(|value| value.parse().ok())
             .or(self.tmux_bar_width);
+        self.vertical_bar_width = get_usize(
+            &get,
+            "SHOWY_QUOTA_VERTICAL_BAR_WIDTH",
+            self.vertical_bar_width,
+        );
+        // Only the two documented orders are accepted; an unknown value keeps
+        // provider blocks rather than silently inventing a third layout.
+        if let Some(value) = get("SHOWY_QUOTA_VERTICAL_SORT") {
+            let value = value.trim().to_ascii_lowercase();
+            if value == "provider" || value == "urgency" {
+                self.vertical_sort = value;
+            }
+        }
+        self.vertical_reset_clock = get_bool(
+            &get,
+            "SHOWY_QUOTA_VERTICAL_RESET_CLOCK",
+            self.vertical_reset_clock,
+        );
         assign_string(
             &get,
             "SHOWY_QUOTA_TERMINAL_BAR_MODE",

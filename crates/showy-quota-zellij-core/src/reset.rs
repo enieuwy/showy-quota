@@ -33,6 +33,25 @@ pub(crate) fn reset_epoch(
     parse_description_epoch(desc, now_epoch, reset_description_offset_minutes)
 }
 
+/// Local wall-clock time (`11:54`) a window resets at, for surfaces with room to
+/// print *when* alongside how long. The relative countdown already carries the
+/// day, so only hours/minutes are formatted; that keeps the column six cells
+/// wide. Uses the configured reset-description offset when set, otherwise the
+/// host's local offset, so it matches the countdown's own frame of reference.
+pub(crate) fn reset_clock(
+    raw: &str,
+    now_epoch: i64,
+    reset_description_offset_minutes: Option<i16>,
+) -> Option<String> {
+    let epoch = reset_epoch(raw, now_epoch, reset_description_offset_minutes)?;
+    let utc = OffsetDateTime::from_unix_timestamp(epoch).ok()?;
+    let offset = configured_reset_description_offset(reset_description_offset_minutes)
+        .unwrap_or_else(|| local_offset_at(utc));
+    utc.to_offset(offset)
+        .format(format_description!("[hour]:[minute]"))
+        .ok()
+}
+
 pub(crate) fn parse_offset_datetime(raw: &str) -> Option<i64> {
     if let Ok(parsed) = OffsetDateTime::parse(raw, &Rfc3339) {
         return Some(parsed.unix_timestamp());
