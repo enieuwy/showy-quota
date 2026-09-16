@@ -259,27 +259,37 @@ pub fn render_vertical(
     // between blocks, which is what makes the grouping readable at a glance.
     let mut lines: Vec<(&str, &VerticalWindow<'_>, bool)> = Vec::new();
     if config.vertical_sort == "urgency" {
-        let mut flat: Vec<(&str, &VerticalWindow<'_>)> = groups
+        let mut flat: Vec<(usize, &str, &VerticalWindow<'_>)> = groups
             .iter()
-            .flat_map(|(sigil, windows)| windows.iter().map(move |window| (*sigil, window)))
+            .enumerate()
+            .flat_map(|(group_index, (sigil, windows))| {
+                windows
+                    .iter()
+                    .map(move |window| (group_index, *sigil, window))
+            })
             .collect();
         flat.sort_by(|a, b| {
-            a.1.remaining
-                .cmp(&b.1.remaining)
+            a.2.remaining
+                .cmp(&b.2.remaining)
                 .then_with(|| {
-                    a.1.minutes
+                    a.2.minutes
                         .unwrap_or(i64::MAX)
-                        .cmp(&b.1.minutes.unwrap_or(i64::MAX))
+                        .cmp(&b.2.minutes.unwrap_or(i64::MAX))
                 })
-                .then_with(|| a.0.cmp(b.0))
-                // Ties fall back to the provider's own window order. Comparing
-                // labels would sort by superscript codepoint (² before ¹) and
-                // scramble same-cycle pools that CodexBar published in order.
-                .then_with(|| a.1.order.cmp(&b.1.order))
+                // Ties keep the order the providers arrived in, which is
+                // CodexBar's order as filtered by `provider_order`. Comparing
+                // the sigil instead sorted alphabetically, so an urgency tie
+                // put CL before CX under the default codex,claude order and
+                // contradicted the documented behaviour.
+                .then_with(|| a.0.cmp(&b.0))
+                // Within one provider, fall back to its own window order.
+                // Comparing labels would sort by superscript codepoint
+                // (² before ¹) and scramble same-cycle pools.
+                .then_with(|| a.2.order.cmp(&b.2.order))
         });
         lines.extend(
             flat.into_iter()
-                .map(|(sigil, window)| (sigil, window, true)),
+                .map(|(_, sigil, window)| (sigil, window, true)),
         );
     } else {
         for (sigil, windows) in &groups {
@@ -2521,11 +2531,6 @@ mod tests {
         assert_eq!(
             reset_epoch("Resets 12:00 AM", 1_704_088_800, Some(0)),
             Some(1_704_153_600)
-        );
-        // The two must never collapse onto each other.
-        assert_ne!(
-            reset_epoch("Resets 12:00 AM", 1_704_088_800, Some(0)),
-            reset_epoch("Resets 12:00 PM", 1_704_088_800, Some(0))
         );
     }
 

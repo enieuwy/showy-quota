@@ -47,7 +47,11 @@ pub(crate) fn reset_clock(
     let utc = OffsetDateTime::from_unix_timestamp(epoch).ok()?;
     let offset = configured_reset_description_offset(reset_description_offset_minutes)
         .unwrap_or_else(|| local_offset_at(utc));
-    utc.to_offset(offset)
+    // `to_offset` panics when the shifted result leaves the supported year
+    // range, which a far-future reset plus a large configured offset reaches
+    // (`9999-12-31T23:59:59Z` with `+14:00`). A status-bar renderer must not
+    // abort on a payload it merely displays: drop the clock and keep the row.
+    utc.checked_to_offset(offset)?
         .format(format_description!("[hour]:[minute]"))
         .ok()
 }
@@ -178,6 +182,21 @@ mod tests {
     fn rejects_overlong_reset_strings() {
         let raw = format!("Resets {}", "1".repeat(65));
         assert_eq!(reset_epoch(&raw, 0, Some(0)), None);
+    }
+
+    #[test]
+    fn far_future_reset_with_large_offset_drops_the_clock() {
+        // A reset at the end of the supported range shifted by a configured
+        // offset lands outside it. `to_offset` panics there, which aborted the
+        // whole renderer for a payload it only displays, so the clock must
+        // degrade to None instead. +14:00 is a real zone (Kiritimati), not an
+        // extreme: the panic was reachable without a hostile offset.
+        assert_eq!(reset_clock("9999-12-31T23:59:59Z", 0, Some(14 * 60)), None);
+        // A shift that stays inside the range still renders.
+        assert_eq!(
+            reset_clock("2099-01-01T00:12:00Z", 0, Some(14 * 60)),
+            Some("14:12".to_string())
+        );
     }
 
     #[test]

@@ -108,14 +108,50 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   override silently honoured would poison cache-age and stale rendering
   everywhere; each case must fall back to the real clock, and a valid override
   must still be honoured exactly.
-- `test/render_test.sh` no longer inherits colour from the shell that runs it.
-  The renderer disables colour when `NO_COLOR` is set **or** `TERM` is exactly
-  `dumb`, so a terminal or agent harness setting either one stripped the ANSI
-  that the `--emit vertical` assertions parse: the suite passed locally and
-  failed in CI, which sets neither. The harness now clears `NO_COLOR`,
-  `CLICOLOR`, `CLICOLOR_FORCE` and `FORCE_COLOR` and pins `TERM`, and the
-  vertical block states the colour it expects. Verified identical (713 passed)
-  under `NO_COLOR=1 TERM=dumb` and with both unset.
+- **`--diagnose --redact` no longer reports `"redacted": true` over an
+  unmasked value.** Review found seven paths that reached a paste intact: the
+  JSON `codexbarProbe.command`, the text cache-probe line, the `state` payload
+  (provider error messages arrive from CodexBar and quote the URL or path they
+  failed against), `config.theme` in both modes, `manage serve`,
+  `codexbarProbe.version` (a configured binary prints whatever it likes), and a
+  value mixing prose with a URL, where a `://` anywhere made everything before
+  the scheme a literal prefix. A control that claims safety it does not have is
+  worse than no control, so masking now covers absolute, `~user`, bare
+  `~user`, relative, `/Users`- and `/home`-anchored, IPv6-bracketed,
+  `%q`-escaped and userinfo-bearing forms. The port survives a query string
+  (`http://<host>:8080`), a bare command name stays readable, and the
+  unredacted default is unchanged. 24 assertions cover the shapes.
+- The vertical view keeps provider order when two windows tie under
+  `SHOWY_QUOTA_VERTICAL_SORT=urgency`. It compared the rendered sigil first, so
+  the default `codex,claude` order rendered `CL` before `CX` — contradicting
+  the documented tie behaviour, with no assertion on a cross-provider tie.
+- A far-future `resetsAt` can no longer abort the renderer. `reset_clock` used
+  the panicking `to_offset`, so `9999-12-31T23:59:59Z` with a configured
+  `+14:00` (Kiritimati, not an extreme) killed the process for a payload it
+  only displays. The clock now degrades to blank. Verified by mutation.
+- `make test` rebuilds the renderer when its sources change. The suite built
+  `target/release/showy-quota-render` only when the file was **absent**, so a
+  stale binary silently tested old code — which is why the colour failure below
+  reproduced in CI but not locally. `$(RENDER_BIN)` is now a real file target
+  with the crate sources as prerequisites, and `make test` depends on it.
+- `test/render_test.sh` no longer inherits colour, locale or umask from the
+  shell that runs it. The renderer disables colour when `NO_COLOR` is set
+  **or** `TERM` is exactly `dumb`, and `SHOWY_QUOTA_FORCE_COLOR=1` overrides
+  both the other way, so a terminal or agent harness setting any of them
+  flipped the ANSI that the `--emit vertical` assertions parse: the suite
+  passed locally and failed in CI, which sets none. The harness now clears all
+  four, pins `TERM`, pins `LC_ALL=C`/`TZ=UTC` so the `date`-backed meridiem
+  parser cannot disagree with its Python expectation because of the host locale
+  (under `fa_IR` the shell side returned nothing at all), and pins `umask 022`
+  because config sourcing refuses a group/other-writable file — under a `0000`
+  umask the suite wrote 0666 fixtures and failed its own palette tests.
+- `make check-deps` enforces the floors it prints. `JQ_MIN` was interpolated
+  into the message but not the comparison, so raising it changed the text only;
+  `doctor` likewise advised a 7.1.1 ImageMagick floor while testing `major < 7`,
+  letting 7.1.0 pass unwarned. Both now derive from their variables.
+- `make ci-gates` runs `check-deps`, so the local gate matches CI's nine steps
+  rather than eight, and its `cargo-audit` hint pins the same version the
+  workflows install. Renovate manages all four pin sites.
 
 ### Removed
 - **`SHOWY_QUOTA_CODEXBAR_SERVE_PORT`.** The port now always derives from

@@ -27,13 +27,31 @@ export SHOWY_QUOTA_CODEXBAR_SERVE_URL=
 
 # Colour must never be inherited from the developer's shell. The renderer
 # disables colour when NO_COLOR is set OR when TERM is exactly "dumb"
-# (showy-quota-render.rs:334-335). An agent harness or editor terminal that
-# sets either one silently strips the ANSI that colour-sensitive assertions
-# parse, so the suite passes locally and fails in CI, which sets neither.
-# Normalise to the CI state — colour enabled — and let each test state the
-# colour it expects.
-unset NO_COLOR CLICOLOR CLICOLOR_FORCE FORCE_COLOR
+# (showy-quota-render.rs:334-335), and SHOWY_QUOTA_FORCE_COLOR=1 overrides both
+# in the other direction. An agent harness or editor terminal that sets any of
+# them silently flips the ANSI that colour-sensitive assertions parse, so the
+# suite passes locally and fails in CI, which sets none. Normalise to the CI
+# state — colour enabled, nothing forced — and let each test state the colour
+# it expects.
+unset NO_COLOR CLICOLOR CLICOLOR_FORCE FORCE_COLOR SHOWY_QUOTA_FORCE_COLOR
 export TERM=xterm-256color
+
+# The shell reset-description parser delegates month and meridiem parsing to
+# `date`, which is locale-sensitive: under fa_IR or fr_FR an English "12 PM"
+# parses differently or not at all, while the Python expectation helper stays
+# locale-independent. Pin the locale so the two sides cannot disagree because
+# of the host, and pin the timezone so a countdown assertion cannot depend on
+# where the machine is.
+export LC_ALL=C
+export TZ=UTC
+
+# Config sourcing refuses a group/other-writable file, so the permissions of
+# the fixtures this suite writes decide whether those tests pass. A shell with
+# a permissive umask (0000 is common in agent and CI harnesses) produces 0666
+# config files and fails them for a reason that has nothing to do with the
+# code. Pin the umask for the same reason the colour and locale state above is
+# pinned: the suite must not read the shell that launched it.
+umask 022
 
 
 # Build the native renderer only when the suite cannot use the repository
@@ -710,13 +728,20 @@ assert_equals "uint helper validates, clamps, and decimal-normalizes" "42|7|100|
 # shellcheck disable=SC2016
 out=$(run_common_eval 'printf "%s" "$(showy_quota_now_epoch)"' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_NOW_EPOCH=4070908800)
 assert_equals "now_epoch honors a valid pinned override" "4070908800" "${out}"
+# Bracket the call with the real clock instead of a floor: a parser that
+# returned one fixed epoch above 1600000000 for every junk value would satisfy
+# a threshold while still poisoning every freshness decision. The window is
+# generous enough for a slow subshell and still excludes a constant.
 for bad_now in abc -1 ' 123 ' '' 1e9 '12.5' '0x10'; do
+    now_before=$(date +%s)
     # shellcheck disable=SC2016
     out=$(run_common_eval 'printf "%s" "$(showy_quota_now_epoch)"' SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_NOW_EPOCH="${bad_now}")
-    if [[ "${out}" =~ ^[0-9]+$ ]] && (( out > 1600000000 )) && [[ "${out}" != "${bad_now}" ]]; then
+    now_after=$(date +%s)
+    if [[ "${out}" =~ ^[0-9]+$ ]] && (( out >= now_before && out <= now_after )); then
         ok "now_epoch falls back to the real clock for malformed '${bad_now}'"
     else
-        fail "now_epoch falls back to the real clock for malformed '${bad_now}'" "got '${out}'"
+        fail "now_epoch falls back to the real clock for malformed '${bad_now}'" \
+            "got '${out}', expected the clock between ${now_before} and ${now_after}"
     fi
 done
 
@@ -1167,6 +1192,69 @@ if printf '%s' "${out}" | jq -e '.redacted == false and (.paths.repoRoot | start
 else
     fail "diagnose json is unredacted unless --redact is passed" "${out}"
 fi
+
+# Every value that reaches a paste must be masked, not just the ones the
+# redactor was first written for. Five distinct code paths leaked a real path
+# or host while the payload still reported `"redacted": true`, which tells the
+# user the paste is safe: the JSON codexbar command, the text cache-probe line,
+# the state payload (provider error messages arrive from CodexBar and quote the
+# URL or path they failed against), the theme value, and `manage serve`. Each
+# form below is a shape that escaped an earlier pass, so the table doubles as
+# the list of regressions to defend: absolute, `~user`, bare `~user`,
+# relative, IPv6-bracketed, and userinfo-bearing.
+redact_probe_cache=$(mk_cache)
+for redact_case in \
+    '/Users/alice/private/token.json|alice' \
+    '/Users/alice x/private/token.json|alice' \
+    '/Users/alice%corp/private/token.json|alice' \
+    '/Users/alice:corp/private/token.json|alice' \
+    '/home/alice/private/token.json|alice' \
+    '~alice/private/token.json|alice' \
+    '~alice|alice' \
+    '../alice/private/token.json|alice' \
+    'https://secret.example.test:8443/private|secret.example' \
+    'https://[2001:db8::1]:8443/private|db8' \
+    'http://user:pw@secret.example.test/x|secret.example'
+do
+    redact_value="${redact_case%%|*}"
+    redact_needle="${redact_case##*|}"
+    printf '[{"provider":"cursor","error":{"code":1,"kind":"provider","message":"failed at %s"}}]\n' \
+        "${redact_value}" > "${redact_probe_cache}/usage.json"
+    seed_usage_source "${redact_probe_cache}" "cli"
+    for redact_mode in "--diagnose --redact" "--diagnose --json --redact"; do
+        # shellcheck disable=SC2086
+        redact_seen=$(
+            env \
+                PATH="${stub_dir}:${PATH}" \
+                XDG_CONFIG_HOME="${diag_xdg}" \
+                SHOWY_QUOTA_NO_CONFIG=1 \
+                SHOWY_QUOTA_CACHE_DIR="${redact_probe_cache}" \
+                SHOWY_QUOTA_MANAGE_SERVE=0 \
+                SHOWY_QUOTA_THEME="${redact_value}" \
+                "${REPO_ROOT}/bin/showy-quota" ${redact_mode} 2>&1 | grep -c "${redact_needle}" || true
+        )
+        assert_equals "diagnose ${redact_mode} masks ${redact_value}" "0" "${redact_seen}"
+    done
+done
+
+# Masking must not cost the value a maintainer needs: the port survives even
+# when the authority ends at a query rather than a path.
+assert_equals "diagnose --redact keeps the port when a query follows the host" \
+    "http://<host>:8080" \
+    "$(env PATH="${stub_dir}:${PATH}" XDG_CONFIG_HOME="${diag_xdg}" SHOWY_QUOTA_NO_CONFIG=1 \
+        SHOWY_QUOTA_CACHE_DIR="${redact_probe_cache}" SHOWY_QUOTA_MANAGE_SERVE=0 \
+        SHOWY_QUOTA_CODEXBAR_SERVE_URL='http://secret.example:8080?token=1' \
+        "${REPO_ROOT}/bin/showy-quota" --diagnose --redact 2>&1 \
+        | sed -n 's/.*SHOWY_QUOTA_CODEXBAR_SERVE_URL=\(.*\)/\1/p' | head -1)"
+
+# A bare command name is not a path and stays readable, or the flag would
+# destroy the field it exists to report.
+assert_equals "diagnose --redact keeps a bare command name" "codexbar" \
+    "$(env PATH="${stub_dir}:${PATH}" XDG_CONFIG_HOME="${diag_xdg}" SHOWY_QUOTA_NO_CONFIG=1 \
+        SHOWY_QUOTA_CACHE_DIR="${redact_probe_cache}" SHOWY_QUOTA_MANAGE_SERVE=0 \
+        SHOWY_QUOTA_CODEXBAR_BIN=codexbar \
+        "${REPO_ROOT}/bin/showy-quota" --diagnose --json --redact 2>/dev/null \
+        | jq -r '.codexbarProbe.command')"
 
 # ── grant zellij permissions ──────────────────────────────────────────
 printf '\ngrant zellij permissions\n'
@@ -2081,7 +2169,7 @@ assert_equals "render rows CLI honours explicit --ansi" "true" "$(printf '%s' "$
 # here rather than inherited from the environment. The coloured path is covered
 # by the `--emit rows --ansi` test above.
 render_vertical() {
-    env NO_COLOR=1 SHOWY_QUOTA_NOW_EPOCH=4070908800 "$@" \
+    env NO_COLOR=1 SHOWY_QUOTA_FORCE_COLOR=0 SHOWY_QUOTA_NOW_EPOCH=4070908800 "$@" \
         "${RENDER_BIN}" --emit vertical --json -
 }
 
@@ -2101,9 +2189,17 @@ assert_equals "render vertical CLI keeps same-cycle pools on separate ordinal li
 assert_equals "render vertical CLI reports each pool's own percentage" "88%,75%,100%" "$(printf '%s\n' "${render_vertical_cursor}" | grep -oE '[0-9]+%' | paste -sd, -)"
 
 # `urgency` flattens the provider blocks so the window closest to running out is
-# the first line; ties keep CodexBar's own slot order.
+# the first line. A tie keeps provider order, not sigil order: sorting the sigil
+# put CL before CX under the default codex,claude order, contradicting the
+# documented behaviour, and no assertion covered a cross-provider tie.
 assert_equals "render vertical CLI urgency order leads with the lowest remaining" "75%,88%,100%" "$(render_vertical SHOWY_QUOTA_VERTICAL_SORT=urgency < "${FIXTURE_DIR}/codexbar-cursor.json" | grep -oE '[0-9]+%' | paste -sd, -)"
 assert_equals "render vertical CLI urgency order drops the block separators" "0" "$(render_vertical SHOWY_QUOTA_VERTICAL_SORT=urgency < "${FIXTURE_DIR}/codexbar-antigravity-quad.json" | grep -c '^$')"
+vertical_tie_fixture="${TMP}/codexbar-vertical-tie.json"
+printf '%s\n' '[{"provider":"codex","usage":{"primary":{"usedPercent":50,"windowMinutes":300,"resetsAt":"2099-01-01T00:12:00Z"},"secondary":null,"tertiary":null}},{"provider":"claude","usage":{"primary":{"usedPercent":50,"windowMinutes":300,"resetsAt":"2099-01-01T00:12:00Z"},"secondary":null,"tertiary":null}}]' > "${vertical_tie_fixture}"
+assert_equals "render vertical CLI urgency tie keeps provider order" "CX,CL" \
+    "$(render_vertical SHOWY_QUOTA_VERTICAL_SORT=urgency < "${vertical_tie_fixture}" | sed -E 's/^[^A-Z]*([A-Z]+).*/\1/' | paste -sd, -)"
+assert_equals "render vertical CLI urgency tie follows a configured provider order" "CL,CX" \
+    "$(render_vertical SHOWY_QUOTA_VERTICAL_SORT=urgency SHOWY_QUOTA_PROVIDER_ORDER=claude,codex < "${vertical_tie_fixture}" | sed -E 's/^[^A-Z]*([A-Z]+).*/\1/' | paste -sd, -)"
 
 # The clock answers "when" for rows that all read the same relative countdown, so
 # it is on by default; `0` trades it back for six columns.

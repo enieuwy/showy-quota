@@ -201,7 +201,8 @@ If you do not pre-grant, reveal floating panes once, focus the pending permissio
 Replacing the `.wasm` on disk does not update running Zellij sessions: each
 session caches the compiled module by plugin path, and new tabs reuse that
 cached module. Restarting the session always picks up the new build. To
-upgrade a live session instead (verified on Zellij 0.44.x):
+upgrade a live session instead (steps verified on Zellij 0.44.x, before the
+0.45 floor; not re-verified against a 0.45 server):
 
 1. Refresh the session's module cache so new tabs load the new build. A
    plugin `new-pane` with `--skip-plugin-cache` always performs a fresh
@@ -217,8 +218,8 @@ upgrade a live session instead (verified on Zellij 0.44.x):
    navigate with arrows, `Tab` reloads the selected instance, `Del` closes
    one, `Esc` exits. If its list is empty, open the session-manager once
    (`zellij action launch-or-focus-plugin session-manager --floating`) and
-   close it — on 0.44.x the plugin list only populates after a session-list
-   query.
+   close it — on 0.44.x the plugin list only populated after a session-list
+   query. Whether 0.45 still needs that nudge is unverified.
 
 Avoid `zellij action start-or-reload-plugin` for strips configured in a
 layout: it matches instances by location **and** configuration, its

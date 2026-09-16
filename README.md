@@ -302,6 +302,9 @@ Config is optional; create it only for values you want to override. The full env
 | `SHOWY_QUOTA_CODEXBAR_SERVE_REFRESH_SECONDS` | /usage re-read cadence when `codexbar serve` is available. default=`SHOWY_QUOTA_REFRESH_SECONDS / 2` |
 | `SHOWY_QUOTA_TIME_WARN_MINUTES` | Urgent countdown threshold. default=`30` |
 | `SHOWY_QUOTA_SKETCHYBAR_CLICK` | Default SketchyBar click action; degraded icons open provider status URLs. default=`open -b com.steipete.codexbar` |
+| `SHOWY_QUOTA_VERTICAL_BAR_WIDTH` | Bar width in cells for each `--emit vertical` line. default=`16` |
+| `SHOWY_QUOTA_VERTICAL_SORT` | `--emit vertical` line order: `provider` keeps CodexBar's blocks, `urgency` puts the window closest to running out first (ties keep provider order). default=`provider` |
+| `SHOWY_QUOTA_VERTICAL_RESET_CLOCK` | Append each window's local reset clock to its `--emit vertical` line; `0` trades it back for six columns. default=`1` |
 
 Palette overrides use role-first primary keys such as
 `SHOWY_QUOTA_PALETTE_PRIMARY_*`; long-horizon windows are dimmed from the

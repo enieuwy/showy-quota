@@ -81,12 +81,14 @@
   "customManagers": [
     {
       "customType": "regex",
-      "description": "cargo-audit is pinned in workflow run steps, which no built-in manager reads.",
+      "description": "cargo-audit is pinned in workflow run steps and in the Makefile gate, which no built-in manager reads.",
       "managerFilePatterns": [
-        "/^\\.github/workflows/.+\\.ya?ml$/"
+        "/^\\.github/workflows/.+\\.ya?ml$/",
+        "/^Makefile$/"
       ],
       "matchStrings": [
-        "CARGO_AUDIT_VERSION:\\s*\"(?<currentValue>[^\"]+)\""
+        "CARGO_AUDIT_VERSION:\\s*\"(?<currentValue>[^\"]+)\"",
+        "CARGO_AUDIT_VERSION\\s*:=\\s*(?<currentValue>[0-9][^\\s]*)"
       ],
       "depNameTemplate": "cargo-audit",
       "datasourceTemplate": "crate"

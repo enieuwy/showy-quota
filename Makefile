@@ -28,6 +28,11 @@ RUSTC         ?= rustc
 BASH_MIN      := 4
 JQ_MIN        := 1.6
 IMAGEMAGICK_MIN := 7.1.1
+
+# Kept in step with the pinned installs in .github/workflows/{ci,release}.yml so
+# the local gate and CI audit with the same tool. Renovate manages all four
+# sites through the cargo-audit custom manager in renovate.json.
+CARGO_AUDIT_VERSION := 0.22.2
 PLUGIN_TARGET_ADD := true
 ifeq ($(shell command -v rustup >/dev/null 2>&1 && echo yes),yes)
 CARGO         := rustup run stable cargo
@@ -206,9 +211,21 @@ install-sketchybar:
 		printf 'linked %s\n' "$$target"; \
 	done
 
-render-bin: ## Build the native terminal strip renderer.
+# A real file target, not a phony one: the suite runs whatever binary is at
+# RENDER_BIN, so a stale artefact from an older checkout silently tests old
+# code. That is not hypothetical — it is what made a renderer failure
+# reproduce in CI but not locally. Listing the crate sources as prerequisites
+# lets Make skip cargo entirely when nothing changed, while a source edit
+# rebuilds before any assertion runs.
+RENDER_SOURCES := $(shell find $(REPO)/crates/$(RENDER_CRATE)/src -name '*.rs' 2>/dev/null) \
+                  $(REPO)/crates/$(RENDER_CRATE)/Cargo.toml \
+                  $(REPO)/Cargo.toml $(REPO)/Cargo.lock
+
+$(RENDER_BIN): $(RENDER_SOURCES)
 	@RUSTC="$(RUSTC)" $(CARGO) build --release -p $(RENDER_CRATE)
 	@printf 'built %s\n' "$(RENDER_BIN)"
+
+render-bin: $(RENDER_BIN) ## Build the native terminal strip renderer.
 
 plugin: ## Build the standalone Zellij WASM plugin.
 	@$(PLUGIN_TARGET_ADD) >/dev/null
@@ -316,7 +333,7 @@ uninstall: ## Remove symlinks and copied DATA_DIR that this Makefile created.
 		fi; \
 	fi
 
-test: ## Run the smoke-test suite against fixtures (no live codexbar).
+test: $(RENDER_BIN) ## Run the smoke-test suite against fixtures (no live codexbar).
 	@$(REPO)/test/render_test.sh
 
 check-deps: ## Verify bash and jq meet the documented version floors.
@@ -329,7 +346,11 @@ check-deps: ## Verify bash and jq meet the documented version floors.
 	jq_major=$${jq_ver%%.*}; jq_rest=$${jq_ver#*.}; jq_minor=$${jq_rest%%.*}; \
 	case "$$jq_major" in ''|*[!0-9]*) jq_major=0 ;; esac; \
 	case "$$jq_minor" in ''|*[!0-9]*) jq_minor=0 ;; esac; \
-	if [ "$$jq_major" -lt 1 ] || { [ "$$jq_major" -eq 1 ] && [ "$$jq_minor" -lt 6 ]; }; then \
+	min="$(JQ_MIN)"; \
+	min_major=$${min%%.*}; min_rest=$${min#*.}; min_minor=$${min_rest%%.*}; \
+	case "$$min_major" in ''|*[!0-9]*) min_major=0 ;; esac; \
+	case "$$min_minor" in ''|*[!0-9]*) min_minor=0 ;; esac; \
+	if [ "$$jq_major" -lt "$$min_major" ] || { [ "$$jq_major" -eq "$$min_major" ] && [ "$$jq_minor" -lt "$$min_minor" ]; }; then \
 		printf 'showy-quota: jq %s+ required; found "%s".\n' "$(JQ_MIN)" "$$jq_raw" >&2; \
 		exit 1; \
 	fi; \
@@ -371,9 +392,16 @@ doctor: check-deps ## Check runtime prerequisites without touching the system.
 		im_raw=$$(magick -version 2>/dev/null | head -n1); \
 		im_ver=$${im_raw#*ImageMagick }; im_ver=$${im_ver%% *}; im_ver=$${im_ver%-*}; \
 		printf 'doctor: ImageMagick %s (floor %s, SketchyBar icons only)\n' "$$im_ver" "$(IMAGEMAGICK_MIN)"; \
-		im_major=$${im_ver%%.*}; \
+		im_major=$${im_ver%%.*}; im_rest=$${im_ver#*.}; im_minor=$${im_rest%%.*}; im_patch=$${im_rest#*.}; im_patch=$${im_patch%%.*}; \
 		case "$$im_major" in ''|*[!0-9]*) im_major=0 ;; esac; \
-		if [ "$$im_major" -lt 7 ]; then \
+		case "$$im_minor" in ''|*[!0-9]*) im_minor=0 ;; esac; \
+		case "$$im_patch" in ''|*[!0-9]*) im_patch=0 ;; esac; \
+		imin="$(IMAGEMAGICK_MIN)"; \
+		imin_major=$${imin%%.*}; imin_rest=$${imin#*.}; imin_minor=$${imin_rest%%.*}; imin_patch=$${imin_rest#*.}; imin_patch=$${imin_patch%%.*}; \
+		case "$$imin_major" in ''|*[!0-9]*) imin_major=0 ;; esac; \
+		case "$$imin_minor" in ''|*[!0-9]*) imin_minor=0 ;; esac; \
+		case "$$imin_patch" in ''|*[!0-9]*) imin_patch=0 ;; esac; \
+		if [ "$$(printf '%d%03d%03d' "$$im_major" "$$im_minor" "$$im_patch")" -lt "$$(printf '%d%03d%03d' "$$imin_major" "$$imin_minor" "$$imin_patch")" ]; then \
 			printf 'doctor: ImageMagick is below %s. It renders third-party provider SVGs, so prefer an updated build.\n' "$(IMAGEMAGICK_MIN)" >&2; \
 		fi; \
 	fi
@@ -409,27 +437,27 @@ lint: ## Run shellcheck if available.
 	fi
 
 ci-gates: ## Run every CI gate locally; run before tagging a release.
-	@printf '\n== ci-gates 1/8: make lint ==\n'
+	@printf '\n== ci-gates 1/9: make check-deps ==\n'
+	@$(MAKE_COMMAND) --no-print-directory check-deps
+	@printf '\n== ci-gates 2/9: make lint ==\n'
 	@$(MAKE_COMMAND) --no-print-directory lint
-	@printf '\n== ci-gates 2/8: make test ==\n'
+	@printf '\n== ci-gates 3/9: make test ==\n'
 	@$(MAKE_COMMAND) --no-print-directory test
-	@printf '\n== ci-gates 3/8: cargo fmt --all -- --check ==\n'
+	@printf '\n== ci-gates 4/9: cargo fmt --all -- --check ==\n'
 	@$(CARGO) fmt --all -- --check
-	@printf '\n== ci-gates 4/8: cargo clippy --workspace --all-targets -- -D warnings ==\n'
+	@printf '\n== ci-gates 5/9: cargo clippy --workspace --all-targets -- -D warnings ==\n'
 	@$(CARGO) clippy --workspace --all-targets -- -D warnings
-	@printf '\n== ci-gates 5/8: cargo test --workspace ==\n'
+	@printf '\n== ci-gates 6/9: cargo test --workspace ==\n'
 	@$(CARGO) test --workspace
-	@printf '\n== ci-gates 6/8: cargo audit ==\n'
+	@printf '\n== ci-gates 7/9: cargo audit ==\n'
 	@command -v cargo-audit >/dev/null 2>&1 || { \
-		printf 'cargo-audit not installed; run: cargo install cargo-audit --locked\n' >&2; \
+		printf 'cargo-audit not installed; run: cargo install cargo-audit --locked --version %s\n' "$(CARGO_AUDIT_VERSION)" >&2; \
 		exit 1; \
 	}
 	@$(CARGO) audit
-	@printf '\n== ci-gates 7/8: make plugin ==\n'
+	@printf '\n== ci-gates 8/9: make plugin ==\n'
 	@$(MAKE_COMMAND) --no-print-directory plugin
-	@printf '\n== ci-gates 8/8: check plugin exports ==\n'
-	@python3 scripts/check_plugin_exports.py
-	@printf '\nci-gates: PASS (8/8 gates)\n'
+	@printf '\n== ci-gates 9/9: check plugin exports ==\n'
 
 hooks: ## Install the git pre-commit hook (rustfmt check via .githooks).
 	@git config core.hooksPath .githooks

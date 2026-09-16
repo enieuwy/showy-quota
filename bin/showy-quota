@@ -405,7 +405,27 @@ preview_theme() {
 # machine: a path collapses to its basename, and a URL keeps its scheme and
 # port but loses the host. Values that carry no local layout (counts, provider
 # ids, theme names, booleans) are never touched.
+#
+# Anything path-shaped collapses, not just absolute paths. `~alice/x` and
+# `../private/x` name a user and a layout just as plainly as `/Users/alice/x`,
+# and a redactor that misses them while the payload still reports
+# `"redacted": true` is worse than no redaction: it tells the user the paste is
+# safe. A bare word with no separator (`codexbar`, `jq`) is a command name, not
+# a path, and stays readable.
 DIAGNOSE_REDACT=0
+
+# Mask every path-shaped and URL-shaped token in free text. Shared by the
+# single-value helper and the state walk so both agree on what a mask is, and
+# so a value that mixes prose with a path (`cb_version` is whatever the
+# configured binary prints) cannot slip through by not looking like one token.
+diagnose_mask_text() {
+    sed -E \
+        -e 's#/(Users|home)/[^/[:space:]]*#<home>#g' \
+        -e 's#(~[A-Za-z0-9._-]*|\.\.?)(/[A-Za-z0-9._@+-]+)*/([A-Za-z0-9._@+-]+)#<path>/\3#g' \
+        -e 's#([a-zA-Z][a-zA-Z0-9+.-]*)://([^/[:space:]@]*@)?(\\?\[[^]]*\\?]|[^/:[:space:]]+)(:[0-9]+)?#\1://<host>\4#g' \
+        -e 's#(/[A-Za-z0-9._@+-]+){1,}/([A-Za-z0-9._@+-]+)#<path>/\2#g' \
+        -e 's#~[A-Za-z0-9._-]+#<home>#g'
+}
 
 diagnose_redact_value() {
     local value="$1" scheme rest hostport port
@@ -413,21 +433,97 @@ diagnose_redact_value() {
         printf '%s' "${value}"
         return 0
     fi
+    # The URL arm exists to keep the port, which the generic masker cannot do
+    # as precisely, so it only claims a value that is nothing but a URL. A
+    # `://` anywhere else (prose plus a URL, or a path followed by a URL) used
+    # to make everything before the scheme a literal prefix and leak it.
+    if [[ "${value}" =~ ^[a-zA-Z][a-zA-Z0-9+.-]*://[^[:space:]]*$ ]]; then
+        scheme="${value%%://*}"
+        rest="${value#*://}"
+        # The authority ends at the first `/`, `?` or `#`. Splitting on `/`
+        # alone leaves `8080?token=1` in the port slot, which fails the
+        # numeric test and silently drops the port the maintainer needs.
+        hostport="${rest%%[/?#]*}"
+        port="${hostport##*:}"
+        if [[ "${port}" == "${hostport}" || ! "${port}" =~ ^[0-9]+$ ]]; then
+            printf '%s://<host>' "${scheme}"
+        else
+            printf '%s://<host>:%s' "${scheme}" "${port}"
+        fi
+        return 0
+    fi
     case "${value}" in
-        *://*)
-            scheme="${value%%://*}"
-            rest="${value#*://}"
-            hostport="${rest%%/*}"
-            port="${hostport##*:}"
-            if [[ "${port}" == "${hostport}" || ! "${port}" =~ ^[0-9]+$ ]]; then
-                printf '%s://<host>' "${scheme}"
-            else
-                printf '%s://<host>:%s' "${scheme}" "${port}"
-            fi
-            ;;
-        /*) printf '<path>/%s' "${value##*/}" ;;
+        # Single clean tokens keep their basename, which is the useful part of
+        # a diagnostic path. Anything else — whitespace, or a mix of shapes —
+        # goes through the generic masker rather than a prefix-preserving arm.
+        *[[:space:]]*) printf '%s' "${value}" | diagnose_mask_text ;;
+        # The tilde arms precede the generic path arm: `~alice/x` also matches
+        # `*/*`, so ordering them after it left them unreachable and reported a
+        # home path as an ordinary one. `~alice` alone has no separator, so a
+        # basename strip returns the tilde form unchanged and would print the
+        # account name; only the multi-segment form has a basename worth keeping.
+        ~*/*) printf '<home>/%s' "${value##*/}" ;;
+        ~*) printf '<home>' ;;
+        /*|*/*) printf '<path>/%s' "${value##*/}" ;;
         *)  printf '%s' "${value}" ;;
     esac
+}
+
+# `--redact` must also cover values showy-quota did not compose. Provider error
+# messages arrive from CodexBar and can quote the URL or path they failed
+# against, and they reach both modes through the `state` payload without
+# passing diagnose_redact_value. showy-quota-state already masks secret-shaped
+# values; hosts and absolute paths are ours to mask. This walks every string
+# leaf, so a new state field cannot bypass it by being added later, and leaves
+# non-strings untouched so the key/type contract holds.
+#
+# jq is a hard requirement, so a failure here means a broken jq, not a missing
+# value: fail closed to `null` rather than emit the unredacted payload.
+diagnose_redact_json() {
+    local payload
+    payload="$(cat)"
+    if (( ! DIAGNOSE_REDACT )) || [[ -z "${payload}" || "${payload}" == null ]]; then
+        printf '%s' "${payload}"
+        return 0
+    fi
+    # The text mode pipes stderr through here too, so the payload is not always
+    # JSON. Mask at the text level in that case: dropping a state error would
+    # trade a disclosure bug for a diagnostic one.
+    #
+    # The host class accepts a bracketed literal, optionally backslash-escaped
+    # because `lib/common.sh` reports rejected values with `%q`, before the
+    # colon-free form. Matching `[^/:]+` first would stop at the first inner
+    # colon and leave the rest of an IPv6 address in the output.
+    #
+    # The home prefixes run first and deliberately consume a whole segment up
+    # to the next `/`, including spaces and punctuation. `/Users/` and `/home/`
+    # make the boundary unambiguous, so the account name cannot survive as a
+    # fragment the way a narrow ASCII segment class let `/Users/alice x` and
+    # `/Users/alice%corp` do.
+    #
+    # Known limit: a path inside free prose has no unambiguous end, so an
+    # unanchored relative fragment (`foo/bar`) is left alone rather than
+    # mangling every message containing `and/or`, `read/write` or `TCP/IP`.
+    # That residue carries no account name and no home directory. `--redact`
+    # is a paste-safety aid for text this program did not compose, not a
+    # guarantee against a determined leak through free-form upstream output.
+    #
+    if ! printf '%s' "${payload}" | jq -e . >/dev/null 2>&1; then
+        printf '%s' "${payload}" | diagnose_mask_text
+        return 0
+    fi
+    printf '%s' "${payload}" | jq 'def mask:
+  if type == "string" then
+    gsub("/(?:Users|home)/[^/]*"; "<home>")
+    | gsub("(?<t>~[A-Za-z0-9._-]*|\\.\\.?)(?:/[A-Za-z0-9._@+-]+)*/(?<b>[A-Za-z0-9._@+-]+)"; "<path>/\(.b)")
+    | gsub("(?<s>[a-zA-Z][a-zA-Z0-9+.-]*)://(?:[^/@\\s]*@)?(?:\\\\?\\[[^\\]\\s]*\\\\?\\]|[^/:\\s]+)(?<p>:[0-9]+)?"; "\(.s)://<host>\(.p // "")")
+    | gsub("(?<d>(?:/[A-Za-z0-9._@+-]+){1,})/(?<b>[A-Za-z0-9._@+-]+)"; "<path>/\(.b)")
+    | gsub("~(?<u>[A-Za-z0-9._-]+)"; "<home>")
+  else . end;
+walk(mask)' 2>/dev/null || {
+        printf 'null'
+        printf 'showy-quota: --redact could not filter state; reporting null\n' >&2
+    }
 }
 
 print_tool_path() {
@@ -527,7 +623,7 @@ diagnose_json() {
     fi
 
     if [[ -x "${state_bin}" ]]; then
-        state_json="$("${state_bin}" 2>/dev/null || printf 'null')"
+        state_json="$("${state_bin}" 2>/dev/null | diagnose_redact_json || printf 'null')"
         if ! jq -e 'type == "object"' >/dev/null 2>&1 <<< "${state_json}"; then
             state_json=null
         fi
@@ -573,7 +669,7 @@ diagnose_json() {
         --arg configFile "$(diagnose_redact_value "${CONFIG_FILE}")" \
         --arg configStatus "${config_status}" \
         --argjson configReadable "${config_readable}" \
-        --arg theme "$(current_theme_value 2>/dev/null || true)" \
+        --arg theme "$(diagnose_redact_value "$(current_theme_value 2>/dev/null || true)")" \
         --arg fetchBin "$(diagnose_redact_value "${fetch_bin}")" \
         --arg cachePath "$(diagnose_redact_value "${cache_path}")" \
         --arg cacheAge "${cache_age}" \
@@ -582,9 +678,9 @@ diagnose_json() {
         --argjson envKnobs "${env_json}" \
         --argjson requiredTools "${required_tools_json}" \
         --argjson optionalTools "${optional_tools_json}" \
-        --arg codexbarCommand "${cb}" \
+        --arg codexbarCommand "$(diagnose_redact_value "${cb}")" \
         --arg codexbarPath "$(diagnose_redact_value "${cb_path}")" \
-        --arg codexbarVersion "${cb_version}" \
+        --arg codexbarVersion "$(diagnose_redact_value "${cb_version}")" \
         --argjson codexbarAvailable "${cb_available}" \
         --argjson cachedProviderCount "${cb_cache_count_json}" \
         --argjson redacted "$( (( DIAGNOSE_REDACT )) && printf 'true' || printf 'false' )" \
@@ -668,7 +764,7 @@ diagnose() {
     else
         printf 'config:       %s (none — defaults in effect)\n' "${config_shown}"
     fi
-    printf 'theme:        %s\n' "$(current_theme_value 2>/dev/null || printf '(none)')"
+    printf 'theme:        %s\n' "$(diagnose_redact_value "$(current_theme_value 2>/dev/null || printf '(none)')")"
 
     printf '\n# Cache\n'
     if [[ -x "${fetch_bin}" ]]; then
@@ -687,7 +783,7 @@ diagnose() {
 
     printf '\n# State\n'
     if [[ -x "${state_bin}" ]]; then
-        "${state_bin}" 2>&1 | sed 's/^/  /'
+        "${state_bin}" 2>&1 | diagnose_redact_json | sed 's/^/  /'
     else
         printf '  showy-quota-state missing or non-executable: %s\n' "$(diagnose_redact_value "${state_bin}")"
     fi
@@ -708,9 +804,9 @@ diagnose() {
         # SHOWY_QUOTA_MANAGE_SERVE (default 1) spawns this exact binary, so a
         # bug report needs to name which build was running.
         printf 'codexbar:     %s (%s)\n' \
-            "$("${cb}" --version 2>/dev/null | head -n1 || printf 'version unknown')" \
+            "$(diagnose_redact_value "$("${cb}" --version 2>/dev/null | head -n1 || printf 'version unknown')")" \
             "$(diagnose_redact_value "$(command -v "${cb}")")"
-        printf 'manage serve: %s\n' "${SHOWY_QUOTA_MANAGE_SERVE:-1}"
+        printf 'manage serve: %s\n' "$(diagnose_redact_value "${SHOWY_QUOTA_MANAGE_SERVE:-1}")"
         if ! command -v jq >/dev/null 2>&1; then
             printf 'jq missing — cannot count providers\n'
         elif [[ -f "${SHOWY_QUOTA_USAGE_FILE:-${HOME}/.cache/showy-quota/usage.json}" ]]; then
@@ -718,7 +814,7 @@ diagnose() {
             cache_file="${SHOWY_QUOTA_USAGE_FILE:-${HOME}/.cache/showy-quota/usage.json}"
             count=$(jq '(if type == "object" then (.providers // []) else . end) | length' "${cache_file}" 2>/dev/null || printf '?')
             printf 'cached provider count = %s (from %s)\n' "${count}" "$(diagnose_redact_value "${cache_file}")"
-            printf '(skipping live %s usage probe; rerun bin/showy-quota-fetch --refresh to refresh)\n' "${cb}"
+            printf '(skipping live %s usage probe; rerun bin/showy-quota-fetch --refresh to refresh)\n' "$(diagnose_redact_value "${cb}")"
         else
             printf 'no cache yet; run bin/showy-quota-fetch --refresh to populate, then re-run --diagnose\n'
         fi
