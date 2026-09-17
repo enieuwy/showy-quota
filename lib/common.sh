@@ -460,7 +460,20 @@ declare -gA SHOWY_QUOTA_ROLE_PALETTE_CACHE=()
 
 # ── small utilities ────────────────────────────────────────────────────
 
+# Diagnostic log. Stderr output stays behind SHOWY_QUOTA_DEBUG, but a
+# SHOWY_QUOTA_LOG_FILE sink records unconditionally: the SketchyBar background
+# refresh runs as `( fetch ) &` with stderr on /dev/null, so without a file
+# sink a failing cycle discards the only record of why a provider went stale.
+# Appends are line-buffered single writes, so concurrent surfaces interleave
+# whole lines rather than corrupting each other.
 showy_quota_log() {
+    local line
+    if [[ -n "${SHOWY_QUOTA_LOG_FILE-}" ]]; then
+        # EPOCHSECONDS avoids a `date` spawn and avoids depending on helper
+        # functions that may not be defined yet while this file is sourcing.
+        printf -v line '%s [showy-quota:%s] %s\n' "${EPOCHSECONDS:-0}" "$$" "$*"
+        printf '%s' "${line}" >> "${SHOWY_QUOTA_LOG_FILE}" 2>/dev/null || true
+    fi
     showy_quota_bool "${SHOWY_QUOTA_DEBUG-}" 0 || return 0
     printf '[showy-quota] %s\n' "$*" >&2
 }

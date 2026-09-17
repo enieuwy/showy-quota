@@ -647,11 +647,16 @@ provider_failure_backoff_active() {
     return 1
 }
 
+# The stamp's first line stays a bare epoch, because
+# `provider_failure_backoff_active` reads only that line and rejects anything
+# non-numeric. The exit code goes on a second line so a post-mortem can tell a
+# hard timeout (124) or output-cap kill (125) from a fast provider error.
 record_provider_failure() {
-    local provider="$1" stamp
+    local provider="$1" reason="${2-}" stamp
     mkdir -p "${SHOWY_QUOTA_PROVIDER_FAILURE_DIR}" 2>/dev/null || true
     stamp=$(provider_failure_stamp_path "${provider}")
-    printf '%s\n' "$(showy_quota_now_epoch)" > "${stamp}" 2>/dev/null || true
+    [[ "${reason}" =~ ^[A-Za-z0-9_-]{1,32}$ ]] || reason="unknown"
+    printf '%s\nrc=%s\n' "$(showy_quota_now_epoch)" "${reason}" > "${stamp}" 2>/dev/null || true
 }
 
 clear_provider_failure() {
@@ -959,14 +964,17 @@ run_codexbar_cli_provider() {
     out=$(run_with_hard_timeout "${timeout_seconds}" "${SHOWY_QUOTA_MAX_USAGE_JSON_BYTES}" "${SHOWY_QUOTA_CODEXBAR_BIN}" "${args[@]}") || rc=$?
     if (( rc != 0 )); then
         showy_quota_log "codexbar usage --provider ${provider} failed (rc=${rc})"
+        record_provider_failure "${provider}" "${rc}"
         return 1
     fi
     if (( ${#out} > SHOWY_QUOTA_MAX_USAGE_JSON_BYTES )); then
         showy_quota_log "codexbar usage --provider ${provider} exceeded ${SHOWY_QUOTA_MAX_USAGE_JSON_BYTES}-byte cap"
+        record_provider_failure "${provider}" 125
         return 1
     fi
     if ! provider_payload_is_publishable "${provider}" "${out}"; then
         showy_quota_log "codexbar usage --provider ${provider} returned no renderable record"
+        record_provider_failure "${provider}" unrenderable
         return 1
     fi
     printf '%s' "${out}"
@@ -1045,7 +1053,8 @@ run_codexbar_cli_per_provider() {
             return 1
         fi
         if (( provider_rc != 0 )); then
-            record_provider_failure "${provider}"
+            # `run_codexbar_cli_provider` already stamped the failure with the
+            # reason it observed; this branch only preserves the old slice.
             if out=$(carry_forward_provider_record "${provider}"); then
                 accumulated+=("${out}")
             fi

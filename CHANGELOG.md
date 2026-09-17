@@ -6,6 +6,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+- A failed refresh can now explain itself. The SketchyBar background cycle runs
+  the fetcher with stderr on `/dev/null`, so `SHOWY_QUOTA_DEBUG` never reached
+  it and a provider could go grey with no record of why. Set
+  `SHOWY_QUOTA_LOG_FILE=<path>` to append every log line with an epoch and pid
+  (opt-in, cold path only), and each `provider-failures/<id>` stamp now carries
+  `rc=<code>` on a second line: `124` hard timeout, `125` output cap,
+  `unrenderable` no usable window, anything else straight from `codexbar`. The
+  first line stays a bare epoch, which is all the backoff check reads.
 - Per-provider cache freshness. A provider whose own refresh fails no longer
   presents its preserved slice as freshly fetched: publishes carry
   `providerMeta` (source plus timestamp per provider, `showy-quota/cache@2`),

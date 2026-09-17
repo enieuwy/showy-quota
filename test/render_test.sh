@@ -4622,6 +4622,69 @@ if (( rc == 0 )) \
 else
     fail "fetcher isolates one hanging provider from surviving providers" "rc=${rc}; out=${out:0:120}"
 fi
+# The failure stamp must name the reason, not just the time. A hung provider
+# is killed by the hard timeout, so its stamp records rc=124: that is what
+# separates "CodexBar hung" from "CodexBar refused fast" in a post-mortem of a
+# background refresh, whose stderr the SketchyBar plugin discards.
+stamp_body=$(cat "${cache}/provider-failures/codex" 2>/dev/null)
+stamp_epoch=$(printf '%s\n' "${stamp_body}" | sed -n '1p')
+if [[ "${stamp_epoch}" =~ ^[0-9]+$ ]]; then
+    ok "failure stamp keeps a bare epoch on its first line"
+else
+    fail "failure stamp keeps a bare epoch on its first line" "body=${stamp_body}"
+fi
+assert_contains "failure stamp records the timeout exit code" "rc=124" "${stamp_body}"
+
+# SHOWY_QUOTA_LOG_FILE is the only way a background cycle can explain itself:
+# `start_background_refresh` runs the fetcher with stderr on /dev/null, so the
+# DEBUG stderr path cannot be observed there.
+log_sink_cache=$(mk_cache)
+log_sink_file="${TMP}/log-sink.log"
+log_sink_counter="${log_sink_cache}/log-sink-count"
+: > "${log_sink_counter}"
+rc=0
+(
+    SHOWY_QUOTA_NO_CONFIG=1 \
+    SHOWY_QUOTA_CACHE_DIR="${log_sink_cache}" \
+    SHOWY_QUOTA_CODEXBAR_BIN="${provider_aware_dir}/codexbar" \
+    SHOWY_QUOTA_CODEXBAR_SERVE_URL='' \
+    SHOWY_QUOTA_CODEXBAR_CLI_TIMEOUT_SECONDS=1 \
+    SHOWY_QUOTA_LOG_FILE="${log_sink_file}" \
+    SHOWY_QUOTA_TEST_COUNTER="${log_sink_counter}" \
+    SHOWY_QUOTA_TEST_HANG_PROVIDER=codex \
+    SHOWY_QUOTA_TEST_FIXTURE="${FIXTURE_DIR}/codexbar-mixed.json" \
+    "${REPO_ROOT}/bin/showy-quota-fetch" >/dev/null 2>/dev/null
+) || rc=$?
+log_sink_body=$(cat "${log_sink_file}" 2>/dev/null)
+assert_contains "log sink records the failing provider and its exit code" \
+    "codexbar usage --provider codex failed (rc=124)" "${log_sink_body}"
+if printf '%s\n' "${log_sink_body}" | sed -n '1p' | grep -q '^[0-9][0-9]* \[showy-quota:[0-9][0-9]*\] '; then
+    ok "log sink stamps each line with an epoch and a pid"
+else
+    fail "log sink stamps each line with an epoch and a pid" "first=$(printf '%s\n' "${log_sink_body}" | sed -n '1p')"
+fi
+
+# The knob is opt-in: a refresh with SHOWY_QUOTA_LOG_FILE unset must not
+# append to the sink an earlier run created.
+no_sink_cache=$(mk_cache)
+no_sink_counter="${no_sink_cache}/no-sink-count"
+: > "${no_sink_counter}"
+log_sink_size_before=$(wc -c < "${log_sink_file}" | tr -d ' ')
+(
+    SHOWY_QUOTA_NO_CONFIG=1 \
+    SHOWY_QUOTA_CACHE_DIR="${no_sink_cache}" \
+    SHOWY_QUOTA_CODEXBAR_BIN="${provider_aware_dir}/codexbar" \
+    SHOWY_QUOTA_CODEXBAR_SERVE_URL='' \
+    SHOWY_QUOTA_CODEXBAR_CLI_TIMEOUT_SECONDS=1 \
+    SHOWY_QUOTA_TEST_COUNTER="${no_sink_counter}" \
+    SHOWY_QUOTA_TEST_HANG_PROVIDER=codex \
+    SHOWY_QUOTA_TEST_FIXTURE="${FIXTURE_DIR}/codexbar-mixed.json" \
+    "${REPO_ROOT}/bin/showy-quota-fetch" >/dev/null 2>/dev/null
+) || true
+log_sink_size_after=$(wc -c < "${log_sink_file}" | tr -d ' ')
+assert_equals "log sink stays opt-in when SHOWY_QUOTA_LOG_FILE is unset" \
+    "${log_sink_size_before}" "${log_sink_size_after}"
+
 
 # Provider-level backoff: once a provider has a fresh failure stamp, a
 # subsequent refresh skips it without bumping the per-provider counter. We

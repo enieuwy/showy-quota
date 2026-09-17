@@ -172,6 +172,24 @@ Cadence is the caller's: the renderer prints one frame. A live panel is a loop t
 | Data older than stale threshold | One trailing `⚠`, grey frozen quota data, no elapsed markers | Same visual stale behavior from in-memory age |
 | Zellij permission denied | Not applicable to shell/zjstatus feeder | Pane shows `showy-quota: permission denied` |
 
+### Diagnosing a failed refresh
+
+The SketchyBar plugin refreshes with `( fetch ) &` and stderr on `/dev/null`, so
+`SHOWY_QUOTA_DEBUG=1` cannot be observed in a background cycle. Two records
+survive it instead:
+
+- `SHOWY_QUOTA_LOG_FILE=<path>` appends every `showy_quota_log` line, each
+  prefixed with an epoch and the pid. It is opt-in, writes only on the cold
+  fetch path, and never gates on `SHOWY_QUOTA_DEBUG`.
+- `<cache>/provider-failures/<id>` holds the epoch on line 1 (the only line the
+  backoff check reads) and `rc=<code>` on line 2. `rc=124` is the hard timeout,
+  `rc=125` the output cap, `rc=unrenderable` a payload with no usable window,
+  and any other code comes straight from `codexbar`.
+
+A provider whose collection needs host privileges — the browser-cookie
+providers — can fail only in the background cycle, because the responsible
+process there is the bar, not your shell. A macOS upgrade resets those grants.
+
 ## Why bash and Rust, not Python/Go
 
 The old `ai-quota` predecessor was Python with a daemon, sidecar, and `--client-defaults` indirection. That stack made sense when it also had to talk to providers. CodexBar removed that need for host bars: bash + `jq` remains the lowest-friction glue for the cold fetch path and host integration, while every hot render/compute path (terminal strips, prompt segment, providerMetrics, SketchyBar rows) is small and deterministic enough to centralize in Rust.
