@@ -6,7 +6,34 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-### Added
+- Per-provider cache freshness. A provider whose own refresh fails no longer
+  presents its preserved slice as freshly fetched: publishes carry
+  `providerMeta` (source plus timestamp per provider, `showy-quota/cache@2`),
+  each stale provider renders like a wholly stale strip (grey chunk, no
+  pacing marker) while the rest keep their colors, and
+  `showy-quota-state` gains `providerFreshness` (`source`, `updatedAt`,
+  `ageSeconds`, `stale` per rendered provider). A degraded marker now shows
+  whenever any rendered slice is CLI-sourced, including mixed serve/CLI
+  publishes. The standalone plugin applies the same per-chunk staleness from
+  its own per-provider record timestamps. The marker answers "is a
+  CLI-sourced slice visible": metadata for a filtered-out or absent provider
+  no longer paints it. Incident indicators are normalized once, so metrics,
+  the strip tint, and SketchyBar agree; a malformed `status` block can no
+  longer hide valid quota windows.
+  Error rows tint their SketchyBar icon with the warning color and keep the
+  status-page click even when no icon image is available. No new
+  configuration.
+- The empty strip now says why it is empty. `AI idle` stays for unused
+  quota, `AI none` means CodexBar published no providers, and `AI filtered`
+  means the allow/exclude lists removed everything. `showy-quota-state`
+  publishes the matching `emptyReason` (`idle`, `no-providers`,
+  `filtered`, `unavailable`, or null when something rendered).
+- CodexBar incident status is visible everywhere. `providerMetrics` carries
+  each provider's `status` block (indicator and URL), the terminal strip
+  tints the incidented provider's sigil pill while the bars still read real
+  remaining quota, and SketchyBar already tints its icons. Provider errors
+  that CodexBar cannot read at all also keep their place in the SketchyBar
+  bar as an error label with no lanes, instead of vanishing.
 - `showy-quota guard --no-fetch` now evaluates the cache as-is without starting
   provider collection. Agent hooks can use it with a separately warmed cache
   instead of paying for a synchronous CodexBar request before each tool call.

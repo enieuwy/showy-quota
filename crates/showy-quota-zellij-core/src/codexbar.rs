@@ -7,8 +7,36 @@ pub struct ProviderRecord {
     pub error: Option<serde_json::Value>,
     #[serde(default)]
     pub usage: Option<Usage>,
-    #[serde(default)]
+    // Optional incident extension: a malformed block must never hide valid
+    // quota windows, so this deserializes defensively (`None` on any shape
+    // that is not an object with string fields).
+    #[serde(default, deserialize_with = "deserialize_status")]
     pub status: Option<ProviderStatus>,
+}
+
+fn deserialize_status<'de, D>(deserializer: D) -> Result<Option<ProviderStatus>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let serde_json::Value::Object(map) = value else {
+        return Ok(None);
+    };
+    let field = |name: &str| match map.get(name) {
+        Some(serde_json::Value::String(text)) => Some(text.clone()),
+        _ => None,
+    };
+    let status = ProviderStatus {
+        indicator: field("indicator"),
+        url: field("url"),
+    };
+    if status.indicator.is_none() && status.url.is_none() {
+        return Ok(None);
+    }
+    Ok(Some(status))
 }
 
 /// Optional CodexBar provider status block (`status.indicator` +
@@ -173,9 +201,30 @@ pub fn parse_usage_payload_indexed(
         .collect())
 }
 
+/// One provider's slice metadata from the cache envelope: where that record
+/// came from and when it was last refreshed. A provider whose fresh fetch
+/// failed is carried forward from the previous cache with its ORIGINAL
+/// timestamp, so this is the only way to tell a live record from a preserved
+/// one — the cache file's own mtime says every record is as new as the
+/// publish.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderCacheMeta {
+    pub provider: String,
+    pub source: String,
+    pub updated_at: Option<i64>,
+}
+
+/// The payload plus the envelope metadata that describes it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CacheTransport {
+    pub payload: Vec<u8>,
+    pub source: String,
+    pub provider_meta: Vec<ProviderCacheMeta>,
+}
+
 /// A cache file or `--json` input is either a bare CodexBar provider array
 /// (legacy transport; degrades to `source = "unknown"`) or a cache envelope
-/// object `{"schema":"showy-quota/cache@1","source":"serve"|"cli"|"unknown","providers":[...]}`.
+/// object `{"schema":"showy-quota/cache@2","source":"serve"|"cli"|"unknown","providers":[...],"providerMeta":{...}}`.
 /// Dispatches on the first non-whitespace byte and, for an envelope,
 /// extracts `providers` via [`serde_json::value::RawValue`] so the inner
 /// array (up to [`MAX_USAGE_JSON_BYTES`]) is sliced out verbatim rather than
@@ -189,30 +238,66 @@ pub fn parse_usage_payload_indexed(
 /// validity/quarantine path, and this helper must never become a new hard
 /// failure point. An envelope with an absent, null, or non-string `source`
 /// likewise degrades only the source to `"unknown"`, keeping the extracted
-/// `providers` array.
-pub fn unwrap_cache_transport(bytes: Vec<u8>) -> (Vec<u8>, String) {
+/// `providers` array. A `cache@1` envelope simply has no `providerMeta`, so
+/// per-provider freshness degrades to the whole-cache freshness.
+pub fn unwrap_cache_transport(bytes: Vec<u8>) -> CacheTransport {
+    let degraded = |bytes: Vec<u8>| CacheTransport {
+        payload: bytes,
+        source: String::from("unknown"),
+        provider_meta: Vec::new(),
+    };
     if bytes.len() > MAX_USAGE_JSON_BYTES {
-        return (bytes, String::from("unknown"));
+        return degraded(bytes);
     }
     match bytes.iter().find(|byte| !byte.is_ascii_whitespace()) {
         Some(b'{') => match serde_json::from_slice::<CacheEnvelope>(&bytes) {
             Ok(envelope) => {
-                let inner = envelope.providers.get().as_bytes().to_vec();
+                let payload = envelope.providers.get().as_bytes().to_vec();
                 // Constrain to the tokens the publisher writes, mirroring the
                 // shell's `showy_quota_cache_source`. `usage.json` is now an
                 // attacker-shaped data document rather than a private one-token
                 // metadata file, and this value is reachable through the public
                 // `CacheFreshness.source`, so it must not carry arbitrary text.
-                let source = match envelope.source.as_ref().and_then(|v| v.as_str()) {
-                    Some(value @ ("serve" | "cli")) => String::from(value),
-                    _ => String::from("unknown"),
-                };
-                (inner, source)
+                let source = cache_source_token(envelope.source.as_ref());
+                CacheTransport {
+                    payload,
+                    source,
+                    provider_meta: provider_meta_entries(envelope.provider_meta.as_ref()),
+                }
             }
-            Err(_) => (bytes, String::from("unknown")),
+            Err(_) => degraded(bytes),
         },
-        _ => (bytes, String::from("unknown")),
+        _ => degraded(bytes),
     }
+}
+
+fn cache_source_token(value: Option<&serde_json::Value>) -> String {
+    match value.and_then(serde_json::Value::as_str) {
+        Some(value @ ("serve" | "cli")) => String::from(value),
+        _ => String::from("unknown"),
+    }
+}
+
+/// Read the envelope's `providerMeta` map. Every field is optional and every
+/// malformed entry is dropped rather than failing the read: metadata that is
+/// missing costs a provider its individual stale marker, metadata that is
+/// trusted blindly would let cache content drive arbitrary strings into the
+/// public freshness surface.
+fn provider_meta_entries(value: Option<&serde_json::Value>) -> Vec<ProviderCacheMeta> {
+    let Some(serde_json::Value::Object(map)) = value else {
+        return Vec::new();
+    };
+    map.iter()
+        .filter(|(provider, _)| valid_provider_id(provider))
+        .map(|(provider, entry)| ProviderCacheMeta {
+            provider: provider.clone(),
+            source: cache_source_token(entry.get("source")),
+            updated_at: entry
+                .get("updatedAt")
+                .and_then(serde_json::Value::as_i64)
+                .filter(|epoch| *epoch >= 0),
+        })
+        .collect()
 }
 
 #[derive(Debug, Deserialize)]
@@ -220,6 +305,8 @@ struct CacheEnvelope {
     providers: Box<serde_json::value::RawValue>,
     #[serde(default)]
     source: Option<serde_json::Value>,
+    #[serde(rename = "providerMeta", default)]
+    provider_meta: Option<serde_json::Value>,
 }
 
 pub fn payload_has_renderable_provider(records: &[ProviderRecord]) -> bool {
@@ -619,81 +706,142 @@ mod tests {
     #[test]
     fn unwrap_cache_transport_extracts_envelope_providers_and_source() {
         let bytes =
-            br#"{"schema":"showy-quota/cache@1","source":"cli","providers":[{"provider":"codex"}]}"#
+            br#"{"schema":"showy-quota/cache@2","source":"cli","providers":[{"provider":"codex"}]}"#
                 .to_vec();
-        let (payload, source) = unwrap_cache_transport(bytes);
-        assert_eq!(payload, br#"[{"provider":"codex"}]"#.to_vec());
-        assert_eq!(source, "cli");
+        let transport = unwrap_cache_transport(bytes);
+        assert_eq!(transport.payload, br#"[{"provider":"codex"}]"#.to_vec());
+        assert_eq!(transport.source, "cli");
+        assert!(transport.provider_meta.is_empty());
+    }
+
+    #[test]
+    fn unwrap_cache_transport_reads_provider_meta() {
+        let bytes = br#"{"schema":"showy-quota/cache@2","source":"cli","providers":[],
+            "providerMeta":{"codex":{"source":"serve","updatedAt":1700},
+                            "claude":{"source":"cli","updatedAt":1500}}}"#
+            .to_vec();
+        let mut meta = unwrap_cache_transport(bytes).provider_meta;
+        meta.sort_by(|a, b| a.provider.cmp(&b.provider));
+        assert_eq!(
+            meta,
+            vec![
+                ProviderCacheMeta {
+                    provider: String::from("claude"),
+                    source: String::from("cli"),
+                    updated_at: Some(1500),
+                },
+                ProviderCacheMeta {
+                    provider: String::from("codex"),
+                    source: String::from("serve"),
+                    updated_at: Some(1700),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn unwrap_cache_transport_rejects_hostile_provider_meta_entries() {
+        // An unsafe provider id is dropped; unknown source tokens and
+        // non-numeric timestamps degrade the entry instead of propagating
+        // cache-controlled strings into the freshness surface.
+        let bytes = br#"{"providers":[],"providerMeta":{
+            "../escape":{"source":"cli","updatedAt":1},
+            "codex":{"source":"pwned","updatedAt":"soon"},
+            "claude":{"updatedAt":-5}}}"#
+            .to_vec();
+        let mut meta = unwrap_cache_transport(bytes).provider_meta;
+        meta.sort_by(|a, b| a.provider.cmp(&b.provider));
+        assert_eq!(
+            meta,
+            vec![
+                ProviderCacheMeta {
+                    provider: String::from("claude"),
+                    source: String::from("unknown"),
+                    updated_at: None,
+                },
+                ProviderCacheMeta {
+                    provider: String::from("codex"),
+                    source: String::from("unknown"),
+                    updated_at: None,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn unwrap_cache_transport_ignores_non_object_provider_meta() {
+        let bytes = br#"{"providers":[1],"providerMeta":[{"provider":"codex"}]}"#.to_vec();
+        assert!(unwrap_cache_transport(bytes).provider_meta.is_empty());
     }
 
     #[test]
     fn unwrap_cache_transport_leaves_bare_array_unchanged() {
         let bytes = br#"[{"provider":"codex"}]"#.to_vec();
-        let (payload, source) = unwrap_cache_transport(bytes.clone());
-        assert_eq!(payload, bytes);
-        assert_eq!(source, "unknown");
+        let transport = unwrap_cache_transport(bytes.clone());
+        assert_eq!(transport.payload, bytes);
+        assert_eq!(transport.source, "unknown");
     }
 
     #[test]
     fn unwrap_cache_transport_degrades_missing_source_to_unknown() {
         let bytes = br#"{"schema":"showy-quota/cache@1","providers":[1,2]}"#.to_vec();
-        let (payload, source) = unwrap_cache_transport(bytes);
-        assert_eq!(payload, b"[1,2]".to_vec());
-        assert_eq!(source, "unknown");
+        let transport = unwrap_cache_transport(bytes);
+        assert_eq!(transport.payload, b"[1,2]".to_vec());
+        assert_eq!(transport.source, "unknown");
     }
 
     #[test]
     fn unwrap_cache_transport_degrades_null_source_to_unknown() {
         let bytes = br#"{"source":null,"providers":[1,2]}"#.to_vec();
-        let (payload, source) = unwrap_cache_transport(bytes);
-        assert_eq!(payload, b"[1,2]".to_vec());
-        assert_eq!(source, "unknown");
+        let transport = unwrap_cache_transport(bytes);
+        assert_eq!(transport.payload, b"[1,2]".to_vec());
+        assert_eq!(transport.source, "unknown");
     }
 
     #[test]
     fn unwrap_cache_transport_degrades_non_string_source_to_unknown() {
         let bytes = br#"{"source":42,"providers":[1,2]}"#.to_vec();
-        let (payload, source) = unwrap_cache_transport(bytes);
-        assert_eq!(payload, b"[1,2]".to_vec());
-        assert_eq!(source, "unknown");
+        let transport = unwrap_cache_transport(bytes);
+        assert_eq!(transport.payload, b"[1,2]".to_vec());
+        assert_eq!(transport.source, "unknown");
     }
 
     #[test]
     fn unwrap_cache_transport_malformed_object_degrades_without_panicking() {
         // No `providers` field at all: not a well-formed envelope.
         let bytes = br#"{"schema":"showy-quota/cache@1","source":"cli"}"#.to_vec();
-        let (payload, source) = unwrap_cache_transport(bytes.clone());
+        let transport = unwrap_cache_transport(bytes.clone());
         assert_eq!(
-            payload, bytes,
+            transport.payload, bytes,
             "malformed envelope must degrade to original bytes"
         );
-        assert_eq!(source, "unknown");
+        assert_eq!(transport.source, "unknown");
 
         // Truncated/invalid JSON object must not panic either.
         let truncated = br#"{"providers":[1,2"#.to_vec();
-        let (payload, source) = unwrap_cache_transport(truncated.clone());
-        assert_eq!(payload, truncated);
-        assert_eq!(source, "unknown");
+        let transport = unwrap_cache_transport(truncated.clone());
+        assert_eq!(transport.payload, truncated);
+        assert_eq!(transport.source, "unknown");
     }
 
     #[test]
     fn unwrap_cache_transport_tolerates_leading_whitespace() {
         let envelope_bytes = b"  \n\t{\"source\":\"serve\",\"providers\":[9]}".to_vec();
-        let (payload, source) = unwrap_cache_transport(envelope_bytes);
-        assert_eq!(payload, b"[9]".to_vec());
-        assert_eq!(source, "serve");
+        let transport = unwrap_cache_transport(envelope_bytes);
+        assert_eq!(transport.payload, b"[9]".to_vec());
+        assert_eq!(transport.source, "serve");
 
         let array_bytes = b"   [9]".to_vec();
-        let (payload, source) = unwrap_cache_transport(array_bytes.clone());
-        assert_eq!(payload, array_bytes);
-        assert_eq!(source, "unknown");
+        let transport = unwrap_cache_transport(array_bytes.clone());
+        assert_eq!(transport.payload, array_bytes);
+        assert_eq!(transport.source, "unknown");
     }
 
     #[test]
     fn unwrap_cache_transport_respects_oversize_ceiling() {
         let oversize = vec![b' '; MAX_USAGE_JSON_BYTES + 1];
-        let (payload, source) = unwrap_cache_transport(oversize.clone());
-        assert_eq!(payload, oversize);
-        assert_eq!(source, "unknown");
+        let transport = unwrap_cache_transport(oversize.clone());
+        assert_eq!(transport.payload, oversize);
+        assert_eq!(transport.source, "unknown");
     }
 }

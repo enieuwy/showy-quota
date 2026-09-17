@@ -83,8 +83,90 @@ sanitize_error_message() {
         )'
 }
 
+# Classify an empty render surface, mirroring the strip's own label
+# (`crates/showy-quota-zellij-core/src/render.rs::empty_reason`): an empty
+# CodexBar inventory, a user filter that removed everything, and quota that
+# is simply unused need three different responses, and one shared `idle`
+# reported the most common first-run failure as healthy.
+# Prints the reason token, or nothing when the surface is not empty.
+empty_reason_for() {
+    local rendered="$1" payload="$2"
+    if (( rendered > 0 )); then
+        return 0
+    fi
+    printf '%s' "${payload}" | jq -r \
+        --arg allow "${SHOWY_QUOTA_PROVIDERS:-}" \
+        --arg exclude "${SHOWY_QUOTA_PROVIDERS_EXCLUDE:-}" '
+        def valid_provider_id:
+            type == "string"
+            and (length <= 64)
+            and test("^[A-Za-z0-9_.-]+$")
+            and . != "."
+            and . != ".."
+            and (startswith("-") | not);
+        def renderable:
+            (.error // null) == null
+            and (.provider | valid_provider_id)
+            and ([.usage.primary, .usage.secondary, .usage.tertiary]
+                 | any(. != null and (.usedPercent | type == "number")));
+        def errored:
+            (.error // null) != null and (.provider | valid_provider_id) and (renderable | not);
+        (if type == "array" then . else [] end) as $records
+        | ($records | length) as $total
+        | ([ $records[] | select(renderable or errored) ] | length) as $candidates
+        | (($allow | length) > 0 or ($exclude | length) > 0) as $filtering
+        | if $total == 0 then "no-providers"
+          elif $candidates > 0 and $filtering then "filtered"
+          else "idle"
+          end' 2>/dev/null || printf 'idle'
+}
 
-
+# Per-provider freshness from the cache envelope's `providerMeta`. The cache
+# file's own mtime dates the publish, not each record: a provider whose fetch
+# failed is republished with its previous slice, and only this map says so.
+# A legacy envelope has no map, so every provider inherits the file's age.
+provider_freshness_json() {
+    local metrics="$1" now meta_file
+    now=$(showy_quota_now_epoch)
+    # The envelope map travels through a temp file, not argv: a valid cache
+    # nears the 5 MiB cap, past the macOS 1 MiB exec argument limit.
+    meta_file=$(mktemp "${TMPDIR:-/tmp}/showy-quota-meta.XXXXXX") || return 1
+    if [[ -r "${SHOWY_QUOTA_USAGE_FILE}" ]]; then
+        jq -c 'if type == "object" and (.providerMeta | type) == "object"
+               then .providerMeta else {} end' \
+            "${SHOWY_QUOTA_USAGE_FILE}" > "${meta_file}" 2>/dev/null || printf '{}' > "${meta_file}"
+    else
+        printf '{}' > "${meta_file}"
+    fi
+    printf '%s' "${metrics}" | jq -c \
+        --slurpfile meta "${meta_file}" \
+        --argjson now "${now}" \
+        --arg cache_age "${cache_age}" \
+        --argjson stale_after "${stale_after}" \
+        --arg cache_source "${cache_source}" '
+        # A present entry with a missing or invalid source stays `unknown`
+        # (the native reader contract); only an absent entry inherits the
+        # envelope source. Non-object entries count as absent.
+        ($meta[0] // {}) as $metamap
+        | ($cache_age | if . == "null" then null else tonumber end) as $file_age
+        | reduce (.[]? | .provider) as $p ({};
+            ($metamap[$p]) as $raw
+            | (if ($raw | type) == "object" then $raw else null end) as $entry
+            | (if $entry == null then null
+               elif ($entry.updatedAt | type) == "number"
+                    and $entry.updatedAt >= 0 and ($entry.updatedAt | floor) == $entry.updatedAt
+               then $entry.updatedAt | floor else null end) as $updated
+            | (if $updated == null then $file_age else (($now - $updated) | fabs | floor) end) as $age
+            | .[$p] = {
+                source: (if $entry == null then $cache_source
+                         elif ($entry.source | IN("serve", "cli")) then $entry.source
+                         else "unknown" end),
+                updatedAt: $updated,
+                ageSeconds: $age,
+                stale: ($age != null and $age > $stale_after)
+            })' 2>/dev/null || printf '{}'
+    rm -f -- "${meta_file}"
+}
 
 data=""
 available=false
@@ -118,20 +200,54 @@ if [[ -f "${SHOWY_QUOTA_USAGE_FILE}" ]]; then
     cache_age=$(showy_quota_age_seconds "${SHOWY_QUOTA_USAGE_FILE}")
 fi
 cache_source="$(showy_quota_cache_source)"
+# The envelope source is only the starting point: a `cli` publish whose
+# slices were all filtered out shows no CLI-sourced row, so the marker must
+# derive from the rendered slices below. An explicit env value still wins.
 if [[ "${SHOWY_QUOTA_DEGRADED_CLI:-}" == "1" ]]; then
     degraded_flag=true
 elif [[ -n "${SHOWY_QUOTA_DEGRADED_CLI:-}" ]]; then
     degraded_flag=false
-elif [[ "${cache_source}" == "cli" ]]; then
-    degraded_flag=true
 else
     degraded_flag=false
+fi
+degraded_envelope_cli=false
+if [[ "${cache_source}" == "cli" ]]; then
+    degraded_envelope_cli=true
 fi
 stale_after=$(showy_quota_stale_after_seconds)
 if [[ "${cache_age}" != "null" ]] && (( cache_age > stale_after )); then
     stale_flag=true
 else
     stale_flag=false
+fi
+
+# The whole-cache degraded flag understates a mixed snapshot: a serve publish
+# that carried one provider forward from an earlier CLI fallback still has a
+# CLI-sourced slice. Derive it from the slices when the envelope describes
+# them, exactly like the Rust cache reader does.
+provider_freshness_json="$(provider_freshness_json "${provider_metrics_json}")"
+if [[ -z "${SHOWY_QUOTA_DEGRADED_CLI:-}" ]]; then
+    if [[ "${degraded_envelope_cli}" == true ]] \
+        && printf '%s' "${provider_metrics_json}" | jq -e 'length > 0' >/dev/null 2>&1; then
+        # A whole-cache CLI source with at least one rendered row: every
+        # visible slice came from that CLI publish.
+        degraded_flag=true
+    elif printf '%s' "${provider_freshness_json}" | jq -e 'any(.[]; .source == "cli")' >/dev/null 2>&1; then
+        # A mixed serve publish with a CLI-sourced slice still on screen.
+        degraded_flag=true
+    fi
+fi
+
+rendered_count=$(printf '%s' "${provider_metrics_json}" | jq 'length' 2>/dev/null) || rendered_count=0
+if [[ "${available}" == true ]]; then
+    empty_reason_token=$(empty_reason_for "${rendered_count}" "${data}")
+else
+    empty_reason_token="unavailable"
+fi
+if [[ -z "${empty_reason_token}" ]]; then
+    empty_reason='null'
+else
+    empty_reason=$(jq -n --arg reason "${empty_reason_token}" '$reason')
 fi
 
 case "${mode}" in
@@ -151,6 +267,8 @@ case "${mode}" in
             --arg cache_age "${cache_age}" \
             --arg stale_after "${stale_after}" \
             --arg cache_source "${cache_source}" \
+            --argjson providerFreshness "${provider_freshness_json}" \
+            --argjson emptyReason "${empty_reason}" \
             --arg compact_threshold "${threshold}" \
             '($compact_threshold | tonumber) as $compact_threshold_num
             | {
@@ -165,6 +283,8 @@ case "${mode}" in
                 providers: $providers,
                 providerMetrics: $providerMetrics,
                 providerCount: ($providers | length),
+                providerFreshness: $providerFreshness,
+                emptyReason: $emptyReason,
                 sketchybar: {
                     itemPrefix: "showy_quota",
                     bracket: "showy_quota_bracket",

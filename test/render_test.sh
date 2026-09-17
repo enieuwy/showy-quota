@@ -1553,7 +1553,7 @@ assert_not_contains "zellij dual weekly window is not bright-good fill" "48;2;37
 
 
 out=$(run_renderer showy-quota-zellij-bar codexbar-empty.json)
-assert_contains "empty provider array still renders 'AI idle'" "AI idle" "${out}"
+assert_contains "empty provider array still renders 'AI none'" "AI none" "${out}"
 
 out=$(run_renderer showy-quota-zellij-bar codexbar-error-only.json)
 assert_contains "zellij all-error fixture renders cursor sigil" "CR" "${out}"
@@ -1583,7 +1583,7 @@ assert_not_contains "exclude drops cursor error chunk from strip" "CR" "${out}"
 assert_contains "exclude keeps factory error chunk in strip" "FA    ⚠err    " "${out}"
 
 out=$(run_renderer showy-quota-zellij-bar codexbar-empty.json SHOWY_QUOTA_DEGRADED_CLI=1 NO_COLOR=1 SHOWY_QUOTA_FORCE_COLOR=0)
-assert_contains "empty degraded fixture renders trailing CLI marker" "AI idle ⚠cli" "${out}"
+assert_contains "empty degraded fixture renders trailing CLI marker" "AI none ⚠cli" "${out}"
 
 idle_cache=$(mk_cache)
 cp "${FIXTURE_DIR}/codexbar-empty.json" "${idle_cache}/usage.json"
@@ -1600,7 +1600,7 @@ out=$(
         NO_COLOR=1 \
         "${REPO_ROOT}/bin/showy-quota-zellij-bar"
 )
-assert_contains "stale degraded idle cache renders both markers" "AI idle ⚠ ⚠cli" "${out}"
+assert_contains "stale degraded idle cache renders both markers" "AI none ⚠ ⚠cli" "${out}"
 
 out=$(run_renderer showy-quota-zellij-bar codexbar-low.json)
 # Bad-palette ee5396 = decimal RGB 238;83;150 inside the truecolor escape.
@@ -1661,7 +1661,7 @@ out=$(
         NO_COLOR=1 \
         "${REPO_ROOT}/bin/showy-quota-zellij-bar"
 )
-assert_contains "driver fresh cache renders seeded data" "AI idle" "${out}"
+assert_contains "driver fresh cache renders seeded data" "AI none" "${out}"
 assert_not_contains "driver fresh cache omits stale marker" "⚠" "${out}"
 
 driver_stale_cache=$(mk_cache)
@@ -1677,7 +1677,7 @@ out=$(
         NO_COLOR=1 \
         "${REPO_ROOT}/bin/showy-quota-zellij-bar"
 )
-assert_contains "driver stale cache shows stale marker" "AI idle ⚠" "${out}"
+assert_contains "driver stale cache shows stale marker" "AI none ⚠" "${out}"
 
 driver_degraded_cache=$(mk_cache)
 seed_usage_cache "${driver_degraded_cache}" codexbar-empty.json cli
@@ -1691,7 +1691,7 @@ out=$(
         NO_COLOR=1 \
         "${REPO_ROOT}/bin/showy-quota-zellij-bar"
 )
-assert_contains "driver cli source derives degraded marker" "AI idle ⚠cli" "${out}"
+assert_contains "driver cli source derives degraded marker" "AI none ⚠cli" "${out}"
 
 out=$(
     env \
@@ -1719,7 +1719,7 @@ out=$(
         NO_COLOR=1 \
         "${REPO_ROOT}/bin/showy-quota-zellij-bar"
 )
-assert_contains "driver degraded CLI one forces marker" "AI idle ⚠cli" "${out}"
+assert_contains "driver degraded CLI one forces marker" "AI none ⚠cli" "${out}"
 
 driver_missing_cache=$(mk_cache)
 out=$(
@@ -1792,7 +1792,7 @@ assert_not_contains "tmux mono3 collapse omits shared separator" "│" "${visibl
 
 
 out=$(run_renderer showy-quota-tmux-bar codexbar-empty.json)
-assert_contains "tmux empty fixture renders 'AI idle'" "AI idle" "${out}"
+assert_contains "tmux empty fixture renders 'AI none'" "AI none" "${out}"
 
 out=$(run_renderer_json showy-quota-tmux-bar codexbar-error-only.json)
 visible=$(strip_tmux_markup "${out}")
@@ -2064,7 +2064,7 @@ assert_equals "state providerMetrics includes renderable and errored providers" 
 assert_equals "state claude primary window exposes normalized usage" "17|83|300|340" "$(printf '%s' "${out}" | jq -r '.providerMetrics[] | select(.provider == "claude") | .windows.primary | [.usedPercent, .remainingPercent, .windowMinutes, .minutesUntilReset] | map(tostring) | join("|")')"
 assert_equals "state missing tertiary window stays null" "true" "$(printf '%s' "${out}" | jq -r '.providerMetrics[] | select(.provider == "codex") | .windows.tertiary == null')"
 assert_equals "state renderable provider error field stays null" "true" "$(printf '%s' "${out}" | jq -r '.providerMetrics[] | select(.provider == "codex") | .error == null')"
-assert_equals "state top-level contract is unchanged apart from providerMetrics" '{"available":true,"cache":{"degraded":true,"source":"cli"},"cacheAgeSeconds":"number","providerCount":3,"providers":["codex","claude","gemini"],"sketchybar":{"bracket":"showy_quota_bracket","compactProviderThreshold":5,"compactRecommended":false,"itemPrefix":"showy_quota"},"stale":true,"staleAfterSeconds":240}' "$(printf '%s' "${out}" | jq -cS 'del(.providerMetrics) | .cacheAgeSeconds = (.cacheAgeSeconds | type)')"
+assert_equals "state top-level contract is unchanged apart from providerMetrics" '{"available":true,"cache":{"degraded":true,"source":"cli"},"cacheAgeSeconds":"number","emptyReason":"null","providerCount":3,"providerFreshness":"object","providers":["codex","claude","gemini"],"sketchybar":{"bracket":"showy_quota_bracket","compactProviderThreshold":5,"compactRecommended":false,"itemPrefix":"showy_quota"},"stale":true,"staleAfterSeconds":240}' "$(printf '%s' "${out}" | jq -cS 'del(.providerMetrics) | .cacheAgeSeconds = (.cacheAgeSeconds | type) | .emptyReason = (.emptyReason | type) | .providerFreshness = (.providerFreshness | type)')"
 assert_equals "state providers stay string array" "true" "$(printf '%s' "${out}" | jq -r '.providers | type == "array" and all(.[]; type == "string")')"
 assert_equals "state compact recommendation defaults below threshold" "false" "$(printf '%s' "${out}" | jq -r '.sketchybar.compactRecommended')"
 assert_equals "state exposes degraded CLI source" "cli" "$(printf '%s' "${out}" | jq -r '.cache.source')"
@@ -2216,7 +2216,7 @@ render_vertical_plain=$(render_vertical SHOWY_QUOTA_VERTICAL_RESET_CLOCK=0 < "${
 assert_equals "render vertical CLI spends exactly six columns on the clock" "6" "$((render_vertical_clocked - render_vertical_plain))"
 
 assert_equals "render vertical CLI honours the vertical bar width" "8" "$(render_vertical SHOWY_QUOTA_VERTICAL_BAR_WIDTH=8 < "${FIXTURE_DIR}/codexbar-cursor.json" | head -1 | sed -E 's/.*▕(.*)▏.*/\1/' | jq -Rn 'input | length')"
-assert_equals "render vertical CLI renders idle when nothing is renderable" "AI idle" "$(render_vertical < "${FIXTURE_DIR}/codexbar-empty.json")"
+assert_equals "render vertical CLI renders idle when nothing is renderable" "AI none" "$(render_vertical < "${FIXTURE_DIR}/codexbar-empty.json")"
 
 out=$(run_state codexbar-error-only.json)
 assert_equals "state error-only providers stay renderable-only empty" "[]" "$(printf '%s' "${out}" | jq -c '.providers')"
@@ -2300,7 +2300,7 @@ assert_contains "bootstrap adds native marker overlay" "--add slider showy_quota
 assert_contains "bootstrap recreates bracket immediately" "--add bracket showy_quota_bracket" "${item_log}"
 assert_contains "bootstrap declares stale indicator" "--add item showy_quota.stale left" "${item_log}"
 assert_contains "bootstrap declares degraded indicator" "--add item showy_quota.degraded left" "${item_log}"
-assert_contains "bootstrap places indicators rightmost in bracket" "showy_quota.gemini.label showy_quota.stale showy_quota.degraded --set showy_quota_bracket" "${item_log}"
+assert_contains "bootstrap places indicators rightmost in bracket" "showy_quota.cursor.label showy_quota.stale showy_quota.degraded --set showy_quota_bracket" "${item_log}"
 assert_contains "bootstrap preserves icon width" "width=22" "${item_log}"
 assert_contains "bootstrap preserves native bar slot width" "showy_quota.claude.slot icon.drawing=off" "${item_log}"
 assert_contains "bootstrap preserves native bar width" "width=83" "${item_log}"
@@ -2546,7 +2546,7 @@ assert_contains "plugin can draw provider icons from app font without magick" "-
 assert_contains "plugin maps codex provider to app font icon" "showy_quota.codex.icon drawing=on icon.drawing=on icon=:codex:" "${plugin_log}"
 assert_contains "plugin maps gemini provider to app font icon" "showy_quota.gemini.icon drawing=on icon.drawing=on icon=:gemini:" "${plugin_log}"
 assert_contains "plugin widens font icon item to make a real native bar gap" "showy_quota.claude.icon drawing=on icon.drawing=on icon=:claude: icon.font=sketchybar-app-font:Regular:14.0 icon.color=0xfff2f4f8 icon.align=center icon.width=22 icon.padding_left=0 icon.padding_right=0 label.drawing=off background.image.drawing=off background.color=0x00000000 background.height=0 padding_left=5 padding_right=0 width=24" "${plugin_log}"
-assert_not_contains "font icon mode avoids provider PNG cache paths" "icon-v4-" "${plugin_log}"
+assert_not_contains "font icon mode avoids provider PNG cache paths" "icon-v5-" "${plugin_log}"
 
 copilot_fixture="${TMP}/codexbar-copilot.json"
 printf '%s\n' '[{"provider":"copilot","usage":{"primary":{"usedPercent":0},"secondary":{"usedPercent":0}}}]' > "${copilot_fixture}"
@@ -2564,7 +2564,7 @@ run_sketchybar_plugin_without_magick codexbar-status-major.json "${cache}" "${lo
 font_status_log="$(< "${log}")"
 assert_contains "font icon mode colors degraded providers without magick" "showy_quota.codex.icon drawing=on icon.drawing=on icon=:codex: icon.font=sketchybar-app-font:Regular:14.0 icon.color=0xffee5396" "${font_status_log}"
 assert_contains "font icon mode preserves degraded provider status click without magick" "click_script=open 'https://status.openai.com/'" "${font_status_log}"
-assert_not_contains "font icon mode skips status PNG for mapped provider without magick" "icon-v4-codex-" "${font_status_log}"
+assert_not_contains "font icon mode skips status PNG for mapped provider without magick" "icon-v5-codex-" "${font_status_log}"
 
 # ── sketchybar status URL guard ───────────────────────────────────────
 printf '\nsketchybar status URL guard\n'
@@ -2652,7 +2652,7 @@ if command -v magick >/dev/null 2>&1; then
     cache=$(mk_cache)
     log="${TMP}/sb-status.log"
     run_sketchybar_plugin codexbar-status-major.json "${cache}" "${log}"
-    status_icon_path=$(compgen -G "${cache}/sb/icon-v4-codex-*-major.png" | sort | head -n 1 || true)
+    status_icon_path=$(compgen -G "${cache}/sb/icon-v5-codex-*-major.png" | sort | head -n 1 || true)
     if [[ -s "${status_icon_path}" ]]; then
         ok "plugin generates status-tinted icon"
     else
@@ -2742,7 +2742,7 @@ EOF
     cache=$(mk_cache)
     log="${TMP}/sb-opencode.log"
     run_sketchybar_plugin "${opencode_fixture}" "${cache}" "${log}" SHOWY_QUOTA_CODEXBAR_RESOURCES="${resource_dir}"
-    opencode_icon_path=$(compgen -G "${cache}/sb/icon-v4-opencode-*.png" | sort | head -n 1 || true)
+    opencode_icon_path=$(compgen -G "${cache}/sb/icon-v5-opencode-*.png" | sort | head -n 1 || true)
     if [[ -s "${opencode_icon_path}" ]]; then
         ok "plugin generates tinted dark icon"
     else
@@ -2759,7 +2759,7 @@ EOF
     log="${TMP}/sb-opencode-font-fallback.log"
     run_sketchybar_plugin "${opencode_fixture}" "${cache}" "${log}" SHOWY_QUOTA_CODEXBAR_RESOURCES="${resource_dir}" SHOWY_QUOTA_SKETCHYBAR_PROVIDER_ICON_MODE=font
     font_fallback_log="$(< "${log}")"
-    assert_contains "font icon mode falls back to SVG for unmapped opencode" "showy_quota.opencode.icon drawing=on icon.drawing=off label.drawing=off background.image=${cache}/sb/icon-v4-opencode-" "${font_fallback_log}"
+    assert_contains "font icon mode falls back to SVG for unmapped opencode" "showy_quota.opencode.icon drawing=on icon.drawing=off label.drawing=off background.image=${cache}/sb/icon-v5-opencode-" "${font_fallback_log}"
     assert_not_contains "font icon mode avoids generic code glyph for opencode" "showy_quota.opencode.icon drawing=on icon.drawing=on icon=:code:" "${font_fallback_log}"
 
     copilot_resource_dir="${TMP}/copilot-resources"
@@ -2769,7 +2769,7 @@ EOF
     log="${TMP}/sb-copilot-svg-fallback.log"
     run_sketchybar_plugin "${copilot_fixture}" "${cache}" "${log}" SHOWY_QUOTA_CODEXBAR_RESOURCES="${copilot_resource_dir}" SHOWY_QUOTA_SKETCHYBAR_PROVIDER_ICON_MODE=font
     copilot_svg_log="$(< "${log}")"
-    assert_contains "font icon mode falls back to CodexBar SVG for copilot" "showy_quota.copilot.icon drawing=on icon.drawing=off label.drawing=off background.image=${cache}/sb/icon-v4-copilot-" "${copilot_svg_log}"
+    assert_contains "font icon mode falls back to CodexBar SVG for copilot" "showy_quota.copilot.icon drawing=on icon.drawing=off label.drawing=off background.image=${cache}/sb/icon-v5-copilot-" "${copilot_svg_log}"
     assert_not_contains "font icon mode avoids pointer-like copilot app-font glyph" "showy_quota.copilot.icon drawing=on icon.drawing=on icon=:copilot:" "${copilot_svg_log}"
 
     # ImageMagick's internal MSVG decoder rasterizes stroke-only paths to a
@@ -2785,7 +2785,7 @@ EOF
     cache=$(mk_cache)
     log="${TMP}/sb-stroke-only.log"
     run_sketchybar_plugin "${stroke_fixture}" "${cache}" "${log}" SHOWY_QUOTA_CODEXBAR_RESOURCES="${stroke_resource_dir}"
-    stroke_icon_path=$(compgen -G "${cache}/sb/icon-v4-opencode-*.png" | sort | head -n 1 || true)
+    stroke_icon_path=$(compgen -G "${cache}/sb/icon-v5-opencode-*.png" | sort | head -n 1 || true)
     stroke_alpha=$(magick "${stroke_icon_path}" -format '%[fx:maxima.a]' info: 2>/dev/null || true)
     if [[ -s "${stroke_icon_path}" && -n "${stroke_alpha}" && "${stroke_alpha}" != "0" ]]; then
         ok "stroke-only provider SVG never publishes an invisible icon"
@@ -2805,7 +2805,7 @@ EOF
     run_sketchybar_plugin "${stroke_fixture}" "${cache}" "${log}" \
         PATH="${no_rsvg_dir}:${stub_dir}:${PATH}" \
         SHOWY_QUOTA_CODEXBAR_RESOURCES="${stroke_resource_dir}"
-    sigil_icon_path=$(compgen -G "${cache}/sb/icon-v4-opencode-*.png" | sort | head -n 1 || true)
+    sigil_icon_path=$(compgen -G "${cache}/sb/icon-v5-opencode-*.png" | sort | head -n 1 || true)
     sigil_alpha=$(magick "${sigil_icon_path}" -format '%[fx:maxima.a]' info: 2>/dev/null || true)
     if [[ -s "${sigil_icon_path}" && -n "${sigil_alpha}" && "${sigil_alpha}" != "0" ]]; then
         ok "unrenderable provider SVG falls back to the drawn sigil icon"
@@ -2854,8 +2854,35 @@ else
     fail "plugin re-adds declared providers ahead of new providers in sort order" \
         "codex line=${add_codex_before_gemini} gemini line=${add_gemini_label}"
 fi
-assert_contains "plugin rebuilds bracket with added native provider" "showy_quota.gemini.icon showy_quota.gemini.primary showy_quota.gemini.secondary showy_quota.gemini.tertiary showy_quota.gemini.quaternary showy_quota.gemini.secondary_marker showy_quota.gemini.tertiary_marker showy_quota.gemini.quaternary_marker showy_quota.gemini.primary_marker showy_quota.gemini.slot showy_quota.gemini.label showy_quota.stale showy_quota.degraded --set showy_quota_bracket" "${plugin_log}"
-assert_contains "plugin triggers provider-change event" "--trigger showy_quota_provider_change SHOWY_QUOTA_PROVIDER_COUNT=3 SHOWY_QUOTA_PROVIDERS=codex,claude,gemini" "${plugin_log}"
+assert_contains "plugin rebuilds bracket with added native provider" "showy_quota.gemini.icon showy_quota.gemini.primary showy_quota.gemini.secondary showy_quota.gemini.tertiary showy_quota.gemini.quaternary showy_quota.gemini.secondary_marker showy_quota.gemini.tertiary_marker showy_quota.gemini.quaternary_marker showy_quota.gemini.primary_marker showy_quota.gemini.slot showy_quota.gemini.label showy_quota.cursor.icon showy_quota.cursor.primary showy_quota.cursor.secondary showy_quota.cursor.tertiary showy_quota.cursor.quaternary showy_quota.cursor.secondary_marker showy_quota.cursor.tertiary_marker showy_quota.cursor.quaternary_marker showy_quota.cursor.primary_marker showy_quota.cursor.slot showy_quota.cursor.label showy_quota.stale showy_quota.degraded --set showy_quota_bracket" "${plugin_log}"
+assert_contains "plugin draws the errored provider label" "--set showy_quota.cursor.label drawing=on label=" "${plugin_log}"
+# The error-row contract is label-only: every slider stays off, the icon uses
+# the warning tint (error rows carry no incident indicator), and the row keeps
+# a click action. The label-only assertion above passes with a normal-tint
+# icon, so pin the rest here.
+assert_contains "plugin keeps the errored primary lane off" "--set showy_quota.cursor.primary drawing=off slider.percentage=0" "${plugin_log}"
+assert_contains "plugin keeps the errored secondary lane off" "--set showy_quota.cursor.secondary drawing=off" "${plugin_log}"
+assert_contains "plugin keeps the errored tertiary lane off" "--set showy_quota.cursor.tertiary drawing=off" "${plugin_log}"
+assert_contains "plugin keeps the errored quaternary lane off" "--set showy_quota.cursor.quaternary drawing=off" "${plugin_log}"
+# The lifecycle run uses the default PNG icon path: without an incident the
+# fallback glyph renders untinted, so the warning color arrives through the
+# generated PNG cache key, not the font-icon color field.
+assert_contains "plugin tints the errored icon with the warning color" "icon-v5-cursor-" "${plugin_log}"
+assert_contains "plugin keys the errored icon on the error tint" "-error.png" "${plugin_log}"
+error_font_cache=$(mk_cache)
+seed_usage_cache "${error_font_cache}" codexbar-error-only.json serve
+seed_sketchybar_state "${error_font_cache}" cursor factory
+seed_sketchybar_live_items "${error_font_cache}" cursor factory
+error_font_log_pre="${TMP}/sb-error-font-pre.log"
+run_sketchybar_plugin codexbar-error-only.json "${error_font_cache}" "${error_font_log_pre}" SHOWY_QUOTA_SKETCHYBAR_PROVIDER_ICON_MODE=font SHOWY_QUOTA_SKETCHYBAR_FORCE_REDECLARE=1
+error_font_log="${TMP}/sb-error-font.log"
+run_sketchybar_plugin codexbar-error-only.json "${error_font_cache}" "${error_font_log}" SHOWY_QUOTA_SKETCHYBAR_PROVIDER_ICON_MODE=font
+# Steady-state runs only refresh labels, never icons: the icon tint lives on
+# the redeclare-run log, where the full row is drawn.
+error_font_log_content="$(< "${error_font_log_pre}")"
+error_warn_argb_check="0xff$(run_common_eval 'showy_quota_palette countdown_warn' SHOWY_QUOTA_NO_CONFIG=1)"
+assert_contains "plugin tints the errored font icon with the warning color" "showy_quota.cursor.icon drawing=on icon.drawing=on icon=:cursor: icon.font=sketchybar-app-font:Regular:14.0 icon.color=${error_warn_argb_check}" "${error_font_log_content}"
+assert_contains "plugin triggers provider-change event" "--trigger showy_quota_provider_change SHOWY_QUOTA_PROVIDER_COUNT=4 SHOWY_QUOTA_PROVIDERS=codex,claude,gemini,cursor" "${plugin_log}"
 
 cache=$(mk_cache)
 seed_sketchybar_state "${cache}" codex claude gemini
@@ -2876,8 +2903,8 @@ assert_contains "plugin removes dropped provider native rows" "--remove showy_qu
 assert_contains "plugin removes dropped provider native markers" "--remove showy_quota.gemini.secondary_marker --remove showy_quota.gemini.tertiary_marker --remove showy_quota.gemini.quaternary_marker --remove showy_quota.gemini.primary_marker --remove showy_quota.gemini.slot --remove showy_quota.gemini.label" "${plugin_log}"
 
 cache=$(mk_cache)
-seed_sketchybar_state "${cache}" codex claude gemini
-seed_sketchybar_live_items "${cache}" codex claude gemini
+seed_sketchybar_state "${cache}" codex claude gemini cursor
+seed_sketchybar_live_items "${cache}" codex claude gemini cursor
 log="${TMP}/sb-unchanged.log"
 run_sketchybar_plugin codexbar-mixed.json "${cache}" "${log}"
 plugin_log="$(< "${log}")"
@@ -6258,9 +6285,10 @@ if (( rc == 0 )) \
     && printf '%s' "${envelope_publish_out}" | jq -e 'type == "array" and any(.provider == "codex")' >/dev/null 2>&1 \
     && printf '%s' "${envelope_publish_raw}" | jq -e '
         type == "object"
-        and .schema == "showy-quota/cache@1"
+        and .schema == "showy-quota/cache@2"
         and (has("source") and (.source | type) == "string")
         and (has("providers") and (.providers | type) == "array")
+        and (has("providerMeta") and (.providerMeta | type) == "object")
     ' >/dev/null 2>&1 \
     && [[ ! -e "${envelope_publish_cache}/source" ]]; then
     ok "fetcher publishes one envelope with source+providers and no legacy source file"
@@ -6362,6 +6390,172 @@ else
         "before=${race_source_before}; with_stray_file=${race_source_with_stray_file}; after_delete=${race_source_after_delete}"
 fi
 
+
+# ── per-provider cache freshness ─────────────────────────────────────
+
+printf '\nper-provider cache freshness\n'
+
+# A provider whose own CLI fetch fails is carried forward from the previous
+# cache. The publish refreshes the file's mtime, so without per-slice
+# metadata that preserved record would claim to be as new as the fetch that
+# republished it.
+freshness_dir="${TMP}/per-provider-freshness"
+mkdir -p "${freshness_dir}"
+cat > "${freshness_dir}/codexbar" <<EOF
+#!/bin/sh
+if [ "\${1:-}" = "config" ] && [ "\${2:-}" = "providers" ]; then
+    jq '[.[] | {provider, enabled: true}]' < "${FIXTURE_DIR}/codexbar-mixed.json"
+    exit 0
+fi
+provider=""
+while [ "\$#" -gt 0 ]; do
+    case "\$1" in --provider) shift; provider="\${1:-}" ;; esac
+    shift
+done
+if [ "\${provider}" = "\${SHOWY_QUOTA_TEST_FAIL_PROVIDER:-}" ]; then exit 7; fi
+jq --arg p "\${provider}" '[.[] | select(.provider == \$p)]' < "${FIXTURE_DIR}/codexbar-mixed.json"
+EOF
+chmod +x "${freshness_dir}/codexbar"
+
+freshness_cache=$(mk_cache)
+freshness_now=$(date +%s)
+freshness_then=$(( freshness_now - 1000 ))
+run_freshness_fetch() {
+    env SHOWY_QUOTA_NO_CONFIG=1 \
+        SHOWY_QUOTA_CACHE_DIR="${freshness_cache}" \
+        SHOWY_QUOTA_CODEXBAR_BIN="${freshness_dir}/codexbar" \
+        SHOWY_QUOTA_CODEXBAR_SERVE_URL='' \
+        SHOWY_QUOTA_REFRESH_SECONDS=60 \
+        "$@" \
+        "${REPO_ROOT}/bin/showy-quota-fetch" --refresh >/dev/null 2>&1
+}
+run_freshness_fetch SHOWY_QUOTA_NOW_EPOCH="${freshness_then}"
+run_freshness_fetch SHOWY_QUOTA_NOW_EPOCH="${freshness_now}" SHOWY_QUOTA_TEST_FAIL_PROVIDER=gemini
+
+freshness_meta=$(jq -c '.providerMeta' "${freshness_cache}/usage.json" 2>/dev/null)
+assert_equals "fresh provider slices carry the publish timestamp" "${freshness_now}" \
+    "$(printf '%s' "${freshness_meta}" | jq -r '.codex.updatedAt')"
+assert_equals "a carried-forward slice keeps the timestamp of the fetch that measured it" \
+    "${freshness_then}" "$(printf '%s' "${freshness_meta}" | jq -r '.gemini.updatedAt')"
+
+freshness_state=$(
+    env SHOWY_QUOTA_NO_CONFIG=1 \
+        SHOWY_QUOTA_CACHE_DIR="${freshness_cache}" \
+        SHOWY_QUOTA_CODEXBAR_SERVE_URL='' \
+        SHOWY_QUOTA_REFRESH_SECONDS=60 \
+        SHOWY_QUOTA_NOW_EPOCH="${freshness_now}" \
+        "${REPO_ROOT}/bin/showy-quota-state" --no-fetch --json
+)
+assert_equals "the cache as a whole is reported fresh" "false" \
+    "$(printf '%s' "${freshness_state}" | jq -r '.stale')"
+assert_equals "state marks the carried-forward provider stale" "true" \
+    "$(printf '%s' "${freshness_state}" | jq -r '.providerFreshness.gemini.stale')"
+assert_equals "state leaves the freshly fetched providers alone" "false" \
+    "$(printf '%s' "${freshness_state}" | jq -r '.providerFreshness.codex.stale')"
+assert_equals "state reports the carried-forward slice's age" "1000" \
+    "$(printf '%s' "${freshness_state}" | jq -r '.providerFreshness.gemini.ageSeconds')"
+
+# The renderer reads the same metadata straight from the cache, so the strip
+# greys exactly one chunk while the rest keep their bands.
+freshness_rows=$(
+    env SHOWY_QUOTA_NO_CONFIG=1 \
+        SHOWY_QUOTA_CACHE_DIR="${freshness_cache}" \
+        SHOWY_QUOTA_REFRESH_SECONDS=60 \
+        SHOWY_QUOTA_NOW_EPOCH="${freshness_now}" \
+        "${RENDER_BIN}" --emit sketchybar --from-cache 2>/dev/null | tr '\037' '\t'
+)
+freshness_gemini_row=$(printf '%s\n' "${freshness_rows}" | awk -F'\t' '$1 == "gemini" {print $9}')
+freshness_codex_row=$(printf '%s\n' "${freshness_rows}" | awk -F'\t' '$1 == "codex" {print $9}')
+assert_equals "the carried-forward provider renders in the stale colour" "0xff6c7086" \
+    "${freshness_gemini_row}"
+# A missing row must not pass as "kept its color": the awk lookup yields an
+# empty string when the renderer drops the provider entirely.
+if [[ -z "${freshness_codex_row}" ]]; then
+    fail "a fresh provider keeps its own band beside a stale one" "codex row missing from sketchybar rows"
+elif [[ "${freshness_codex_row}" == "0xff6c7086" ]]; then
+    fail "a fresh provider keeps its own band beside a stale one" "codex highlight=${freshness_codex_row}"
+else
+    ok "a fresh provider keeps its own band beside a stale one"
+fi
+empty_reason_for_state() {
+    local fixture="$1"
+    shift
+    # Seed the cache directly: a refresh applies the provider allow-list at
+    # fetch time (`apply_provider_filters`), so the "your filters hide live
+    # data" case is only observable when the cache already holds providers.
+    local cache
+    cache=$(mk_cache)
+    cp "$(fixture_path "${fixture}")" "${cache}/usage.json"
+    env SHOWY_QUOTA_NO_CONFIG=1 \
+        SHOWY_QUOTA_CACHE_DIR="${cache}" \
+        SHOWY_QUOTA_CODEXBAR_SERVE_URL='' \
+        "$@" \
+        "${REPO_ROOT}/bin/showy-quota-state" --no-fetch --json | jq -r '.emptyReason'
+}
+legacy_freshness_cache=$(mk_cache)
+cp "${FIXTURE_DIR}/codexbar-mixed.json" "${legacy_freshness_cache}/usage.json"
+seed_usage_source "${legacy_freshness_cache}" "serve"
+legacy_freshness_state=$(
+    env SHOWY_QUOTA_NO_CONFIG=1 \
+        SHOWY_QUOTA_CACHE_DIR="${legacy_freshness_cache}" \
+        SHOWY_QUOTA_CODEXBAR_SERVE_URL='' \
+        SHOWY_QUOTA_REFRESH_SECONDS=9999999 \
+        "${REPO_ROOT}/bin/showy-quota-state" --no-fetch --json
+)
+assert_equals "a legacy envelope still reports every provider" "claude,codex,cursor,gemini" \
+    "$(printf '%s' "${legacy_freshness_state}" | jq -r '[.providerFreshness | keys[]] | sort | join(",")')"
+assert_equals "a legacy envelope reports no per-provider staleness" "false" \
+    "$(printf '%s' "${legacy_freshness_state}" | jq -r '[.providerFreshness[] | .stale] | any')"
+
+# ── empty-state reasons ──────────────────────────────────────────────
+
+printf '\nempty-state reasons\n'
+
+assert_equals "an empty CodexBar inventory is reported as no-providers" "no-providers" \
+    "$(empty_reason_for_state codexbar-empty.json)"
+
+assert_equals "a filter that removes every provider is reported as filtered" "filtered" \
+    "$(empty_reason_for_state codexbar-mixed.json SHOWY_QUOTA_PROVIDERS=nothing-matches)"
+assert_equals "a rendered strip reports no empty reason" "null" \
+    "$(empty_reason_for_state codexbar-mixed.json)"
+assert_equals "error-only providers still count as rendered" "null" \
+    "$(empty_reason_for_state codexbar-error-only.json)"
+assert_equals "a missing cache is reported as unavailable" "unavailable" \
+    "$(SHOWY_QUOTA_CACHE_DIR="${TMP}/sq-no-such-cache" SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_CODEXBAR_SERVE_URL='' "${REPO_ROOT}/bin/showy-quota-state" --no-fetch --json | jq -r '.emptyReason')"
+idle_reason_cache=$(mk_cache)
+printf '[{"provider":"codex","usage":{"primary":{"usedPercent":null}}}]' > "${idle_reason_cache}/usage.json"
+assert_equals "unused quota is reported as idle" "idle" \
+    "$(SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_CACHE_DIR="${idle_reason_cache}" SHOWY_QUOTA_CODEXBAR_SERVE_URL='' "${REPO_ROOT}/bin/showy-quota-state" --no-fetch --json | jq -r '.emptyReason')"
+
+# The strip label and the state token must agree; they are derived
+# independently (Rust renderer vs jq) and drift would send users hunting the
+# wrong problem.
+empty_label_cache=$(mk_cache)
+cp "${FIXTURE_DIR}/codexbar-empty.json" "${empty_label_cache}/usage.json"
+empty_label_strip=$(
+    env SHOWY_QUOTA_NO_CONFIG=1 \
+        SHOWY_QUOTA_CACHE_DIR="${empty_label_cache}" \
+        "${RENDER_BIN}" --from-cache 2>/dev/null
+)
+if [[ "${empty_label_strip}" == *"AI none"* ]]; then
+    ok "the strip says AI none when CodexBar has no providers"
+else
+    fail "the strip says AI none when CodexBar has no providers" "strip=${empty_label_strip}"
+fi
+
+filtered_label_cache=$(mk_cache)
+cp "${FIXTURE_DIR}/codexbar-mixed.json" "${filtered_label_cache}/usage.json"
+filtered_label_strip=$(
+    env SHOWY_QUOTA_NO_CONFIG=1 \
+        SHOWY_QUOTA_CACHE_DIR="${filtered_label_cache}" \
+        SHOWY_QUOTA_PROVIDERS=nothing-matches \
+        "${RENDER_BIN}" --from-cache 2>/dev/null
+)
+if [[ "${filtered_label_strip}" == *"AI filtered"* ]]; then
+    ok "the strip says AI filtered when the user's own filters emptied it"
+else
+    fail "the strip says AI filtered when the user's own filters emptied it" "strip=${filtered_label_strip}"
+fi
 
 # ── summary ──────────────────────────────────────────────────────────
 

@@ -14,7 +14,19 @@ pub(crate) struct ProviderMetric {
     pub(crate) windows: WindowsMetric,
     #[serde(rename = "extraRateWindows")]
     pub(crate) extra_rate_windows: Vec<ExtraWindowMetric>,
+    /// CodexBar's incident block for the provider, when it publishes one.
+    /// Consumers need it to tell "the provider is down" from "you are out of
+    /// quota"; both look like a failing request from the outside.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    status: Option<StatusMetric>,
     error: Option<ErrorMetric>,
+}
+
+#[derive(Serialize)]
+struct StatusMetric {
+    indicator: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    url: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -83,20 +95,64 @@ pub fn emit_provider_metrics(
     serde_json::to_string(&metrics).map_err(|_| RenderError::InvalidPayload)
 }
 
+/// Metrics JSON plus the filtered provider set, so a caller that needs both
+/// (the metrics rows and the degraded-marker decision) parses once. The
+/// visible set is what the degraded marker must consult: metadata for a
+/// filtered-out provider is not on screen.
+pub struct MetricsWithVisible {
+    pub rendered: String,
+    pub visible_providers: Vec<String>,
+}
+
+pub fn emit_provider_metrics_with_visible(
+    payload: &[u8],
+    config: &RenderConfig,
+    now_epoch: i64,
+) -> Result<MetricsWithVisible, RenderError> {
+    let filtered = provider_metrics_filtered(payload, config, now_epoch)?;
+    let rendered =
+        serde_json::to_string(&filtered.metrics).map_err(|_| RenderError::InvalidPayload)?;
+    Ok(MetricsWithVisible {
+        rendered,
+        visible_providers: filtered.visible_providers,
+    })
+}
+
 pub(crate) fn provider_metrics(
     payload: &[u8],
     config: &RenderConfig,
     now_epoch: i64,
 ) -> Result<Vec<ProviderMetric>, RenderError> {
+    provider_metrics_filtered(payload, config, now_epoch).map(|filtered| filtered.metrics)
+}
+
+pub(crate) struct FilteredMetrics {
+    pub(crate) metrics: Vec<ProviderMetric>,
+    pub(crate) visible_providers: Vec<String>,
+}
+pub(crate) fn provider_metrics_filtered(
+    payload: &[u8],
+    config: &RenderConfig,
+    now_epoch: i64,
+) -> Result<FilteredMetrics, RenderError> {
     let records = parse_display_payload(payload)?;
+    let mut visible_providers: Vec<String> = records
+        .iter()
+        .filter(|record| passes_provider_filters(record, config))
+        .map(|record| record.provider.clone())
+        .collect();
+    visible_providers.sort();
+    visible_providers.dedup();
     let mut metrics: Vec<ProviderMetric> = records
         .iter()
         .filter(|record| passes_provider_filters(record, config))
         .filter_map(|record| provider_metric(record, config, now_epoch))
         .collect();
-
     sort_metrics(&mut metrics, config);
-    Ok(metrics)
+    Ok(FilteredMetrics {
+        metrics,
+        visible_providers,
+    })
 }
 
 /// Parse the array transport shared by display emitters. Invalid records are
@@ -125,7 +181,7 @@ fn provider_metric(
     let has_renderable_window = has_renderable_window(record);
     match (record.error.as_ref(), has_renderable_window) {
         (None, true) => Some(renderable_metric(record, config, now_epoch)),
-        (Some(error), false) => Some(error_metric(&record.provider, error)),
+        (Some(error), false) => Some(error_metric(record, error)),
         _ => None,
     }
 }
@@ -151,20 +207,57 @@ fn renderable_metric(
             .iter()
             .map(|extra| extra_window_metric(extra, config, now_epoch))
             .collect(),
+        status: status_metric(record),
         error: None,
     }
 }
 
-fn error_metric(provider: &str, error: &Value) -> ProviderMetric {
+/// CodexBar's incident block, normalised once for every consumer: trim, drop
+/// control characters, then reject empty/`none`. The terminal tint, the
+/// SketchyBar status field, and this metric all read the same token, so an
+/// indicator must never appear in one surface and vanish from another.
+pub(crate) fn normalized_status_indicator(record: &ProviderRecord) -> Option<String> {
+    let indicator = record.status.as_ref()?.indicator.as_deref()?;
+    let cleaned: String = indicator
+        .chars()
+        .filter(|c| !c.is_control())
+        .collect::<String>()
+        .trim()
+        .to_owned();
+    if cleaned.is_empty() || cleaned == "none" {
+        return None;
+    }
+    Some(cleaned)
+}
+
+fn status_metric(record: &ProviderRecord) -> Option<StatusMetric> {
+    let indicator = normalized_status_indicator(record)?;
+    let url = record
+        .status
+        .as_ref()
+        .and_then(|status| status.url.clone())
+        .map(|url| {
+            url.chars()
+                .filter(|c| !c.is_control())
+                .collect::<String>()
+                .trim()
+                .to_owned()
+        })
+        .filter(|url| !url.is_empty());
+    Some(StatusMetric { indicator, url })
+}
+
+fn error_metric(record: &ProviderRecord, error: &Value) -> ProviderMetric {
     let message = sanitize_error_message(error_raw(error));
     ProviderMetric {
-        provider: provider.to_owned(),
+        provider: record.provider.clone(),
         windows: WindowsMetric {
             primary: None,
             secondary: None,
             tertiary: None,
         },
         extra_rate_windows: Vec::new(),
+        status: status_metric(record),
         error: Some(ErrorMetric {
             kind: error_kind(&message),
             message,
@@ -178,6 +271,11 @@ fn passes_provider_filters(record: &ProviderRecord, config: &RenderConfig) -> bo
         && !contains(&config.providers_exclude, &record.provider)
 }
 
+/// A provider counts as having renderable usage exactly when the renderers
+/// draw a usage chunk for it: a numeric `usedPercent` on a positional
+/// window. Extra rate windows alone do not count — the strip renders `AI
+/// idle` for an extras-only record, so the metrics gate must agree, or
+/// `emptyReason` reports `null` for a visibly empty strip.
 fn has_renderable_window(record: &ProviderRecord) -> bool {
     record.usage.as_ref().is_some_and(|usage| {
         [
@@ -188,13 +286,6 @@ fn has_renderable_window(record: &ProviderRecord) -> bool {
         .into_iter()
         .flatten()
         .any(|window| numeric_percent(window.used_percent).is_some())
-            || usage.extra_rate_windows.iter().any(|extra| {
-                extra.usage_known != Some(false)
-                    && extra
-                        .window
-                        .as_ref()
-                        .is_some_and(|window| numeric_percent(window.used_percent).is_some())
-            })
     })
 }
 

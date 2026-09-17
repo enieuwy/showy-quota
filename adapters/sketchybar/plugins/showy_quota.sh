@@ -663,7 +663,7 @@ click_script_for_status() {
 
 # Bump when icon rendering semantics change so stale cached PNGs are replaced
 # on the next plugin tick.
-ICON_CACHE_VERSION="4"
+ICON_CACHE_VERSION="5"
 
 # ── provider icon: native app-font experiment ────────────────────────
 provider_font_icon() {
@@ -792,7 +792,12 @@ provider_icon_png() {
     local pid="$1" status="${2:-none}" out_var="$3"
     local status_color="" tint_color="" suffix="" dest cache_key drawn=0
     [[ -n "${out_var}" ]] || return 1
-    if status_color=$(status_color_for_indicator "${status}"); then
+    # An errored row with no incident indicator arrives as `error`: paint the
+    # warning tint into the fallback glyph so the icon reads as an error.
+    if [[ "${status}" == "error" ]]; then
+        status_color="${COUNTDOWN_WARN_HEX}"
+        suffix="-error"
+    elif status_color=$(status_color_for_indicator "${status}"); then
         suffix="-${status}"
     fi
     cache_key="${ICON_TEXT_HEX}-${PRIMARY_UNKNOWN_HEX}-${PRIMARY_WARN_HEX}-${PRIMARY_BAD_HEX}"
@@ -974,25 +979,45 @@ while IFS=$'\x1f' read -r pid label color status status_url \
     p_present rem_p_pct marker_p_pct primary_highlight \
     s_present rem_s_pct marker_s_pct secondary_highlight \
     t_present rem_t_pct marker_t_pct tertiary_highlight \
-    q_present rem_q_pct marker_q_pct quaternary_highlight; do
+    q_present rem_q_pct marker_q_pct quaternary_highlight \
+    row_error; do
     [[ -n "${pid}" ]] || continue
 
     icon=""
     font_icon=""
+    # `row_error` is parsed below; icon rendering happens before that block,
+    # so derive the error state from the raw field here. An errored row with
+    # no incident indicator still needs the warning icon tint.
+    icon_errored=0
+    [[ "${row_error}" == "1" ]] && icon_errored=1
+    icon_status="${status}"
+    if (( icon_errored )) && [[ "${status}" == "none" ]]; then
+        # The PNG icon cache keys on the indicator; an errored row with no
+        # incident still needs the warning tint, and `unknown` renders the
+        # fallback glyph untinted, so synthesize the tint below instead.
+        icon_status="error"
+    fi
     if [[ "${SHOWY_QUOTA_SKETCHYBAR_PROVIDER_ICON_MODE}" == "font" ]]; then
         font_icon=$(provider_font_icon "${pid}" || true)
+    fi
+    # The PNG fallback populates `icon` when the font map has no glyph; the
+    # error tint travels in `icon_status` either way.
+    if [[ -z "${font_icon}" ]]; then
         # Direct call, never $( ): see the ICON_TMP_FILES invariant.
-        [[ -n "${font_icon}" ]] || provider_icon_png "${pid}" "${status}" icon || icon=""
-    else
-        provider_icon_png "${pid}" "${status}" icon || icon=""
+        provider_icon_png "${pid}" "${icon_status}" icon || icon=""
     fi
 
+    # An errored provider has no lane at all. Without this branch the absent
+    # primary lane would draw a full bad-severity bar at zero remaining —
+    # "quota exhausted", which is precisely what the data does not say.
+    errored=0
+    [[ "${row_error}" == "1" ]] && errored=1
     has_t=0
-    [[ "${t_present}" == "1" ]] && has_t=1
+    (( errored )) || [[ "${t_present}" != "1" ]] || has_t=1
     has_q=0
-    [[ "${q_present}" == "1" ]] && has_q=1
+    (( errored )) || [[ "${q_present}" != "1" ]] || has_q=1
     has_s=0
-    [[ "${s_present}" == "1" ]] && has_s=1
+    (( errored )) || [[ "${s_present}" != "1" ]] || has_s=1
     if (( has_q )); then
         primary_y=9
         secondary_y=3
@@ -1018,9 +1043,15 @@ while IFS=$'\x1f' read -r pid label color status status_url \
     fi
 
     icon_click=$(click_script_for_status "${status}" "${status_url}")
+    # An errored row with no incident indicator has no status tint, but it is
+    # still an error: the icon must read as a warning, not as healthy. Force
+    # the tint before both the font and PNG paths.
     font_icon_color="$(argb_from_hex "${ICON_TEXT_HEX}")"
     font_icon_item_width=$((SHOWY_QUOTA_SKETCHYBAR_ICON_WIDTH + SHOWY_QUOTA_SKETCHYBAR_PROVIDER_ICON_FONT_PADDING_RIGHT))
     status_icon_hex=$(status_color_for_indicator "${status}" || true)
+    if (( errored )); then
+        status_icon_hex="${COUNTDOWN_WARN_HEX}"
+    fi
     if [[ -n "${status_icon_hex}" ]]; then
         font_icon_color="$(argb_from_hex "${status_icon_hex}")"
     fi
@@ -1051,12 +1082,22 @@ while IFS=$'\x1f' read -r pid label color status status_url \
     elif [[ -n "${icon}" && -s "${icon}" ]]; then
         args+=( --set "showy_quota.${pid}.icon" drawing=on icon.drawing=off label.drawing=off background.image="${icon}" background.image.drawing=on background.image.scale="${SHOWY_QUOTA_SKETCHYBAR_ICON_SCALE}" background.color=0x00000000 background.height=0 padding_left="${SHOWY_QUOTA_SKETCHYBAR_ICON_PADDING_LEFT}" padding_right=0 width="${SHOWY_QUOTA_SKETCHYBAR_ICON_WIDTH}" click_script="${icon_click}" )
     else
-        args+=( --set "showy_quota.${pid}.icon" drawing=off click_script="${CLICK}" )
+        # The icon item is hidden, but its click target still covers the row
+        # slot: keep the status-page action so an errored provider without a
+        # drawable icon still reaches its status page.
+        args+=( --set "showy_quota.${pid}.icon" drawing=off click_script="${icon_click}" )
     fi
 
-    args+=(
-        --set "${primary_item}" drawing=on slider.percentage="${rem_p_pct}" slider.highlight_color="${primary_highlight}" slider.background.color="${TRACK_ARGB}" slider.background.height="${NATIVE_ROW_HEIGHT}" slider.background.corner_radius="${NATIVE_ROW_RADIUS}" slider.knob.drawing=off background.color=0x00000000 background.height=0 padding_left=0 padding_right=0 width=0 y_offset="${primary_y}" click_script="${primary_click}"
-    )
+    if (( errored )); then
+        args+=(
+            --set "${primary_item}" drawing=off slider.percentage=0 background.color=0x00000000 background.height=0 padding_left=0 padding_right=0 width=0 y_offset="${primary_y}" click_script="${primary_click}"
+        )
+    else
+        args+=(
+            --set "${primary_item}" drawing=on slider.percentage="${rem_p_pct}" slider.highlight_color="${primary_highlight}" slider.background.color="${TRACK_ARGB}" slider.background.height="${NATIVE_ROW_HEIGHT}" slider.background.corner_radius="${NATIVE_ROW_RADIUS}" slider.knob.drawing=off background.color=0x00000000 background.height=0 padding_left=0 padding_right=0 width=0 y_offset="${primary_y}" click_script="${primary_click}"
+        )
+    fi
+
     if (( has_s )); then
         args+=( --set "${secondary_item}" drawing=on slider.percentage="${rem_s_pct}" slider.highlight_color="${secondary_highlight}" slider.background.color="${TRACK_ARGB}" slider.background.height="${NATIVE_ROW_HEIGHT}" slider.background.corner_radius="${NATIVE_ROW_RADIUS}" slider.knob.drawing=off background.color=0x00000000 background.height=0 padding_left=0 padding_right=0 width=0 y_offset="${secondary_y}" click_script="${secondary_click}" )
     else

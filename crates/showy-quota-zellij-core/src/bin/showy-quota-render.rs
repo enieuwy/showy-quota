@@ -1,10 +1,8 @@
-use std::fs;
 use std::io::{self, Read, Write};
 use std::process;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use showy_quota_zellij_core::{
-    cache::read_cache_from_env,
     codexbar::{unwrap_cache_transport, MAX_USAGE_JSON_BYTES},
     emit_prompt_segment, emit_provider_metrics, emit_rows, emit_sketchybar, render_tmux,
     render_vertical, render_zellij, valid_provider_id, PromptOptions, RenderConfig, RenderError,
@@ -54,7 +52,7 @@ fn run() -> Result<(), String> {
     let cli = parse_args(std::env::args().skip(1))?;
     let config = scoped_config(RenderConfig::from_env(), &cli.provider_filter);
     let now_epoch = now_epoch()?;
-    let input = match read_input(&cli, now_epoch) {
+    let input = match read_input(&cli, now_epoch, &config) {
         Ok(input) => input,
         Err(_) if cli.emit == Emit::Prompt => return write_output("AI ?\n"),
         Err(err) => return Err(err),
@@ -66,8 +64,8 @@ fn run() -> Result<(), String> {
         stale,
         degraded_cli,
         now_epoch,
+        stale_providers: &input.stale_providers,
     };
-
     if cli.emit == Emit::Metrics {
         let mut rendered =
             emit_provider_metrics(&input.payload, &config, now_epoch).map_err(render_error)?;
@@ -84,6 +82,7 @@ fn run() -> Result<(), String> {
                 stale,
                 degraded_cli,
                 bar_width: png_bar_width_from_env(),
+                stale_providers: &input.stale_providers,
             },
         )
         .map_err(render_error)?;
@@ -276,36 +275,87 @@ struct InputPayload {
     payload: Vec<u8>,
     stale: bool,
     degraded_cli: bool,
+    /// Providers whose cached slice is older than the stale horizon even
+    /// though the cache file itself is current. Only the cache path can know
+    /// this: `--json` input carries no publish metadata.
+    stale_providers: Vec<String>,
 }
 
-fn read_input(cli: &Cli, now_epoch: i64) -> Result<InputPayload, String> {
+fn read_input(cli: &Cli, now_epoch: i64, config: &RenderConfig) -> Result<InputPayload, String> {
     match &cli.input {
-        Input::Json(path) => {
-            let (payload, _source) = unwrap_cache_transport(read_payload(path)?);
-            Ok(InputPayload {
-                payload,
-                stale: false,
-                degraded_cli: false,
-            })
-        }
+        Input::Json(path) => Ok(InputPayload {
+            payload: unwrap_cache_transport(read_payload(path)?).payload,
+            stale: false,
+            degraded_cli: false,
+            stale_providers: Vec::new(),
+        }),
         Input::Cache => {
-            let snapshot = read_cache_from_env(now_epoch).map_err(|err| err.to_string())?;
+            let snapshot = read_cache_snapshot(now_epoch, config).map_err(|err| err.to_string())?;
             Ok(InputPayload {
                 payload: snapshot.payload,
                 stale: snapshot.freshness.stale,
                 degraded_cli: snapshot.freshness.degraded_cli,
+                stale_providers: snapshot.freshness.stale_providers(),
             })
         }
     }
 }
 
+/// Read the cache envelope, then restrict the freshness decision to the
+/// providers this invocation renders: the degraded marker must reflect the
+/// visible slices, not metadata for filtered-out or absent providers.
+fn read_cache_snapshot(
+    now_epoch: i64,
+    config: &RenderConfig,
+) -> Result<
+    showy_quota_zellij_core::cache::CacheSnapshot,
+    showy_quota_zellij_core::cache::CacheReadError,
+> {
+    use showy_quota_zellij_core::cache::{
+        cache_paths_from_env, freshness_from_parts_filtered, refresh_seconds_from_env,
+    };
+    use showy_quota_zellij_core::codexbar::{parse_usage_payload, valid_provider_id};
+    let paths = cache_paths_from_env();
+    let raw = std::fs::read(&paths.usage_file).map_err(|source| {
+        showy_quota_zellij_core::cache::CacheReadError::for_path(paths.usage_file.clone(), source)
+    })?;
+    let mtime = std::fs::metadata(&paths.usage_file)
+        .ok()
+        .and_then(|metadata| metadata.modified().ok())
+        .map(showy_quota_zellij_core::cache::system_time_epoch);
+    let transport = showy_quota_zellij_core::codexbar::unwrap_cache_transport(raw);
+    let visible: Vec<String> = parse_usage_payload(&transport.payload)
+        .unwrap_or_default()
+        .iter()
+        .filter(|record| {
+            valid_provider_id(&record.provider)
+                && (config.providers.is_empty() || config.providers.contains(&record.provider))
+                && !config.providers_exclude.contains(&record.provider)
+        })
+        .map(|record| record.provider.clone())
+        .collect();
+    let freshness = freshness_from_parts_filtered(
+        mtime,
+        now_epoch,
+        refresh_seconds_from_env(),
+        transport.source,
+        std::env::var("SHOWY_QUOTA_DEGRADED_CLI").ok(),
+        &transport.provider_meta,
+        Some(&visible),
+    );
+    Ok(showy_quota_zellij_core::cache::CacheSnapshot {
+        payload: transport.payload,
+        freshness,
+    })
+}
+
 fn read_payload(path: &str) -> Result<Vec<u8>, String> {
+    use std::fs::File;
     if path == "-" {
         return read_bounded_payload(io::stdin())
             .map_err(|err| format!("failed to read JSON from stdin: {err}"));
     }
-
-    let file = fs::File::open(path).map_err(|err| format!("failed to read JSON {path}: {err}"))?;
+    let file = File::open(path).map_err(|err| format!("failed to read JSON {path}: {err}"))?;
     read_bounded_payload(file).map_err(|err| format!("failed to read JSON {path}: {err}"))
 }
 

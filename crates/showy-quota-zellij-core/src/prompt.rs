@@ -151,12 +151,15 @@ mod tests {
     }
 
     #[test]
-    fn prompt_uses_known_extra_window_without_positional_usage() {
+    fn prompt_ignores_extra_windows_without_positional_usage() {
+        // An extras-only record draws no chunk on any surface (see
+        // `has_renderable_window`): the prompt agrees with the strip and
+        // reports unknown rather than surfacing a pool the bars hide.
         let output = prompt(
             br#"[{"provider":"codex","usage":{"extraRateWindows":[{"title":"Model pool","window":{"usedPercent":75}}]}}]"#,
             options(&[]),
         );
-        assert_eq!(output, "CX 75%");
+        assert_eq!(output, "AI ?");
     }
 
     fn options<'a>(provider_filter: &'a [String]) -> PromptOptions<'a> {

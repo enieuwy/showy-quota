@@ -5,7 +5,7 @@ use std::io::{self, Read};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::codexbar::MAX_USAGE_JSON_BYTES;
+use crate::codexbar::{ProviderCacheMeta, MAX_USAGE_JSON_BYTES};
 
 pub const MISSING_AGE_SECONDS: i64 = 999_999_999;
 const DEFAULT_REFRESH_SECONDS: i64 = 120;
@@ -16,6 +16,41 @@ pub struct CacheFreshness {
     pub stale: bool,
     pub source: String,
     pub degraded_cli: bool,
+    /// One entry per provider the envelope described. Empty for a legacy
+    /// `cache@1` envelope or a bare array, in which case every provider is
+    /// exactly as fresh as the file.
+    pub providers: Vec<ProviderFreshness>,
+}
+
+/// How old one provider's slice is, independent of the cache file's mtime.
+///
+/// The fetcher carries a provider forward from the previous cache when its
+/// own refresh fails, so the file mtime describes the publish, not the
+/// record. Without this the strip paints a week-old slice with the same
+/// confidence as one fetched a second ago.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderFreshness {
+    pub provider: String,
+    pub source: String,
+    pub updated_at: Option<i64>,
+    pub age_seconds: i64,
+    pub stale: bool,
+}
+
+impl CacheFreshness {
+    /// Providers whose own slice crossed the stale horizon. Empty when the
+    /// whole cache is stale: the strip already says so once, and repeating it
+    /// per chunk adds no information.
+    pub fn stale_providers(&self) -> Vec<String> {
+        if self.stale {
+            return Vec::new();
+        }
+        self.providers
+            .iter()
+            .filter(|provider| provider.stale)
+            .map(|provider| provider.provider.clone())
+            .collect()
+    }
 }
 
 #[derive(Debug)]
@@ -28,6 +63,12 @@ pub struct CacheSnapshot {
 pub struct CacheReadError {
     path: PathBuf,
     source: io::Error,
+}
+
+impl CacheReadError {
+    pub fn for_path(path: PathBuf, source: io::Error) -> Self {
+        Self { path, source }
+    }
 }
 
 impl fmt::Display for CacheReadError {
@@ -63,15 +104,19 @@ pub fn read_cache_from_env(now_epoch: i64) -> Result<CacheSnapshot, CacheReadErr
             path: paths.usage_file.clone(),
             source,
         })?;
-    let (payload, source) = crate::codexbar::unwrap_cache_transport(raw);
+    let transport = crate::codexbar::unwrap_cache_transport(raw);
     let freshness = freshness_from_parts(
         mtime_epoch,
         now_epoch,
         refresh_seconds_from_env(),
-        source,
+        transport.source,
         env::var("SHOWY_QUOTA_DEGRADED_CLI").ok(),
+        &transport.provider_meta,
     );
-    Ok(CacheSnapshot { payload, freshness })
+    Ok(CacheSnapshot {
+        payload: transport.payload,
+        freshness,
+    })
 }
 
 fn read_usage_payload(path: &PathBuf) -> io::Result<(Vec<u8>, Option<i64>)> {
@@ -120,6 +165,7 @@ pub fn freshness_for_paths(paths: &CachePaths, now_epoch: i64, source: String) -
         refresh_seconds_from_env(),
         source,
         env::var("SHOWY_QUOTA_DEGRADED_CLI").ok(),
+        &[],
     )
 }
 
@@ -129,24 +175,85 @@ pub fn freshness_from_parts(
     refresh_seconds: i64,
     source: String,
     degraded_cli_env: Option<String>,
+    provider_meta: &[ProviderCacheMeta],
 ) -> CacheFreshness {
-    let age_seconds = age_seconds(now_epoch, mtime_epoch);
+    freshness_from_parts_filtered(
+        mtime_epoch,
+        now_epoch,
+        refresh_seconds,
+        source,
+        degraded_cli_env,
+        provider_meta,
+        None,
+    )
+}
+
+/// [`freshness_from_parts`] restricted to the providers the caller actually
+/// renders. Provider metadata describes the whole envelope, but the degraded
+/// marker answers "is a CLI-sourced slice visible": a CLI entry the
+/// allow/exclude lists removed must not paint the marker, and an entry for a
+/// provider absent from the payload must not either. Pass the rendered
+/// provider ids (post-validation, post-filter); `None` keeps the legacy
+/// whole-envelope behaviour for callers with no payload view.
+pub fn freshness_from_parts_filtered(
+    mtime_epoch: Option<i64>,
+    now_epoch: i64,
+    refresh_seconds: i64,
+    source: String,
+    degraded_cli_env: Option<String>,
+    provider_meta: &[ProviderCacheMeta],
+    visible_providers: Option<&[String]>,
+) -> CacheFreshness {
+    let file_age_seconds = age_seconds(now_epoch, mtime_epoch);
     let stale_after = refresh_seconds.saturating_mul(2);
-    let stale = age_seconds > stale_after;
+    let stale = file_age_seconds > stale_after;
+    // A provider with no recorded timestamp is as fresh as the file: a
+    // legacy envelope must not invent per-provider staleness.
+    let providers: Vec<ProviderFreshness> = provider_meta
+        .iter()
+        .map(|meta| {
+            let provider_age = match meta.updated_at {
+                Some(updated_at) => age_seconds(now_epoch, Some(updated_at)),
+                None => file_age_seconds,
+            };
+            ProviderFreshness {
+                provider: meta.provider.clone(),
+                source: meta.source.clone(),
+                updated_at: meta.updated_at,
+                age_seconds: provider_age,
+                stale: provider_age > stale_after,
+            }
+        })
+        .collect();
     // Tri-state, matching the shell driver: SHOWY_QUOTA_DEGRADED_CLI="1" forces
     // the marker on; any other non-empty value (e.g. "0") forces it off; unset
     // or empty derives it from the cache source. A two-state
     // `== Some("1") || source == "cli"` wrongly ignored the explicit "0" off.
+    //
+    // A serve publish that carried a provider forward from an earlier CLI
+    // fallback labels the publish `serve` while one slice is still
+    // CLI-sourced, so the per-provider sources decide too — but only for
+    // slices the caller renders.
+    let rendered_cli = |provider: &str| match visible_providers {
+        Some(visible) => visible.iter().any(|name| name == provider),
+        None => true,
+    };
     let degraded_cli = match degraded_cli_env.as_deref() {
         Some("1") => true,
         Some(value) if !value.is_empty() => false,
-        _ => source == "cli",
+        _ => {
+            source == "cli"
+                || providers
+                    .iter()
+                    .any(|provider| provider.source == "cli" && rendered_cli(&provider.provider))
+        }
     };
     CacheFreshness {
-        age_seconds,
+        age_seconds: file_age_seconds,
         stale,
         source,
         degraded_cli,
+        providers,
     }
 }
 
@@ -186,8 +293,7 @@ fn default_cache_dir() -> PathBuf {
         .join(".cache")
         .join("showy-quota")
 }
-
-fn system_time_epoch(time: SystemTime) -> i64 {
+pub fn system_time_epoch(time: SystemTime) -> i64 {
     match time.duration_since(UNIX_EPOCH) {
         Ok(duration) => duration.as_secs().min(i64::MAX as u64) as i64,
         Err(err) => -(err.duration().as_secs().min(i64::MAX as u64) as i64),
@@ -198,40 +304,155 @@ fn system_time_epoch(time: SystemTime) -> i64 {
 mod tests {
     use super::*;
 
+    fn meta(provider: &str, source: &str, updated_at: Option<i64>) -> ProviderCacheMeta {
+        ProviderCacheMeta {
+            provider: provider.into(),
+            source: source.into(),
+            updated_at,
+        }
+    }
+
     #[test]
     fn freshness_matches_shell_age_stale_and_degraded_rules() {
-        let fresh = freshness_from_parts(Some(1_000), 1_100, 60, "serve".into(), None);
+        let fresh = freshness_from_parts(Some(1_000), 1_100, 60, "serve".into(), None, &[]);
         assert_eq!(fresh.age_seconds, 100);
         assert!(!fresh.stale);
         assert!(!fresh.degraded_cli);
 
-        let boundary = freshness_from_parts(Some(1_000), 1_120, 60, "serve".into(), None);
+        let boundary = freshness_from_parts(Some(1_000), 1_120, 60, "serve".into(), None, &[]);
         assert_eq!(boundary.age_seconds, 120);
         assert!(!boundary.stale);
 
-        let stale = freshness_from_parts(Some(1_000), 1_121, 60, "serve".into(), None);
+        let stale = freshness_from_parts(Some(1_000), 1_121, 60, "serve".into(), None, &[]);
         assert_eq!(stale.age_seconds, 121);
         assert!(stale.stale);
 
-        let future = freshness_from_parts(Some(1_300), 1_000, 120, "serve".into(), None);
+        let future = freshness_from_parts(Some(1_300), 1_000, 120, "serve".into(), None, &[]);
         assert_eq!(future.age_seconds, 300);
         assert!(future.stale);
 
-        let source_cli = freshness_from_parts(Some(1_000), 1_000, 120, "cli".into(), None);
+        let source_cli = freshness_from_parts(Some(1_000), 1_000, 120, "cli".into(), None, &[]);
         assert!(source_cli.degraded_cli);
 
-        let env_cli =
-            freshness_from_parts(Some(1_000), 1_000, 120, "serve".into(), Some("1".into()));
+        let env_cli = freshness_from_parts(
+            Some(1_000),
+            1_000,
+            120,
+            "serve".into(),
+            Some("1".into()),
+            &[],
+        );
         assert!(env_cli.degraded_cli);
 
         // Tri-state override: an explicit non-"1" value forces the marker off
         // even when the source is cli (matches the shell's -z guard).
         let forced_off =
-            freshness_from_parts(Some(1_000), 1_000, 120, "cli".into(), Some("0".into()));
+            freshness_from_parts(Some(1_000), 1_000, 120, "cli".into(), Some("0".into()), &[]);
         assert!(!forced_off.degraded_cli);
-        let empty_derives =
-            freshness_from_parts(Some(1_000), 1_000, 120, "cli".into(), Some(String::new()));
+        let empty_derives = freshness_from_parts(
+            Some(1_000),
+            1_000,
+            120,
+            "cli".into(),
+            Some(String::new()),
+            &[],
+        );
         assert!(empty_derives.degraded_cli);
+    }
+
+    #[test]
+    fn carried_forward_provider_is_stale_inside_a_fresh_cache() {
+        // The file was published a second ago, but `claude`'s slice was
+        // carried forward from a fetch 10 minutes back: the strip must mark
+        // that one chunk and leave the rest alone.
+        let freshness = freshness_from_parts(
+            Some(1_999),
+            2_000,
+            60,
+            "cli".into(),
+            None,
+            &[
+                meta("codex", "cli", Some(2_000)),
+                meta("claude", "cli", Some(1_400)),
+            ],
+        );
+        assert!(!freshness.stale, "the cache itself just refreshed");
+        assert_eq!(freshness.stale_providers(), vec![String::from("claude")]);
+        let claude = &freshness.providers[1];
+        assert_eq!(claude.age_seconds, 600);
+        assert!(claude.stale);
+        assert!(!freshness.providers[0].stale);
+    }
+
+    #[test]
+    fn whole_cache_staleness_suppresses_per_provider_markers() {
+        let freshness = freshness_from_parts(
+            Some(1_000),
+            2_000,
+            60,
+            "cli".into(),
+            None,
+            &[meta("codex", "cli", Some(1_000))],
+        );
+        assert!(freshness.stale);
+        assert!(
+            freshness.stale_providers().is_empty(),
+            "the strip already carries one stale marker"
+        );
+    }
+
+    #[test]
+    fn provider_without_timestamp_inherits_file_freshness() {
+        let freshness = freshness_from_parts(
+            Some(1_900),
+            2_000,
+            60,
+            "serve".into(),
+            None,
+            &[meta("codex", "serve", None)],
+        );
+        assert_eq!(freshness.providers[0].age_seconds, 100);
+        assert!(!freshness.providers[0].stale);
+    }
+
+    #[test]
+    fn cli_sourced_slice_degrades_a_serve_publish() {
+        let freshness = freshness_from_parts(
+            Some(2_000),
+            2_000,
+            60,
+            "serve".into(),
+            None,
+            &[
+                meta("codex", "serve", Some(2_000)),
+                meta("claude", "cli", Some(2_000)),
+            ],
+        );
+        assert!(freshness.degraded_cli);
+    }
+
+    #[test]
+    fn filtered_out_cli_slice_does_not_degrade_visible_serve_rows() {
+        // The marker answers "is a CLI-sourced slice visible": a CLI entry
+        // the allow-list removed, or an entry for a provider absent from the
+        // payload, must not paint it.
+        let meta = [
+            meta("codex", "serve", Some(2_000)),
+            meta("claude", "cli", Some(2_000)),
+            meta("ghost", "cli", Some(2_000)),
+        ];
+        let filtered = freshness_from_parts_filtered(
+            Some(2_000),
+            2_000,
+            60,
+            "serve".into(),
+            None,
+            &meta,
+            Some(&[String::from("codex")]),
+        );
+        assert!(!filtered.degraded_cli);
+        let unfiltered = freshness_from_parts(Some(2_000), 2_000, 60, "serve".into(), None, &meta);
+        assert!(unfiltered.degraded_cli);
     }
 
     #[test]
@@ -244,7 +465,7 @@ mod tests {
 
     #[test]
     fn missing_mtime_uses_shell_sentinel() {
-        let freshness = freshness_from_parts(None, 1_000, 120, "unknown".into(), None);
+        let freshness = freshness_from_parts(None, 1_000, 120, "unknown".into(), None, &[]);
         assert_eq!(freshness.age_seconds, MISSING_AGE_SECONDS);
         assert!(freshness.stale);
         assert!(!freshness.degraded_cli);

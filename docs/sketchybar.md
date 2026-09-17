@@ -140,6 +140,14 @@ collection hiccup), those lanes stay drawn as empty tracks with no pacing
 marker rather than collapsing, so a momentarily-thin family does not vanish
 from the stack (parity with the Zellij `AGᶜ` lane).
 
+A provider CodexBar cannot read at all (an expired login, a network failure)
+keeps its place in the bar as an error label with no rows: the icon and the
+label draw in the warning color, every slider stays off, and its click action
+still reaches the provider's status page when CodexBar publishes one.
+A provider whose own slice went stale renders grey with no pacing markers,
+exactly like a wholly stale bar, while the providers beside it keep their own
+colors.
+
 ## Customizing colors
 
 Set `SHOWY_QUOTA_PALETTE_PRIMARY_*` in `~/.config/showy-quota/config.env` for

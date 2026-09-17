@@ -298,6 +298,11 @@ fn requested_permissions(manage_serve: bool, cli_fallback: CliFallback) -> Vec<P
 struct ProviderFallbackState {
     in_flight: bool,
     last_record: Option<serde_json::Value>,
+    /// When `last_record` was actually measured. The synthesized CLI payload
+    /// republishes every provider's last-known-good slice on each per-provider
+    /// success, so the payload's own age says nothing about a record the
+    /// plugin merely carried forward.
+    last_record_seconds: Option<f64>,
     last_result_empty: bool,
     last_attempt_seconds: Option<f64>,
     last_failure_seconds: Option<f64>,
@@ -1603,6 +1608,7 @@ impl State {
             .entry(provider.to_string())
             .or_default();
         entry.last_record = record;
+        entry.last_record_seconds = Some(now);
         entry.last_result_empty = entry.last_record.is_none();
         entry.last_failure_seconds = None;
         entry.consecutive_failures = 0;
@@ -1658,6 +1664,9 @@ impl State {
                 .get(provider)
                 .is_none_or(|state| state.last_record.is_none() && !state.last_result_empty)
         });
+        // The seeded records are exactly as old as the payload they come
+        // from, which is when the plugin last accepted a snapshot.
+        let payload_seconds = self.last_success_seconds;
         if needs_seed {
             // Seed any unqueried eligible providers from the existing payload so a
             // single per-provider success does not blow away the rest of the bar.
@@ -1680,6 +1689,7 @@ impl State {
                                     .or_default();
                                 if entry.last_record.is_none() && !entry.last_result_empty {
                                     entry.last_record = Some(value.clone());
+                                    entry.last_record_seconds = payload_seconds;
                                 }
                             }
                         }
@@ -1867,6 +1877,7 @@ impl State {
         // Index by the record's ORIGINAL array position: the validated list is a
         // subsequence, so a positional zip would store another record's raw JSON
         // under this provider's id.
+        let measured_at = now_seconds();
         for (index, record) in &indexed {
             if !valid_provider_id(&record.provider) {
                 continue;
@@ -1879,6 +1890,7 @@ impl State {
                 .entry(record.provider.clone())
                 .or_default();
             entry.last_record = Some(value.clone());
+            entry.last_record_seconds = Some(measured_at);
         }
     }
 
@@ -1892,6 +1904,26 @@ impl State {
         }
         self.last_output = output.into();
         true
+    }
+
+    /// Providers whose carried-forward slice has aged past the stale horizon
+    /// while the published payload as a whole has not. Empty for a serve
+    /// snapshot (one fetch, one age) and empty once the bar is wholly stale,
+    /// because the strip already carries that marker once.
+    fn stale_provider_slices(&self, now_seconds: f64, interval: f64, stale: bool) -> Vec<String> {
+        if stale || self.source != Source::Cli {
+            return Vec::new();
+        }
+        self.provider_states
+            .iter()
+            .filter(|(_, state)| state.last_record.is_some())
+            .filter(|(_, state)| {
+                state
+                    .last_record_seconds
+                    .is_some_and(|seconds| (now_seconds - seconds).max(0.0) >= interval * 2.0)
+            })
+            .map(|(provider, _)| provider.clone())
+            .collect()
     }
 
     fn refresh_output(&mut self) -> bool {
@@ -1908,6 +1940,11 @@ impl State {
             .last_success_seconds
             .map(|seconds| (now_seconds - seconds).max(0.0) >= interval * 2.0)
             .unwrap_or(false);
+        // The synthesized CLI payload is republished on every per-provider
+        // success, so its age only describes the newest slice. Mark the
+        // providers whose own record has aged out, so one recovered provider
+        // cannot make the whole bar look live.
+        let stale_providers = self.stale_provider_slices(now_seconds, interval, stale);
         match render_zellij(
             payload,
             &self.render_config,
@@ -1916,6 +1953,7 @@ impl State {
                 stale,
                 degraded_cli: self.source == Source::Cli,
                 now_epoch: now,
+                stale_providers: &stale_providers,
             },
         ) {
             Ok(output) => {

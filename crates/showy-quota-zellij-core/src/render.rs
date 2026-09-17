@@ -9,11 +9,35 @@ use crate::palette::{hex_to_rgb, normalized_hex, Severity};
 use crate::reset::{minutes_until, reset_clock, reset_epoch};
 
 #[derive(Debug, Clone, Copy)]
-pub struct RenderOptions {
+pub struct RenderOptions<'a> {
     pub color: bool,
     pub stale: bool,
     pub degraded_cli: bool,
     pub now_epoch: i64,
+    /// Providers whose own slice is older than the stale horizon while the
+    /// snapshot as a whole is not — a record the data plane carried forward
+    /// after its refresh failed. Such a chunk renders exactly like a wholly
+    /// stale strip (stale colour, no pacing marker) so one preserved provider
+    /// cannot pass itself off as live quota.
+    pub stale_providers: &'a [String],
+}
+
+impl RenderOptions<'_> {
+    /// The strip-wide stale flag, or this provider's own carried-forward
+    /// state. Callers shadow `options` with the result so every downstream
+    /// reader of `options.stale` sees the effective value for the chunk.
+    fn for_provider(self, provider: &str) -> Self {
+        if self.stale {
+            return self;
+        }
+        RenderOptions {
+            stale: self
+                .stale_providers
+                .iter()
+                .any(|stale| stale.as_str() == provider),
+            ..self
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -200,10 +224,12 @@ pub fn render_vertical(
     options: RenderOptions,
 ) -> Result<String, RenderError> {
     let records = parse_render_payload(payload).map_err(|_| RenderError::InvalidPayload)?;
+    let total = records.len();
     let mut records: Vec<&ProviderRecord> = records
         .iter()
         .filter(|record| is_renderable(record) || is_errored(record))
         .collect();
+    let candidates = records.len();
     filter_and_sort(&mut records, config);
 
     let format = OutputFormat::Zellij;
@@ -213,7 +239,7 @@ pub fn render_vertical(
 
     if records.is_empty() {
         dim(&mut out, format, options.color);
-        out.push_str("AI idle");
+        out.push_str(empty_reason(total, candidates, config).label());
         reset(&mut out, format, options.color);
         out.push('\n');
     }
@@ -230,7 +256,12 @@ pub fn render_vertical(
                 out.push('\n');
             }
             RenderUnit::Provider(record, sigil) => {
-                let windows = vertical_windows(record, config, options.now_epoch);
+                let windows = vertical_windows(
+                    record,
+                    config,
+                    options.now_epoch,
+                    options.for_provider(&record.provider).stale,
+                );
                 if !windows.is_empty() {
                     groups.push((sigil.as_str(), windows));
                 }
@@ -369,6 +400,9 @@ struct VerticalWindow<'a> {
     /// Position within the provider's own window list, so `urgency` ties keep
     /// CodexBar's ordering.
     order: usize,
+    /// This provider's slice was carried forward and is past the stale
+    /// horizon, even though the snapshot as a whole is current.
+    stale: bool,
 }
 
 /// A window selected for the view, with the name it ended up carrying. A
@@ -384,6 +418,7 @@ fn vertical_windows<'a>(
     record: &'a ProviderRecord,
     config: &RenderConfig,
     now_epoch: i64,
+    stale: bool,
 ) -> Vec<VerticalWindow<'a>> {
     let Some(usage) = record.usage.as_ref() else {
         return Vec::new();
@@ -473,6 +508,7 @@ fn vertical_windows<'a>(
                 )
             }),
             order,
+            stale,
         });
     }
     out
@@ -541,10 +577,13 @@ fn render_vertical_line(
     let chunk_bg = &config.palette_bg;
     let surface = &config.palette_surface;
     let window = line.window;
+    // The whole snapshot is old, or this provider's slice alone was carried
+    // forward past the stale horizon.
+    let stale = options.stale || window.stale;
 
     // No dim variant: the horizon is printed in its own column, so dimming would
     // restate a literal label at the cost of contrast.
-    let color = if options.stale {
+    let color = if stale {
         config.palette_stale.clone()
     } else {
         config.window_color(window.remaining, false)
@@ -552,13 +591,13 @@ fn render_vertical_line(
     // A stale snapshot cannot place a pacing marker, matching the strip's marker
     // suppression. The countdown still renders — it is the reading, not the
     // pacing — and its stale colour says the snapshot is old.
-    let (marker_reset, marker_window) = if options.stale {
+    let (marker_reset, marker_window) = if stale {
         (None, None)
     } else {
         (window.reset, window.window)
     };
     let countdown = primary_label(window.minutes, window.remaining, window.reset);
-    let time_color = if options.stale {
+    let time_color = if stale {
         config.palette_stale.as_str()
     } else if window
         .minutes
@@ -737,16 +776,58 @@ fn collect_units<'a>(records: &[&'a ProviderRecord], config: &RenderConfig) -> V
     units
 }
 
+/// Why the strip has nothing to draw. The three cases need three different
+/// user actions — enable a provider in CodexBar, fix the allow/exclude
+/// lists, or simply wait — and collapsing them into one `AI idle` left the
+/// most common first-run failure looking like healthy, unused quota.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EmptyReason {
+    /// Providers reported usable quota; none of it is consumed yet.
+    Idle,
+    /// CodexBar published no providers at all.
+    NoProviders,
+    /// Providers exist, but `providers`/`providers_exclude` removed them all.
+    Filtered,
+}
+
+impl EmptyReason {
+    /// The strip label. Kept to the `AI <word>` shape and width class of the
+    /// existing idle label, because this text occupies a status bar. The
+    /// machine-readable counterpart is `showy-quota-state`'s `emptyReason`.
+    pub fn label(self) -> &'static str {
+        match self {
+            EmptyReason::Idle => "AI idle",
+            EmptyReason::NoProviders => "AI none",
+            EmptyReason::Filtered => "AI filtered",
+        }
+    }
+}
+
+/// Classify an empty strip. `candidates` are the records that could have been
+/// drawn (renderable or errored) before the provider filters ran.
+fn empty_reason(total: usize, candidates: usize, config: &RenderConfig) -> EmptyReason {
+    if total == 0 {
+        return EmptyReason::NoProviders;
+    }
+    let filtering = !config.providers.is_empty() || !config.providers_exclude.is_empty();
+    if candidates > 0 && filtering {
+        return EmptyReason::Filtered;
+    }
+    EmptyReason::Idle
+}
+
 fn render_records(
     records: &[ProviderRecord],
     config: &RenderConfig,
     options: RenderOptions,
     output_format: OutputFormat,
 ) -> String {
+    let total = records.len();
     let mut records: Vec<&ProviderRecord> = records
         .iter()
         .filter(|record| is_renderable(record) || is_errored(record))
         .collect();
+    let candidates = records.len();
     filter_and_sort(&mut records, config);
 
     let chunk_bg = &config.palette_bg;
@@ -754,16 +835,17 @@ fn render_records(
     let mut out = String::new();
 
     if records.is_empty() {
+        let label = empty_reason(total, candidates, config).label();
         dim(&mut out, output_format, options.color);
         match output_format {
             OutputFormat::Zellij => {
-                out.push_str("AI idle");
+                out.push_str(label);
                 reset(&mut out, output_format, options.color);
             }
             OutputFormat::Tmux => {
                 style_text(
                     &mut out,
-                    "AI idle",
+                    label,
                     Some(&config.palette_primary_unknown),
                     None,
                     Weight::Normal,
@@ -932,6 +1014,20 @@ fn center_pad(text: &str, width: usize) -> String {
     out
 }
 
+/// Colour for a provider's CodexBar incident indicator, or `None` when the
+/// provider reports no incident. Mirrors the SketchyBar adapter's
+/// `status_color_for_indicator` token for token, including its
+/// case-sensitivity: an indicator CodexBar does not publish must leave the
+/// chunk alone rather than guess a severity.
+fn status_color<'a>(config: &'a RenderConfig, record: &ProviderRecord) -> Option<&'a str> {
+    match crate::metrics::normalized_status_indicator(record)?.as_str() {
+        "minor" | "maintenance" => Some(config.palette_primary_warn.as_str()),
+        "major" | "critical" => Some(config.palette_primary_bad.as_str()),
+        "unknown" => Some(config.palette_primary_unknown.as_str()),
+        _ => None,
+    }
+}
+
 /// The severity band a chunk was coloured with, reported so surfaces that
 /// cannot carry colour inside the text itself can reproduce showy-quota's own
 /// choice. See `RenderedRow`.
@@ -949,6 +1045,10 @@ fn render_provider(
     options: RenderOptions,
     output_format: OutputFormat,
 ) -> RowBand {
+    // A provider whose slice was carried forward greys exactly like a stale
+    // strip, so every `options.stale` reader below — colours, markers,
+    // countdown — sees the effective state for this chunk.
+    let options = options.for_provider(&record.provider);
     let chunk_bg = &config.palette_bg;
     let stale_color = &config.palette_stale;
     let usage = record
@@ -1057,10 +1157,13 @@ fn render_provider(
         }
         // The shell mono3 fallback refreshes its assembled-window reset fields
         // after the stale marker-clearing branch; preserve that byte contract.
+        // The mono4 fallback above passes the effective stale flag so a stale
+        // provider clears its pacing markers; this branch must do the same,
+        // or a stale mono3 provider keeps markers while its chunk is grey.
         "mono3" if tertiary.is_none() && assembled_windows.len() >= 3 => assembled_windows
             .iter()
             .take(3)
-            .map(|window| Lane::from_window(window, config, false))
+            .map(|window| Lane::from_window(window, config, options.stale))
             .collect(),
         "mono3" => [primary, secondary, tertiary]
             .into_iter()
@@ -1092,13 +1195,21 @@ fn render_provider(
         mono_color = stale_color.to_string();
     }
 
+    // The sigil pill (cap, chip, separator) carries PROVIDER state; the bars
+    // carry quota state. An active CodexBar incident therefore recolours the
+    // pill and leaves the bars reading their real remaining percentages, so
+    // "the provider is down" never looks like "you are out of quota". Stale
+    // wins: a snapshot too old to trust cannot vouch for an incident either.
+    let pill_color = match status_color(config, record) {
+        Some(color) if !options.stale => color.to_string(),
+        _ => primary_color.clone(),
+    };
     let separator_fg = chunk_bg;
-    let separator_bg = &primary_color;
     let cap_left = cap_text(output_format, &config.cap_left);
     style_text(
         out,
         cap_left.as_ref(),
-        Some(&primary_color),
+        Some(&pill_color),
         Some(chunk_bg),
         Weight::Normal,
         output_format,
@@ -1108,7 +1219,7 @@ fn render_provider(
         out,
         sigil,
         Some(chunk_bg),
-        Some(&primary_color),
+        Some(&pill_color),
         Weight::Bold,
         output_format,
         options.color,
@@ -1117,7 +1228,7 @@ fn render_provider(
         out,
         "▕",
         Some(separator_fg),
-        Some(separator_bg),
+        Some(&pill_color),
         Weight::Normal,
         output_format,
         options.color,
@@ -1907,7 +2018,9 @@ fn expand_pooled(
                         tertiary: None,
                         extra_rate_windows: Vec::new(),
                     }),
-                    status: None,
+                    // The pooled chunk is still this provider's slice: carry
+                    // the incident so the tint follows the expansion.
+                    status: record.status.clone(),
                 };
                 (sigil, synthetic)
             })
@@ -2195,17 +2308,19 @@ mod tests {
                 stale,
                 degraded_cli,
                 now_epoch: 4_070_908_800,
+                stale_providers: &[],
             },
         )
         .expect("rendered idle fixture")
     }
 
-    fn base_options(color: bool) -> RenderOptions {
+    fn base_options(color: bool) -> RenderOptions<'static> {
         RenderOptions {
             color,
             stale: false,
             degraded_cli: false,
             now_epoch: 4_070_908_800,
+            stale_providers: &[],
         }
     }
 
@@ -2279,6 +2394,175 @@ mod tests {
             "{output}"
         );
         assert!(!output.contains("AI idle"), "{output}");
+    }
+
+    const TWO_FRESH_PROVIDERS: &[u8] = br#"[
+        {
+            "provider": "codex",
+            "usage": {"primary": {"usedPercent": 10,
+                "resetsAt": "2099-01-01T01:00:00Z", "windowMinutes": 300}}
+        },
+        {
+            "provider": "claude",
+            "usage": {"primary": {"usedPercent": 20,
+                "resetsAt": "2099-01-01T01:00:00Z", "windowMinutes": 300}}
+        }
+    ]"#;
+
+    #[test]
+    fn carried_forward_provider_greys_only_its_own_chunk() {
+        // The cache file is current, so the strip carries no global stale
+        // marker — but `claude`'s slice was preserved from an older fetch and
+        // must not read as live quota.
+        let config = RenderConfig::default();
+        let stale_providers = vec![String::from("claude")];
+        let output = render_zellij(
+            TWO_FRESH_PROVIDERS,
+            &config,
+            RenderOptions {
+                stale_providers: &stale_providers,
+                ..base_options(true)
+            },
+        )
+        .expect("rendered mixed-freshness payload");
+
+        let fresh = render_zellij(TWO_FRESH_PROVIDERS, &config, base_options(true))
+            .expect("rendered all-fresh payload");
+        // Chunks are separated by a plain space, and neither fixture chunk
+        // contains one, so the split isolates each provider's styling —
+        // including the leading cap colour, which precedes its glyph.
+        let split_chunks = |rendered: &str| -> (String, String) {
+            let (left, right) = rendered.split_once(' ').expect("two provider chunks");
+            (left.to_string(), right.to_string())
+        };
+
+        let (codex_chunk, claude_chunk) = split_chunks(&output);
+        let (fresh_codex, fresh_claude) = split_chunks(&fresh);
+        let stale = "108;112;134"; // palette_stale 6c7086
+
+        assert_eq!(
+            codex_chunk, fresh_codex,
+            "the fresh provider renders byte-identically"
+        );
+        assert_ne!(claude_chunk, fresh_claude);
+        assert!(claude_chunk.contains(stale), "{claude_chunk}");
+        assert!(
+            !claude_chunk.contains("37;190;106"),
+            "a carried-forward slice must not keep its good band: {claude_chunk}"
+        );
+        assert!(
+            !output.contains(&config.stale_glyph),
+            "a fresh cache carries no strip-wide stale marker: {output}"
+        );
+    }
+
+    #[test]
+    fn strip_wide_stale_needs_no_per_provider_list() {
+        let config = RenderConfig::default();
+        let listed = vec![String::from("claude")];
+        let whole = render_zellij(
+            TWO_FRESH_PROVIDERS,
+            &config,
+            RenderOptions {
+                stale: true,
+                ..base_options(true)
+            },
+        )
+        .expect("rendered stale strip");
+        let whole_and_listed = render_zellij(
+            TWO_FRESH_PROVIDERS,
+            &config,
+            RenderOptions {
+                stale: true,
+                stale_providers: &listed,
+                ..base_options(true)
+            },
+        )
+        .expect("rendered stale strip with a redundant list");
+
+        assert_eq!(whole, whole_and_listed);
+    }
+
+    #[test]
+    fn empty_strip_says_why_it_is_empty() {
+        let config = RenderConfig::default();
+        let idle = br#"[{"provider": "codex", "usage": {"primary": null}}]"#;
+        assert!(
+            render_zellij(idle, &config, base_options(false))
+                .expect("rendered idle payload")
+                .contains("AI idle"),
+            "a provider with no consumed quota is idle"
+        );
+
+        assert!(
+            render_zellij(b"[]", &config, base_options(false))
+                .expect("rendered empty inventory")
+                .contains("AI none"),
+            "CodexBar published no providers at all"
+        );
+
+        let filtered = RenderConfig {
+            providers_exclude: vec!["claude".into()],
+            ..RenderConfig::default()
+        };
+        let output = render_zellij(CLAUDE_RENDERABLE, &filtered, base_options(false))
+            .expect("rendered filtered payload");
+        assert!(
+            output.contains("AI filtered"),
+            "the user's own filters emptied the strip: {output}"
+        );
+    }
+
+    #[test]
+    fn incident_tints_the_pill_and_leaves_the_bars_reading_quota() {
+        let config = RenderConfig::default();
+        let payload = br#"[{
+            "provider": "codex",
+            "usage": {"primary": {"usedPercent": 10,
+                "resetsAt": "2099-01-01T01:00:00Z", "windowMinutes": 300}},
+            "status": {"indicator": "major", "url": "https://status.example.com"}
+        }]"#;
+        let output = render_zellij(payload, &config, base_options(true))
+            .expect("rendered provider with an incident");
+
+        let bad = "238;83;150"; // palette_primary_bad ee5396
+        let good = "37;190;106";
+        assert!(
+            output.contains(&format!("48;2;{bad}m")),
+            "the sigil pill carries the incident: {output}"
+        );
+        assert!(
+            output.contains(good),
+            "the bars still report real remaining quota: {output}"
+        );
+
+        let healthy = render_zellij(TWO_FRESH_PROVIDERS, &config, base_options(true))
+            .expect("rendered healthy providers");
+        assert!(
+            !healthy.contains(&format!("48;2;{bad}m")),
+            "no incident, no tint: {healthy}"
+        );
+    }
+
+    #[test]
+    fn unknown_incident_indicators_leave_the_chunk_alone() {
+        let config = RenderConfig::default();
+        let payload = br#"[{
+            "provider": "codex",
+            "usage": {"primary": {"usedPercent": 10,
+                "resetsAt": "2099-01-01T01:00:00Z", "windowMinutes": 300}},
+            "status": {"indicator": "wobbly"}
+        }]"#;
+        let plain = br#"[{
+            "provider": "codex",
+            "usage": {"primary": {"usedPercent": 10,
+                "resetsAt": "2099-01-01T01:00:00Z", "windowMinutes": 300}}
+        }]"#;
+
+        assert_eq!(
+            render_zellij(payload, &config, base_options(true)).expect("rendered"),
+            render_zellij(plain, &config, base_options(true)).expect("rendered"),
+        );
     }
 
     #[test]
@@ -2395,11 +2679,12 @@ mod tests {
                 stale: true,
                 degraded_cli: true,
                 now_epoch: 4_070_908_800,
+                stale_providers: &[],
             },
         )
         .expect("rendered tmux idle fixture");
 
-        assert_eq!(output, "#[dim]#[fg=#6c7086]AI idle#[default]");
+        assert_eq!(output, "#[dim]#[fg=#6c7086]AI none#[default]");
     }
 
     #[test]
@@ -2449,17 +2734,17 @@ mod tests {
 
     #[test]
     fn idle_render_appends_degraded_marker() {
-        assert_eq!(render_idle(false, true), "AI idle ⚠cli\n");
+        assert_eq!(render_idle(false, true), "AI none ⚠cli\n");
     }
 
     #[test]
     fn idle_render_appends_stale_marker() {
-        assert_eq!(render_idle(true, false), "AI idle ⚠\n");
+        assert_eq!(render_idle(true, false), "AI none ⚠\n");
     }
 
     #[test]
     fn idle_render_appends_stale_and_degraded_markers() {
-        assert_eq!(render_idle(true, true), "AI idle ⚠ ⚠cli\n");
+        assert_eq!(render_idle(true, true), "AI none ⚠ ⚠cli\n");
     }
 
     #[test]
@@ -2477,11 +2762,12 @@ mod tests {
                 stale: false,
                 degraded_cli: true,
                 now_epoch: 4_070_908_800,
+                stale_providers: &[],
             },
         )
         .expect("rendered idle fixture");
 
-        assert_eq!(output, "AI idle CLI\n");
+        assert_eq!(output, "AI none CLI\n");
     }
 
     #[test]
@@ -2584,6 +2870,7 @@ mod tests {
                 stale: false,
                 degraded_cli: false,
                 now_epoch: 4_070_908_800,
+                stale_providers: &[],
             },
         )
         .expect("rendered fixture");
@@ -2619,6 +2906,7 @@ mod tests {
                 stale: false,
                 degraded_cli: false,
                 now_epoch: 4_070_908_800,
+                stale_providers: &[],
             },
         )
         .expect("rendered promoted-primary provider");
@@ -2669,6 +2957,7 @@ mod tests {
                 stale: false,
                 degraded_cli: false,
                 now_epoch: 4_070_908_800,
+                stale_providers: &[],
             },
         )
         .expect("rendered middle-gap provider");
@@ -2858,6 +3147,7 @@ mod tests {
                 stale: false,
                 degraded_cli: false,
                 now_epoch: 4_070_908_800,
+                stale_providers: &[],
             },
         )
         .expect("rendered mono4 fixture");
@@ -2884,6 +3174,7 @@ mod tests {
                 stale: false,
                 degraded_cli: false,
                 now_epoch: 4_070_908_800,
+                stale_providers: &[],
             },
         )
         .expect("rendered cursor fixture");
@@ -2897,12 +3188,13 @@ mod tests {
         // background) is suppressed.
         assert!(!output.contains("48;2;190;149;255"), "{output}");
     }
-    fn row_options(now_epoch: i64) -> RenderOptions {
+    fn row_options(now_epoch: i64) -> RenderOptions<'static> {
         RenderOptions {
             color: false,
             stale: false,
             degraded_cli: false,
             now_epoch,
+            stale_providers: &[],
         }
     }
 
@@ -2974,6 +3266,7 @@ mod tests {
                 stale: false,
                 degraded_cli: false,
                 now_epoch: 4_070_908_800,
+                stale_providers: &[],
             },
             OutputFormat::Zellij,
         )
@@ -3022,8 +3315,8 @@ mod tests {
         )
         .expect("rendered rows");
 
-        // The strip would print `AI idle`; rows leave that affordance to the
-        // surface instead of inventing a provider row.
+        // The strip would print an empty-state label; rows leave that
+        // affordance to the surface instead of inventing a provider row.
         assert!(rows.is_empty(), "{rows:?}");
         assert!(render_zellij(
             include_bytes!("../../../test/fixtures/codexbar-empty.json"),
@@ -3031,7 +3324,7 @@ mod tests {
             row_options(4_070_908_800),
         )
         .expect("rendered strip")
-        .contains("AI idle"));
+        .contains("AI none"));
     }
 
     #[test]
@@ -3046,6 +3339,7 @@ mod tests {
                 stale: true,
                 degraded_cli: false,
                 now_epoch: 4_070_908_800,
+                stale_providers: &[],
             },
             OutputFormat::Zellij,
         )
@@ -3443,6 +3737,7 @@ mod tests {
                 stale: true,
                 degraded_cli: true,
                 now_epoch: 4_070_908_800,
+                stale_providers: &[],
             },
         );
 
@@ -3468,6 +3763,6 @@ mod tests {
             base_options(false),
         );
 
-        assert_eq!(lines, vec!["AI idle".to_string()], "{lines:?}");
+        assert_eq!(lines, vec!["AI none".to_string()], "{lines:?}");
     }
 }

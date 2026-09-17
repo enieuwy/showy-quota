@@ -14,7 +14,7 @@ pub use codexbar::{
     ProviderConfigError, ProviderRecord,
 };
 pub use config::RenderConfig;
-pub use metrics::emit_provider_metrics;
+pub use metrics::{emit_provider_metrics, emit_provider_metrics_with_visible, MetricsWithVisible};
 pub use palette::Severity;
 pub use prompt::{emit_prompt_segment, PromptOptions};
 pub use render::{

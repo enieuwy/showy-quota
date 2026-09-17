@@ -14,15 +14,20 @@
 //!          US s_present US s_rem US s_marker US s_argb
 //!          US t_present US t_rem US t_marker US t_argb
 //!          US q_present US q_rem US q_marker US q_argb
+//!          US error
 //! ```
 //!
 //! Marker fields are empty when no elapsed marker should draw. Every color is
-//! a final `0xffRRGGBB` SketchyBar literal. The row semantics mirror the
-//! previous shell/jq pipeline byte-for-byte, including its quirks (absent
-//! lanes render remaining `0` with the bad-severity highlight; a shared cycle
-//! only suppresses the secondary/tertiary markers).
+//! a final `0xffRRGGBB` SketchyBar literal. The trailing `error` is `1` for a
+//! provider CodexBar could not read at all: no lane is present, and the
+//! adapter draws the label alone rather than a full bar at zero remaining.
+//! It trails the lane block so the lane fields keep their positions. The row
+//! semantics otherwise mirror the previous shell/jq pipeline byte-for-byte,
+//! including its quirks (absent lanes render remaining `0` with the
+//! bad-severity highlight; a shared cycle only suppresses the
+//! secondary/tertiary markers).
 
-use crate::codexbar::{is_renderable, NamedWindow, ProviderRecord, UsageWindow};
+use crate::codexbar::{is_errored, is_renderable, NamedWindow, ProviderRecord, UsageWindow};
 use crate::config::RenderConfig;
 use crate::metrics::parse_display_payload;
 use crate::render::{format_countdown, RenderError};
@@ -34,12 +39,26 @@ const MIN_BAR_WIDTH: i64 = 2;
 const MAX_BAR_WIDTH: i64 = 4_096;
 
 #[derive(Debug, Clone, Copy)]
-pub struct SketchybarOptions {
+pub struct SketchybarOptions<'a> {
     pub stale: bool,
     pub degraded_cli: bool,
     /// `SHOWY_QUOTA_PNG_BAR_W`: slider width in pixels. Elapsed markers are
     /// quantized to this width and converted to a slider percentage.
     pub bar_width: i64,
+    /// Providers whose own slice was carried forward past the stale horizon.
+    /// Their rows grey and drop their pacing markers exactly like a wholly
+    /// stale bar, while the fresh providers beside them keep their colours.
+    pub stale_providers: &'a [String],
+}
+
+impl SketchybarOptions<'_> {
+    fn stale_for(self, provider: &str) -> bool {
+        self.stale
+            || self
+                .stale_providers
+                .iter()
+                .any(|stale| stale.as_str() == provider)
+    }
 }
 
 /// One assembled slider lane. `rem` is the integer remaining percent the jq
@@ -65,15 +84,21 @@ pub fn emit_sketchybar(
     let records = parse_display_payload(payload)?;
     let mut out = header(options);
 
-    let mut renderable: Vec<&ProviderRecord> = records
+    let mut rows: Vec<&ProviderRecord> = records
         .iter()
-        .filter(|record| is_renderable(record) && passes_filters(record, config))
+        .filter(|record| {
+            (is_renderable(record) || is_errored(record)) && passes_filters(record, config)
+        })
         .collect();
-    sort_records(&mut renderable, config);
+    sort_records(&mut rows, config);
 
-    for record in renderable {
+    for record in rows {
         out.push('\n');
-        provider_line(&mut out, record, config, now_epoch, options);
+        if is_errored(record) {
+            error_line(&mut out, record, config);
+        } else {
+            provider_line(&mut out, record, config, now_epoch, options);
+        }
     }
     Ok(out)
 }
@@ -196,7 +221,7 @@ fn provider_line(
         .map(|(remaining, is_long)| argb(&config.window_color(*remaining as i32, *is_long)))
         .collect();
 
-    if options.stale {
+    if options.stale_for(&record.provider) {
         let stale_argb = argb(&config.palette_stale);
         label_color = stale_argb.clone();
         highlights.iter_mut().for_each(|c| *c = stale_argb.clone());
@@ -219,6 +244,31 @@ fn provider_line(
         );
         push_field(out, &highlights[index]);
     }
+    push_field(out, "0");
+}
+
+/// A provider CodexBar could not read at all (expired login, network
+/// failure). It keeps its place in the bar with an `⚠err` label and no
+/// lanes: a provider that silently disappears reads as "not configured",
+/// which is the one conclusion the data does not support. Marking the row
+/// `error` lets the adapter draw the label alone, because an absent lane
+/// otherwise renders as a full bad-severity bar at zero remaining.
+fn error_line(out: &mut String, record: &ProviderRecord, config: &RenderConfig) {
+    let error_argb = argb(&config.palette_countdown_warn);
+    let (status, status_url) = provider_status(record);
+
+    out.push_str(&record.provider);
+    push_field(out, &sanitize_field(&format!("{}err", config.error_glyph)));
+    push_field(out, &error_argb);
+    push_field(out, &status);
+    push_field(out, &status_url);
+    for _ in 0..LANE_COUNT {
+        push_field(out, "0");
+        push_field(out, "0");
+        push_field(out, "");
+        push_field(out, &error_argb);
+    }
+    push_field(out, "1");
 }
 
 fn push_field(out: &mut String, value: &str) {
@@ -231,17 +281,23 @@ fn argb(hex: &str) -> String {
 }
 
 /// `.status.indicator // "none"` and `.status.url // ""`, with control
-/// characters stripped so payload data cannot break the record framing.
+/// characters stripped so payload data cannot break the record framing. The
+/// indicator reads the same normalised token the metrics emitter and the
+/// terminal tint use, so all three surfaces agree on what counts as active.
 fn provider_status(record: &ProviderRecord) -> (String, String) {
-    let indicator = record
-        .status
-        .as_ref()
-        .and_then(|status| status.indicator.clone())
-        .unwrap_or_else(|| "none".into());
+    let indicator =
+        crate::metrics::normalized_status_indicator(record).unwrap_or_else(|| "none".into());
     let url = record
         .status
         .as_ref()
         .and_then(|status| status.url.clone())
+        .map(|url| {
+            url.chars()
+                .filter(|c| !c.is_control())
+                .collect::<String>()
+                .trim()
+                .to_owned()
+        })
         .unwrap_or_default();
     (sanitize_field(&indicator), sanitize_field(&url))
 }
@@ -420,11 +476,12 @@ mod tests {
 
     const BAR_W: i64 = 80;
 
-    fn options() -> SketchybarOptions {
+    fn options() -> SketchybarOptions<'static> {
         SketchybarOptions {
             stale: false,
             degraded_cli: false,
             bar_width: BAR_W,
+            stale_providers: &[],
         }
     }
 
@@ -450,6 +507,7 @@ mod tests {
                 stale: true,
                 degraded_cli: false,
                 bar_width: BAR_W,
+                stale_providers: &[],
             },
         );
         assert_eq!(rendered, format!("1{FIELD_SEP}0"));
@@ -706,6 +764,7 @@ mod tests {
                 stale: true,
                 degraded_cli: true,
                 bar_width: BAR_W,
+                stale_providers: &[],
             },
         );
         let rows = lines(&rendered);
@@ -775,9 +834,9 @@ mod tests {
     }
 
     #[test]
-    fn filters_errors_and_orders_providers() {
+    fn errored_providers_keep_their_place_in_the_bar() {
         let config = RenderConfig {
-            provider_order: vec!["gemini".into(), "codex".into()],
+            provider_order: vec!["gemini".into(), "broken".into(), "codex".into()],
             ..RenderConfig::default()
         };
         let payload = r#"[
@@ -787,9 +846,48 @@ mod tests {
         ]"#;
         let rendered = emit(payload, &config, 1_700_000_000, options());
         let rows = lines(&rendered);
-        assert_eq!(rows.len(), 3, "error-only provider is dropped");
+        assert_eq!(rows.len(), 4);
         assert_eq!(rows[1][0], "gemini");
-        assert_eq!(rows[2][0], "codex");
+        assert_eq!(rows[2][0], "broken");
+        assert_eq!(rows[3][0], "codex");
+
+        let error_row = &rows[2];
+        assert_eq!(error_row[1], "⚠err", "the label states the failure");
+        assert_eq!(error_row.last().expect("error field"), "1");
+        assert_eq!(error_row[5], "0", "an errored provider has no lane");
+        assert_eq!(rows[1].last().expect("error field"), "0");
+    }
+
+    #[test]
+    fn per_provider_stale_greys_only_that_row() {
+        let config = RenderConfig::default();
+        let payload = r#"[
+            {"provider": "codex", "usage": {"primary": {"usedPercent": 10,
+                "resetsAt": "2023-11-15T02:00:00Z", "windowMinutes": 300}}},
+            {"provider": "claude", "usage": {"primary": {"usedPercent": 20,
+                "resetsAt": "2023-11-15T02:00:00Z", "windowMinutes": 300}}}
+        ]"#;
+        let stale_providers = vec![String::from("claude")];
+        let rendered = emit(
+            payload,
+            &config,
+            1_700_000_000,
+            SketchybarOptions {
+                stale: false,
+                degraded_cli: false,
+                bar_width: BAR_W,
+                stale_providers: &stale_providers,
+            },
+        );
+        let rows = lines(&rendered);
+        let stale_argb = argb(&config.palette_stale);
+        assert_eq!(rows[1][0], "codex");
+        assert_ne!(rows[1][8], stale_argb, "the fresh provider keeps its band");
+        assert_ne!(rows[1][7], "", "and keeps its pacing marker");
+        assert_eq!(rows[2][0], "claude");
+        assert_eq!(rows[2][8], stale_argb);
+        assert_eq!(rows[2][2], stale_argb, "countdown greys too");
+        assert_eq!(rows[2][7], "", "a stale slice cannot place a marker");
     }
 
     #[test]

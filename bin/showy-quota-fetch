@@ -162,8 +162,22 @@ showy_quota_cleanup_cache_temps() {
     SHOWY_QUOTA_CACHE_TMP_FILES=()
 }
 
+# Start a refresh attempt with an empty carry-forward list. The path is
+# process-scoped, so concurrent fetchers never share it.
+begin_carry_forward_tracking() {
+    SHOWY_QUOTA_CARRIED_PROVIDERS_FILE="${SHOWY_QUOTA_CACHE_DIR}/carried-providers.$$"
+    : > "${SHOWY_QUOTA_CARRIED_PROVIDERS_FILE}" 2>/dev/null || SHOWY_QUOTA_CARRIED_PROVIDERS_FILE=""
+}
+
+end_carry_forward_tracking() {
+    [[ -n "${SHOWY_QUOTA_CARRIED_PROVIDERS_FILE:-}" ]] || return 0
+    rm -f -- "${SHOWY_QUOTA_CARRIED_PROVIDERS_FILE}" 2>/dev/null || true
+    SHOWY_QUOTA_CARRIED_PROVIDERS_FILE=""
+}
+
 showy_quota_exit_cleanup() {
     showy_quota_cleanup_cache_temps
+    end_carry_forward_tracking
     showy_quota_release_mkdir_lock
 }
 
@@ -963,6 +977,10 @@ run_codexbar_cli_provider() {
 # provider whose fresh CLI fetch is skipped (backoff) or fails keeps its
 # last-known-good slice instead of vanishing from the merged payload. Returns 1
 # when the cache is absent/invalid or has no record for the provider.
+#
+# A carried-forward record is NOT as fresh as the publish that republishes it.
+# Record the provider id so `publish_cache_payload` preserves its original
+# `providerMeta` timestamp instead of stamping it with the publish time.
 carry_forward_provider_record() {
     local provider="$1" record=""
     [[ -s "${SHOWY_QUOTA_USAGE_FILE}" ]] || return 1
@@ -971,7 +989,18 @@ carry_forward_provider_record() {
         '(if type == "object" then (.providers // []) else . end) | [.[] | select(type == "object" and .provider == $p)]' \
         "${SHOWY_QUOTA_USAGE_FILE}" 2>/dev/null) || return 1
     [[ -n "${record}" && "${record}" != "[]" ]] || return 1
+    record_carried_forward_provider "${provider}"
     printf '%s' "${record}"
+}
+
+# Note a provider whose slice this refresh preserved rather than measured.
+# `run_codexbar_cli_per_provider` runs inside a command substitution, so the
+# list travels through a file rather than a variable.
+record_carried_forward_provider() {
+    local provider="$1"
+    [[ -n "${SHOWY_QUOTA_CARRIED_PROVIDERS_FILE:-}" ]] || return 0
+    showy_quota_valid_provider_id "${provider}" || return 0
+    printf '%s\n' "${provider}" >> "${SHOWY_QUOTA_CARRIED_PROVIDERS_FILE}" 2>/dev/null || true
 }
 
 # Per-provider CLI fallback: discover providers, run one CLI invocation per
@@ -1970,8 +1999,30 @@ run_codexbar() {
     return 1
 }
 
+# Read the previous envelope's per-provider metadata, so a carried-forward
+# slice keeps the timestamp of the fetch that actually measured it. A legacy
+# bare-array or `cache@1` cache has none; callers fall back to the file mtime.
+previous_provider_meta() {
+    [[ -s "${SHOWY_QUOTA_USAGE_FILE}" ]] || { printf '{}'; return; }
+    # Normalize to an object: a non-object `providerMeta` still passes the
+    # envelope validator, and the publish filter indexes `$prev[$p]`.
+    jq -c 'if type == "object" and (.providerMeta | type) == "object"
+           then .providerMeta else {} end' \
+        "${SHOWY_QUOTA_USAGE_FILE}" 2>/dev/null || printf '{}'
+}
+
+# The provider ids this refresh preserved instead of measuring, as a JSON
+# array. Duplicates are harmless: the envelope builder tests membership.
+carried_forward_providers_json() {
+    [[ -n "${SHOWY_QUOTA_CARRIED_PROVIDERS_FILE:-}" ]] || { printf '[]'; return; }
+    [[ -s "${SHOWY_QUOTA_CARRIED_PROVIDERS_FILE}" ]] || { printf '[]'; return; }
+    jq -R -s -c 'split("\n") | map(select(length > 0))' \
+        < "${SHOWY_QUOTA_CARRIED_PROVIDERS_FILE}" 2>/dev/null || printf '[]'
+}
+
 publish_cache_payload() {
     local out="$1" source="${2:-unknown}" tmp stamp_tmp payload_marker=""
+    local now prev_file prev_source prev_updated carried
     SHOWY_QUOTA_CACHE_TMP_FILES=()
     trap showy_quota_exit_cleanup EXIT
     trap 'showy_quota_exit_cleanup; exit 130' INT
@@ -1988,13 +2039,62 @@ publish_cache_payload() {
         return 1
     fi
 
-    # Payload and source are built into ONE envelope object here, so they can
-    # be published with a single atomic rename below: there is no window in
-    # which a reader could observe a payload paired with source metadata from
-    # a different generation. jq escapes `source` correctly; never
-    # string-concatenate JSON by hand.
-    if ! printf '%s' "${out}" | jq -c --arg source "${source}" \
-        '{schema: "showy-quota/cache@1", source: $source, providers: .}' \
+    # Payload, source and per-provider metadata are built into ONE envelope
+    # object here, so they can be published with a single atomic rename below:
+    # there is no window in which a reader could observe a payload paired with
+    # metadata from a different generation. jq escapes every value correctly;
+    # never string-concatenate JSON by hand.
+    #
+    # `providerMeta` dates each provider's slice. Fresh slices carry this
+    # publish; a slice this refresh only carried forward keeps the timestamp
+    # and source of the fetch that measured it, because the cache file's mtime
+    # describes the publish and would otherwise vouch for a record nobody
+    # refreshed.
+    now=$(showy_quota_now_epoch)
+    # The previous envelope map travels through a temp file, not argv: a
+    # valid cache nears the 5 MiB cap, past the macOS 1 MiB exec argument
+    # limit, and a large `providerMeta` would abort an otherwise valid
+    # publish.
+    prev_file=$(mktemp "${SHOWY_QUOTA_CACHE_DIR}/usage.prev-meta.XXXXXX") || {
+        showy_quota_log "could not stage previous provider metadata"
+        rm -f -- "${tmp}"
+        return 1
+    }
+    SHOWY_QUOTA_CACHE_TMP_FILES+=("${prev_file}")
+    previous_provider_meta > "${prev_file}" 2>/dev/null || printf '{}' > "${prev_file}"
+    carried=$(carried_forward_providers_json)
+    prev_source="$(showy_quota_cache_source)"
+    prev_updated=$(( now - $(showy_quota_age_seconds "${SHOWY_QUOTA_USAGE_FILE}") ))
+    if ! printf '%s' "${out}" | jq -c \
+        --arg source "${source}" \
+        --arg prev_source "${prev_source}" \
+        --argjson now "${now}" \
+        --argjson prev_updated "${prev_updated}" \
+        --slurpfile prev "${prev_file}" \
+        --argjson carried "${carried}" \
+        '($prev[0] // {}) as $prevmap
+        | {
+            schema: "showy-quota/cache@2",
+            source: $source,
+            providers: .,
+            providerMeta: (
+                reduce (.[]? | select(type == "object") | .provider
+                        | select(type == "string")) as $p ({};
+                    .[$p] = (
+                        if ($carried | index($p)) == null then
+                            {source: $source, updatedAt: $now}
+                        elif ($prevmap[$p] | type) == "object" then
+                            {
+                                source: ($prevmap[$p].source // $prev_source),
+                                updatedAt: ($prevmap[$p].updatedAt // $prev_updated)
+                            }
+                        else
+                            {source: $prev_source, updatedAt: $prev_updated}
+                        end
+                    )
+                )
+            )
+        }' \
         > "${tmp}"; then
         rm -f -- "${tmp}"
         showy_quota_log "codexbar JSON failed validation"
@@ -2103,16 +2203,27 @@ refresh_cache() {
     [[ "${source}" == "cli" ]] && record_cli_failure
     return 1
 }
+# Both refresh entry points bracket the attempt with carry-forward tracking:
+# `publish_cache_payload` needs the list of preserved providers, and it must
+# not survive into the next attempt.
 refresh_cache_with_quarantine() {
+    local rc=0
     showy_quota_touch_mkdir_lock_heartbeat
     quarantine_invalid_cache_if_present || return 1
-    refresh_cache
+    begin_carry_forward_tracking
+    refresh_cache || rc=$?
+    end_carry_forward_tracking
+    return "${rc}"
 }
 
 refresh_cache_from_serve_with_quarantine() {
+    local rc=0
     showy_quota_touch_mkdir_lock_heartbeat
     quarantine_invalid_cache_if_present || return 1
-    refresh_cache_from_serve
+    begin_carry_forward_tracking
+    refresh_cache_from_serve || rc=$?
+    end_carry_forward_tracking
+    return "${rc}"
 }
 
 
