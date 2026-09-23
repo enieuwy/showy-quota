@@ -8,12 +8,20 @@ use crate::config::RenderConfig;
 use crate::palette::{hex_to_rgb, normalized_hex, Severity};
 use crate::reset::{minutes_until, reset_clock, reset_epoch};
 
+/// Snapshot metadata supplied by the data plane, not parsed from quota records.
+#[derive(Debug, Clone, Copy)]
+pub struct Freshness<'a> {
+    pub age_seconds: i64,
+    pub source: &'a str,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct RenderOptions<'a> {
     pub color: bool,
     pub stale: bool,
     pub degraded_cli: bool,
     pub now_epoch: i64,
+    pub freshness: Option<Freshness<'a>>,
     /// Providers whose own slice is older than the stale horizon while the
     /// snapshot as a whole is not — a record the data plane carried forward
     /// after its refresh failed. Such a chunk renders exactly like a wholly
@@ -360,6 +368,20 @@ pub fn render_vertical(
 
     // Strip-level state gets its own trailing line: a vertical view has no
     // shared line to hang the markers on.
+    if !options.stale {
+        if let Some(suffix) = freshness_suffix(config, options.freshness) {
+            style_text(
+                &mut out,
+                &suffix,
+                Some(&config.palette_countdown),
+                Some(chunk_bg),
+                Weight::Normal,
+                format,
+                options.color,
+            );
+            out.push('\n');
+        }
+    }
     let mut glyphs: Vec<&str> = Vec::new();
     if options.stale {
         glyphs.push(config.stale_glyph.as_str());
@@ -704,6 +726,17 @@ fn render_vertical_line(
         options.color,
     );
 
+    if config.severity_glyphs && !stale {
+        style_text(
+            out,
+            config.severity(window.remaining).marker(),
+            Some(&color),
+            Some(chunk_bg),
+            Weight::Bold,
+            format,
+            options.color,
+        );
+    }
     // The percentage is the primary reading, so it keeps full contrast and never
     // inherits a dimmed band.
     style_text(
@@ -878,6 +911,20 @@ fn render_records(
         }
     }
 
+    if !options.stale {
+        if let Some(suffix) = freshness_suffix(config, options.freshness) {
+            separator_space(&mut out, output_format, chunk_bg, options.color);
+            style_text(
+                &mut out,
+                &suffix,
+                Some(&config.palette_countdown),
+                Some(chunk_bg),
+                Weight::Normal,
+                output_format,
+                options.color,
+            );
+        }
+    }
     if options.stale {
         separator_space(&mut out, output_format, chunk_bg, options.color);
         style_text(
@@ -906,6 +953,39 @@ fn render_records(
         out.push('\n');
     }
     out
+}
+
+fn freshness_suffix(config: &RenderConfig, freshness: Option<Freshness<'_>>) -> Option<String> {
+    let freshness = freshness?;
+    let age = match config.freshness.as_str() {
+        "age" | "age+source" => {
+            let seconds = freshness.age_seconds.max(0);
+            Some(if seconds < 60 {
+                format!("{seconds}s")
+            } else if seconds < 3600 {
+                format!("{}m", seconds / 60)
+            } else if seconds < 86_400 {
+                format!("{}h", seconds / 3600)
+            } else {
+                format!("{}d", seconds / 86_400)
+            })
+        }
+        _ => None,
+    };
+    let source = match config.freshness.as_str() {
+        "source" | "age+source" => match freshness.source {
+            "serve" => Some("serve"),
+            "cli" => Some("cli"),
+            _ => None,
+        },
+        _ => None,
+    };
+    match (age, source) {
+        (Some(age), Some(source)) => Some(format!("{age} {source}")),
+        (Some(age), None) => Some(age),
+        (None, Some(source)) => Some(source.into()),
+        (None, None) => None,
+    }
 }
 
 fn filter_and_sort(records: &mut Vec<&ProviderRecord>, config: &RenderConfig) {
@@ -1302,6 +1382,17 @@ fn render_provider(
         );
     }
 
+    if config.severity_glyphs && !options.stale {
+        style_text(
+            out,
+            config.severity(band.remaining).marker(),
+            Some(&primary_color),
+            Some(surface_color),
+            Weight::Bold,
+            output_format,
+            options.color,
+        );
+    }
     style_text(
         out,
         &countdown,
@@ -2113,39 +2204,16 @@ fn terminal_mode_for_provider(
 }
 
 pub(crate) fn provider_sigil(provider: &str) -> String {
-    match provider {
-        "codex" => "CX".into(),
-        "claude" => "CL".into(),
-        "cursor" => "CR".into(),
-        "opencode" => "OC".into(),
-        "opencodego" => "OG".into(),
-        "alibaba" => "AL".into(),
-        "factory" | "droid" => "FA".into(),
-        "gemini" => "GE".into(),
-        "antigravity" => "AG".into(),
-        "copilot" => "CP".into(),
-        "zai" => "ZA".into(),
-        "minimax" => "MX".into(),
-        "kimi" => "KM".into(),
-        "kimik2" => "K2".into(),
-        "kilo" => "KL".into(),
-        "kiro" => "KR".into(),
-        "vertexai" => "VA".into(),
-        "augment" => "AU".into(),
-        "jetbrains" => "JB".into(),
-        "amp" => "AM".into(),
-        "ollama" => "OL".into(),
-        "synthetic" => "SY".into(),
-        "warp" => "WP".into(),
-        "openrouter" => "OR".into(),
-        "windsurf" => "WS".into(),
-        "perplexity" => "PX".into(),
-        "abacus" => "AB".into(),
-        "mistral" => "MS".into(),
-        "deepseek" => "DS".into(),
-        "codebuff" => "CB".into(),
-        other => other.chars().take(2).flat_map(char::to_uppercase).collect(),
-    }
+    crate::providers::sigil(provider).map_or_else(
+        || {
+            provider
+                .chars()
+                .take(2)
+                .flat_map(char::to_uppercase)
+                .collect()
+        },
+        str::to_owned,
+    )
 }
 
 fn primary_label(minutes: Option<i64>, remaining: i32, reset_value: Option<&str>) -> String {
@@ -2308,6 +2376,7 @@ mod tests {
                 stale,
                 degraded_cli,
                 now_epoch: 4_070_908_800,
+                freshness: None,
                 stale_providers: &[],
             },
         )
@@ -2320,6 +2389,7 @@ mod tests {
             stale: false,
             degraded_cli: false,
             now_epoch: 4_070_908_800,
+            freshness: None,
             stale_providers: &[],
         }
     }
@@ -2679,6 +2749,7 @@ mod tests {
                 stale: true,
                 degraded_cli: true,
                 now_epoch: 4_070_908_800,
+                freshness: None,
                 stale_providers: &[],
             },
         )
@@ -2762,6 +2833,7 @@ mod tests {
                 stale: false,
                 degraded_cli: true,
                 now_epoch: 4_070_908_800,
+                freshness: None,
                 stale_providers: &[],
             },
         )
@@ -2870,6 +2942,7 @@ mod tests {
                 stale: false,
                 degraded_cli: false,
                 now_epoch: 4_070_908_800,
+                freshness: None,
                 stale_providers: &[],
             },
         )
@@ -2906,6 +2979,7 @@ mod tests {
                 stale: false,
                 degraded_cli: false,
                 now_epoch: 4_070_908_800,
+                freshness: None,
                 stale_providers: &[],
             },
         )
@@ -2957,6 +3031,7 @@ mod tests {
                 stale: false,
                 degraded_cli: false,
                 now_epoch: 4_070_908_800,
+                freshness: None,
                 stale_providers: &[],
             },
         )
@@ -3147,6 +3222,7 @@ mod tests {
                 stale: false,
                 degraded_cli: false,
                 now_epoch: 4_070_908_800,
+                freshness: None,
                 stale_providers: &[],
             },
         )
@@ -3174,6 +3250,7 @@ mod tests {
                 stale: false,
                 degraded_cli: false,
                 now_epoch: 4_070_908_800,
+                freshness: None,
                 stale_providers: &[],
             },
         )
@@ -3194,6 +3271,7 @@ mod tests {
             stale: false,
             degraded_cli: false,
             now_epoch,
+            freshness: None,
             stale_providers: &[],
         }
     }
@@ -3266,6 +3344,7 @@ mod tests {
                 stale: false,
                 degraded_cli: false,
                 now_epoch: 4_070_908_800,
+                freshness: None,
                 stale_providers: &[],
             },
             OutputFormat::Zellij,
@@ -3339,6 +3418,7 @@ mod tests {
                 stale: true,
                 degraded_cli: false,
                 now_epoch: 4_070_908_800,
+                freshness: None,
                 stale_providers: &[],
             },
             OutputFormat::Zellij,
@@ -3737,6 +3817,7 @@ mod tests {
                 stale: true,
                 degraded_cli: true,
                 now_epoch: 4_070_908_800,
+                freshness: None,
                 stale_providers: &[],
             },
         );
@@ -3764,5 +3845,70 @@ mod tests {
         );
 
         assert_eq!(lines, vec!["AI none".to_string()], "{lines:?}");
+    }
+    #[test]
+    fn optional_freshness_respects_stale_and_source() {
+        let mut config = RenderConfig {
+            freshness: "age+source".into(),
+            ..RenderConfig::default()
+        };
+        for (age, stale, source, suffix) in [
+            (42, false, "serve", "42s serve"),
+            (239, false, "cli", "3m cli"),
+            (240, false, "serve", "4m serve"),
+            (241, true, "serve", "⚠"),
+        ] {
+            let output = render_zellij(
+                CLAUDE_RENDERABLE,
+                &config,
+                RenderOptions {
+                    stale,
+                    freshness: Some(Freshness {
+                        age_seconds: age,
+                        source,
+                    }),
+                    ..base_options(false)
+                },
+            )
+            .expect("freshness fixture renders");
+            assert!(output.trim_end().ends_with(suffix), "{output:?}");
+            if stale {
+                assert!(!output.contains("4m serve"), "{output:?}");
+            }
+        }
+        config.freshness = "source".into();
+        let output = render_tmux(
+            CLAUDE_RENDERABLE,
+            &config,
+            RenderOptions {
+                freshness: Some(Freshness {
+                    age_seconds: 42,
+                    source: "cli",
+                }),
+                ..base_options(false)
+            },
+        )
+        .expect("source fixture renders");
+        assert!(output.ends_with("cli#[default]"), "{output:?}");
+    }
+
+    #[test]
+    fn severity_glyphs_distinguish_bands_without_color() {
+        let config = RenderConfig {
+            severity_glyphs: true,
+            ..RenderConfig::default()
+        };
+        let payload = br#"[
+            {"provider":"codex","usage":{"primary":{"usedPercent":10}}},
+            {"provider":"claude","usage":{"primary":{"usedPercent":70}}},
+            {"provider":"copilot","usage":{"primary":{"usedPercent":95}}}
+        ]"#;
+        let rows = render_rows(payload, &config, base_options(false), OutputFormat::Zellij)
+            .expect("severity fixture renders");
+        assert_eq!(rows.len(), 3);
+        for (row, marker) in rows.iter().zip(["+", "!", "x"]) {
+            assert!(row.text.contains(&format!("▏{marker}")), "{row:?}");
+            assert!(!row.text.contains('\x1b'), "{row:?}");
+        }
     }
 }

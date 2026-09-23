@@ -141,6 +141,7 @@ fn assert_cli_case(case: Case) {
         stale: case.stale,
         degraded_cli: case.degraded_cli,
         now_epoch: case.now_epoch,
+        freshness: None,
         stale_providers: &[],
     };
     let expected = match case.format {

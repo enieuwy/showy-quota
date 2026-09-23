@@ -1,6 +1,7 @@
 use crate::config::RenderConfig;
 use crate::metrics::{provider_metrics, ProviderMetric, WindowMetric};
 use crate::render::{format_countdown, provider_sigil, RenderError};
+use crate::template::{Template, TemplateScope};
 
 const UNKNOWN_SEGMENT: &str = "AI ?";
 
@@ -27,6 +28,40 @@ pub fn emit_prompt_segment(
 ) -> Result<String, RenderError> {
     let metrics = provider_metrics(payload, config, now_epoch)?;
     Ok(render_prompt_segment(&metrics, config, options))
+}
+
+/// A custom prompt uses the same worst-window template model as the default
+/// prompt. The caller validates the template before reading the cache.
+pub fn emit_formatted_prompt_segment(
+    payload: &[u8],
+    config: &RenderConfig,
+    now_epoch: i64,
+    options: PromptOptions<'_>,
+    template: &Template<'_>,
+) -> Result<String, RenderError> {
+    let mut metrics = provider_metrics(payload, config, now_epoch)?;
+    if !options.provider_filter.is_empty() {
+        metrics.retain(|metric| {
+            options
+                .provider_filter
+                .iter()
+                .any(|provider| provider == &metric.provider)
+        });
+    }
+    let Some(candidate) = select_candidate(&metrics, &[]) else {
+        return Ok(String::from(UNKNOWN_SEGMENT));
+    };
+    let segment =
+        template.render_metrics(&metrics, config, " ", options.stale, TemplateScope::Worst);
+    if options.ansi && std::env::var_os("NO_COLOR").is_none() {
+        Ok(format!(
+            "\u{1b}[{}m{}\u{1b}[0m",
+            config.severity_ansi_code(candidate.remaining),
+            segment
+        ))
+    } else {
+        Ok(segment)
+    }
 }
 
 fn render_prompt_segment(
@@ -193,6 +228,23 @@ mod tests {
             options(&requested),
         );
         assert_eq!(output, "CL 10% 2h");
+    }
+
+    #[test]
+    fn formatted_prompt_filters_before_template_expansion() {
+        let requested = vec![String::from("claude")];
+        let output = emit_formatted_prompt_segment(
+            br#"[
+                {"provider":"codex","usage":{"primary":{"usedPercent":99}}},
+                {"provider":"claude","usage":{"primary":{"usedPercent":10}}}
+            ]"#,
+            &config(),
+            NOW,
+            options(&requested),
+            &Template::parse("{provider}").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(output, "claude");
     }
 
     #[test]

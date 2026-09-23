@@ -1,15 +1,15 @@
 # Automation & prompts
 
-`showy-quota` ships two automation-friendly subcommands that read the **same
-provider metrics every bar renderer uses** (via `showy-quota-state --json`), so
-they never re-parse CodexBar's JSON:
+`showy-quota` exposes cache-backed quota gates and routing commands. `guard`,
+`run`, and `next-reset` read the native provider metrics through
+`showy-quota-state --json`. `pick` and `prompt` use the native renderer directly.
 
 - **`showy-quota guard`** — a threshold gate for CI, cron, and agent hooks. It
   refreshes by default; `--no-fetch` reads the cache as-is for hot paths.
 - **`showy-quota prompt`** — a one-line segment for shell prompts (starship,
   powerlevel10k, plain `PS1`). It reads the cache as-is and never blocks.
 
-Both rely on the shared fetch/cache plumbing. A local status bar, the Zellij
+They rely on the shared fetch/cache plumbing. A local status bar, the Zellij
 pipe, or a timer normally keeps the cache warm; see the wiring docs for those.
 
 ---
@@ -148,6 +148,83 @@ showy-quota guard --provider codex --min-remaining 5 --wait-max 3600 || {
   exit 1
 }
 ```
+
+**Gate a command** — `run` uses the same guard options and waits across distinct
+reset windows while its `--wait-max` budget remains. It runs the child only
+after the gate passes. It forwards the child's exit code.
+
+```sh
+showy-quota run --provider codex --min-remaining 5 --wait-max 3600 -- \
+  ./quota-heavy-job
+```
+
+`run` exits `1` on a breach without a usable reset budget, `2` for unusable
+data or bad arguments, and otherwise forwards the child exit code. Use
+`--no-fetch` only if another process updates the cache during the wait.
+
+## `showy-quota next-reset`
+
+```
+showy-quota next-reset [--provider ID] [--window primary|secondary|tertiary|worst]
+                       [--json] [--epoch|--seconds] [--no-fetch]
+```
+
+This command prints seconds until the reset by default. `--epoch` prints the
+Unix reset timestamp. `--json` prints the chosen provider and window with
+`secondsUntilReset` and `resetEpoch`. The default window is the least-remaining
+window; with no provider flag, the least-remaining window across providers
+wins. It checks the normal fetch window by default; `--no-fetch` reads the
+cache as-is. Exit `0` means a known reset, `1` means unknown or missing data,
+and `2` means invalid arguments.
+
+**at** — schedule one command near the reset, without keeping a runner asleep.
+`at` works in minutes, so round the delay up:
+
+```sh
+delay=$(showy-quota next-reset --provider codex --no-fetch) || exit 1
+printf '%s\n' 'showy-quota run --provider codex -- ./quota-heavy-job' |
+  at now + "$(( (delay + 59) / 60 ))" minutes
+```
+
+**systemd** — use a transient one-shot timer with second resolution:
+
+```sh
+delay=$(showy-quota next-reset --provider codex --no-fetch) || exit 1
+systemd-run --user --on-active="${delay}s" --unit=quota-job \
+  showy-quota run --provider codex -- ./quota-heavy-job
+```
+
+**cron** — schedule a daily refresh decision that creates one `at` job.
+This avoids a minute-by-minute quota check:
+
+```cron
+0 8 * * * /bin/sh -c 'd=$(showy-quota next-reset --provider codex) || exit 0; printf "%s\n" "showy-quota run --provider codex -- ./quota-heavy-job" | at now + "$(( (d + 59) / 60 ))" minutes'
+```
+
+## `showy-quota pick`
+
+```
+showy-quota pick [--min-remaining N] [--window primary|secondary|tertiary|worst]
+                 [--format id|json] [--no-fetch] [--providers a,b]
+```
+
+`pick` selects the provider with the most remaining quota in its chosen
+window. With `worst`, each provider contributes its least-remaining window.
+It honors the configured provider allow and exclude lists. `--providers`
+narrows the selection further. `--format json` prints `provider`, `window`,
+`remainingPercent`, and `minutesUntilReset`. Exit `1` means that no provider
+meets the floor; exit `2` means bad arguments. It checks the normal fetch
+window by default. Use `--no-fetch` for cache-only routing.
+
+## `showy-quota refresh`
+
+`showy-quota refresh` forces one shared-cache fetch. It then sends a
+`showy_quota_refresh` SketchyBar event, refreshes present tmux clients, and
+pushes the current strip to the advanced zjstatus pipe when
+`ZELLIJ_SESSION_NAME` names a session. Missing surfaces are skipped. It
+never starts a bar or a session. The standalone Zellij WASM plugin has no
+pipe API, so this command cannot nudge it; the plugin uses its own refresh
+cycle. The fetch result controls the exit code; repaint failures do not.
 
 ---
 

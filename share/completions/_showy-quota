@@ -1,17 +1,18 @@
 #compdef showy-quota showy-quota-fetch showy-quota-state
 
 _showy-quota() {
-    local mode="${words[2]}" previous=""
-    local -a options themes
+    local mode="${words[2]}" previous="" dashdash
+    local -a options themes guard_options
     (( CURRENT > 1 )) && previous="${words[CURRENT-1]}"
+    guard_options=(--provider --window --min-remaining --max-used --no-fetch --allow-stale --wait-max --json --quiet -h --help)
 
     case "${words[1]:t}" in
         showy-quota-fetch)
-            options=(--refresh --json --cache-only --age --path --stop-serve -h --help)
+            options=(--refresh --json --cache-only --age --path --stop-serve --serve-status --restart-serve -h --help)
             _describe 'option' options
             return ;;
         showy-quota-state)
-            options=(--json --count --providers --no-fetch -h --help)
+            options=(--json --count --providers --explain --no-fetch -h --help)
             _describe 'option' options
             return ;;
     esac
@@ -23,24 +24,51 @@ _showy-quota() {
         return
     fi
     case "${mode}" in
-        guard)
+        guard|run|next-reset|pick)
+            if [[ "${mode}" == run ]]; then
+                dashdash=${words[(i)--]}
+                if (( dashdash < CURRENT )); then
+                    # Everything after -- is the gated command.
+                    words=("${(@)words[dashdash+1,-1]}")
+                    (( CURRENT -= dashdash ))
+                    _normal
+                    return
+                fi
+            fi
             case "${previous}" in
                 --window)
                     options=(primary secondary tertiary worst)
                     _describe 'window' options
                     return ;;
-                --provider|--min-remaining|--max-used|--wait-max)
+                --format)
+                    options=(id json)
+                    _describe 'format' options
+                    return ;;
+                --provider|--providers|--min-remaining|--max-used|--wait-max)
                     _message 'value'
                     return ;;
             esac
-            options=(--provider --window --min-remaining --max-used --no-fetch --allow-stale --wait-max --json --quiet -h --help) ;;
+            case "${mode}" in
+                guard) options=("${guard_options[@]}") ;;
+                run) options=("${guard_options[@]}" --) ;;
+                next-reset) options=(--provider --window --json --epoch --seconds --no-fetch -h --help) ;;
+                pick) options=(--min-remaining --window --format --no-fetch --providers -h --help) ;;
+            esac ;;
         prompt)
-            if [[ "${previous}" == --provider ]]; then
-                _message 'provider ID'
+            case "${previous}" in
+                --provider) _message 'provider ID'; return ;;
+                --format) _message 'template, e.g. {sigil} {remaining}%'; return ;;
+            esac
+            options=(--ansi --provider --format -h --help) ;;
+        serve)
+            if (( CURRENT == 3 )); then
+                options=(status restart stop -h --help)
+            elif [[ "${words[3]}" == status ]]; then
+                options=(--json)
+            else
                 return
-            fi
-            options=(--ansi --provider -h --help) ;;
-        --diagnose)
+            fi ;;
+        --diagnose|--check-config)
             options=(--json --redact) ;;
         --grant-zellij)
             if [[ "${PREFIX}" != -* ]]; then
@@ -50,7 +78,8 @@ _showy-quota() {
             options=(--manage-serve --cli-fallback --force --dry-run --check) ;;
         *)
             (( CURRENT == 2 )) || return
-            options=(--set --unset --current --list --preview --diagnose --grant-zellij guard prompt -h --help) ;;
+            options=(--set --unset --current --list --preview --diagnose --check-config --grant-zellij
+                guard prompt serve next-reset run pick refresh -h --help) ;;
     esac
     _describe 'option' options
 }

@@ -21,6 +21,15 @@ impl Severity {
             Severity::Bad => "bad",
         }
     }
+
+    /// ASCII cues remain legible without color or a Nerd Font.
+    pub fn marker(self) -> &'static str {
+        match self {
+            Severity::Good => "+",
+            Severity::Warn => "!",
+            Severity::Bad => "x",
+        }
+    }
 }
 
 impl RenderConfig {

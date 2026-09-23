@@ -75,6 +75,12 @@ Refresh cadence is deliberately derived from one knob. `SHOWY_QUOTA_REFRESH_SECO
 When a healthy `codexbar serve` reports a build `version` on `/health`, `showy-quota-fetch` reuses it only if that build matches the installed `codexbar --version`. Both the `/health` value and `codexbar --version` are reduced to a comparable version token (the first `v?`-digit field, `v` stripped) — the same normalization glean's stale-serve detector uses — so a `CodexBar`-prefixed `/health` value is not mistaken for a stale build, and a transient bare `CodexBar` yields no token (reuse, never recycle). On a real mismatch (e.g. a CodexBar update left a stale in-memory binary serving the port) it recycles the serve — terminating a managed serve through its pidfile, or freeing the configured port of a foreign serve after verifying each `lsof` listener PID is actually a CodexBar serve (command basename plus a `serve` argument) — and starts a fresh build. Listeners that fail verification are never signaled, and there is no name-based `pkill` fallback: when the port cannot be safely freed, the stale serve is reused. A serve whose `/health` omits `version` is reused unchanged, so the gate is a no-op for builds that predate the field. Recycling only happens with `SHOWY_QUOTA_MANAGE_SERVE=1`, runs under the existing fetch lock, and falls back to reuse when no recycle mechanism is available.
 The configured `codexbar` binary is resolved to an absolute path before `--version` and before launching a managed serve, because CodexBar reads its version from the app bundle via `argv[0]` — invoked by a bare command name it reports no version (in `--version` and serve `/health`), which would otherwise leave the gate inert and make showy-quota's own recycled serves omit `/health.version`.
 
+### Managed serve controls
+
+`showy-quota serve status [--json]` inspects the shell fetcher's pidfile, configured local URL and port, `/health` response and version, failure count and backoff, and cache source and age. It never starts a process, changes the cache directory, removes a stale pidfile, or requests `/usage`. Status exits 0 only when the recorded managed process passes the pid, start-time, binary, and port checks and `/health` responds; it exits 1 otherwise. The JSON object groups fields under `managed`, `serve`, `failure`, and `cache`, with a top-level `healthy` boolean. A reachable foreign serve does not count as a healthy **managed** serve.
+
+`showy-quota serve restart` requires `SHOWY_QUOTA_MANAGE_SERVE=1` and a loopback URL. It takes the shared refresh lock, stops only a verified managed process, starts the configured CodexBar binary with the URL's port and refresh interval, and waits for `/health`. It refuses to claim a restart when a foreign responder still owns the port. `showy-quota serve stop` removes a stale pidfile or stops only the identity-checked managed process under the same lock. Neither command fetches `/usage`; the normal cold refresh still owns quota collection. The standalone Zellij plugin manages its own process and does not use these shell controls.
+
 The tmux and Zellij detail panes source showy-quota config when present, then run `${SHOWY_QUOTA_CODEXBAR_BIN:-codexbar} usage` directly because they display CodexBar's text UI, not the compact cache-backed renderer output.
 
 ## Standalone Zellij plugin contract
@@ -117,6 +123,21 @@ Color and pacing follow each window's **horizon**, not its row position. A windo
 Pools that share one billing cycle — identical `resetsAt` and `windowMinutes` across at least two present slots — are an exception. They are parallel usage *categories* within a single budget (e.g. Cursor's Total/Auto/API on one 30-day cycle), not a live tier over a longer cap, so they render at full brightness regardless of horizon and draw a single pacing marker (the others would land on the identical column). This is why `cursor` ships as `mono3` by default.
 
 The stacked modes collapse to the densest body the data supports: `mono4` needs four assembled windows (else it falls back to `mono3`, then `dual`); `mono3` needs a tertiary slot (else `dual`). Model-pooled Antigravity carries session+weekly windows per pool, so `auto` splits it into `AGᴳ` + `AGᶜ`; if a stacked body is forced, missing lanes still collapse the body rather than leaving empty rows, matching SketchyBar dropping an absent row.
+
+### Plain-text templates
+
+`showy-quota-render --emit template --format '{sigil} {remaining}% {countdown}' --from-cache` expands the format once per visible provider. Each expansion uses that provider's window with the **lowest remaining percentage**, including known extra-rate windows. Equal values keep the first window in primary, secondary, tertiary, then extra order. `--join SEP` joins expansions; the default separator is one space. An empty set prints an empty line. `showy-quota prompt --format '{provider}: {used}%'` selects the **single worst window across all providers** instead. Without `--format`, the prompt keeps its existing output (`{sigil} {used}% {countdown}{stale}`).
+
+| Field | Text |
+|---|---|
+| `{provider}` / `{sigil}` | Provider ID / display sigil |
+| `{used}` / `{remaining}` | Integer percentages without `%` |
+| `{countdown}` | Reset countdown; empty when unknown |
+| `{class}` | Configured severity: `good`, `warn`, or `bad` |
+| `{window}` | `primary`, `secondary`, `tertiary`, or an extra-rate window title (`extra` if unnamed) |
+| `{stale}` | A space and the configured stale glyph when the cache is stale; empty otherwise |
+
+Use `{{` and `}}` to print literal braces. Unknown or unclosed fields fail with exit code 2 and name the field. Each expansion removes trailing ASCII spaces, so the default prompt does not leave a space when the reset time is unknown. Template output has no ANSI codes. The existing prompt `--ansi` option still controls color for a custom prompt format.
 
 ### Vertical view
 
@@ -202,9 +223,9 @@ Go is not used because the Zellij plugin API is Rust-first. TinyGo/community bin
 
 CodexBar's JSON `provider` field is the canonical id and matches the filename of its bundled SVG (`ProviderIcon-<id>.svg`). The SketchyBar plugin uses these one-to-one — no remapping table.
 
-The terminal strips render a 2-letter sigil per provider. New CodexBar providers fall back to the first two letters of the id.
+`share/providers.tsv` holds the stable two-letter sigils, default display ranks, and optional SketchyBar app-font icon names. Shell reads it once with bash builtins; Rust embeds it in the core. Add or change a provider's display identity there, not in each renderer. Unknown CodexBar providers retain the first-two-letters sigil fallback. CodexBar still owns discovery, live status, and SVG icons.
 
-Provider render order is deterministic. `SHOWY_QUOTA_PROVIDERS` / plugin `providers`, when set, is both an allow-list and render order. Otherwise `SHOWY_QUOTA_PROVIDER_ORDER` / plugin `provider_order` ranks providers without filtering them; missing providers are skipped, and unlisted providers render after ranked providers sorted by id. The default rank is `codex,claude,copilot,opencode,gemini`.
+Provider render order is deterministic. `SHOWY_QUOTA_PROVIDERS` / plugin `providers`, when set, is both an allow-list and render order. Otherwise `SHOWY_QUOTA_PROVIDER_ORDER` / plugin `provider_order` ranks providers without filtering them; missing providers are skipped, and unlisted providers render after ranked providers sorted by id. The default rank comes from `share/providers.tsv` and remains `codex,claude,copilot,opencode,gemini`.
 
 ## Adding a new SketchyBar provider
 
@@ -214,8 +235,11 @@ CodexBar discovers providers; this repo discovers them via the cache content. En
 
 `bin/showy-quota-state` is the public bridge for configs that need CodexBar's filtered provider/layout state without duplicating CodexBar or renderer internals. It honors `SHOWY_QUOTA_PROVIDERS` / `SHOWY_QUOTA_PROVIDERS_EXCLUDE`, preserves renderer order, and emits:
 
+The state JSON declares `schemaVersion: 1`. The draft 2020-12 contract is at `share/schema/showy-quota-state.schema.json`. Consumers should check the version before reading fields. Version 1 keeps existing field names and nesting. New optional fields may appear without a version change; removing fields, renaming them, or changing their types needs a new version. `showy-quota --diagnose --json` carries its own top-level `schemaVersion: 1` and embeds the state as `state` without changing it. Moving `sketchybar` into an `adapters` namespace is future breaking work, not part of version 1.
+
 | Field | Meaning |
 |---|---|
+| `schemaVersion` | Integer state contract version; currently `1`. |
 | `available` | Whether a valid cache was read. |
 | `stale` | Whether cache age exceeds `SHOWY_QUOTA_REFRESH_SECONDS * 2`. |
 | `cache.source`, `cache.degraded` | Cache source marker (`serve`, `cli`, or `unknown`) and whether CLI fallback is visible. |
@@ -229,6 +253,10 @@ CodexBar discovers providers; this repo discovers them via the cache content. En
 | `providerFreshness` | Map from rendered provider id to `{source, updatedAt, ageSeconds, stale}`, derived from the envelope's `providerMeta` plus the file mtime. Everything the per-provider freshness section describes, keyed by what the strip actually drew. |
 | `emptyReason` | Why the surface is empty, when it is: `unavailable` (no cache), `no-providers` (CodexBar published an empty inventory), `filtered` (allow/exclude lists removed every provider), `idle` (providers exist and are unused), or `null` (something rendered). The strip prints the matching label (`AI idle`, `AI none`, `AI filtered`). |
 | `sketchybar.compactRecommended` | `providerCount >= SHOWY_QUOTA_SKETCHYBAR_COMPACT_PROVIDER_COUNT`. |
+
+`showy-quota-state --explain` lists one decision for every raw cache record. Add `--json` for a JSON array of `{provider, reason, sourceIndex, position, rankSource, orderRank}`. `provider` can be `null` or another invalid raw value. `sourceIndex` is the zero-based cache slot. `position` is the zero-based filtered order, or `null` when excluded. `rankSource` names `allowlist`, `provider_order`, or `cache`; `orderRank` is the zero-based rank in that source, or `null` for an unlisted provider. Reasons are `included`, `excluded_by_allowlist`, `excluded_by_denylist`, `invalid_id`, `error_record`, and `no_numeric_usage_window`. Invalid ids and error records take priority over filters; deny-list wins over allow-list. The text form prints provider, reason, position, rank source, and order rank as tab-separated values. This path inspects the cache; it does not fetch provider usage or add fields to the default state JSON.
+
+The diagnose text includes a cached provider-decision section. The diagnose JSON includes the same decisions in `providerDecisions`; it keeps the embedded state unchanged. The fixture test uses Python `jsonschema` with draft 2020-12 when the module exists, or a `jq` structural check otherwise. CI installs Bash and `jq`, but does not install `jsonschema`.
 
 `providerMetrics` is computed by the native renderer (`showy-quota-render --emit metrics`, the same binary the bar drivers use), which `showy-quota-state` invokes with the raw CodexBar payload on stdin; the shell no longer parses reset times or window math, so the metrics are deterministic across platforms (no BSD/GNU `date` divergence). Provider ids in `providerMetrics` are validated with the same strict predicate as the rest of the pipeline — `.`, `..`, and leading-dash ids are rejected, not merely regex-matched. The flat `providers[]` list, `available`, `stale`, cache, and `sketchybar` fields remain shell-owned.
 

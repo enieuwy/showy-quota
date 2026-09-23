@@ -17,6 +17,8 @@
 #   --age       Print cache age in seconds and exit.
 #   --path      Print the cache file path and exit.
 #   --stop-serve Stop the managed codexbar serve process and exit.
+#   --serve-status [--json] Report managed serve and cache state without changing it.
+#   --restart-serve Stop and restart the managed serve under the refresh lock.
 # This script is intentionally narrow: every renderer (zellij, tmux,
 # sketchybar) reads from the same cache file so we never fan out N parallel
 # `codexbar` invocations.
@@ -38,31 +40,55 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${SCRIPT_PATH}")" && pwd -P)"
 
 mode="json"
 force_refresh=0
-stop_serve=0
+serve_action=""
+status_json=0
+json_seen=0
+cache_mode_seen=0
 while (($#)); do
     case "$1" in
         --refresh) force_refresh=1 ;;
-        --json)    mode="json" ;;
-        --cache-only) mode="cache-only" ;;
-        --age)     mode="age" ;;
-        --path)    mode="path" ;;
-        --stop-serve) stop_serve=1 ;;
+        --json)    json_seen=1; mode="json" ;;
+        --cache-only) mode="cache-only"; cache_mode_seen=1 ;;
+        --age)     mode="age"; cache_mode_seen=1 ;;
+        --path)    mode="path"; cache_mode_seen=1 ;;
+        --stop-serve|--serve-status|--restart-serve)
+            [[ -z "${serve_action}" ]] || { printf 'showy-quota-fetch: choose one serve action\n' >&2; exit 2; }
+            case "$1" in
+                --stop-serve) serve_action=stop ;;
+                --serve-status) serve_action=status ;;
+                --restart-serve) serve_action=restart ;;
+            esac
+            ;;
         -h|--help)
-            sed -n '2,19p' "$0"
+            sed -n '2,21p' "$0"
             exit 0
             ;;
-        *) showy_quota_die "unknown argument: $1" ;;
+        *) printf 'showy-quota-fetch: unknown argument: %s\n' "$1" >&2; exit 2 ;;
     esac
     shift
 done
-
-(umask 077 && mkdir -p "${SHOWY_QUOTA_CACHE_DIR}")
-chmod 700 "${SHOWY_QUOTA_CACHE_DIR}" 2>/dev/null || true
-# Refuse to publish into a cache dir another user could tamper with: a
-# world/group-writable or foreign-owned dir lets a local attacker inject
-# usage.json/status.url that drive SketchyBar clicks and automation consumers.
-if ! showy_quota_dir_is_private "${SHOWY_QUOTA_CACHE_DIR}"; then
-    showy_quota_die "refusing to use unsafe cache dir: ${SHOWY_QUOTA_CACHE_DIR} (must be owned by you and not group/other-writable)"
+if [[ "${serve_action}" == "status" ]]; then
+    status_json="${json_seen}"
+elif [[ -n "${serve_action}" && "${json_seen}" == 1 ]]; then
+    printf 'showy-quota-fetch: --json only applies to --serve-status\n' >&2
+    exit 2
+fi
+if [[ -n "${serve_action}" ]] && (( cache_mode_seen || force_refresh )); then
+    printf 'showy-quota-fetch: serve actions do not accept cache flags\n' >&2
+    exit 2
+fi
+if [[ "${serve_action}" == "status" ]]; then
+    # Inspection does not create or chmod a cache directory.
+    if [[ -e "${SHOWY_QUOTA_CACHE_DIR}" ]] && ! showy_quota_dir_is_private "${SHOWY_QUOTA_CACHE_DIR}"; then
+        showy_quota_die "refusing to inspect unsafe cache dir: ${SHOWY_QUOTA_CACHE_DIR}"
+    fi
+else
+    (umask 077 && mkdir -p "${SHOWY_QUOTA_CACHE_DIR}")
+    chmod 700 "${SHOWY_QUOTA_CACHE_DIR}" 2>/dev/null || true
+    # Refuse to publish into a cache dir another user could tamper with.
+    if ! showy_quota_dir_is_private "${SHOWY_QUOTA_CACHE_DIR}"; then
+        showy_quota_die "refusing to use unsafe cache dir: ${SHOWY_QUOTA_CACHE_DIR} (must be owned by you and not group/other-writable)"
+    fi
 fi
 SHOWY_QUOTA_MANAGED_SERVE_RESTART_ATTEMPTED=0
 
@@ -1427,8 +1453,10 @@ showy_quota_pid_descends_from() {
 }
 
 managed_serve_owns_configured_port() {
-    local pid="" start_epoch="" basename_rec="" port="" listeners="" listener_pid=""
-    managed_serve_valid_pidfile pid start_epoch basename_rec || return 1
+    local pid="${1:-}" start_epoch="" basename_rec="" port="" listeners="" listener_pid=""
+    if [[ -z "${pid}" ]]; then
+        managed_serve_valid_pidfile pid start_epoch basename_rec || return 1
+    fi
     showy_quota_have lsof || return 2
     port=$(serve_port_from_base_url) || return 1
     listeners=$(lsof -ti "tcp:${port}" -sTCP:LISTEN 2>/dev/null) || listeners=""
@@ -1608,12 +1636,153 @@ ensure_serve_running() {
     fi
     return 1
 }
-if (( stop_serve )); then
-    if ! showy_quota_with_lock stop_managed_serve; then
-        exit 1
+# Status is an observation, not a refresh: do not invoke the mutating pidfile
+# validator or the backoff helper (both remove stale records).
+serve_status() {
+    local url="${SHOWY_QUOTA_CODEXBAR_SERVE_URL%/}" port="" local_only=false
+    local pid="" start_epoch="" basename_rec="" raw="" pidfile_state=missing alive=false owned=false
+    local ownership_rc=0 ownership_reason=""
+    local reachable=false version="" count="" failed_at="" backoff_seconds="" remaining=0
+    local now="" cache_source=unknown cache_age="" healthy=false
+    if [[ -n "${url}" ]]; then
+        if [[ "${url}" =~ :([0-9]+)$ ]]; then
+            port="${BASH_REMATCH[1]}"
+        elif [[ "${url}" == http://* ]]; then
+            port=80
+        fi
     fi
-    exit 0
-fi
+    if serve_base_url >/dev/null 2>&1; then
+        local_only=true
+    fi
+    if [[ -e "${SHOWY_QUOTA_CODEXBAR_SERVE_PID_FILE}" ]]; then
+        pidfile_state=malformed
+        if [[ -r "${SHOWY_QUOTA_CODEXBAR_SERVE_PID_FILE}" ]]; then
+            IFS= read -r raw < "${SHOWY_QUOTA_CODEXBAR_SERVE_PID_FILE}" || raw=""
+            if [[ "${raw}" =~ ^([1-9][0-9]*):([0-9]+):([^:[:space:]]+)$ ]]; then
+                pid="${BASH_REMATCH[1]}"
+                start_epoch="${BASH_REMATCH[2]}"
+                basename_rec="${BASH_REMATCH[3]}"
+                pidfile_state=stale
+                if kill -0 "${pid}" 2>/dev/null; then
+                    alive=true
+                    if managed_serve_pid_matches_record "${pid}" "${start_epoch}" "${basename_rec}"; then
+                        if managed_serve_owns_configured_port "${pid}"; then
+                            owned=true
+                            pidfile_state=owned
+                        else
+                            ownership_rc=$?
+                            if (( ownership_rc == 2 )); then
+                                ownership_reason="port ownership unavailable: lsof not found"
+                            else
+                                ownership_reason="managed pid does not own the configured port"
+                            fi
+                        fi
+                    fi
+                fi
+            fi
+        fi
+    fi
+    if [[ "${local_only}" == true ]] && serve_health_ok; then
+        reachable=true
+        version=$(serve_running_version) || version=""
+    fi
+    count=$(serve_failure_count)
+    backoff_seconds=$(serve_failure_backoff_seconds)
+    now=$(showy_quota_now_epoch)
+    if [[ -r "${SHOWY_QUOTA_CODEXBAR_SERVE_FAILURE_STAMP}" ]]; then
+        IFS= read -r raw < "${SHOWY_QUOTA_CODEXBAR_SERVE_FAILURE_STAMP}" || raw=""
+        failed_at=$(showy_quota_epoch_value "${raw}" 2>/dev/null) || failed_at=""
+        if [[ -n "${failed_at}" ]] && (( now >= failed_at && now - failed_at < backoff_seconds )); then
+            remaining=$((backoff_seconds - (now - failed_at)))
+        fi
+    fi
+    if [[ -f "${SHOWY_QUOTA_USAGE_FILE}" ]]; then
+        cache_source=$(showy_quota_cache_source)
+        cache_age=$(showy_quota_age_seconds "${SHOWY_QUOTA_USAGE_FILE}")
+    fi
+    if [[ "${owned}" == true && "${reachable}" == true ]]; then healthy=true; fi
+
+    if (( status_json )); then
+        jq -n \
+            --arg url "${url}" --arg port "${port}" --arg pid "${pid}" \
+            --arg pidfileState "${pidfile_state}" --arg ownershipReason "${ownership_reason}" \
+            --arg version "${version}" --arg failureCount "${count}" \
+            --arg failedAt "${failed_at}" --arg backoffSeconds "${backoff_seconds}" \
+            --argjson backoffRemainingSeconds "${remaining}" \
+            --arg cacheSource "${cache_source}" --arg cacheAge "${cache_age}" \
+            --argjson localOnly "${local_only}" --argjson alive "${alive}" \
+            --argjson owned "${owned}" --argjson healthReachable "${reachable}" \
+            --argjson healthy "${healthy}" \
+            '{
+                healthy: $healthy,
+                managed: ({pidfileState: $pidfileState, pid: (if $pid == "" then null else ($pid | tonumber) end), alive: $alive, owned: $owned}
+                    + (if $ownershipReason == "" then {} else {reason: $ownershipReason} end)),
+                serve: {url: (if $url == "" then null else $url end), port: (if $port == "" then null else ($port | tonumber) end),
+                        localOnly: $localOnly, healthReachable: $healthReachable,
+                        version: (if $version == "" then null else $version end)},
+                failure: {count: ($failureCount | tonumber), lastFailedAt: (if $failedAt == "" then null else ($failedAt | tonumber) end),
+                          backoffSeconds: ($backoffSeconds | tonumber), backoffRemainingSeconds: $backoffRemainingSeconds},
+                cache: {source: $cacheSource, ageSeconds: (if $cacheAge == "" then null else ($cacheAge | tonumber) end)}
+            }'
+    else
+        printf 'managed serve: %s%s (alive: %s, owned: %s)%s\n' "${pidfile_state}" "${pid:+ (pid ${pid})}" "${alive}" "${owned}" "${ownership_reason:+ — ${ownership_reason}}"
+        printf 'serve: %s (port: %s, local: %s, /health: %s, version: %s)\n' \
+            "${url:-disabled}" "${port:-none}" "${local_only}" "${reachable}" "${version:-unknown}"
+        printf 'failures: %s (last: %s, backoff remaining: %ss)\n' "${count}" "${failed_at:-none}" "${remaining}"
+        printf 'cache: %s (age: %s)\n' "${cache_source}" "${cache_age:-missing}"
+    fi
+    [[ "${healthy}" == true ]]
+}
+
+restart_managed_serve_control() {
+    stop_managed_serve || return 1
+    if serve_health_ok; then
+        printf 'showy-quota-fetch: another serve owns the configured port; refusing to restart it\n' >&2
+        return 1
+    fi
+    if ! start_managed_serve || ! wait_for_serve_health || ! adopt_healthy_serve_after_spawn; then
+        printf 'showy-quota-fetch: managed serve did not become healthy\n' >&2
+        return 1
+    fi
+    local pid="" start_epoch="" basename_rec=""
+    if ! managed_serve_valid_pidfile pid start_epoch basename_rec; then
+        printf 'showy-quota-fetch: serve became healthy without a managed pid; refusing to claim a restart\n' >&2
+        return 1
+    fi
+    printf 'managed codexbar serve restarted (pid %s)\n' "${pid}"
+}
+
+restart_managed_serve_with_lock_wait() {
+    local i rc=0
+    for (( i=0; i<=SHOWY_QUOTA_LOCK_WAIT_TENTHS; i++ )); do
+        rc=0
+        showy_quota_with_lock restart_managed_serve_control || rc=$?
+        if (( rc != 2 && rc != 3 )); then
+            return "${rc}"
+        fi
+        (( i < SHOWY_QUOTA_LOCK_WAIT_TENTHS )) || break
+        sleep 0.1
+    done
+    printf 'showy-quota-fetch: timed out waiting for the refresh lock to restart managed serve\n' >&2
+    return 1
+}
+
+case "${serve_action}" in
+    status) serve_status; exit $? ;;
+    stop) showy_quota_with_lock stop_managed_serve && exit 0; exit 1 ;;
+    restart)
+        if ! showy_quota_bool "${SHOWY_QUOTA_MANAGE_SERVE-}" 1; then
+            printf 'showy-quota-fetch: managed serve is disabled (SHOWY_QUOTA_MANAGE_SERVE)\n' >&2
+            exit 1
+        fi
+        if ! serve_base_url >/dev/null; then
+            printf 'showy-quota-fetch: managed serve requires a local loopback URL\n' >&2
+            exit 1
+        fi
+        restart_managed_serve_with_lock_wait && exit 0
+        exit 1
+        ;;
+esac
 
 run_codexbar_serve() {
     local base

@@ -30,6 +30,36 @@ showy_quota_uint() {
     fi
 }
 
+# Diagnostics stay in this shell. Command substitution around the old uint
+# helper would lose array updates in a subshell.
+declare -ga SHOWY_QUOTA_CONFIG_ISSUES=()
+declare -ga SHOWY_QUOTA_CONFIG_RAW=()
+declare -ga SHOWY_QUOTA_CONFIG_EFFECTIVE=()
+declare -ga SHOWY_QUOTA_CONFIG_REASONS=()
+
+showy_quota_record_config_issue() {
+    SHOWY_QUOTA_CONFIG_ISSUES+=("$1")
+    SHOWY_QUOTA_CONFIG_RAW+=("$2")
+    SHOWY_QUOTA_CONFIG_EFFECTIVE+=("$3")
+    SHOWY_QUOTA_CONFIG_REASONS+=("$4")
+}
+
+showy_quota_uint_config() {
+    local key="$1" fallback="$2" max="${3:-}" raw="${!1}" value reason=""
+    if [[ ! "${raw}" =~ ^[0-9]+$ ]] || (( ${#raw} > 18 )); then
+        value="${fallback}"
+        reason=not_integer
+    else
+        value=$((10#${raw}))
+        if [[ -n "${max}" ]] && (( value > max )); then
+            value="${max}"
+            reason=above_max
+        fi
+    fi
+    printf -v "${key}" '%s' "${value}"
+    [[ -z "${reason}" ]] || showy_quota_record_config_issue "${key}" "${raw}" "${value}" "${reason}"
+}
+
 # Validate a configured executable reference. The *_BIN knobs come from the
 # environment/config.env and are exec'd directly; this is defense-in-depth so a
 # value carrying whitespace or shell metacharacters (the documented injection
@@ -214,10 +244,14 @@ showy_quota_load_config() {
     local theme=""
     local theme_path=""
     local repo_root
+    SHOWY_QUOTA_CONFIG_LOADED=0
 
     if [[ -z "${SHOWY_QUOTA_NO_CONFIG:-}" ]] && showy_quota_safe_source_file "${config_file}"; then
         # shellcheck disable=SC1090
         . "${config_file}"
+        # The cold-path CLI reads this after sourcing common.sh.
+        # shellcheck disable=SC2034
+        SHOWY_QUOTA_CONFIG_LOADED=1
     fi
 
     theme="${SHOWY_QUOTA_THEME:-}"
@@ -229,6 +263,7 @@ showy_quota_load_config() {
     if [[ ! "${theme}" =~ ^[A-Za-z0-9._-]+$ ]]; then
         # Ignore the malformed/hostile name and keep rendering with defaults
         # rather than aborting the renderer under `set -e`.
+        showy_quota_record_config_issue SHOWY_QUOTA_THEME "${theme}" "" invalid_value
         printf 'showy-quota: ignoring invalid theme name %q\n' "${theme}" >&2
         return 0
     fi
@@ -265,11 +300,17 @@ else
     if [[ ! "${_swq_max_usage_json_bytes}" =~ ^[0-9]+$ ]] \
         || (( ${#_swq_max_usage_json_bytes} > 18 )); then
         printf 'showy-quota: invalid SHOWY_QUOTA_MAX_USAGE_JSON_BYTES %q; using default 5242880\n' "${_swq_max_usage_json_bytes}" >&2
+        showy_quota_record_config_issue SHOWY_QUOTA_MAX_USAGE_JSON_BYTES "${_swq_max_usage_json_bytes}" 5242880 not_integer
         SHOWY_QUOTA_MAX_USAGE_JSON_BYTES=5242880
     else
         _swq_max_usage_json_bytes=$((10#${_swq_max_usage_json_bytes}))
         if (( _swq_max_usage_json_bytes == 0 || _swq_max_usage_json_bytes > 5242880 )); then
             printf 'showy-quota: invalid SHOWY_QUOTA_MAX_USAGE_JSON_BYTES %q; using default 5242880\n' "${SHOWY_QUOTA_MAX_USAGE_JSON_BYTES}" >&2
+            if (( _swq_max_usage_json_bytes == 0 )); then
+                showy_quota_record_config_issue SHOWY_QUOTA_MAX_USAGE_JSON_BYTES "${SHOWY_QUOTA_MAX_USAGE_JSON_BYTES}" 5242880 below_min
+            else
+                showy_quota_record_config_issue SHOWY_QUOTA_MAX_USAGE_JSON_BYTES "${SHOWY_QUOTA_MAX_USAGE_JSON_BYTES}" 5242880 above_max
+            fi
             SHOWY_QUOTA_MAX_USAGE_JSON_BYTES=5242880
         else
             SHOWY_QUOTA_MAX_USAGE_JSON_BYTES="${_swq_max_usage_json_bytes}"
@@ -296,7 +337,9 @@ fi
 : "${SHOWY_QUOTA_PROVIDER_FAILURE_BACKOFF_SECONDS:=${SHOWY_QUOTA_REFRESH_SECONDS}}"
 : "${SHOWY_QUOTA_PROVIDERS:=}"
 : "${SHOWY_QUOTA_PROVIDERS_EXCLUDE:=}"
-: "${SHOWY_QUOTA_PROVIDER_ORDER:=codex,claude,copilot,opencode,gemini}"
+# shellcheck disable=SC1091
+. "${BASH_SOURCE[0]%/*}/providers.sh"
+: "${SHOWY_QUOTA_PROVIDER_ORDER:=${SHOWY_QUOTA_PROVIDER_DEFAULT_ORDER}}"
 : "${SHOWY_QUOTA_INCLUDE_STATUS:=1}"
 
 : "${SHOWY_QUOTA_PALETTE_PRIMARY_GOOD:=25be6a}"
@@ -329,8 +372,8 @@ fi
 : "${SHOWY_QUOTA_PNG_BAR_H:=18}"
 # Validate the PNG bar dimensions here (before the bar-width default derives
 # from PNG_BAR_W) so a non-numeric value cannot abort sourcing under `set -u`.
-SHOWY_QUOTA_PNG_BAR_W=$(showy_quota_uint "${SHOWY_QUOTA_PNG_BAR_W}" 80 4096)
-SHOWY_QUOTA_PNG_BAR_H=$(showy_quota_uint "${SHOWY_QUOTA_PNG_BAR_H}" 18 4096)
+showy_quota_uint_config SHOWY_QUOTA_PNG_BAR_W 80 4096
+showy_quota_uint_config SHOWY_QUOTA_PNG_BAR_H 18 4096
 : "${SHOWY_QUOTA_SKETCHYBAR_ICON_WIDTH:=22}"
 : "${SHOWY_QUOTA_SKETCHYBAR_ICON_PADDING_LEFT:=5}"
 : "${SHOWY_QUOTA_SKETCHYBAR_ICON_SCALE:=0.28}"
@@ -371,22 +414,24 @@ SHOWY_QUOTA_PNG_BAR_H=$(showy_quota_uint "${SHOWY_QUOTA_PNG_BAR_H}" 18 4096)
 # force every provider to render "good" or report the cache as never stale.
 # Clamp each arithmetic knob back to its default, and to a ceiling where an
 # unbounded value would otherwise stall a wait loop.
-SHOWY_QUOTA_REFRESH_SECONDS=$(showy_quota_uint "${SHOWY_QUOTA_REFRESH_SECONDS}" 120)
-SHOWY_QUOTA_LOCK_WAIT_TENTHS=$(showy_quota_uint "${SHOWY_QUOTA_LOCK_WAIT_TENTHS}" 100 36000)
-SHOWY_QUOTA_GOOD_MIN_REMAINING=$(showy_quota_uint "${SHOWY_QUOTA_GOOD_MIN_REMAINING}" 40)
-SHOWY_QUOTA_WARN_MIN_REMAINING=$(showy_quota_uint "${SHOWY_QUOTA_WARN_MIN_REMAINING}" 15)
+showy_quota_uint_config SHOWY_QUOTA_REFRESH_SECONDS 120
+showy_quota_uint_config SHOWY_QUOTA_LOCK_WAIT_TENTHS 100 36000
+showy_quota_uint_config SHOWY_QUOTA_GOOD_MIN_REMAINING 40
+showy_quota_uint_config SHOWY_QUOTA_WARN_MIN_REMAINING 15
 # Keep the Warn band reachable (parity with the Rust core color_key): swap the
 # thresholds if a user inverts them, so `good` is never below `warn`.
 if (( SHOWY_QUOTA_GOOD_MIN_REMAINING < SHOWY_QUOTA_WARN_MIN_REMAINING )); then
     _swq_tmp="${SHOWY_QUOTA_GOOD_MIN_REMAINING}"
+    showy_quota_record_config_issue SHOWY_QUOTA_GOOD_MIN_REMAINING "${SHOWY_QUOTA_GOOD_MIN_REMAINING}" "${SHOWY_QUOTA_WARN_MIN_REMAINING}" below_min
+    showy_quota_record_config_issue SHOWY_QUOTA_WARN_MIN_REMAINING "${SHOWY_QUOTA_WARN_MIN_REMAINING}" "${SHOWY_QUOTA_GOOD_MIN_REMAINING}" above_max
     SHOWY_QUOTA_GOOD_MIN_REMAINING="${SHOWY_QUOTA_WARN_MIN_REMAINING}"
     SHOWY_QUOTA_WARN_MIN_REMAINING="${_swq_tmp}"
     unset _swq_tmp
 fi
-SHOWY_QUOTA_TIME_WARN_MINUTES=$(showy_quota_uint "${SHOWY_QUOTA_TIME_WARN_MINUTES}" 30)
-SHOWY_QUOTA_DIM_WINDOW_MINUTES=$(showy_quota_uint "${SHOWY_QUOTA_DIM_WINDOW_MINUTES}" 10080)
-SHOWY_QUOTA_ZELLIJ_PIPE_INTERVAL=$(showy_quota_uint "${SHOWY_QUOTA_ZELLIJ_PIPE_INTERVAL}" 10 86400)
-SHOWY_QUOTA_ZELLIJ_PIPE_TIMEOUT_TENTHS=$(showy_quota_uint "${SHOWY_QUOTA_ZELLIJ_PIPE_TIMEOUT_TENTHS}" 20 36000)
+showy_quota_uint_config SHOWY_QUOTA_TIME_WARN_MINUTES 30
+showy_quota_uint_config SHOWY_QUOTA_DIM_WINDOW_MINUTES 10080
+showy_quota_uint_config SHOWY_QUOTA_ZELLIJ_PIPE_INTERVAL 10 86400
+showy_quota_uint_config SHOWY_QUOTA_ZELLIJ_PIPE_TIMEOUT_TENTHS 20 36000
 
 # ── serve cadence derivation ───────────────────────────────────────────
 # Serve cadence tracks the freshness contract instead of oversampling it: a
@@ -403,36 +448,45 @@ if [[ -z "${SHOWY_QUOTA_CODEXBAR_SERVE_REFRESH_INTERVAL_SECONDS}" ]]; then
         SHOWY_QUOTA_CODEXBAR_SERVE_REFRESH_INTERVAL_SECONDS=120
     fi
 fi
-SHOWY_QUOTA_CODEXBAR_SERVE_REFRESH_INTERVAL_SECONDS=$(showy_quota_uint "${SHOWY_QUOTA_CODEXBAR_SERVE_REFRESH_INTERVAL_SECONDS}" 120)
+showy_quota_uint_config SHOWY_QUOTA_CODEXBAR_SERVE_REFRESH_INTERVAL_SECONDS 120
 if [[ -z "${SHOWY_QUOTA_CODEXBAR_SERVE_REFRESH_SECONDS}" ]]; then
     SHOWY_QUOTA_CODEXBAR_SERVE_REFRESH_SECONDS=$((SHOWY_QUOTA_REFRESH_SECONDS / 2))
 fi
-SHOWY_QUOTA_CODEXBAR_SERVE_REFRESH_SECONDS=$(showy_quota_uint "${SHOWY_QUOTA_CODEXBAR_SERVE_REFRESH_SECONDS}" 60)
+showy_quota_uint_config SHOWY_QUOTA_CODEXBAR_SERVE_REFRESH_SECONDS 60
 
 # SketchyBar geometry knobs reach `sketchybar --set` / ImageMagick as numeric
 # arguments; clamp them to sane integer ceilings so a malformed value produces
 # the default instead of a broken/oversized item. (PNG_BAR_W/H are normalized
 # above, before the bar-width default derives from them.)
-SHOWY_QUOTA_SKETCHYBAR_UPDATE_FREQ=$(showy_quota_uint "${SHOWY_QUOTA_SKETCHYBAR_UPDATE_FREQ}" 10 86400)
-SHOWY_QUOTA_SKETCHYBAR_ICON_WIDTH=$(showy_quota_uint "${SHOWY_QUOTA_SKETCHYBAR_ICON_WIDTH}" 22 4096)
-SHOWY_QUOTA_SKETCHYBAR_ICON_PADDING_LEFT=$(showy_quota_uint "${SHOWY_QUOTA_SKETCHYBAR_ICON_PADDING_LEFT}" 5 4096)
-SHOWY_QUOTA_SKETCHYBAR_PROVIDER_ICON_FONT_PADDING_RIGHT=$(showy_quota_uint "${SHOWY_QUOTA_SKETCHYBAR_PROVIDER_ICON_FONT_PADDING_RIGHT}" 2 4096)
-SHOWY_QUOTA_SKETCHYBAR_LABEL_WIDTH=$(showy_quota_uint "${SHOWY_QUOTA_SKETCHYBAR_LABEL_WIDTH}" 32 4096)
-SHOWY_QUOTA_SKETCHYBAR_COMPACT_PROVIDER_COUNT=$(showy_quota_uint "${SHOWY_QUOTA_SKETCHYBAR_COMPACT_PROVIDER_COUNT}" 5 4096)
-SHOWY_QUOTA_SKETCHYBAR_PILL_RADIUS=$(showy_quota_uint "${SHOWY_QUOTA_SKETCHYBAR_PILL_RADIUS}" 14 4096)
-SHOWY_QUOTA_SKETCHYBAR_PILL_HEIGHT=$(showy_quota_uint "${SHOWY_QUOTA_SKETCHYBAR_PILL_HEIGHT}" 28 4096)
-SHOWY_QUOTA_SKETCHYBAR_BAR_WIDTH=$(showy_quota_uint "${SHOWY_QUOTA_SKETCHYBAR_BAR_WIDTH}" $((SHOWY_QUOTA_PNG_BAR_W + 3)) 4096)
+showy_quota_uint_config SHOWY_QUOTA_SKETCHYBAR_UPDATE_FREQ 10 86400
+showy_quota_uint_config SHOWY_QUOTA_SKETCHYBAR_ICON_WIDTH 22 4096
+showy_quota_uint_config SHOWY_QUOTA_SKETCHYBAR_ICON_PADDING_LEFT 5 4096
+showy_quota_uint_config SHOWY_QUOTA_SKETCHYBAR_PROVIDER_ICON_FONT_PADDING_RIGHT 2 4096
+showy_quota_uint_config SHOWY_QUOTA_SKETCHYBAR_LABEL_WIDTH 32 4096
+showy_quota_uint_config SHOWY_QUOTA_SKETCHYBAR_COMPACT_PROVIDER_COUNT 5 4096
+showy_quota_uint_config SHOWY_QUOTA_SKETCHYBAR_PILL_RADIUS 14 4096
+showy_quota_uint_config SHOWY_QUOTA_SKETCHYBAR_PILL_HEIGHT 28 4096
+showy_quota_uint_config SHOWY_QUOTA_SKETCHYBAR_BAR_WIDTH "$((SHOWY_QUOTA_PNG_BAR_W + 3))" 4096
 # ICON_SCALE is a float (sketchybar background.image.scale); fall back to the
 # default when it is not a plain decimal so the icon never gets a junk scale.
-[[ "${SHOWY_QUOTA_SKETCHYBAR_ICON_SCALE}" =~ ^[0-9]+([.][0-9]+)?$ ]] || SHOWY_QUOTA_SKETCHYBAR_ICON_SCALE=0.28
+if [[ ! "${SHOWY_QUOTA_SKETCHYBAR_ICON_SCALE}" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+    showy_quota_record_config_issue SHOWY_QUOTA_SKETCHYBAR_ICON_SCALE "${SHOWY_QUOTA_SKETCHYBAR_ICON_SCALE}" 0.28 not_integer
+    SHOWY_QUOTA_SKETCHYBAR_ICON_SCALE=0.28
+fi
 
 # SketchyBar string knobs reach `sketchybar --set` as quoted single arguments
 # (so no extra-arg injection is possible), but a malformed value still yields a
 # broken item — clamp them to a known-good shape. PILL_COLOR must be an 8-digit
 # ARGB literal; the provider icon font is a `family:style:size` spec, so reject
 # only control characters / absurd length back to the default.
-[[ "${SHOWY_QUOTA_SKETCHYBAR_PILL_COLOR}" =~ ^0x[0-9a-fA-F]{8}$ ]] || SHOWY_QUOTA_SKETCHYBAR_PILL_COLOR=0xcc24273a
-[[ "${SHOWY_QUOTA_SKETCHYBAR_PROVIDER_ICON_FONT}" != *[$'\x01'-$'\x1f']* && ${#SHOWY_QUOTA_SKETCHYBAR_PROVIDER_ICON_FONT} -le 128 ]] || SHOWY_QUOTA_SKETCHYBAR_PROVIDER_ICON_FONT='sketchybar-app-font:Regular:14.0'
+if [[ ! "${SHOWY_QUOTA_SKETCHYBAR_PILL_COLOR}" =~ ^0x[0-9a-fA-F]{8}$ ]]; then
+    showy_quota_record_config_issue SHOWY_QUOTA_SKETCHYBAR_PILL_COLOR "${SHOWY_QUOTA_SKETCHYBAR_PILL_COLOR}" 0xcc24273a invalid_color
+    SHOWY_QUOTA_SKETCHYBAR_PILL_COLOR=0xcc24273a
+fi
+if [[ "${SHOWY_QUOTA_SKETCHYBAR_PROVIDER_ICON_FONT}" == *[$'\x01'-$'\x1f']* || ${#SHOWY_QUOTA_SKETCHYBAR_PROVIDER_ICON_FONT} -gt 128 ]]; then
+    showy_quota_record_config_issue SHOWY_QUOTA_SKETCHYBAR_PROVIDER_ICON_FONT "${SHOWY_QUOTA_SKETCHYBAR_PROVIDER_ICON_FONT}" 'sketchybar-app-font:Regular:14.0' invalid_value
+    SHOWY_QUOTA_SKETCHYBAR_PROVIDER_ICON_FONT='sketchybar-app-font:Regular:14.0'
+fi
 
 # Zellij pipe identifiers are embedded in the zjstatus protocol string
 # (`zjstatus::pipe::<widget>::<output>`) and passed to `zellij pipe --name`.
@@ -440,21 +494,39 @@ SHOWY_QUOTA_SKETCHYBAR_BAR_WIDTH=$(showy_quota_uint "${SHOWY_QUOTA_SKETCHYBAR_BA
 # the protocol field split (misrouting output to another widget), an overlong
 # identifier cannot bypass the renderer-output payload cap, and a stray
 # character in the pipe name cannot confuse the zellij CLI.
-[[ "${SHOWY_QUOTA_ZELLIJ_WIDGET}" =~ ^[A-Za-z0-9_.-]+$ && ${#SHOWY_QUOTA_ZELLIJ_WIDGET} -le 128 ]] || SHOWY_QUOTA_ZELLIJ_WIDGET=pipe_showy_quota
-[[ "${SHOWY_QUOTA_ZELLIJ_PIPE_NAME}" =~ ^[A-Za-z0-9_-]+$ && ${#SHOWY_QUOTA_ZELLIJ_PIPE_NAME} -le 128 ]] || SHOWY_QUOTA_ZELLIJ_PIPE_NAME=showy-quota
+if [[ ! "${SHOWY_QUOTA_ZELLIJ_WIDGET}" =~ ^[A-Za-z0-9_.-]+$ || ${#SHOWY_QUOTA_ZELLIJ_WIDGET} -gt 128 ]]; then
+    showy_quota_record_config_issue SHOWY_QUOTA_ZELLIJ_WIDGET "${SHOWY_QUOTA_ZELLIJ_WIDGET}" pipe_showy_quota invalid_value
+    SHOWY_QUOTA_ZELLIJ_WIDGET=pipe_showy_quota
+fi
+if [[ ! "${SHOWY_QUOTA_ZELLIJ_PIPE_NAME}" =~ ^[A-Za-z0-9_-]+$ || ${#SHOWY_QUOTA_ZELLIJ_PIPE_NAME} -gt 128 ]]; then
+    showy_quota_record_config_issue SHOWY_QUOTA_ZELLIJ_PIPE_NAME "${SHOWY_QUOTA_ZELLIJ_PIPE_NAME}" showy-quota invalid_value
+    SHOWY_QUOTA_ZELLIJ_PIPE_NAME=showy-quota
+fi
 
 # ── executable config validation ───────────────────────────────────────
 # The *_BIN knobs are exec'd directly; reject a value that is a shell snippet
 # or a non-runnable path back to its default so a poisoned env/config.env entry
 # cannot become an arbitrary-binary launch. FETCH_BIN is validated at its
 # point of use in the renderer entry points (its default is a sibling path).
-SHOWY_QUOTA_CODEXBAR_BIN=$(showy_quota_valid_bin "${SHOWY_QUOTA_CODEXBAR_BIN}") || SHOWY_QUOTA_CODEXBAR_BIN=codexbar
-SHOWY_QUOTA_ZELLIJ_BIN=$(showy_quota_valid_bin "${SHOWY_QUOTA_ZELLIJ_BIN}") || SHOWY_QUOTA_ZELLIJ_BIN=zellij
+if ! showy_quota_valid_bin "${SHOWY_QUOTA_CODEXBAR_BIN}" >/dev/null; then
+    showy_quota_record_config_issue SHOWY_QUOTA_CODEXBAR_BIN "${SHOWY_QUOTA_CODEXBAR_BIN}" codexbar invalid_value
+    SHOWY_QUOTA_CODEXBAR_BIN=codexbar
+fi
+if ! showy_quota_valid_bin "${SHOWY_QUOTA_ZELLIJ_BIN}" >/dev/null; then
+    showy_quota_record_config_issue SHOWY_QUOTA_ZELLIJ_BIN "${SHOWY_QUOTA_ZELLIJ_BIN}" zellij invalid_value
+    SHOWY_QUOTA_ZELLIJ_BIN=zellij
+fi
 
 # Status glyphs come from env/config and reach sketchybar/terminal output;
 # reject control characters or absurd lengths back to their defaults.
-SHOWY_QUOTA_STALE_GLYPH=$(showy_quota_valid_glyph "${SHOWY_QUOTA_STALE_GLYPH}") || SHOWY_QUOTA_STALE_GLYPH='⚠'
-SHOWY_QUOTA_DEGRADED_CLI_GLYPH=$(showy_quota_valid_glyph "${SHOWY_QUOTA_DEGRADED_CLI_GLYPH}") || SHOWY_QUOTA_DEGRADED_CLI_GLYPH='⚠cli'
+if ! showy_quota_valid_glyph "${SHOWY_QUOTA_STALE_GLYPH}" >/dev/null; then
+    showy_quota_record_config_issue SHOWY_QUOTA_STALE_GLYPH "${SHOWY_QUOTA_STALE_GLYPH}" '⚠' invalid_value
+    SHOWY_QUOTA_STALE_GLYPH='⚠'
+fi
+if ! showy_quota_valid_glyph "${SHOWY_QUOTA_DEGRADED_CLI_GLYPH}" >/dev/null; then
+    showy_quota_record_config_issue SHOWY_QUOTA_DEGRADED_CLI_GLYPH "${SHOWY_QUOTA_DEGRADED_CLI_GLYPH}" '⚠cli' invalid_value
+    SHOWY_QUOTA_DEGRADED_CLI_GLYPH='⚠cli'
+fi
 
 declare -gA SHOWY_QUOTA_ROLE_PALETTE_CACHE=()
 
@@ -930,6 +1002,64 @@ showy_quota_dim_palette() {
     fi
     SHOWY_QUOTA_ROLE_PALETTE_CACHE["${cache_key}"]="${result}"
     printf '%s' "${result}"
+}
+
+# Diagnostic-only checks for values normalized by consumers rather than by
+# the loader. They do not change the stored values or the renderer's output.
+showy_quota_check_deferred_config() {
+    local key raw normalized effective token severity
+    for key in SHOWY_QUOTA_MANAGE_SERVE SHOWY_QUOTA_INCLUDE_STATUS SHOWY_QUOTA_PROMPT_FETCH SHOWY_QUOTA_DEBUG SHOWY_QUOTA_SEVERITY_GLYPHS; do
+        raw="${!key-}"
+        normalized="${raw#"${raw%%[![:space:]]*}"}"
+        normalized="${normalized%"${normalized##*[![:space:]]}"}"
+        normalized="${normalized,,}"
+        case "${normalized}" in
+            ""|1|true|yes|on|0|false|no|off) continue ;;
+        esac
+        case "${key}" in
+            SHOWY_QUOTA_MANAGE_SERVE|SHOWY_QUOTA_INCLUDE_STATUS) effective=1 ;;
+            *) effective=0 ;;
+        esac
+        showy_quota_record_config_issue "${key}" "${raw}" "${effective}" invalid_boolean
+    done
+    raw="${SHOWY_QUOTA_FRESHNESS-}"
+    if [[ -n "${raw}" ]]; then
+        normalized="${raw#"${raw%%[![:space:]]*}"}"
+        normalized="${normalized%"${normalized##*[![:space:]]}"}"
+        normalized="${normalized,,}"
+        case "${normalized}" in
+            off|age|source|age+source) ;;
+            *) showy_quota_record_config_issue SHOWY_QUOTA_FRESHNESS "${raw}" off invalid_value ;;
+        esac
+    fi
+
+    for token in bg surface track icon_text countdown countdown_warn stale elapsed elapsed_long; do
+        key="SHOWY_QUOTA_PALETTE_${token^^}"
+        raw="${!key}"
+        normalized="${raw#\#}"
+        [[ "${normalized}" =~ ^[[:xdigit:]]{6}$ ]] && continue
+        effective="$(showy_quota_palette "${token}" 2>/dev/null)"
+        showy_quota_record_config_issue "${key}" "${raw}" "${effective}" invalid_color
+    done
+    for severity in good warn bad unknown; do
+        key="SHOWY_QUOTA_PALETTE_PRIMARY_${severity^^}"
+        raw="${!key}"
+        normalized="${raw#\#}"
+        [[ "${normalized}" =~ ^[[:xdigit:]]{6}$ ]] && continue
+        effective="$(showy_quota_primary_palette "${severity}" 2>/dev/null)"
+        showy_quota_record_config_issue "${key}" "${raw}" "${effective}" invalid_color
+    done
+    if [[ "${SHOWY_QUOTA_PALETTE_DIM_SCALE}" =~ ^([0-9]+([.][0-9]{1,4})?|[.][0-9]{1,4})$ ]]; then
+        for severity in good warn bad unknown; do
+            key="SHOWY_QUOTA_PALETTE_DIM_${severity^^}"
+            raw="${!key-}"
+            [[ -n "${raw}" ]] || continue
+            normalized="${raw#\#}"
+            [[ "${normalized}" =~ ^[[:xdigit:]]{6}$ ]] && continue
+            effective="$(showy_quota_dim_palette "${severity}" 2>/dev/null)"
+            showy_quota_record_config_issue "${key}" "${raw}" "${effective}" invalid_color
+        done
+    fi
 }
 
 # Is a window a long-horizon cap (weekly/monthly)? Args: $1 = windowMinutes.

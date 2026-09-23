@@ -1016,7 +1016,7 @@ mkdir -p "${theme_cli_xdg}/showy-quota/themes"
 printf '%s\n' ": \"\${SHOWY_QUOTA_PALETTE_PRIMARY_GOOD:=010203}\"" > "${theme_cli_xdg}/showy-quota/themes/catppuccin-mocha-blue.env"
 printf '%s\n' ": \"\${SHOWY_QUOTA_PALETTE_PRIMARY_GOOD:=040506}\"" > "${theme_cli_xdg}/showy-quota/themes/foo.env"
 out=$(run_theme "${theme_cli_xdg}" --list)
-assert_equals "theme list merges sorted unique names" $'carbonfox\ncatppuccin-frappe\ncatppuccin-latte\ncatppuccin-macchiato\ncatppuccin-mocha\ncatppuccin-mocha-blue\ndefault\ndracula\nfoo\ngruvbox-dark\nnord\ntokyonight' "${out}"
+assert_equals "theme list merges sorted unique names" $'carbonfox\ncatppuccin-frappe\ncatppuccin-latte\ncatppuccin-macchiato\ncatppuccin-mocha\ncatppuccin-mocha-blue\ndefault\ndracula\nfoo\ngruvbox-dark\nmonochrome\nnord\ntokyonight' "${out}"
 
 theme_current_xdg=$(mktemp -d "${TMP}/xdg-theme-current.XXXXXX")
 out=$(run_theme "${theme_current_xdg}" --current)
@@ -2126,7 +2126,6 @@ assert_equals "state providerMetrics includes renderable and errored providers" 
 assert_equals "state claude primary window exposes normalized usage" "17|83|300|340" "$(printf '%s' "${out}" | jq -r '.providerMetrics[] | select(.provider == "claude") | .windows.primary | [.usedPercent, .remainingPercent, .windowMinutes, .minutesUntilReset] | map(tostring) | join("|")')"
 assert_equals "state missing tertiary window stays null" "true" "$(printf '%s' "${out}" | jq -r '.providerMetrics[] | select(.provider == "codex") | .windows.tertiary == null')"
 assert_equals "state renderable provider error field stays null" "true" "$(printf '%s' "${out}" | jq -r '.providerMetrics[] | select(.provider == "codex") | .error == null')"
-assert_equals "state top-level contract is unchanged apart from providerMetrics" '{"available":true,"cache":{"degraded":true,"source":"cli"},"cacheAgeSeconds":"number","emptyReason":"null","providerCount":3,"providerFreshness":"object","providers":["codex","claude","gemini"],"sketchybar":{"bracket":"showy_quota_bracket","compactProviderThreshold":5,"compactRecommended":false,"itemPrefix":"showy_quota"},"stale":true,"staleAfterSeconds":240}' "$(printf '%s' "${out}" | jq -cS 'del(.providerMetrics) | .cacheAgeSeconds = (.cacheAgeSeconds | type) | .emptyReason = (.emptyReason | type) | .providerFreshness = (.providerFreshness | type)')"
 assert_equals "state providers stay string array" "true" "$(printf '%s' "${out}" | jq -r '.providers | type == "array" and all(.[]; type == "string")')"
 assert_equals "state compact recommendation defaults below threshold" "false" "$(printf '%s' "${out}" | jq -r '.sketchybar.compactRecommended')"
 assert_equals "state exposes degraded CLI source" "cli" "$(printf '%s' "${out}" | jq -r '.cache.source')"
@@ -5941,6 +5940,18 @@ out=$(run_guard codexbar-mixed.json --min-remaining 10 --max-used 20 2>&1) || rc
 assert_equals "guard rejects both thresholds with usage exit 3" "3" "${rc}"
 assert_contains "guard both-thresholds error explains the conflict" "mutually exclusive" "${out}"
 
+# Oversized digit strings must fail before Bash converts them to machine integers.
+rc=0
+out=$(run_guard codexbar-mixed.json --no-fetch --min-remaining 18446744073709551616 2>&1) || rc=$?
+assert_equals "guard rejects an overflowing remaining threshold with usage exit 3" "3" "${rc}"
+assert_contains "guard reports the invalid remaining threshold" "invalid --min-remaining" "${out}"
+rc=0
+out=$(run_guard codexbar-mixed.json --no-fetch --max-used 18446744073709551616 2>&1) || rc=$?
+assert_equals "guard rejects an overflowing used threshold with usage exit 3" "3" "${rc}"
+rc=0
+out=$(run_guard codexbar-mixed.json --no-fetch --wait-max 18446744073709551616 2>&1) || rc=$?
+assert_equals "guard rejects an overflowing wait budget with usage exit 3" "3" "${rc}"
+
 # --wait-max 0 never sleeps: an immediate breach exits 1 straight away
 # (timing-based waits are intentionally not exercised).
 rc=0
@@ -6685,6 +6696,675 @@ if [[ "${filtered_label_strip}" == *"AI filtered"* ]]; then
     ok "the strip says AI filtered when the user's own filters emptied it"
 else
     fail "the strip says AI filtered when the user's own filters emptied it" "strip=${filtered_label_strip}"
+fi
+
+printf '\nmanaged serve controls\n'
+
+serve_control_cache=$(mk_cache)
+serve_control_stub="${TMP}/serve-control-stub"
+mkdir -p "${serve_control_stub}"
+cat > "${serve_control_stub}/curl" <<'EOF'
+#!/usr/bin/env bash
+url="${*: -1}"
+printf '%s\n' "${url}" >> "${SHOWY_QUOTA_TEST_STATUS_CURL_LOG}"
+[[ "${url}" == "${SHOWY_QUOTA_TEST_SERVE_URL}/health" ]] || exit 91
+printf '{"version":"CodexBar v9.8.7"}\n'
+EOF
+cat > "${serve_control_stub}/ps" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${2:-}" == "${SHOWY_QUOTA_TEST_STATUS_PID:-none}" ]]; then
+    case "${4:-}" in
+        lstart=) printf 'Mon Jan  1 00:00:00 2024\n'; exit 0 ;;
+        command=) printf 'codexbar serve --port 18183\n'; exit 0 ;;
+    esac
+fi
+exec /bin/ps "$@"
+EOF
+cat > "${serve_control_stub}/lsof" <<'EOF'
+#!/usr/bin/env bash
+[[ "$*" == *'tcp:18183'* ]] || exit 91
+printf '%s\n' "${SHOWY_QUOTA_TEST_STATUS_LISTENER_PID:-99999999}"
+EOF
+chmod +x "${serve_control_stub}/curl" "${serve_control_stub}/ps" "${serve_control_stub}/lsof"
+serve_control_url='http://127.0.0.1:18183'
+serve_control_log="${TMP}/serve-control-curl.log"
+: > "${serve_control_log}"
+serve_control_status() {
+    env TZ=UTC PATH="${serve_control_stub}:${PATH}" SHOWY_QUOTA_NO_CONFIG=1 \
+        SHOWY_QUOTA_CACHE_DIR="${serve_control_cache}" \
+        SHOWY_QUOTA_CODEXBAR_BIN=codexbar \
+        SHOWY_QUOTA_CODEXBAR_SERVE_URL="${serve_control_url}" \
+        SHOWY_QUOTA_TEST_SERVE_URL="${serve_control_url}" \
+        SHOWY_QUOTA_TEST_STATUS_CURL_LOG="${serve_control_log}" \
+        SHOWY_QUOTA_NOW_EPOCH=1704067300 \
+        "$@" "${REPO_ROOT}/bin/showy-quota" serve status --json
+}
+serve_control_rc=0
+serve_control_out=$(serve_control_status env) || serve_control_rc=$?
+if (( serve_control_rc == 1 )) && printf '%s' "${serve_control_out}" |
+    jq -e '.healthy == false and .managed == {pidfileState:"missing",pid:null,alive:false,owned:false}
+        and .serve.localOnly == true and .serve.port == 18183
+        and .serve.healthReachable == true and .serve.version == "9.8.7"
+        and .failure.count == 0 and .cache.ageSeconds == null' >/dev/null; then
+    ok "serve status reports a reachable unmanaged responder without creating a pidfile"
+else
+    fail "serve status reports a reachable unmanaged responder without creating a pidfile" "rc=${serve_control_rc}; ${serve_control_out}"
+fi
+if [[ ! -e "${serve_control_cache}/codexbar-serve.pid" ]] && [[ "$(< "${serve_control_log}")" != *'/usage'* ]]; then
+    ok "serve status does not modify the pidfile or request /usage"
+else
+    fail "serve status does not modify the pidfile or request /usage"
+fi
+serve_control_absent="${TMP}/serve-control-absent"
+serve_control_rc=0
+serve_control_out=$(env PATH="${serve_control_stub}:${PATH}" SHOWY_QUOTA_NO_CONFIG=1 \
+    SHOWY_QUOTA_CACHE_DIR="${serve_control_absent}" \
+    SHOWY_QUOTA_CODEXBAR_SERVE_URL="${serve_control_url}" \
+    SHOWY_QUOTA_TEST_SERVE_URL="${serve_control_url}" \
+    SHOWY_QUOTA_TEST_STATUS_CURL_LOG="${serve_control_log}" \
+    "${REPO_ROOT}/bin/showy-quota" serve status) || serve_control_rc=$?
+if (( serve_control_rc == 1 )) && [[ ! -e "${serve_control_absent}" ]] \
+    && [[ "${serve_control_out}" == *'managed serve: missing'* ]] \
+    && [[ "${serve_control_out}" == *'/health: true'* ]]; then
+    ok "serve status text reports missing management without creating a cache directory"
+else
+    fail "serve status text reports missing management without creating a cache directory" "rc=${serve_control_rc}; ${serve_control_out}"
+fi
+seed_usage_cache "${serve_control_cache}" codexbar-empty.json cli
+printf '%s\n' '99999999:1704067200:codexbar' > "${serve_control_cache}/codexbar-serve.pid"
+printf '4\n' > "${serve_control_cache}/serve-failed-count"
+printf '1704067285\n' > "${serve_control_cache}/serve-failed-at"
+serve_control_rc=0
+serve_control_out=$(serve_control_status env) || serve_control_rc=$?
+if (( serve_control_rc == 1 )) && printf '%s' "${serve_control_out}" |
+    jq -e '.managed.pidfileState == "stale" and .managed.pid == 99999999
+        and .managed.alive == false and .managed.owned == false
+        and .failure == {count:4,lastFailedAt:1704067285,backoffSeconds:60,backoffRemainingSeconds:45}
+        and .cache.source == "cli" and (.cache.ageSeconds | type == "number")' >/dev/null \
+    && [[ -f "${serve_control_cache}/codexbar-serve.pid" && -f "${serve_control_cache}/serve-failed-at" ]]; then
+    ok "serve status keeps stale pidfile and backoff stamps while reporting cache freshness"
+else
+    fail "serve status keeps stale pidfile and backoff stamps while reporting cache freshness" "rc=${serve_control_rc}; ${serve_control_out}"
+fi
+sleep 30 &
+serve_control_pid=$!
+printf '%s:1704067200:codexbar\n' "${serve_control_pid}" > "${serve_control_cache}/codexbar-serve.pid"
+serve_control_rc=0
+serve_control_out=$(serve_control_status env SHOWY_QUOTA_TEST_STATUS_PID="${serve_control_pid}" \
+    SHOWY_QUOTA_TEST_STATUS_LISTENER_PID="${serve_control_pid}") || serve_control_rc=$?
+if (( serve_control_rc == 0 )) && printf '%s' "${serve_control_out}" |
+    jq -e --argjson pid "${serve_control_pid}" '.healthy and .managed.pidfileState == "owned"
+        and .managed.pid == $pid and .managed.alive and .managed.owned' >/dev/null; then
+    ok "serve status checks an alive pid against its recorded identity"
+else
+    fail "serve status checks an alive pid against its recorded identity" "rc=${serve_control_rc}; ${serve_control_out}"
+fi
+serve_control_rc=0
+serve_control_out=$(serve_control_status env SHOWY_QUOTA_TEST_STATUS_PID="${serve_control_pid}") || serve_control_rc=$?
+if (( serve_control_rc == 1 )) && printf '%s' "${serve_control_out}" |
+    jq -e --argjson pid "${serve_control_pid}" '.healthy == false and .managed.pidfileState == "stale"
+        and .managed.pid == $pid and .managed.alive and .managed.owned == false
+        and (.managed.reason | contains("does not own the configured port"))
+        and .serve.healthReachable == true' >/dev/null \
+    && [[ "$(< "${serve_control_cache}/codexbar-serve.pid")" == "${serve_control_pid}:1704067200:codexbar" ]]; then
+    ok "serve status does not claim a matching pid when a foreign process owns the port"
+else
+    fail "serve status does not claim a matching pid when a foreign process owns the port" "rc=${serve_control_rc}; ${serve_control_out}"
+fi
+kill "${serve_control_pid}" 2>/dev/null || true
+wait "${serve_control_pid}" 2>/dev/null || true
+printf '%s\n' '99999999:1704067200:codexbar' > "${serve_control_cache}/codexbar-serve.pid"
+serve_control_rc=0
+serve_control_out=$(env SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_CACHE_DIR="${serve_control_cache}" \
+    SHOWY_QUOTA_CODEXBAR_SERVE_URL="${serve_control_url}" "${REPO_ROOT}/bin/showy-quota" serve stop 2>&1) || serve_control_rc=$?
+if (( serve_control_rc == 0 )) && [[ ! -e "${serve_control_cache}/codexbar-serve.pid" ]]; then
+    ok "serve stop removes a stale pidfile without signaling a foreign process"
+else
+    fail "serve stop removes a stale pidfile without signaling a foreign process" "rc=${serve_control_rc}; ${serve_control_out}"
+fi
+for serve_control_refusal in unmanaged nonlocal; do
+    serve_control_rc=0
+    if [[ "${serve_control_refusal}" == unmanaged ]]; then
+        serve_control_out=$(env SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_CACHE_DIR="${serve_control_cache}" \
+            SHOWY_QUOTA_MANAGE_SERVE=0 SHOWY_QUOTA_CODEXBAR_SERVE_URL="${serve_control_url}" \
+            "${REPO_ROOT}/bin/showy-quota" serve restart 2>&1) || serve_control_rc=$?
+        serve_control_needle='disabled'
+    else
+        serve_control_out=$(env SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_CACHE_DIR="${serve_control_cache}" \
+            SHOWY_QUOTA_MANAGE_SERVE=1 SHOWY_QUOTA_CODEXBAR_SERVE_URL='http://example.test:18183' \
+            "${REPO_ROOT}/bin/showy-quota" serve restart 2>&1) || serve_control_rc=$?
+        serve_control_needle='local loopback'
+    fi
+    if (( serve_control_rc == 1 )) && [[ "${serve_control_out}" == *"${serve_control_needle}"* ]]; then
+        ok "serve restart refuses ${serve_control_refusal} mode"
+    else
+        fail "serve restart refuses ${serve_control_refusal} mode" "rc=${serve_control_rc}; ${serve_control_out}"
+    fi
+done
+serve_control_restart_cache=$(mk_cache)
+serve_control_restart_port=$(unused_tcp_port)
+serve_control_restart_url="http://127.0.0.1:${serve_control_restart_port}"
+serve_control_args="${TMP}/serve-control-args.log"
+serve_control_rc=0
+serve_control_out=$(env PATH="${managed_bin_dir}:${PATH}" SHOWY_QUOTA_NO_CONFIG=1 \
+    SHOWY_QUOTA_CACHE_DIR="${serve_control_restart_cache}" SHOWY_QUOTA_MANAGE_SERVE=1 \
+    SHOWY_QUOTA_CODEXBAR_BIN="${managed_bin_dir}/codexbar" \
+    SHOWY_QUOTA_CODEXBAR_SERVE_URL="${serve_control_restart_url}" \
+    SHOWY_QUOTA_REFRESH_SECONDS=147 \
+    SHOWY_QUOTA_TEST_MANAGED_ARGS_FILE="${serve_control_args}" \
+    SHOWY_QUOTA_TEST_SERVE_FIXTURE="${FIXTURE_DIR}/codexbar-mixed.json" \
+    "${REPO_ROOT}/bin/showy-quota" serve restart 2>&1) || serve_control_rc=$?
+if (( serve_control_rc == 0 )) && [[ -s "${serve_control_restart_cache}/codexbar-serve.pid" ]] \
+    && [[ "$(< "${serve_control_args}")" == *"serve --port ${serve_control_restart_port} --refresh-interval 147"* ]]; then
+    ok "serve restart starts a stub on the configured port with the refresh interval"
+else
+    fail "serve restart starts a stub on the configured port with the refresh interval" "rc=${serve_control_rc}; ${serve_control_out}"
+fi
+serve_control_rc=0
+env PATH="${managed_bin_dir}:${PATH}" SHOWY_QUOTA_NO_CONFIG=1 \
+    SHOWY_QUOTA_CACHE_DIR="${serve_control_restart_cache}" \
+    SHOWY_QUOTA_CODEXBAR_BIN="${managed_bin_dir}/codexbar" \
+    SHOWY_QUOTA_CODEXBAR_SERVE_URL="${serve_control_restart_url}" \
+    "${REPO_ROOT}/bin/showy-quota" serve stop >/dev/null 2>&1 || serve_control_rc=$?
+if (( serve_control_rc == 0 )) && [[ ! -e "${serve_control_restart_cache}/codexbar-serve.pid" ]]; then
+    ok "serve stop terminates the isolated managed stub"
+else
+    fail "serve stop terminates the isolated managed stub" "rc=${serve_control_rc}"
+fi
+serve_control_wait_cache=$(mk_cache)
+serve_control_wait_port=$(unused_tcp_port)
+serve_control_wait_url="http://127.0.0.1:${serve_control_wait_port}"
+serve_control_wait_lock="${serve_control_wait_cache}/usage.lock.d"
+mkdir "${serve_control_wait_lock}"
+printf '%s\n' "$$" > "${serve_control_wait_lock}/owner.pid"
+serve_control_wait_stub="${TMP}/serve-control-wait-stub"
+mkdir "${serve_control_wait_stub}"
+cat > "${serve_control_wait_stub}/sleep" <<'EOF'
+#!/usr/bin/env bash
+if [[ ! -e "${SHOWY_QUOTA_TEST_RELEASE_MARKER}" && -f "${SHOWY_QUOTA_TEST_RELEASE_LOCK}/owner.pid" ]]; then
+    : > "${SHOWY_QUOTA_TEST_RELEASE_MARKER}"
+    rm -f -- "${SHOWY_QUOTA_TEST_RELEASE_LOCK}/owner.pid"
+    rmdir -- "${SHOWY_QUOTA_TEST_RELEASE_LOCK}"
+fi
+exec /bin/sleep "$@"
+EOF
+chmod +x "${serve_control_wait_stub}/sleep"
+serve_control_rc=0
+serve_control_out=$(env PATH="${serve_control_wait_stub}:${managed_bin_dir}:${PATH}" SHOWY_QUOTA_NO_CONFIG=1 \
+    SHOWY_QUOTA_CACHE_DIR="${serve_control_wait_cache}" SHOWY_QUOTA_MANAGE_SERVE=1 \
+    SHOWY_QUOTA_CODEXBAR_BIN="${managed_bin_dir}/codexbar" \
+    SHOWY_QUOTA_CODEXBAR_SERVE_URL="${serve_control_wait_url}" \
+    SHOWY_QUOTA_LOCK_WAIT_TENTHS=20 SHOWY_QUOTA_TEST_RELEASE_LOCK="${serve_control_wait_lock}" \
+    SHOWY_QUOTA_TEST_RELEASE_MARKER="${serve_control_wait_cache}/lock-released" \
+    SHOWY_QUOTA_TEST_SERVE_FIXTURE="${FIXTURE_DIR}/codexbar-mixed.json" \
+    "${REPO_ROOT}/bin/showy-quota" serve restart 2>&1) || serve_control_rc=$?
+if (( serve_control_rc == 0 )) && [[ "${serve_control_out}" == *'managed codexbar serve restarted'* ]] \
+    && [[ -s "${serve_control_wait_cache}/codexbar-serve.pid" ]] \
+    && [[ -f "${serve_control_wait_cache}/lock-released" ]] && [[ ! -e "${serve_control_wait_lock}" ]]; then
+    ok "serve restart waits for a held refresh lock before starting the managed stub"
+else
+    fail "serve restart waits for a held refresh lock before starting the managed stub" "rc=${serve_control_rc}; ${serve_control_out}"
+fi
+serve_control_rc=0
+serve_control_stop_err="${TMP}/serve-control-wait-stop.err"
+env PATH="${managed_bin_dir}:${PATH}" SHOWY_QUOTA_NO_CONFIG=1 \
+    SHOWY_QUOTA_CACHE_DIR="${serve_control_wait_cache}" \
+    SHOWY_QUOTA_CODEXBAR_BIN="${managed_bin_dir}/codexbar" \
+    SHOWY_QUOTA_CODEXBAR_SERVE_URL="${serve_control_wait_url}" \
+    "${REPO_ROOT}/bin/showy-quota" serve stop >/dev/null 2>"${serve_control_stop_err}" || serve_control_rc=$?
+if (( serve_control_rc != 0 )) || [[ -e "${serve_control_wait_cache}/codexbar-serve.pid" ]]; then
+    fail "serve stop cleans up the managed stub after lock contention" \
+        "rc=${serve_control_rc}; stderr=$(< "${serve_control_stop_err}")"
+fi
+
+
+# ── automation primitives: reset, guarded run, provider pick, refresh ──
+printf '\nquota automation primitives\n'
+automation_cache=$(mk_cache)
+automation_fixture="${TMP}/automation-reset.json"
+printf '%s\n' '[{"provider":"codex","usage":{"primary":{"usedPercent":95,"resetsAt":"2099-01-01T00:02:30Z"}}},{"provider":"claude","usage":{"primary":{"usedPercent":40,"resetsAt":"2099-01-01T00:04:00Z"}}}]' > "${automation_fixture}"
+seed_usage_cache "${automation_cache}" "${automation_fixture}" serve
+automation_out=$(env SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_CACHE_DIR="${automation_cache}" \
+    SHOWY_QUOTA_NOW_EPOCH=4070908800 SHOWY_QUOTA_REFRESH_SECONDS=9999999999 \
+    "${REPO_ROOT}/bin/showy-quota" next-reset --provider codex --window primary --no-fetch)
+assert_equals "next-reset prints exact fixture seconds" "150" "${automation_out}"
+automation_out=$(env SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_CACHE_DIR="${automation_cache}" \
+    SHOWY_QUOTA_NOW_EPOCH=4070908800 SHOWY_QUOTA_REFRESH_SECONDS=9999999999 \
+    "${REPO_ROOT}/bin/showy-quota" next-reset --provider codex --window primary --epoch --no-fetch)
+assert_equals "next-reset prints absolute fixture epoch" "4070908950" "${automation_out}"
+automation_rc=0
+automation_out=$(env SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_CACHE_DIR="${automation_cache}" \
+    SHOWY_QUOTA_NOW_EPOCH=4070908800 SHOWY_QUOTA_REFRESH_SECONDS=9999999999 \
+    "${REPO_ROOT}/bin/showy-quota" next-reset --provider missing --no-fetch) || automation_rc=$?
+assert_equals "next-reset exits 1 for an unknown provider" "1" "${automation_rc}"
+automation_rc=0
+automation_out=$(env SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_CACHE_DIR="${automation_cache}" \
+    SHOWY_QUOTA_NOW_EPOCH=4070908800 SHOWY_QUOTA_REFRESH_SECONDS=9999999999 \
+    "${REPO_ROOT}/bin/showy-quota" run --no-fetch --provider claude --window primary \
+        --min-remaining 50 -- sh -c 'printf child-ok; exit 17') || automation_rc=$?
+assert_equals "run executes a passing child" "child-ok" "${automation_out}"
+assert_equals "run forwards its child exit code" "17" "${automation_rc}"
+automation_marker="${TMP}/run-blocked-marker"
+automation_rc=0
+# shellcheck disable=SC2016  # The child shell must expand its own "$1".
+env SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_CACHE_DIR="${automation_cache}" \
+    SHOWY_QUOTA_NOW_EPOCH=4070908800 SHOWY_QUOTA_REFRESH_SECONDS=9999999999 \
+    "${REPO_ROOT}/bin/showy-quota" run --no-fetch --provider codex --window primary \
+        --min-remaining 10 --wait-max 0 -- sh -c 'touch "$1"' sh "${automation_marker}" \
+        >/dev/null 2>&1 || automation_rc=$?
+assert_equals "run refuses a breach without reset budget" "1" "${automation_rc}"
+if [[ -e "${automation_marker}" ]]; then
+    fail "run never launches a child after a breach"
+else
+    ok "run never launches a child after a breach"
+fi
+# The next provider can become the bottleneck after one reset. Simulate the
+# sleeps without waiting for the wall clock; each retry must follow a new reset.
+automation_step1="${TMP}/automation-step1.json"
+automation_step2="${TMP}/automation-step2.json"
+jq '.providers[0].usage.primary.usedPercent = 10
+    | .providers[1].usage.primary.usedPercent = 95
+    | .providers[1].usage.primary.resetsAt = "2099-01-01T00:00:40Z"' \
+    "${automation_cache}/usage.json" > "${automation_step1}"
+jq '.providers[0].usage.primary.usedPercent = 10
+    | .providers[1].usage.primary.usedPercent = 10' \
+    "${automation_step1}" > "${automation_step2}"
+automation_sleep_dir="${TMP}/automation-sleep"
+mkdir -p "${automation_sleep_dir}"
+cat > "${automation_sleep_dir}/sleep" <<'EOF'
+#!/bin/sh
+count=$(cat "${AUTO_SLEEP_COUNT}" 2>/dev/null || printf 0)
+count=$((count + 1))
+printf '%s' "${count}" > "${AUTO_SLEEP_COUNT}"
+if [ "${count}" -eq 1 ]; then
+    cp "${AUTO_STEP1}" "${AUTO_CACHE}/usage.json"
+else
+    cp "${AUTO_STEP2}" "${AUTO_CACHE}/usage.json"
+fi
+EOF
+chmod +x "${automation_sleep_dir}/sleep"
+automation_rc=0
+automation_out=$(env PATH="${automation_sleep_dir}:${PATH}" SHOWY_QUOTA_NO_CONFIG=1 \
+    SHOWY_QUOTA_CACHE_DIR="${automation_cache}" SHOWY_QUOTA_NOW_EPOCH=4070908800 \
+    SHOWY_QUOTA_REFRESH_SECONDS=9999999999 AUTO_CACHE="${automation_cache}" \
+    AUTO_STEP1="${automation_step1}" AUTO_STEP2="${automation_step2}" \
+    AUTO_SLEEP_COUNT="${TMP}/automation-sleep-count" \
+    "${REPO_ROOT}/bin/showy-quota" run --no-fetch --provider codex,claude \
+        --window primary --min-remaining 20 --wait-max 300 -- sh -c 'printf ready') || automation_rc=$?
+assert_equals "run passes after two distinct resets" "0" "${automation_rc}"
+assert_equals "run executes after the second reset" "ready" "${automation_out}"
+assert_equals "run sleeps once for each reset" "2" "$(< "${TMP}/automation-sleep-count")"
+# Restore the initial fixture for the provider-routing cases below.
+seed_usage_cache "${automation_cache}" "${automation_fixture}" serve
+
+automation_out=$(env SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_CACHE_DIR="${automation_cache}" \
+    SHOWY_QUOTA_NOW_EPOCH=4070908800 SHOWY_QUOTA_REFRESH_SECONDS=9999999999 \
+    "${REPO_ROOT}/bin/showy-quota" pick --no-fetch)
+assert_equals "pick chooses maximum remaining on worst windows" "claude" "${automation_out}"
+automation_rc=0
+env SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_CACHE_DIR="${automation_cache}" \
+    SHOWY_QUOTA_NOW_EPOCH=4070908800 SHOWY_QUOTA_REFRESH_SECONDS=9999999999 \
+    "${REPO_ROOT}/bin/showy-quota" pick --no-fetch --min-remaining 61 >/dev/null 2>&1 || automation_rc=$?
+assert_equals "pick exits 1 above available floor" "1" "${automation_rc}"
+automation_rc=0
+automation_out=$(env SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_CACHE_DIR="${automation_cache}" \
+    "${REPO_ROOT}/bin/showy-quota" pick --no-fetch --min-remaining 18446744073709551616 2>&1) || automation_rc=$?
+assert_equals "pick rejects an overflowing floor with usage exit 2" "2" "${automation_rc}"
+assert_contains "pick reports the invalid floor" "invalid floor" "${automation_out}"
+automation_rc=0
+env SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_CACHE_DIR="${automation_cache}" \
+    "${REPO_ROOT}/bin/showy-quota" run --no-fetch --wait-max 18446744073709551616 -- true \
+    >/dev/null 2>&1 || automation_rc=$?
+assert_equals "run rejects an overflowing wait budget with usage exit 2" "2" "${automation_rc}"
+refresh_path="${TMP}/refresh-path"
+mkdir -p "${refresh_path}"
+ln -s "$(command -v bash)" "${refresh_path}/bash"
+refresh_fetch="${TMP}/refresh-fetch"
+printf '#!/bin/sh\nprintf fetched > "%s"\n' "${TMP}/refresh-fetched" > "${refresh_fetch}"
+chmod +x "${refresh_fetch}"
+automation_rc=0
+env PATH="${refresh_path}:/usr/bin:/bin" SHOWY_QUOTA_NO_CONFIG=1 \
+    SHOWY_QUOTA_CACHE_DIR="${automation_cache}" SHOWY_QUOTA_FETCH_BIN="${refresh_fetch}" \
+    "${REPO_ROOT}/bin/showy-quota" refresh >/dev/null 2>&1 || automation_rc=$?
+assert_equals "refresh succeeds without host surfaces" "0" "${automation_rc}"
+assert_equals "refresh runs forced fetch without host surfaces" "fetched" "$(< "${TMP}/refresh-fetched")"
+cat > "${refresh_path}/tmux" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >> "${REFRESH_TMUX_LOG}"
+case "$1" in
+    has-session) [ "${REFRESH_TMUX_SERVER}" = 1 ] ;;
+    show-options)
+        case "$3" in
+            status-right) printf '%s\n' "${REFRESH_TMUX_RIGHT}" ;;
+            status-left) printf '%s\n' "${REFRESH_TMUX_LEFT}" ;;
+        esac ;;
+    list-clients) printf '/dev/pts/1\n' ;;
+esac
+EOF
+chmod +x "${refresh_path}/tmux"
+refresh_tmux_log="${TMP}/refresh-tmux.log"
+: > "${refresh_tmux_log}"
+env PATH="${refresh_path}:/usr/bin:/bin" SHOWY_QUOTA_NO_CONFIG=1 \
+    SHOWY_QUOTA_CACHE_DIR="${automation_cache}" SHOWY_QUOTA_FETCH_BIN="${refresh_fetch}" \
+    REFRESH_TMUX_LOG="${refresh_tmux_log}" REFRESH_TMUX_SERVER=1 \
+    REFRESH_TMUX_RIGHT='#{hostname}' REFRESH_TMUX_LEFT='plain text' \
+    "${REPO_ROOT}/bin/showy-quota" refresh >/dev/null
+assert_not_contains "refresh leaves unrelated tmux status alone" "refresh-client" "$(< "${refresh_tmux_log}")"
+: > "${refresh_tmux_log}"
+env PATH="${refresh_path}:/usr/bin:/bin" SHOWY_QUOTA_NO_CONFIG=1 \
+    SHOWY_QUOTA_CACHE_DIR="${automation_cache}" SHOWY_QUOTA_FETCH_BIN="${refresh_fetch}" \
+    REFRESH_TMUX_LOG="${refresh_tmux_log}" REFRESH_TMUX_SERVER=1 \
+    REFRESH_TMUX_RIGHT='#{hostname}' REFRESH_TMUX_LEFT='#("/tmp/showy-quota-tmux-bar")' \
+    "${REPO_ROOT}/bin/showy-quota" refresh >/dev/null
+assert_contains "refresh nudges a configured showy-quota tmux status" \
+    'refresh-client -S -t /dev/pts/1' "$(< "${refresh_tmux_log}")"
+: > "${refresh_tmux_log}"
+env PATH="${refresh_path}:/usr/bin:/bin" SHOWY_QUOTA_NO_CONFIG=1 \
+    SHOWY_QUOTA_CACHE_DIR="${automation_cache}" SHOWY_QUOTA_FETCH_BIN="${refresh_fetch}" \
+    REFRESH_TMUX_LOG="${refresh_tmux_log}" REFRESH_TMUX_SERVER=0 \
+    REFRESH_TMUX_RIGHT='showy-quota-tmux-bar' REFRESH_TMUX_LEFT='' \
+    "${REPO_ROOT}/bin/showy-quota" refresh >/dev/null
+assert_not_contains "refresh does not nudge tmux without a server" "refresh-client" "$(< "${refresh_tmux_log}")"
+
+# ── configuration issue checker ────────────────────────────────────────
+printf '\nconfiguration issue checker\n'
+check_xdg="${TMP}/config-issues"
+check_cache=$(mk_cache)
+mkdir -p "${check_xdg}/showy-quota"
+cp "${FIXTURE_DIR}/codexbar-mixed.json" "${check_cache}/usage.json"
+printf '%s\n' 'SHOWY_QUOTA_REFRESH_SECONDS=oops' 'SHOWY_QUOTA_PALETTE_TYPO=fff' \
+    > "${check_xdg}/showy-quota/config.env"
+check_rc=0
+check_out=$(env XDG_CONFIG_HOME="${check_xdg}" SHOWY_QUOTA_NO_CONFIG= \
+    SHOWY_QUOTA_CACHE_DIR="${check_cache}" "${REPO_ROOT}/bin/showy-quota" --check-config --json) || check_rc=$?
+if (( check_rc == 1 )) && printf '%s' "${check_out}" | jq -e '
+    .count == 2
+    and any(.issues[]; .key == "SHOWY_QUOTA_REFRESH_SECONDS" and .raw == "oops"
+        and .effective == "120" and .reason == "not_integer")
+    and any(.issues[]; .key == "SHOWY_QUOTA_PALETTE_TYPO" and .raw == "fff"
+        and .effective == null and .reason == "unknown_key")
+' >/dev/null; then
+    ok "config checker shows the numeric fallback and ignored unknown knob"
+else
+    fail "config checker shows the numeric fallback and ignored unknown knob" "rc=${check_rc}; ${check_out}"
+fi
+check_diag=$(env XDG_CONFIG_HOME="${check_xdg}" SHOWY_QUOTA_NO_CONFIG= \
+    SHOWY_QUOTA_CACHE_DIR="${check_cache}" SHOWY_QUOTA_CODEXBAR_SERVE_URL= \
+    "${REPO_ROOT}/bin/showy-quota" --diagnose --json)
+if printf '%s' "${check_diag}" | jq -e '
+    .configIssues.count == 2
+    and any(.configIssues.issues[]; .key == "SHOWY_QUOTA_REFRESH_SECONDS" and .effective == "120")
+' >/dev/null; then
+    ok "diagnose JSON includes the config issue list"
+else
+    fail "diagnose JSON includes the config issue list" "${check_diag}"
+fi
+check_text=$(env XDG_CONFIG_HOME="${check_xdg}" SHOWY_QUOTA_NO_CONFIG= \
+    SHOWY_QUOTA_CACHE_DIR="${check_cache}" SHOWY_QUOTA_CODEXBAR_SERVE_URL= \
+    "${REPO_ROOT}/bin/showy-quota" --diagnose)
+if [[ "${check_text}" == *"config issues: 2"* && "${check_text}" == *"effective=120"* ]]; then
+    ok "diagnose text includes issue count and fallback"
+else
+    fail "diagnose text includes issue count and fallback" "${check_text}"
+fi
+printf '%s\n' 'SHOWY_QUOTA_CODEXBAR_BIN="/private/config-check-secret/bin; bad"' \
+    'SHOWY_QUOTA_MANAGE_SERVE=perhaps' 'SHOWY_QUOTA_PALETTE_BG=badhex' \
+    'SHOWY_QUOTA_PNG_BAR_W=99999' > "${check_xdg}/showy-quota/config.env"
+check_rc=0
+check_out=$(env XDG_CONFIG_HOME="${check_xdg}" SHOWY_QUOTA_NO_CONFIG= \
+    SHOWY_QUOTA_CACHE_DIR="${check_cache}" "${REPO_ROOT}/bin/showy-quota" --check-config --json --redact) || check_rc=$?
+if (( check_rc == 1 )) && printf '%s' "${check_out}" | jq -e '
+    .count >= 4
+    and any(.issues[]; .key == "SHOWY_QUOTA_CODEXBAR_BIN" and .reason == "invalid_value" and .effective == "codexbar")
+    and any(.issues[]; .key == "SHOWY_QUOTA_MANAGE_SERVE" and .reason == "invalid_boolean" and .effective == "1")
+    and any(.issues[]; .key == "SHOWY_QUOTA_PALETTE_BG" and .reason == "invalid_color" and .effective == "161616")
+    and any(.issues[]; .key == "SHOWY_QUOTA_PNG_BAR_W" and .reason == "above_max" and .effective == "4096")
+    and ([.issues[].raw] | all(.[]; contains("config-check-secret") | not))
+' >/dev/null; then
+    ok "config checker records clamped values and redacts path-shaped raw values"
+else
+    fail "config checker records clamped values and redacts path-shaped raw values" "rc=${check_rc}; ${check_out}"
+fi
+printf '%s\n' 'SHOWY_QUOTA_THEME=missing' > "${check_xdg}/showy-quota/config.env"
+check_rc=0
+check_out=$(env XDG_CONFIG_HOME="${check_xdg}" SHOWY_QUOTA_NO_CONFIG= \
+    SHOWY_QUOTA_CACHE_DIR="${check_cache}" "${REPO_ROOT}/bin/showy-quota" --check-config --json 2>/dev/null) || check_rc=$?
+if (( check_rc == 1 )) && printf '%s' "${check_out}" | jq -e '
+    .count == 1 and any(.issues[]; .key == "SHOWY_QUOTA_THEME"
+        and .raw == "missing" and .reason == "missing_theme")
+' >/dev/null; then
+    ok "config checker reports a missing theme and exits 1"
+else
+    fail "config checker reports a missing theme and exits 1" "rc=${check_rc}; ${check_out}"
+fi
+check_diag=$(env XDG_CONFIG_HOME="${check_xdg}" SHOWY_QUOTA_NO_CONFIG= \
+    SHOWY_QUOTA_CACHE_DIR="${check_cache}" SHOWY_QUOTA_CODEXBAR_SERVE_URL= \
+    "${REPO_ROOT}/bin/showy-quota" --diagnose --json 2>/dev/null)
+assert_equals "diagnose reports a missing theme" "missing_theme" \
+    "$(printf '%s' "${check_diag}" | jq -r '.configIssues.issues[] | select(.key == "SHOWY_QUOTA_THEME") | .reason')"
+printf '%s\n' 'SHOWY_QUOTA_REFRESH_SECONDS=120' 'SHOWY_QUOTA_THEME=default' \
+    > "${check_xdg}/showy-quota/config.env"
+check_rc=0
+check_out=$(env XDG_CONFIG_HOME="${check_xdg}" SHOWY_QUOTA_NO_CONFIG= \
+    SHOWY_QUOTA_CACHE_DIR="${check_cache}" "${REPO_ROOT}/bin/showy-quota" --check-config --json) || check_rc=$?
+if (( check_rc == 0 )) && printf '%s' "${check_out}" | jq -e '.count == 0 and .issues == []' >/dev/null; then
+    ok "clean config, including a theme, exits successfully"
+else
+    fail "clean config, including a theme, exits successfully" "rc=${check_rc}; ${check_out}"
+fi
+check_render_config=$(env XDG_CONFIG_HOME="${check_xdg}" SHOWY_QUOTA_NO_CONFIG= \
+    SHOWY_QUOTA_CACHE_DIR="${check_cache}" SHOWY_QUOTA_FETCH_BIN=/usr/bin/true \
+    SHOWY_QUOTA_NOW_EPOCH=4070908800 NO_COLOR=1 "${REPO_ROOT}/bin/showy-quota-zellij-bar")
+check_render_default=$(env XDG_CONFIG_HOME="${check_xdg}" SHOWY_QUOTA_NO_CONFIG=1 \
+    SHOWY_QUOTA_CACHE_DIR="${check_cache}" SHOWY_QUOTA_FETCH_BIN=/usr/bin/true \
+    SHOWY_QUOTA_NOW_EPOCH=4070908800 NO_COLOR=1 "${REPO_ROOT}/bin/showy-quota-zellij-bar")
+assert_equals "config checker leaves hot-path rendering unchanged" "${check_render_default}" "${check_render_config}"
+
+# ── versioned state and provider explanation ────────────────────────
+printf '\nversioned state and provider explanation\n'
+
+state_schema="${REPO_ROOT}/share/schema/showy-quota-state.schema.json"
+state_schema_cache=$(mk_cache)
+if python3 -c 'import jsonschema' >/dev/null 2>&1; then
+    printf '  validator: python3 jsonschema (draft 2020-12)\n'
+    state_schema_validator=python
+else
+    printf '  validator: jq structural fallback (python3 jsonschema unavailable)\n'
+    state_schema_validator=jq
+fi
+schema_checked=0
+for state_fixture in "${FIXTURE_DIR}"/codexbar-*.json; do
+    # The state bridge accepts only cache payloads that the fetcher accepts.
+    if ! jq -e 'type == "array"' "${state_fixture}" >/dev/null; then
+        continue
+    fi
+    cp "${state_fixture}" "${state_schema_cache}/usage.json"
+    state_schema_output="${TMP}/state-schema-output.json"
+    if ! env SHOWY_QUOTA_NO_CONFIG=1 \
+        SHOWY_QUOTA_CACHE_DIR="${state_schema_cache}" \
+        SHOWY_QUOTA_CODEXBAR_SERVE_URL='' \
+        SHOWY_QUOTA_RENDER_BIN="${RENDER_BIN}" \
+        "${REPO_ROOT}/bin/showy-quota-state" --no-fetch --json > "${state_schema_output}"; then
+        fail "state accepts $(basename "${state_fixture}")" "state command failed"
+        continue
+    fi
+    if [[ "${state_schema_validator}" == python ]]; then
+        if python3 -c 'import json,sys,jsonschema; schema=json.load(open(sys.argv[1])); state=json.load(open(sys.argv[2])); jsonschema.Draft202012Validator.check_schema(schema); jsonschema.Draft202012Validator(schema).validate(state)' \
+            "${state_schema}" "${state_schema_output}" 2>/dev/null; then
+            schema_checked=$((schema_checked + 1))
+        else
+            fail "schema validates $(basename "${state_fixture}")" "jsonschema rejected state"
+        fi
+    elif jq -e --slurpfile schema "${state_schema}" '
+        (. as $state | all($schema[0].required[]; . as $key | $state | has($key)))
+        and .schemaVersion == 1
+        and (.available | type == "boolean")
+        and (.stale | type == "boolean")
+        and (.cache | type == "object" and (.source | IN("serve","cli","unknown")) and (.degraded | type == "boolean"))
+        and (.cacheAgeSeconds | type | IN("number","null"))
+        and (.staleAfterSeconds | type == "number")
+        and (.providers | type == "array" and all(.[]; type == "string"))
+        and (.providerCount | type == "number")
+        and (.providerMetrics | type == "array" and all(.[];
+            (.provider | type == "string")
+            and (.windows | type == "object" and
+                ([.primary,.secondary,.tertiary] | all(.[];
+                    . == null or (type == "object" and
+                        ([.usedPercent,.remainingPercent] | all(.[]; type == "number"))))))
+            and (.extraRateWindows | type == "array" and all(.[]; type == "object" and has("usageKnown")))
+            and (.error == null or (.error | type == "object" and has("kind") and has("message")))))
+        and (.providerFreshness | type == "object" and all(.[]; type == "object" and has("source") and has("updatedAt") and has("ageSeconds") and has("stale")))
+        and (.emptyReason | IN(null,"unavailable","no-providers","filtered","idle"))
+        and (.sketchybar | type == "object" and (.compactRecommended | type == "boolean")
+            and (.compactProviderThreshold | type == "number")
+            and (.itemPrefix | type == "string") and (.bracket | type == "string"))
+    ' "${state_schema_output}" >/dev/null; then
+        schema_checked=$((schema_checked + 1))
+    else
+        fail "schema structure validates $(basename "${state_fixture}")" "jq rejected state"
+    fi
+done
+if (( schema_checked > 0 )); then
+    ok "schema validates ${schema_checked} accepted fixture outputs (${state_schema_validator})"
+else
+    fail "schema validates accepted fixture outputs" "no fixture passed"
+fi
+
+explain_cache=$(mk_cache)
+cat > "${explain_cache}/usage.json" <<'EOF'
+[
+ {"provider":"codex","usage":{"primary":{"usedPercent":25}}},
+ {"provider":"claude","usage":{"primary":{"usedPercent":40}}},
+ {"provider":"gemini","usage":{"primary":{"usedPercent":null}}},
+ {"provider":"cursor","error":{"message":"session missing"}},
+ {"provider":"bad/id","usage":{"primary":{"usedPercent":5}}},
+ {"provider":"opencode","usage":{"primary":{"usedPercent":30}}}
+]
+EOF
+explain_json=$(env SHOWY_QUOTA_NO_CONFIG=1 \
+    SHOWY_QUOTA_CACHE_DIR="${explain_cache}" \
+    SHOWY_QUOTA_PROVIDERS='claude,codex' \
+    SHOWY_QUOTA_PROVIDERS_EXCLUDE='claude' \
+    "${REPO_ROOT}/bin/showy-quota-state" --no-fetch --explain --json)
+assert_equals "explain gives every raw provider one stable reason" \
+    "included,excluded_by_denylist,no_numeric_usage_window,error_record,invalid_id,excluded_by_allowlist" \
+    "$(printf '%s' "${explain_json}" | jq -r 'map(.reason) | join(",")')"
+assert_equals "explain exposes allow-list rank and final position" "allowlist|1|0" \
+    "$(printf '%s' "${explain_json}" | jq -r '.[] | select(.provider == "codex") | [.rankSource,.orderRank,.position] | join("|")')"
+assert_equals "explain excludes denied providers from positions" "null" \
+    "$(printf '%s' "${explain_json}" | jq -r '.[] | select(.provider == "claude") | .position')"
+assert_equals "explain works with --json before --explain" "included" \
+    "$(env SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_CACHE_DIR="${explain_cache}" \
+        SHOWY_QUOTA_PROVIDERS='codex' \
+        "${REPO_ROOT}/bin/showy-quota-state" --no-fetch --json --explain \
+        | jq -r '.[0].reason')"
+assert_equals "state count is unchanged by the explain path" "1" \
+    "$(env SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_CACHE_DIR="${explain_cache}" \
+        SHOWY_QUOTA_PROVIDERS='claude,codex' SHOWY_QUOTA_PROVIDERS_EXCLUDE='claude' \
+        "${REPO_ROOT}/bin/showy-quota-state" --no-fetch --count)"
+assert_equals "state providers are unchanged by the explain path" "codex" \
+    "$(env SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_CACHE_DIR="${explain_cache}" \
+        SHOWY_QUOTA_PROVIDERS='claude,codex' SHOWY_QUOTA_PROVIDERS_EXCLUDE='claude' \
+        "${REPO_ROOT}/bin/showy-quota-state" --no-fetch --providers)"
+
+explain_diagnose=$(env SHOWY_QUOTA_NO_CONFIG=1 \
+    SHOWY_QUOTA_CACHE_DIR="${explain_cache}" \
+    SHOWY_QUOTA_CODEXBAR_SERVE_URL='' \
+    SHOWY_QUOTA_CODEXBAR_BIN=/bin/false \
+    SHOWY_QUOTA_REFRESH_SECONDS=999999 \
+    "${REPO_ROOT}/bin/showy-quota" --diagnose --json)
+assert_equals "diagnose JSON versions its own object and embedded state" "1|1" \
+    "$(printf '%s' "${explain_diagnose}" | jq -r '[.schemaVersion,.state.schemaVersion] | join("|")')"
+assert_equals "diagnose JSON explains cached provider decisions" "6|invalid_id" \
+    "$(printf '%s' "${explain_diagnose}" | jq -r '[.providerDecisions | length, (.[4].reason)] | join("|")')"
+cat > "${explain_cache}/usage.json" <<'EOF'
+[
+ {"provider":"codex","usage":{"primary":{"usedPercent":25}}},
+ {"provider":"gemini","usage":3}
+]
+EOF
+explain_json=$(env SHOWY_QUOTA_NO_CONFIG=1 \
+    SHOWY_QUOTA_CACHE_DIR="${explain_cache}" \
+    "${REPO_ROOT}/bin/showy-quota-state" --no-fetch --explain --json)
+assert_equals "explain assigns a numeric usage field the no-window reason" \
+    "included,no_numeric_usage_window" \
+    "$(printf '%s' "${explain_json}" | jq -r 'map(.reason) | join(",")')"
+assert_equals "state render filter excludes numeric usage but keeps the valid provider" "codex" \
+    "$(env SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_CACHE_DIR="${explain_cache}" \
+        "${REPO_ROOT}/bin/showy-quota-state" --no-fetch --providers)"
+
+printf '\nOpt-in freshness and severity\n'
+freshness_cache=$(mk_cache)
+freshness_fixture="${TMP}/freshness-fixture.json"
+jq 'map(if .provider == "codex" then .usage.primary.usedPercent = 70
+        elif .provider == "gemini" then .usage.primary.usedPercent = 95
+        else . end)' "${FIXTURE_DIR}/codexbar-mixed.json" > "${freshness_fixture}"
+seed_usage_cache "${freshness_cache}" "${freshness_fixture}" serve
+freshness_epoch=$(stat -f %m "${freshness_cache}/usage.json" 2>/dev/null) ||
+    freshness_epoch=$(stat -c %Y "${freshness_cache}/usage.json")
+freshness_bar() {
+    env SHOWY_QUOTA_NO_CONFIG=1 XDG_CONFIG_HOME="${TMP}/freshness-config" \
+        SHOWY_QUOTA_CACHE_DIR="${freshness_cache}" SHOWY_QUOTA_FETCH_BIN=/usr/bin/true \
+        SHOWY_QUOTA_RENDER_BIN="${RENDER_BIN}" SHOWY_QUOTA_FRESHNESS="$1" \
+        SHOWY_QUOTA_SEVERITY_GLYPHS=on SHOWY_QUOTA_REFRESH_SECONDS=120 \
+        SHOWY_QUOTA_NOW_EPOCH="$2" NO_COLOR=1 \
+        "${REPO_ROOT}/bin/showy-quota-zellij-bar"
+}
+freshness_out=$(freshness_bar age+source "$((freshness_epoch + 42))")
+if [[ "${freshness_out}" == *"42s serve" && "${freshness_out}" != *$'\033'* ]]; then
+    ok "cache freshness adds age and serve source without color"
+else
+    fail "cache freshness adds age and serve source without color" "${freshness_out}"
+fi
+freshness_out=$(freshness_bar age "$((freshness_epoch + 239))")
+if [[ "${freshness_out}" == *"3m" ]]; then
+    ok "freshness age remains visible just before stale horizon"
+else
+    fail "freshness age remains visible just before stale horizon" "${freshness_out}"
+fi
+freshness_out=$(freshness_bar age+source "$((freshness_epoch + 241))")
+if [[ "${freshness_out}" == *"⚠" && "${freshness_out}" != *"4m serve" ]]; then
+    ok "stale marker wins over opt-in freshness suffix"
+else
+    fail "stale marker wins over opt-in freshness suffix" "${freshness_out}"
+fi
+seed_usage_cache "${freshness_cache}" "${freshness_fixture}" cli
+freshness_epoch=$(stat -f %m "${freshness_cache}/usage.json" 2>/dev/null) ||
+    freshness_epoch=$(stat -c %Y "${freshness_cache}/usage.json")
+freshness_out=$(freshness_bar source "$((freshness_epoch + 42))")
+if [[ "${freshness_out}" == *"cli ⚠cli" ]]; then
+    ok "cache source suffix shows CLI alongside existing degraded marker"
+else
+    fail "cache source suffix shows CLI alongside existing degraded marker" "${freshness_out}"
+fi
+freshness_out=$(freshness_bar off "$((freshness_epoch + 42))")
+if [[ "${freshness_out}" == *'+'* && "${freshness_out}" == *'!'* &&
+      "${freshness_out}" == *'x'* && "${freshness_out}" != *"42s"* ]]; then
+    ok "non-color quota bands use distinct ASCII severity cues"
+else
+    fail "non-color quota bands use distinct ASCII severity cues" "${freshness_out}"
+fi
+
+printf '\nplain-text template emit\n'
+template_sample=$(
+    env SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_NOW_EPOCH=4070908800 \
+        "${RENDER_BIN}" --emit template --format '{provider}/{window}: {sigil} {used}% {remaining}% {class} {countdown}' \
+        --provider codex --json - < "${FIXTURE_DIR}/codexbar-mixed.json"
+)
+assert_equals "template expands the worst window of a selected provider" \
+    "codex/secondary: CX 59% 41% good 7d" "${template_sample}"
+template_prompt=$(SHOWY_QUOTA_RENDER_BIN="${RENDER_BIN}" run_prompt "${prompt_cache}" --format '{sigil} {used}% {countdown}{stale}')
+assert_equals "the default template reproduces the fixed prompt" "CX 59% 7d" "${template_prompt}"
+template_error='' template_rc=0
+template_error=$(
+    env SHOWY_QUOTA_NO_CONFIG=1 "${RENDER_BIN}" --emit template --format '{unknownField}' \
+        --json - < "${FIXTURE_DIR}/codexbar-mixed.json" 2>&1
+) || template_rc=$?
+assert_equals "unknown template field exits with usage status" "2" "${template_rc}"
+if [[ "${template_error}" == *"unknownField"* ]]; then
+    ok "unknown template field names the field"
+else
+    fail "unknown template field names the field" "${template_error}"
 fi
 
 # ── summary ──────────────────────────────────────────────────────────

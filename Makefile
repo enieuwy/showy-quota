@@ -255,6 +255,7 @@ install-completions: ## Link Bash, zsh, and fish completions for all three comma
 # rebuilds before any assertion runs.
 RENDER_SOURCES := $(shell find $(REPO)/crates/$(RENDER_CRATE)/src -name '*.rs' 2>/dev/null) \
                   $(REPO)/crates/$(RENDER_CRATE)/Cargo.toml \
+                  $(REPO)/share/providers.tsv \
                   $(REPO)/Cargo.toml $(REPO)/Cargo.lock
 
 $(RENDER_BIN): $(RENDER_SOURCES)
@@ -484,6 +485,7 @@ lint: ## Run shellcheck if available.
 			"$(REPO)/bin/showy-quota-zellij-pipe" \
 			"$(REPO)/showy-quota.tmux" \
 			"$(REPO)/lib/common.sh" \
+			"$(REPO)/lib/providers.sh" \
 			"$(REPO)/lib/strip.sh" \
 			"$(REPO)/adapters/sketchybar/items/showy_quota.sh" \
 			"$(REPO)/adapters/sketchybar/plugins/showy_quota.sh" \

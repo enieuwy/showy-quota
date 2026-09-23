@@ -26,8 +26,8 @@ THEME_NAME_RE='^[A-Za-z0-9._-]+$'
 
 usage() {
     printf '%s\n' \
-        'Usage: showy-quota [--set <name>|--unset|--current|--list|--preview <name>|--diagnose [--json] [--redact]|--grant-zellij [--dry-run|--check] [opts] [path]]' \
-        '       showy-quota guard [opts]   |   showy-quota prompt [opts]   (run either with -h for details)' \
+        'Usage: showy-quota [--set <name>|--unset|--current|--list|--preview <name>|--diagnose [--json] [--redact]|--check-config [--json] [--redact]|--grant-zellij [--dry-run|--check] [opts] [path]]' \
+        '       showy-quota guard|prompt|next-reset|run|pick|serve|refresh [opts]   (run each with -h for details)' \
         '' \
         'With no flags, opens an interactive theme selector when fzf and a TTY are available.' \
         'Without fzf or a TTY, prints a deterministic theme list and exact set/unset commands.' \
@@ -39,9 +39,15 @@ usage() {
         '  --list            Print available theme names, one per line' \
         '  --preview <name>  Print one ANSI preview strip for a theme' \
         '  --diagnose        Print runtime state useful for bug reports (--json for machines, --redact for paste-safe output)' \
+        '  --check-config    Show ignored or clamped config values and unknown keys (--json, --redact); exit 1 if any' \
         '  --grant-zellij [opts] [p] Pre-grant or inspect Zellij permissions; opts: --dry-run, --check, --manage-serve, --cli-fallback, --force' \
         '  guard [opts]      Evaluate quota thresholds for automation (exit 0/1/2/3); "guard -h" for options' \
         '  prompt [opts]     Print a one-line quota segment for shell prompts; "prompt -h" for options' \
+        '  serve <action>    Inspect or control the managed CodexBar serve; "serve -h" for options' \
+        '  next-reset [opts] Print time until the selected quota reset; "next-reset -h" for options' \
+        '  run [opts] -- CMD Run a command only when its guard passes; "run -h" for options' \
+        '  pick [opts]       Choose the provider with most quota; "pick -h" for options' \
+        '  refresh           Force cache refresh and nudge present bars' \
         '  -h, --help        Show this help'
 }
 
@@ -548,6 +554,127 @@ json_number_or_null() {
     fi
 }
 
+# Cold-path checker. The defaults block supplies the normal knob names. Some
+# integrations consume knobs directly without declaring a shell default; the
+# config reference supplies those names. Keep both scans here, not on render.
+config_issues_prepare() {
+    [[ "${CONFIG_ISSUES_READY:-0}" == 1 ]] && return 0
+    if (( DIAGNOSE_REDACT )); then
+        # The loader warns on stderr with the raw rejected value (a path or URL
+        # in a hostile theme name, say). Each of those is also recorded as an
+        # issue and reported through the redacted output, so drop the raw copy.
+        load_state_libs 2>/dev/null || true
+        showy_quota_check_deferred_config 2>/dev/null
+    else
+        load_state_libs || true
+        showy_quota_check_deferred_config
+    fi
+    # The shared loader leaves a missing, valid theme as an error for renderers.
+    # The checker must still report it alongside the other config issues.
+    if [[ -n "${SHOWY_QUOTA_THEME:-}" && "${SHOWY_QUOTA_THEME}" =~ ${THEME_NAME_RE} ]] \
+        && ! find_theme_path "${SHOWY_QUOTA_THEME}" >/dev/null; then
+        showy_quota_record_config_issue SHOWY_QUOTA_THEME "${SHOWY_QUOTA_THEME}" "" missing_theme
+    fi
+    local line key in_defaults=0
+    local -A known=() seen=()
+    while IFS= read -r line; do
+        case "${line}" in
+            '# ── defaults ──'*) in_defaults=1; continue ;;
+            '# ── numeric config validation ──'*) break ;;
+        esac
+        (( in_defaults )) || continue
+        # shellcheck disable=SC2016
+        if [[ "${line}" == ': "${SHOWY_QUOTA_'* ]]; then
+            # shellcheck disable=SC2016
+            key="${line#*'${'}"
+            known["${key%%[:=]*}"]=1
+        elif [[ "${line}" =~ ^[[:space:]]*(SHOWY_QUOTA_[A-Z0-9_]+)= ]]; then
+            known["${BASH_REMATCH[1]}"]=1
+        fi
+    done < "${REPO_ROOT}/lib/common.sh"
+    if [[ -r "${REPO_ROOT}/share/config.env.example" ]]; then
+        while IFS= read -r line; do
+            if [[ "${line}" =~ ^#[[:space:]]+(SHOWY_QUOTA_[A-Z0-9_]+)= ]]; then
+                known["${BASH_REMATCH[1]}"]=1
+            fi
+        done < "${REPO_ROOT}/share/config.env.example"
+    fi
+    if [[ "${SHOWY_QUOTA_CONFIG_LOADED:-0}" == 1 ]]; then
+        while IFS= read -r line || [[ -n "${line}" ]]; do
+            if [[ "${line}" =~ ^[[:space:]]*(export[[:space:]]+)?(SHOWY_QUOTA_[A-Z0-9_]+)= ]]; then
+                key="${BASH_REMATCH[2]}"
+                if [[ -z "${known[${key}]+x}" && -z "${seen[${key}]+x}" ]]; then
+                    showy_quota_record_config_issue "${key}" "${!key-}" "" unknown_key
+                    seen["${key}"]=1
+                fi
+            fi
+        done < "${CONFIG_FILE}"
+    elif [[ -z "${SHOWY_QUOTA_NO_CONFIG:-}" && -e "${CONFIG_FILE}" ]]; then
+        showy_quota_record_config_issue config.env "${CONFIG_FILE}" "(not loaded)" invalid_value
+    fi
+    CONFIG_ISSUES_READY=1
+}
+
+config_issues_json() {
+    command -v jq >/dev/null 2>&1 || die 'jq is required for config JSON'
+    config_issues_prepare
+    local i
+    for i in "${!SHOWY_QUOTA_CONFIG_ISSUES[@]}"; do
+        jq -n -c \
+            --arg key "${SHOWY_QUOTA_CONFIG_ISSUES[$i]}" \
+            --arg raw "$(diagnose_redact_value "${SHOWY_QUOTA_CONFIG_RAW[$i]}")" \
+            --arg effective "$(diagnose_redact_value "${SHOWY_QUOTA_CONFIG_EFFECTIVE[$i]}")" \
+            --arg reason "${SHOWY_QUOTA_CONFIG_REASONS[$i]}" \
+            '{key:$key, raw:$raw, effective:(if $reason == "unknown_key" then null else $effective end), reason:$reason}'
+    done | jq -s '.'
+}
+
+config_issues_text() {
+    config_issues_prepare
+    local i
+    printf 'config issues: %s\n' "${#SHOWY_QUOTA_CONFIG_ISSUES[@]}"
+    for i in "${!SHOWY_QUOTA_CONFIG_ISSUES[@]}"; do
+        if [[ "${SHOWY_QUOTA_CONFIG_REASONS[$i]}" == unknown_key ]]; then
+            printf '  %s=%s: unknown_key (ignored)\n' \
+                "${SHOWY_QUOTA_CONFIG_ISSUES[$i]}" "$(diagnose_redact_value "${SHOWY_QUOTA_CONFIG_RAW[$i]}")"
+        else
+            printf '  %s=%s: %s; effective=%s\n' \
+                "${SHOWY_QUOTA_CONFIG_ISSUES[$i]}" \
+                "$(diagnose_redact_value "${SHOWY_QUOTA_CONFIG_RAW[$i]}")" \
+                "${SHOWY_QUOTA_CONFIG_REASONS[$i]}" \
+                "$(diagnose_redact_value "${SHOWY_QUOTA_CONFIG_EFFECTIVE[$i]}")"
+        fi
+    done
+}
+
+check_config() {
+    local json_mode=0
+    shift
+    while (($#)); do
+        case "$1" in
+            --json) json_mode=1 ;;
+            --redact) DIAGNOSE_REDACT=1 ;;
+            -h|--help)
+                printf 'Usage: showy-quota --check-config [--json] [--redact]\n'
+                return 0 ;;
+            *) usage_error '--check-config only accepts --json and --redact' ;;
+        esac
+        shift
+    done
+    config_issues_prepare
+    if (( json_mode )); then
+        local issues
+        issues="$(config_issues_json)"
+        jq -n --arg file "$(diagnose_redact_value "${CONFIG_FILE}")" \
+            --argjson issues "${issues}" \
+            '{configFile:$file, count:($issues|length), issues:$issues}'
+    else
+        printf 'config file: %s\n' "$(diagnose_redact_value "${CONFIG_FILE}")"
+        config_issues_text
+    fi
+    (( ${#SHOWY_QUOTA_CONFIG_ISSUES[@]} == 0 ))
+}
+
 diagnose_env_vars() {
     printf '%s\n' \
         SHOWY_QUOTA_REFRESH_SECONDS \
@@ -637,7 +764,7 @@ diagnose_serve_probe() {
 diagnose_json() {
     command -v jq >/dev/null 2>&1 || die 'jq is required for --diagnose --json'
 
-    local fetch_bin state_bin cache_path cache_age cache_size_json state_json config_status config_readable
+    local fetch_bin state_bin cache_path cache_age cache_size_json state_json provider_decisions_json config_status config_readable
     local env_json required_tools_json optional_tools_json cb cb_path cb_version cb_available cb_cache_count_json
     fetch_bin="${SCRIPT_DIR}/showy-quota-fetch"
     state_bin="${SCRIPT_DIR}/showy-quota-state"
@@ -660,6 +787,13 @@ diagnose_json() {
         fi
     else
         state_json=null
+    fi
+    provider_decisions_json='[]'
+    if [[ -x "${state_bin}" ]]; then
+        provider_decisions_json="$("${state_bin}" --no-fetch --explain --json 2>/dev/null | diagnose_redact_json || printf '[]')"
+        if ! jq -e 'type == "array"' >/dev/null 2>&1 <<< "${provider_decisions_json}"; then
+            provider_decisions_json='[]'
+        fi
     fi
 
     if [[ -r "${CONFIG_FILE}" ]]; then
@@ -708,6 +842,8 @@ diagnose_json() {
         --arg cacheAge "${cache_age}" \
         --argjson cacheSize "${cache_size_json}" \
         --argjson state "${state_json}" \
+        --argjson providerDecisions "${provider_decisions_json}" \
+        --argjson configIssues "$(config_issues_json)" \
         --argjson envKnobs "${env_json}" \
         --argjson requiredTools "${required_tools_json}" \
         --argjson optionalTools "${optional_tools_json}" \
@@ -721,6 +857,7 @@ diagnose_json() {
         --arg serveVersion "$(diagnose_redact_value "${SERVE_PROBE_VERSION}")" \
         --argjson redacted "$( (( DIAGNOSE_REDACT )) && printf 'true' || printf 'false' )" \
         '{
+            schemaVersion: 1,
             redacted: $redacted,
             paths: {
                 showyQuota: $showyQuota,
@@ -749,6 +886,8 @@ diagnose_json() {
                 sizeBytes: $cacheSize
             },
             state: $state,
+            configIssues: {count: ($configIssues | length), issues: $configIssues},
+            providerDecisions: $providerDecisions,
             env: $envKnobs,
             codexbarProbe: {
                 command: $codexbarCommand,
@@ -807,6 +946,8 @@ diagnose() {
         printf 'config:       %s (none — defaults in effect)\n' "${config_shown}"
     fi
     printf 'theme:        %s\n' "$(diagnose_redact_value "$(current_theme_value 2>/dev/null || printf '(none)')")"
+    printf '\n# Config issues\n'
+    config_issues_text
 
     printf '\n# Cache\n'
     if [[ -x "${fetch_bin}" ]]; then
@@ -828,6 +969,13 @@ diagnose() {
         "${state_bin}" 2>&1 | diagnose_redact_json | sed 's/^/  /'
     else
         printf '  showy-quota-state missing or non-executable: %s\n' "$(diagnose_redact_value "${state_bin}")"
+    fi
+
+    printf '\n# Provider decisions (cached)\n'
+    if [[ -x "${state_bin}" ]]; then
+        "${state_bin}" --no-fetch --explain --json 2>/dev/null | diagnose_redact_json | sed 's/^/  /'
+    else
+        printf '  []\n'
     fi
 
     printf '\n# Env knobs (set values only)\n'
@@ -1254,7 +1402,7 @@ guard_help() {
     printf '%s\n' \
         'Usage: showy-quota guard [--provider ID[,ID...]] [--window primary|secondary|tertiary|worst]' \
         '                         [--min-remaining PCT | --max-used PCT] [--no-fetch] [--allow-stale]' \
-        '                         [--wait-max SECONDS] [--json] [--quiet]' \
+        '                         [--wait-max SECONDS (0-999999999)] [--json] [--quiet]' \
         '' \
         'Runs a refresh-window fetch by default; --no-fetch evaluates the cache as-is.' \
         'Window default "worst" = the non-null slot with the least remaining per provider.' \
@@ -1265,13 +1413,18 @@ guard_help() {
 }
 
 guard_usage_error() {
-    printf 'showy-quota guard: %s\n\n' "$1" >&2
+    printf 'showy-quota %s: %s\n\n' "${G_COMMAND:-guard}" "$1" >&2
+    if [[ "${G_COMMAND:-guard}" == run ]]; then
+        printf 'Usage: showy-quota run [guard options] -- <command...>\n' >&2
+        exit 2
+    fi
     guard_help >&2
     exit 3
 }
 
-guard_valid_pct() { [[ "$1" =~ ^[0-9]+$ ]] && (( 10#$1 <= 100 )); }
-guard_valid_uint() { [[ "$1" =~ ^[0-9]+$ ]]; }
+guard_valid_pct() { [[ "$1" =~ ^[0-9]{1,3}$ ]] && (( 10#$1 <= 100 )); }
+# Nine digits keep wait budgets within Bash integer range before 10# conversion.
+guard_valid_uint() { [[ "$1" =~ ^[0-9]{1,9}$ ]]; }
 
 # Evaluate once against showy-quota-state --json. Reads globals G_WIN, G_TK,
 # G_TV, G_AS, G_NF, REQUESTED_JSON, PROVIDER_IDS, STATE_BIN; sets G_EXIT, G_REASON,
@@ -1386,15 +1539,32 @@ guard_emit_human() {
 }
 
 cmd_guard() {
+    cmd_guard_or_run guard "$@"
+}
+
+cmd_run() {
+    cmd_guard_or_run run "$@"
+}
+
+cmd_guard_or_run() {
+    local mode="$1"
+    G_COMMAND="${mode}"
+    shift
     load_state_libs
-    showy_quota_have jq || { printf 'showy-quota guard: jq is required\n' >&2; exit 3; }
+    showy_quota_have jq || { printf 'showy-quota %s: jq is required\n' "${mode}" >&2; if [[ "${mode}" == guard ]]; then exit 3; else exit 2; fi; }
 
     PROVIDER_IDS=()
     local window="worst" threshold_kind="" threshold_value=""
     local no_fetch=0 allow_stale=0 wait_max=0 json_mode=0 quiet=0
-
+    local -a command=()
     while (($#)); do
         case "$1" in
+            --)
+                [[ "${mode}" == run ]] || guard_usage_error "unknown argument: $1"
+                shift
+                (($#)) || { printf 'showy-quota run: command required after --\n' >&2; exit 2; }
+                command=("$@")
+                break ;;
             --provider)
                 (($# >= 2)) || guard_usage_error '--provider requires a value'
                 parse_provider_list "$2" || guard_usage_error "invalid --provider value: $2"
@@ -1426,10 +1596,24 @@ cmd_guard() {
                 wait_max=$((10#$2)); shift 2 ;;
             --json)  json_mode=1; shift ;;
             --quiet) quiet=1; shift ;;
-            -h|--help) guard_help; return 0 ;;
-            *) guard_usage_error "unknown argument: $1" ;;
+            -h|--help)
+                if [[ "${mode}" == run ]]; then
+                    printf '%s\n' 'Usage: showy-quota run [guard options] -- <command...>' \
+                        'Uses guard thresholds and exit codes; passes the child exit code on success.' \
+                        'On breach, --wait-max waits for known resets and retries while the budget remains.'
+                else
+                    guard_help
+                fi
+                return 0 ;;
+            *) if [[ "${mode}" == run ]]; then
+                   printf 'showy-quota run: unknown argument: %s\n' "$1" >&2; exit 2
+               else guard_usage_error "unknown argument: $1"; fi ;;
         esac
     done
+    if [[ "${mode}" == run && ${#command[@]} -eq 0 ]]; then
+        printf 'showy-quota run: command required after --\n' >&2
+        exit 2
+    fi
 
     if [[ -z "${threshold_kind}" ]]; then
         threshold_kind="min-remaining"; threshold_value=10
@@ -1449,31 +1633,37 @@ cmd_guard() {
     fi
     guard_evaluate
 
-    # --wait-max: if breaching and the worst window's reset is known and lands
-    # within the budget, sleep past it, force one refresh (unless --no-fetch,
-    # which leaves refreshing to the bar or timer), and retry once. The sleep
-    # adds a fixed 30s grace (reset timestamps round down to the
-    # minute, so the actual reset can land up to ~59s after the reported
-    # minute), but that grace is clamped to the caller's budget rather than
-    # added on top of it: automation asked to wait "up to wait_max seconds",
-    # so spending the remainder of the budget and re-evaluating is more
-    # useful than either failing immediately or blocking past the stated
-    # deadline.
-    if (( G_BREACH )) && (( wait_max > 0 )); then
-        local wmin wsecs sleep_secs
-        wmin="$(printf '%s' "${G_WORST_JSON}" | jq -r '.minutesUntilReset // "null"')"
-        if [[ "${wmin}" =~ ^[0-9]+$ ]]; then
-            wsecs=$(( wmin * 60 ))
-            if (( wsecs <= wait_max )); then
-                sleep_secs=$(( wsecs + 30 ))
-                (( sleep_secs > wait_max )) && sleep_secs=${wait_max}
-                sleep "${sleep_secs}"
-                if (( ! no_fetch )); then
-                    "${fetch}" --refresh >/dev/null 2>&1 || true
-                fi
-                guard_evaluate
-            fi
+    # Guard keeps its historical single retry. Run can cross multiple distinct
+    # reset windows, but never polls: each retry follows one reset-length sleep.
+    local attempts=0 start_epoch remaining_budget wmin wsecs sleep_secs reset_key=""
+    start_epoch=$(date +%s)
+    while (( G_BREACH && wait_max > 0 )); do
+        if [[ "${mode}" == guard ]] && (( attempts > 0 )); then break; fi
+        remaining_budget=$((wait_max - ($(date +%s) - start_epoch)))
+        (( remaining_budget > 0 )) || break
+        local -a reset_fields=()
+        mapfile -t reset_fields < <(printf '%s' "${G_WORST_JSON}" | jq -r '[.provider, .window, (.resetsAt // ""), (.minutesUntilReset // "null" | tostring)] | .[]')
+        wmin="${reset_fields[3]}"
+        [[ "${wmin}" =~ ^[0-9]+$ ]] || break
+        wsecs=$((wmin * 60))
+        (( wsecs <= remaining_budget )) || break
+        # An unchanged cache must not cause repeated sleeps at the same reset.
+        local next_key="${reset_fields[0]}/${reset_fields[1]}/${reset_fields[2]}"
+        [[ "${next_key}" != "${reset_key}" ]] || break
+        reset_key="${next_key}"
+        sleep_secs=$((wsecs + 30))
+        (( sleep_secs > remaining_budget )) && sleep_secs=${remaining_budget}
+        (( sleep_secs > 0 )) || break
+        sleep "${sleep_secs}"
+        if (( ! no_fetch )); then
+            "${fetch}" --refresh >/dev/null 2>&1 || true
         fi
+        guard_evaluate
+        attempts=$((attempts + 1))
+    done
+
+    if [[ "${mode}" == run && "${G_EXIT}" == 0 ]]; then
+        exec "${command[@]}"
     fi
 
     if (( json_mode )); then
@@ -1488,8 +1678,8 @@ cmd_guard() {
 
 prompt_usage_error() {
     printf 'showy-quota prompt: %s\n' "$1" >&2
-    printf 'Usage: showy-quota prompt [--ansi] [--provider ID]\n' >&2
-    exit 3
+    printf 'Usage: showy-quota prompt [--ansi] [--provider ID] [--format SPEC]\n' >&2
+    exit 2
 }
 
 cmd_prompt() {
@@ -1498,19 +1688,24 @@ cmd_prompt() {
     # the neutral "AI ?" and exits 0. Only argument errors exit non-zero.
 
     PROVIDER_IDS=()
-    local ansi=0
+    local ansi=0 prompt_format
     while (($#)); do
         case "$1" in
             --ansi) ansi=1; shift ;;
+            --format)
+                (($# >= 2)) || prompt_usage_error '--format requires a template'
+                prompt_format="$2"; shift 2 ;;
             --provider)
                 (($# >= 2)) || prompt_usage_error '--provider requires a value'
                 parse_provider_list "$2" || prompt_usage_error "invalid --provider value: $2"
                 shift 2 ;;
             -h|--help)
                 printf '%s\n' \
-                    'Usage: showy-quota prompt [--ansi] [--provider ID]' \
+                    'Usage: showy-quota prompt [--ansi] [--provider ID] [--format SPEC]' \
                     '' \
                     'Prints "<SIGIL> <used>% <countdown>" for the worst-remaining provider window.' \
+                    '--format SPEC expands {provider}, {sigil}, {used}, {remaining}, {countdown}, {class}, {window}, and {stale}.' \
+                    'Use {{ and }} for literal braces. Invalid fields exit 2.' \
                     'Reads the cache as-is; set SHOWY_QUOTA_PROMPT_FETCH=1 to refresh first.' \
                     '--ansi adds severity color (suppressed by NO_COLOR). Always exits 0 (usage errors aside).'
                 return 0 ;;
@@ -1539,13 +1734,214 @@ cmd_prompt() {
     fi
 
     local -a render_args=(--emit prompt --from-cache)
+    if [[ ${prompt_format+x} ]]; then render_args+=(--format "${prompt_format}"); fi
     (( ansi )) && render_args+=(--ansi)
     render_args+=("${provider_args[@]}")
 
-    if ! "${render_bin}" "${render_args[@]}" 2>/dev/null; then
-        printf 'AI ?\n'
+    local render_rc=0
+    if [[ ${prompt_format+x} ]]; then
+        "${render_bin}" "${render_args[@]}" || render_rc=$?
+    else
+        "${render_bin}" "${render_args[@]}" 2>/dev/null || render_rc=$?
     fi
+    if (( render_rc == 2 )); then exit 2; fi
+    if (( render_rc != 0 )); then printf 'AI ?\n'; fi
     exit 0
+}
+
+automation_usage_error() {
+    local verb="$1" message="$2"
+    printf 'showy-quota %s: %s\n' "${verb}" "${message}" >&2
+    exit 2
+}
+
+cmd_next_reset() {
+    load_state_libs
+    showy_quota_have jq || automation_usage_error next-reset 'jq is required'
+    PROVIDER_IDS=()
+    local window=worst no_fetch=0 json_mode=0 epoch_mode=0 mode_seen=0
+    while (($#)); do
+        case "$1" in
+            --provider)
+                (($# >= 2)) || automation_usage_error next-reset '--provider requires ID'
+                parse_provider_list "$2" || automation_usage_error next-reset 'invalid provider ID'
+                ((${#PROVIDER_IDS[@]} == 1)) || automation_usage_error next-reset '--provider requires one ID'
+                shift 2 ;;
+            --window)
+                (($# >= 2)) || automation_usage_error next-reset '--window requires a value'
+                case "$2" in primary|secondary|tertiary|worst) window="$2" ;;
+                    *) automation_usage_error next-reset 'invalid window' ;; esac
+                shift 2 ;;
+            --json) json_mode=1; shift ;;
+            --epoch|--seconds)
+                (( ! mode_seen )) || automation_usage_error next-reset '--epoch and --seconds are mutually exclusive'
+                mode_seen=1
+                [[ "$1" == --epoch ]] && epoch_mode=1
+                shift ;;
+            --no-fetch) no_fetch=1; shift ;;
+            -h|--help)
+                printf '%s\n' 'Usage: showy-quota next-reset [--provider ID] [--window primary|secondary|tertiary|worst] [--json] [--epoch|--seconds] [--no-fetch]' \
+                    'Prints seconds until reset by default; --epoch prints a Unix timestamp. Exit 1 when unknown.'
+                return 0 ;;
+            *) automation_usage_error next-reset "unknown argument: $1" ;;
+        esac
+    done
+    if (( ! no_fetch )); then
+        local fetch; fetch="$(automation_fetch_bin)"
+        "${fetch}" >/dev/null 2>&1 || true
+    fi
+    local -a state_args=(--json --no-fetch)
+    local state facts now
+    state="$("${SCRIPT_DIR}/showy-quota-state" "${state_args[@]}" 2>/dev/null)" || return 1
+    now="$(showy_quota_now_epoch)"
+    facts="$(printf '%s' "${state}" | jq -c --argjson requested "$(providers_json)" --arg window "${window}" "${GUARD_JQ}" 2>/dev/null)" || return 1
+    # The metric clock is authoritative for relative time; ISO reset timestamps
+    # retain sub-minute precision when present. Descriptions use metric minutes.
+    local selected
+    selected="$(printf '%s' "${facts}" | jq -c --argjson now "${now}" '
+        def exact_epoch:
+          if type != "string" then null
+          else (try capture("^(?<utc>[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(?:[.][0-9]+)?(?<zone>Z|[+-][0-9]{2}:?[0-9]{2})$") catch null) as $d
+            | if $d == null then null
+              else try (
+                ($d.utc | strptime("%Y-%m-%dT%H:%M:%S") | mktime)
+                - (if $d.zone == "Z" then 0
+                   else (($d.zone[1:3] | tonumber) * 3600 + ($d.zone[-2:] | tonumber) * 60)
+                        * (if $d.zone[0:1] == "+" then 1 else -1 end)
+                   end)
+              ) catch null end
+          end;
+        .worst
+        | select(. != null and .minutesUntilReset != null)
+        | . as $w
+        | (.resetsAt | exact_epoch) as $exact
+        | ($exact // ($now + $w.minutesUntilReset * 60)) as $epoch
+        | $w + {resetEpoch: $epoch, secondsUntilReset: ([$epoch - $now, 0] | max)}
+    ' 2>/dev/null)" || return 1
+    [[ -n "${selected}" ]] || return 1
+    if (( json_mode )); then
+        printf '%s\n' "${selected}"
+    elif (( epoch_mode )); then
+        printf '%s\n' "${selected}" | jq -r '.resetEpoch'
+    else
+        printf '%s\n' "${selected}" | jq -r '.secondsUntilReset'
+    fi
+}
+
+cmd_pick() {
+    load_state_libs
+    PROVIDER_IDS=()
+    local floor=0 window=worst format=id no_fetch=0
+    while (($#)); do
+        case "$1" in
+            --providers)
+                (($# >= 2)) || automation_usage_error pick '--providers requires IDs'
+                parse_provider_list "$2" || automation_usage_error pick 'invalid provider list'
+                shift 2 ;;
+            --window)
+                (($# >= 2)) || automation_usage_error pick '--window requires a value'
+                case "$2" in primary|secondary|tertiary|worst) window="$2" ;;
+                    *) automation_usage_error pick 'invalid window' ;; esac
+                shift 2 ;;
+            --min-remaining)
+                (($# >= 2)) || automation_usage_error pick '--min-remaining requires a value'
+                guard_valid_pct "$2" || automation_usage_error pick 'invalid floor (0-100)'
+                floor=$((10#$2)); shift 2 ;;
+            --format)
+                (($# >= 2)) || automation_usage_error pick '--format requires id or json'
+                case "$2" in id|json) format="$2" ;;
+                    *) automation_usage_error pick 'invalid format' ;; esac
+                shift 2 ;;
+            --no-fetch) no_fetch=1; shift ;;
+            -h|--help)
+                printf '%s\n' 'Usage: showy-quota pick [--min-remaining N] [--window primary|secondary|tertiary|worst] [--format id|json] [--no-fetch] [--providers a,b]' \
+                    'Selects the provider with the most remaining quota; exit 1 when none qualifies.'
+                return 0 ;;
+            *) automation_usage_error pick "unknown argument: $1" ;;
+        esac
+    done
+    showy_quota_export_config
+    local render_bin
+    render_bin="$(showy_quota_resolve_render_bin "${SCRIPT_DIR}" "${SCRIPT_DIR}/..")" || return 1
+    if (( ! no_fetch )); then
+        local fetch; fetch="$(automation_fetch_bin)"
+        "${fetch}" >/dev/null 2>&1 || true
+    fi
+    local -a args=(--emit pick --from-cache --window "${window}" --min-remaining "${floor}" --pick-format "${format}")
+    if ((${#PROVIDER_IDS[@]})); then
+        args+=(--provider "$(IFS=,; printf '%s' "${PROVIDER_IDS[*]}")")
+    fi
+    "${render_bin}" "${args[@]}" 2>/dev/null
+}
+
+cmd_refresh() {
+    if (($#)); then
+        case "$1" in -h|--help)
+            (($# == 1)) || automation_usage_error refresh 'unexpected argument'
+            printf 'Usage: showy-quota refresh\nForce a fetch, then nudge present host surfaces.\n'
+            return 0 ;;
+        *) automation_usage_error refresh "unknown argument: $1" ;; esac
+    fi
+    load_state_libs
+    local fetch; fetch="$(automation_fetch_bin)"
+    "${fetch}" --refresh || return $?
+    if showy_quota_have sketchybar; then
+        sketchybar --trigger showy_quota_refresh >/dev/null 2>&1 || true
+    fi
+    local client status_right status_left
+    if showy_quota_have tmux && tmux has-session 2>/dev/null; then
+        status_right="$(tmux show-options -gqv status-right 2>/dev/null || true)"
+        status_left="$(tmux show-options -gqv status-left 2>/dev/null || true)"
+        if [[ "${status_right}" == *showy-quota-tmux-bar* || "${status_left}" == *showy-quota-tmux-bar* ]]; then
+            while IFS= read -r client; do
+                [[ -n "${client}" ]] && tmux refresh-client -S -t "${client}" >/dev/null 2>&1 || true
+            done < <(tmux list-clients -F '#{client_tty}' 2>/dev/null)
+        fi
+    fi
+    # The advanced zjstatus feeder has a pipe; the standalone WASM plugin does
+    # not. Only address a named live session, never create one while refreshing.
+    if [[ -n "${ZELLIJ_SESSION_NAME:-}" ]] && showy_quota_have "${SHOWY_QUOTA_ZELLIJ_BIN}"; then
+        local render_bin payload session found=0
+        while IFS= read -r session; do
+            [[ "${session}" == "${ZELLIJ_SESSION_NAME}" ]] && found=1
+        done < <("${SHOWY_QUOTA_ZELLIJ_BIN}" list-sessions --short --no-formatting 2>/dev/null)
+        if (( found )) && render_bin="$(showy_quota_resolve_render_bin "${SCRIPT_DIR}" "${SCRIPT_DIR}/..")" \
+            && payload="$("${render_bin}" --from-cache 2>/dev/null)" && [[ -n "${payload}" ]]; then
+            "${SHOWY_QUOTA_ZELLIJ_BIN}" --session "${ZELLIJ_SESSION_NAME}" pipe \
+                --name "${SHOWY_QUOTA_ZELLIJ_PIPE_NAME}" -- \
+                "zjstatus::pipe::${SHOWY_QUOTA_ZELLIJ_WIDGET}::${payload}" >/dev/null 2>&1 || true
+        fi
+    fi
+}
+
+cmd_serve() {
+    if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+        (($# == 1)) || usage_error 'serve help does not accept arguments'
+        printf '%s\n' \
+            'Usage: showy-quota serve status [--json]' \
+            '       showy-quota serve restart|stop' \
+            '' \
+            'Status only probes /health and reads cache state. Restart requires managed serve and a local URL.'
+        return 0
+    fi
+    local action="${1:-}" fetch="${SCRIPT_DIR}/showy-quota-fetch"
+    (($# > 0)) && shift
+    case "${action}" in
+        status)
+            if (($# == 0)); then
+                exec "${fetch}" --serve-status
+            elif (($# == 1)) && [[ "$1" == "--json" ]]; then
+                exec "${fetch}" --serve-status --json
+            fi
+            ;;
+        restart|stop)
+            if (($# == 0)); then
+                exec "${fetch}" "--${action}-serve"
+            fi
+            ;;
+    esac
+    printf 'showy-quota serve: expected status [--json], restart, or stop\n' >&2
+    exit 2
 }
 
 main() {
@@ -1575,6 +1971,9 @@ main() {
             (($# == 2)) || usage_error '--preview requires exactly one theme name'
             preview_theme "$2"
             ;;
+        --check-config)
+            check_config "$@"
+            ;;
         --diagnose)
             local diagnose_as_json=0
             shift
@@ -1603,6 +2002,26 @@ main() {
         prompt)
             shift
             cmd_prompt "$@"
+            ;;
+        next-reset)
+            shift
+            cmd_next_reset "$@"
+            ;;
+        run)
+            shift
+            cmd_run "$@"
+            ;;
+        pick)
+            shift
+            cmd_pick "$@"
+            ;;
+        refresh)
+            shift
+            cmd_refresh "$@"
+            ;;
+        serve)
+            shift
+            cmd_serve "$@"
             ;;
         -h|--help)
             (($# == 1)) || usage_error '--help does not accept arguments'

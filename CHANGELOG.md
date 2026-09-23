@@ -6,6 +6,49 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+- `showy-quota next-reset [--provider ID] [--window W] [--epoch|--seconds|--json]`
+  prints the time until a quota window resets, so `at`, cron, systemd, and CI
+  can schedule work for the refill. It exits 1 when the reset is unknown.
+- `showy-quota run [guard options] -- <command...>` runs a command only when
+  its guard passes and forwards the command's exit code. With `--wait-max`,
+  a breach waits for each known reset and checks again while the budget lasts.
+- `showy-quota pick` prints the renderable provider with the most remaining
+  quota (`--format id|json`, `--min-remaining`), computed in the native
+  renderer (`showy-quota-render --emit pick`). It exits 1 when none qualifies.
+- `showy-quota refresh` forces a cache refresh, then nudges each host bar that
+  is running: SketchyBar (new `showy_quota_refresh` event), tmux
+  (`refresh-client -S`), and the shell Zellij pipe feeder. The standalone WASM
+  plugin has no pipe API and refreshes on its own timer.
+- `showy-quota serve status|restart|stop` (and `showy-quota-fetch
+  --serve-status [--json]` / `--restart-serve`) inspect and control the managed
+  CodexBar serve. Status reads the pidfile, `/health`, failure stamps, and cache
+  state; it never calls `/usage`. Restart refuses when serve management is off
+  or the URL is not loopback.
+- `showy-quota-render --emit template --format SPEC [--join SEP]` and
+  `showy-quota prompt --format SPEC` expand user templates (`{provider}`,
+  `{sigil}`, `{used}`, `{remaining}`, `{countdown}`, `{class}`, `{window}`,
+  `{stale}`), so a new host surface needs no core change. The default prompt
+  output is unchanged.
+- `showy-quota-state --json` and `showy-quota --diagnose --json` carry
+  `"schemaVersion": 1`, and `share/schema/showy-quota-state.schema.json`
+  publishes the state contract (checked against every fixture in `make test`).
+- `showy-quota-state --explain [--json]` gives each cached provider a reason
+  code (`included`, `excluded_by_allowlist`, `excluded_by_denylist`,
+  `invalid_id`, `error_record`, `no_numeric_usage_window`) and its order rank;
+  `--diagnose` lists the same decisions.
+- `showy-quota --check-config [--json] [--redact]` reports rejected or clamped
+  config values with the value actually used, plus unknown `SHOWY_QUOTA_*`
+  keys in `config.env`, and exits 1 when it finds any. `--diagnose` shows the
+  same issues (`configIssues`). Recording costs the hot path no process spawns.
+- Opt-in `SHOWY_QUOTA_FRESHNESS=age|source|age+source` (KDL `freshness`) adds
+  a compact suffix such as `42s`, `3m`, `serve`, or `cli` before the stale
+  threshold; after it, the existing stale marker applies unchanged.
+- Opt-in `SHOWY_QUOTA_SEVERITY_GLYPHS=true` (KDL `severity_glyphs`) adds ASCII
+  `+`, `!`, or `x` to good, warn, and bad bars so severity survives `NO_COLOR`,
+  and a bundled `monochrome` high-contrast theme enables it.
+- Provider sigils, the default display order, and SketchyBar font icons now
+  come from one registry, `share/providers.tsv`, read by both shell and Rust.
+  Rendered output is unchanged on every fixture.
 - Standalone Zellij plugin: a tab that becomes visible repaints at once and,
   when its data is at least one interval old and nothing is in flight, starts
   the same probe a timer tick would. Fresh tabs add no probes and no timers.

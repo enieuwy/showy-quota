@@ -9,6 +9,7 @@
 #   --json       Default. Print the full state JSON.
 #   --count      Print only the filtered provider count.
 #   --providers  Print filtered provider ids, one per line.
+#   --explain    Explain every cached provider; add --json for JSON output.
 #   --no-fetch   Report the cache as-is; skip the internal refresh (cache-only).
 
 set -euo pipefail
@@ -29,19 +30,22 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${SCRIPT_PATH}")" && pwd -P)"
 . "${SCRIPT_DIR}/../lib/strip.sh"
 
 mode="json"
+explain_json=0
 no_fetch=0
 while (($#)); do
     case "$1" in
-        --json)      mode="json" ;;
+        --json)      explain_json=1; if [[ "${mode}" != "explain" ]]; then mode="json"; fi ;;
         --count)     mode="count" ;;
         --providers) mode="providers" ;;
+        --explain)   mode="explain" ;;
         --no-fetch)  no_fetch=1 ;;
         -h|--help)
             printf '%s\n' \
-                'Usage: showy-quota-state [--json|--count|--providers] [--no-fetch]' \
+                'Usage: showy-quota-state [--json|--count|--providers|--explain [--json]] [--no-fetch]' \
                 '' \
                 'Emits filtered CodexBar provider state for external layout managers.' \
                 '' \
+                '  --explain   Explain each cached provider and its order (text by default).' \
                 '  --no-fetch  Report the cache as-is; skip the internal refresh (cache-only).'
             exit 0
             ;;
@@ -178,6 +182,25 @@ elif data=$("${FETCH}" 2>/dev/null) && [[ -n "${data}" ]]; then
     available=true
 fi
 
+if [[ "${mode}" == "explain" ]]; then
+    if [[ "${available}" == true ]]; then
+        decisions=$(printf '%s' "${data}" | showy_quota_explain_providers)
+    else
+        decisions='[]'
+    fi
+    if (( explain_json )); then
+        printf '%s\n' "${decisions}" | jq -c '.'
+    else
+        printf '%s\n' "${decisions}" | jq -r '
+            .[] | [(.provider | tojson), .reason,
+                  (if .position == null then "-" else (.position | tostring) end),
+                  .rankSource,
+                  (if .orderRank == null then "-" else (.orderRank | tostring) end)]
+            | @tsv'
+    fi
+    exit 0
+fi
+
 if [[ "${available}" == true ]]; then
     filtered_json=$(printf '%s' "${data}" | showy_quota_filter_renderable | jq -c '.')
     provider_ids_json=$(printf '%s' "${filtered_json}" | jq -c '[ .[].provider ]')
@@ -272,6 +295,7 @@ case "${mode}" in
             --arg compact_threshold "${threshold}" \
             '($compact_threshold | tonumber) as $compact_threshold_num
             | {
+                schemaVersion: 1,
                 available: $available,
                 stale: $stale,
                 cache: {

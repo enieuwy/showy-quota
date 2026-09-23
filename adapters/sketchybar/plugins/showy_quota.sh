@@ -667,22 +667,11 @@ ICON_CACHE_VERSION="5"
 
 # ── provider icon: native app-font experiment ────────────────────────
 provider_font_icon() {
-    case "$1" in
-        antigravity) printf ':antigravity:' ;;
-        claude)      printf ':claude:' ;;
-        codex)       printf ':codex:' ;;
-        cursor)      printf ':cursor:' ;;
-        deepseek)    printf ':deepseek:' ;;
-        gemini)      printf ':gemini:' ;;
-        kiro)        printf ':kiro:' ;;
-        ollama)      printf ':ollama:' ;;
-        openai)      printf ':openai:' ;;
-        perplexity)  printf ':perplexity:' ;;
-        warp)        printf ':warp:' ;;
-        abacus|abacusai|alibaba|alibaba-coding-plan|amp|augment|codebuff|commandcode|crof|doubao|factory|jetbrains|kilo|kimi|kimik2|manus|mimo|minimax|mistral|opencode|opencodego|openrouter|stepfun|synthetic|venice|vertexai|windsurf|zai)
-                    return 1 ;;
-        *)           return 1 ;;
-    esac
+    if [[ -v SHOWY_QUOTA_PROVIDER_FONT_ICONS["$1"] ]]; then
+        printf '%s' "${SHOWY_QUOTA_PROVIDER_FONT_ICONS[$1]}"
+    else
+        return 1
+    fi
 }
 
 # ── provider icon: lazily render SVG → PNG ───────────────────────────

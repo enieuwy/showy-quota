@@ -4,52 +4,23 @@
 #
 # Sourced after lib/common.sh.
 
-# Provider id → short two-or-three letter sigil shown when no Nerd Font icon
-# is available. Keep these stable so users can recognize them in the strip.
+# Provider id → stable sigil. Unknown ids retain the two-character fallback.
 showy_quota_provider_sigil() {
-    case "$1" in
-        codex)         printf 'CX' ;;
-        claude)        printf 'CL' ;;
-        cursor)        printf 'CR' ;;
-        opencode)      printf 'OC' ;;
-        opencodego)    printf 'OG' ;;
-        alibaba)       printf 'AL' ;;
-        factory|droid) printf 'FA' ;;
-        gemini)        printf 'GE' ;;
-        antigravity)   printf 'AG' ;;
-        copilot)       printf 'CP' ;;
-        zai)           printf 'ZA' ;;
-        minimax)       printf 'MX' ;;
-        kimi)          printf 'KM' ;;
-        kimik2)        printf 'K2' ;;
-        kilo)          printf 'KL' ;;
-        kiro)          printf 'KR' ;;
-        vertexai)      printf 'VA' ;;
-        augment)       printf 'AU' ;;
-        jetbrains)     printf 'JB' ;;
-        amp)           printf 'AM' ;;
-        ollama)        printf 'OL' ;;
-        synthetic)     printf 'SY' ;;
-        warp)          printf 'WP' ;;
-        openrouter)    printf 'OR' ;;
-        windsurf)      printf 'WS' ;;
-        perplexity)    printf 'PX' ;;
-        abacus)        printf 'AB' ;;
-        mistral)       printf 'MS' ;;
-        deepseek)      printf 'DS' ;;
-        codebuff)      printf 'CB' ;;
-        *)             printf '%s' "${1:0:2}" | tr '[:lower:]' '[:upper:]' ;;
-    esac
+    if [[ -v SHOWY_QUOTA_PROVIDER_SIGILS["$1"] ]]; then
+        printf '%s' "${SHOWY_QUOTA_PROVIDER_SIGILS[$1]}"
+    else
+        printf '%s' "${1:0:2}" | tr '[:lower:]' '[:upper:]'
+    fi
 }
 
-# Filter the cached JSON down to provider records with at least one numeric
-# usage window, honoring SHOWY_QUOTA_PROVIDERS, SHOWY_QUOTA_PROVIDERS_EXCLUDE,
-# and provider ordering when set. Reads from stdin, writes JSON array to stdout.
-showy_quota_filter_renderable() {
-    local allow="${SHOWY_QUOTA_PROVIDERS:-}"
-    local exclude="${SHOWY_QUOTA_PROVIDERS_EXCLUDE:-}"
-    local order="${SHOWY_QUOTA_PROVIDER_ORDER:-}"
-    jq --arg allow "${allow}" --arg exclude "${exclude}" --arg order "${order}" '
+# Filter and explain providers with the same reason predicate. The ordinary
+# render path still runs one jq process and emits only the original records.
+showy_quota_filter_records() {
+    local mode="$1"
+    jq --arg allow "${SHOWY_QUOTA_PROVIDERS:-}" \
+        --arg exclude "${SHOWY_QUOTA_PROVIDERS_EXCLUDE:-}" \
+        --arg order "${SHOWY_QUOTA_PROVIDER_ORDER:-}" \
+        --arg mode "${mode}" '
         def valid_provider_id:
             type == "string"
             and test("^[A-Za-z0-9_.-]+$")
@@ -57,34 +28,75 @@ showy_quota_filter_renderable() {
             and . != ".."
             and (startswith("-") | not);
         def list($raw):
-            $raw
-            | split(",")
+            $raw | split(",")
             | map(gsub("^\\s+|\\s+$"; ""))
             | map(select(length > 0));
         def pos($items; $provider):
             ($items | index($provider)) as $idx
             | if $idx == null then 1000000 else $idx end;
+        def reason($allow_list; $exclude_list):
+            if (.provider | valid_provider_id | not) then "invalid_id"
+            elif (.error // null) != null then "error_record"
+            elif ((.usage | type) != "object"
+                or ([
+                    .usage.primary,
+                    .usage.secondary,
+                    .usage.tertiary
+                ] | any(. != null and (.usedPercent | type == "number")) | not))
+                then "no_numeric_usage_window"
+            elif (.provider as $p | $exclude_list | index($p)) != null
+                then "excluded_by_denylist"
+            elif ($allow_list | length) > 0
+                and (.provider as $p | $allow_list | index($p)) == null
+                then "excluded_by_allowlist"
+            else "included" end;
         (list($allow)) as $allow_list
         | (list($exclude)) as $exclude_list
         | (list($order)) as $order_list
-        | [ .[] | select(
-            (.error // null) == null
-            and (.provider | valid_provider_id)
-            and ([
-                .usage.primary,
-                .usage.secondary,
-                .usage.tertiary
-            ] | any(. != null and (.usedPercent | type == "number")))
-            and (.provider as $p | (($allow_list | length) == 0 or ($allow_list | index($p) != null)))
-            and (.provider as $p | ($exclude_list | index($p) == null))
-        ) ] as $filtered
-        | if ($allow_list | length) > 0 then
-            $filtered | sort_by([(.provider as $p | pos($allow_list; $p)), .provider])
-          elif ($order_list | length) > 0 then
-            $filtered | sort_by([(.provider as $p | pos($order_list; $p)), .provider])
+        | if $mode == "filtered" then
+            [ .[] | select(reason($allow_list; $exclude_list) == "included") ] as $filtered
+            | if ($allow_list | length) > 0 then
+                $filtered | sort_by([(.provider as $p | pos($allow_list; $p)), .provider])
+              elif ($order_list | length) > 0 then
+                $filtered | sort_by([(.provider as $p | pos($order_list; $p)), .provider])
+              else $filtered end
           else
-            $filtered
+            [to_entries[] | select(.value | reason($allow_list; $exclude_list) == "included")] as $included
+            | (if ($allow_list | length) > 0 then
+                $included | sort_by([(.value.provider as $p | pos($allow_list; $p)), .value.provider])
+              elif ($order_list | length) > 0 then
+                $included | sort_by([(.value.provider as $p | pos($order_list; $p)), .value.provider])
+              else $included end) as $ordered
+            | (. as $records
+            | [ $records | to_entries[] | . as $entry
+                | ($entry.value.provider // null) as $provider
+                | ($entry.value | reason($allow_list; $exclude_list)) as $why
+                | {
+                    provider: $provider,
+                    reason: $why,
+                    sourceIndex: $entry.key,
+                    position: (if $why == "included" then
+                        ($ordered | map(.key) | index($entry.key))
+                      else null end),
+                    rankSource: (if ($allow_list | length) > 0 then "allowlist"
+                                 elif ($order_list | length) > 0 then "provider_order"
+                                 else "cache" end),
+                    orderRank: (if ($allow_list | length) > 0 then
+                        ($allow_list | index($provider))
+                      elif ($order_list | length) > 0 then
+                        ($order_list | index($provider))
+                      else $entry.key end)
+                }
+            ])
           end
     '
+}
+
+showy_quota_filter_renderable() {
+    showy_quota_filter_records filtered
+}
+
+showy_quota_explain_providers() {
+    showy_quota_filter_records explain
 }
 

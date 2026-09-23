@@ -183,7 +183,7 @@ fn provider_line(
     // whose 5-hour pools go unknown once the weekly is exhausted) and disagreed
     // with the terminal strip — `render.rs::render_chunk` always reads the
     // positional primary.
-    let (label, mut label_color) = match label_lane(record).as_ref() {
+    let (mut label, mut label_color) = match label_lane(record).as_ref() {
         None => ("idle".to_string(), argb(&config.palette_countdown)),
         Some(lane) => {
             let minutes = if lane.reset.is_empty() {
@@ -226,6 +226,11 @@ fn provider_line(
         label_color = stale_argb.clone();
         highlights.iter_mut().for_each(|c| *c = stale_argb.clone());
         markers.iter_mut().for_each(|m| *m = None);
+    }
+    if config.severity_glyphs && !options.stale_for(&record.provider) {
+        if let Some(primary) = label_lane(record) {
+            label.insert_str(0, config.severity(primary.rem as i32).marker());
+        }
     }
 
     let (status, status_url) = provider_status(record);
@@ -302,7 +307,7 @@ fn provider_status(record: &ProviderRecord) -> (String, String) {
     (sanitize_field(&indicator), sanitize_field(&url))
 }
 
-fn sanitize_field(value: &str) -> String {
+pub(crate) fn sanitize_field(value: &str) -> String {
     value.chars().filter(|c| !c.is_control()).collect()
 }
 
@@ -905,5 +910,21 @@ mod tests {
             row[4], "https://status.example.com/xy",
             "control chars stripped"
         );
+    }
+    #[test]
+    fn severity_glyphs_prefix_the_countdown_label() {
+        let config = RenderConfig {
+            severity_glyphs: true,
+            ..RenderConfig::default()
+        };
+        let payload = r#"[
+            {"provider":"codex","usage":{"primary":{"usedPercent":10}}},
+            {"provider":"claude","usage":{"primary":{"usedPercent":70}}},
+            {"provider":"copilot","usage":{"primary":{"usedPercent":95}}}
+        ]"#;
+        let rows = lines(&emit(payload, &config, 1_700_000_000, options()));
+        assert_eq!(rows[1][1], "+?");
+        assert_eq!(rows[2][1], "!?");
+        assert_eq!(rows[3][1], "x?");
     }
 }

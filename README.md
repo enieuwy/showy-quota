@@ -220,10 +220,10 @@ versions and provider counts, and sets `"redacted": true` in the JSON.
 
 ## Automation & prompts
 
-Two subcommands read the same provider metrics the bars use — see
+These subcommands read the same provider metrics the bars use — see
 [`docs/automation.md`](docs/automation.md) for the full reference (exit codes,
-`--json` schema, hook/cron recipes, and prompt snippets for starship,
-powerlevel10k, and plain `PS1`).
+`--json` schema, hook/cron/`at`/systemd recipes, and prompt snippets for
+starship, powerlevel10k, and plain `PS1`).
 
 - **`showy-quota guard`** gates CI, cron, and agent hooks on quota thresholds
   with stable exit codes (`0` pass, `1` breach, `2` unusable data, `3` usage):
@@ -249,6 +249,20 @@ powerlevel10k, and plain `PS1`).
   format = '[$output]($style) '
   style = 'bold yellow'
   ```
+
+- **`showy-quota run [guard options] -- <command>`** runs a command only when
+  its guard passes and forwards its exit code; `--wait-max` waits for known
+  resets instead of failing. **`showy-quota next-reset`** prints the seconds
+  until a window refills, for `at`, cron, and systemd timers.
+- **`showy-quota pick`** prints the provider with the most remaining quota, for
+  routing work between models.
+- **`showy-quota refresh`** forces a cache refresh and repaints the SketchyBar,
+  tmux, and shell Zellij bars that are running.
+- **`showy-quota serve status|restart|stop`** inspects or controls the managed
+  `codexbar serve`; status only reads `/health`.
+- **`showy-quota --check-config`** lists config values that were rejected or
+  clamped, and unknown `SHOWY_QUOTA_*` keys.
+- **`showy-quota-state --explain`** says why each provider is shown or hidden.
 
 ## Requirements
 

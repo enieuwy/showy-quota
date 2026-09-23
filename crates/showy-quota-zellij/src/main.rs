@@ -7,7 +7,7 @@ use showy_quota_zellij_core::palette::hex_to_rgb;
 use showy_quota_zellij_core::{
     parse_provider_config_payload, parse_usage_payload, parse_usage_payload_indexed,
     payload_has_renderable_provider, provider_ids_from_records, render_zellij, valid_provider_id,
-    ProviderConfigError, ProviderRecord, RenderConfig, RenderOptions,
+    Freshness, ProviderConfigError, ProviderRecord, RenderConfig, RenderOptions,
 };
 use zellij_tile::prelude::*;
 
@@ -1976,6 +1976,14 @@ impl State {
         // providers whose own record has aged out, so one recovered provider
         // cannot make the whole bar look live.
         let stale_providers = self.stale_provider_slices(now_seconds, interval, stale);
+        let freshness = self.last_success_seconds.map(|seconds| Freshness {
+            age_seconds: (now_seconds - seconds).max(0.0) as i64,
+            source: match self.source {
+                Source::Serve => "serve",
+                Source::Cli => "cli",
+                _ => "",
+            },
+        });
         match render_zellij(
             payload,
             &self.render_config,
@@ -1984,6 +1992,7 @@ impl State {
                 stale,
                 degraded_cli: self.source == Source::Cli,
                 now_epoch: now,
+                freshness,
                 stale_providers: &stale_providers,
             },
         ) {
@@ -2497,6 +2506,36 @@ mod tests {
             last_success_seconds: age_seconds.map(|age| now_seconds() - age),
             ..State::default()
         }
+    }
+    #[test]
+    fn freshness_uses_last_success_time_and_fetch_source() {
+        let mut state = visible_serve_state(Some(185.0));
+        state.interval_seconds = 120.0;
+        state.render_config.freshness = "age+source".into();
+        assert!(state.refresh_output());
+        assert!(
+            state.last_output.contains("3m serve"),
+            "{}",
+            state.last_output
+        );
+
+        state.source = Source::Cli;
+        state.cli_interval_seconds = 120.0;
+        assert!(state.refresh_output());
+        assert!(
+            state.last_output.contains("3m cli"),
+            "{}",
+            state.last_output
+        );
+
+        state.last_success_seconds = Some(now_seconds() - 241.0);
+        assert!(state.refresh_output());
+        assert!(
+            !state.last_output.contains("4m cli"),
+            "{}",
+            state.last_output
+        );
+        assert!(state.last_output.contains(&state.render_config.stale_glyph));
     }
 
     #[test]

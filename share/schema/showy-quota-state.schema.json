@@ -1,0 +1,116 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/enieuwy/showy-quota/main/share/schema/showy-quota-state.schema.json",
+  "title": "showy-quota-state JSON",
+  "type": "object",
+  "required": ["schemaVersion", "available", "stale", "cache", "cacheAgeSeconds", "staleAfterSeconds", "providers", "providerMetrics", "providerCount", "providerFreshness", "emptyReason", "sketchybar"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "available": {"type": "boolean"},
+    "stale": {"type": "boolean"},
+    "cache": {
+      "type": "object",
+      "required": ["source", "degraded"],
+      "properties": {
+        "source": {"enum": ["serve", "cli", "unknown"]},
+        "degraded": {"type": "boolean"}
+      }
+    },
+    "cacheAgeSeconds": {"type": ["integer", "null"], "minimum": 0},
+    "staleAfterSeconds": {"type": "integer", "minimum": 0},
+    "providers": {"type": "array", "items": {"type": "string"}},
+    "providerMetrics": {"type": "array", "items": {"$ref": "#/$defs/providerMetric"}},
+    "providerCount": {"type": "integer", "minimum": 0},
+    "providerFreshness": {
+      "type": "object",
+      "additionalProperties": {"$ref": "#/$defs/freshness"}
+    },
+    "emptyReason": {"enum": [null, "unavailable", "no-providers", "filtered", "idle"]},
+    "sketchybar": {
+      "type": "object",
+      "required": ["itemPrefix", "bracket", "compactProviderThreshold", "compactRecommended"],
+      "properties": {
+        "itemPrefix": {"type": "string"},
+        "bracket": {"type": "string"},
+        "compactProviderThreshold": {"type": "integer", "minimum": 0},
+        "compactRecommended": {"type": "boolean"}
+      }
+    }
+  },
+  "$defs": {
+    "window": {
+      "type": "object",
+      "required": ["usedPercent", "remainingPercent", "resetsAt", "resetDescription", "windowMinutes", "minutesUntilReset"],
+      "properties": {
+        "usedPercent": {"type": "integer"},
+        "remainingPercent": {"type": "integer"},
+        "resetsAt": {"type": ["string", "null"]},
+        "resetDescription": {"type": ["string", "null"]},
+        "windowMinutes": {"type": ["integer", "null"]},
+        "minutesUntilReset": {"type": ["integer", "null"]}
+      }
+    },
+    "extraWindow": {
+      "type": "object",
+      "required": ["title", "usageKnown", "usedPercent", "remainingPercent", "resetsAt", "resetDescription", "windowMinutes", "minutesUntilReset"],
+      "properties": {
+        "title": {"type": ["string", "null"]},
+        "usageKnown": {"type": "boolean"},
+        "usedPercent": {"type": ["integer", "null"]},
+        "remainingPercent": {"type": ["integer", "null"]},
+        "resetsAt": {"type": ["string", "null"]},
+        "resetDescription": {"type": ["string", "null"]},
+        "windowMinutes": {"type": ["integer", "null"]},
+        "minutesUntilReset": {"type": ["integer", "null"]}
+      }
+    },
+    "providerMetric": {
+      "type": "object",
+      "required": ["provider", "windows", "extraRateWindows", "error"],
+      "properties": {
+        "provider": {"type": "string"},
+        "windows": {
+          "type": "object",
+          "required": ["primary", "secondary", "tertiary"],
+          "properties": {
+            "primary": {"anyOf": [{"$ref": "#/$defs/window"}, {"type": "null"}]},
+            "secondary": {"anyOf": [{"$ref": "#/$defs/window"}, {"type": "null"}]},
+            "tertiary": {"anyOf": [{"$ref": "#/$defs/window"}, {"type": "null"}]}
+          }
+        },
+        "extraRateWindows": {"type": "array", "items": {"$ref": "#/$defs/extraWindow"}},
+        "status": {
+          "type": "object",
+          "required": ["indicator"],
+          "properties": {
+            "indicator": {"type": "string"},
+            "url": {"type": "string"}
+          }
+        },
+        "error": {
+          "anyOf": [
+            {"type": "null"},
+            {
+              "type": "object",
+              "required": ["kind", "message"],
+              "properties": {
+                "kind": {"enum": ["auth", "cookies", "network", "unknown"]},
+                "message": {"type": "string"}
+              }
+            }
+          ]
+        }
+      }
+    },
+    "freshness": {
+      "type": "object",
+      "required": ["source", "updatedAt", "ageSeconds", "stale"],
+      "properties": {
+        "source": {"enum": ["serve", "cli", "unknown"]},
+        "updatedAt": {"type": ["integer", "null"], "minimum": 0},
+        "ageSeconds": {"type": ["integer", "null"], "minimum": 0},
+        "stale": {"type": "boolean"}
+      }
+    }
+  }
+}

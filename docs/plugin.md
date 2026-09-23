@@ -304,6 +304,8 @@ Common options:
 |`provider_modes`|`gemini=mono3,cursor=mono3`|Per-provider body in `auto` mode, `provider=mode,…`. Providers without an entry render `dual`, except model pools: a provider whose `extraRateWindows` carry *more* pools than its positional slots expose auto-detects as model-pooled and splits into one standalone `dual` per pool (`AGᴳ`/`AGᶜ`); a single pool stays one plain `dual`, and a coincidental reset/window collision (e.g. Codex's main weekly matching its Spark weekly) is not mistaken for pooling. Antigravity is the canonical case (OAuth → plain `dual`, the Antigravity IDE → `AGᴳ` + `AGᶜ`). An explicit `provider=dual2` (or `mono4`) forces the pool view and unions positional + extra pools (e.g. Codex + Spark). Pools sharing one billing cycle (same reset+window, e.g. Cursor's Total/Auto/API) stay bright and draw a single pacing marker.|
 |`mono_color_mode`|`lowest`|mono3/mono4 chunk color: `lowest` or `primary`.|
 |`mono_markers`|`primary`|Comma list of paced window slots (`primary`,`secondary`,`tertiary`,`quaternary`); `none` disables. First marker uses `palette_elapsed`, the rest `palette_elapsed_long`.|
+|`freshness`|`off`|Optional suffix: `age`, `source`, or `age+source`. Age uses the last successful fetch; source says `serve` or `cli`. The suffix disappears when the existing stale marker applies.|
+|`severity_glyphs`|`false`|Add ASCII `+`, `!`, or `x` to good, warn, or bad quota bars. This also works when colors are unavailable.|
 |`cap_left` / `cap_right`|`` / ``|Provider chunk end caps; set to empty strings for flat edges.|
 
 Provider, threshold, glyph, geometry, and palette keys use the same names as shell env vars without the `SHOWY_QUOTA_` prefix, lowercased. Example:
@@ -318,6 +320,8 @@ plugin location="file:~/.config/zellij/plugins/showy-quota-zellij.wasm" {
     time_warn_minutes 45
     stale_glyph "⚠"
     degraded_cli_glyph "⚠cli"
+    freshness "age+source"
+    severity_glyphs true
     // reset_description_timezone_offset "-07:00"
 }
 ```

@@ -8,6 +8,9 @@ pub struct RenderConfig {
     pub providers_exclude: Vec<String>,
     pub provider_order: Vec<String>,
     pub include_status: bool,
+    /// Optional strip suffix; never changes the stale marker.
+    pub freshness: String,
+    pub severity_glyphs: bool,
 
     pub palette_primary_good: String,
     pub palette_primary_warn: String,
@@ -65,8 +68,10 @@ impl Default for RenderConfig {
         Self {
             providers: Vec::new(),
             providers_exclude: Vec::new(),
-            provider_order: csv("codex,claude,copilot,opencode,gemini"),
+            provider_order: crate::providers::default_order(),
             include_status: true,
+            freshness: "off".into(),
+            severity_glyphs: false,
             palette_primary_good: "25be6a".into(),
             palette_primary_warn: "f0af00".into(),
             palette_primary_bad: "ee5396".into(),
@@ -141,6 +146,13 @@ impl RenderConfig {
         );
         self.provider_order = get_csv(&get, "SHOWY_QUOTA_PROVIDER_ORDER", &self.provider_order);
         self.include_status = get_bool(&get, "SHOWY_QUOTA_INCLUDE_STATUS", self.include_status);
+        if let Some(value) = get("SHOWY_QUOTA_FRESHNESS") {
+            let value = value.trim().to_ascii_lowercase();
+            if matches!(value.as_str(), "off" | "age" | "source" | "age+source") {
+                self.freshness = value;
+            }
+        }
+        self.severity_glyphs = get_bool(&get, "SHOWY_QUOTA_SEVERITY_GLYPHS", self.severity_glyphs);
 
         assign_string(
             &get,
@@ -767,5 +779,27 @@ mod tests {
         assert!(!get_bool(&get("garbage"), "V", false));
         assert!(get_bool(&missing, "V", true));
         assert!(!get_bool(&missing, "V", false));
+    }
+    #[test]
+    fn freshness_and_severity_glyphs_accept_env_and_kdl() {
+        let env = BTreeMap::from([
+            ("SHOWY_QUOTA_FRESHNESS".into(), " AGE+SOURCE ".into()),
+            ("SHOWY_QUOTA_SEVERITY_GLYPHS".into(), "on".into()),
+        ]);
+        let config = RenderConfig::from_env_map(&env);
+        assert_eq!(config.freshness, "age+source");
+        assert!(config.severity_glyphs);
+
+        let kdl = BTreeMap::from([
+            ("freshness".into(), "source".into()),
+            ("severity_glyphs".into(), "true".into()),
+        ]);
+        let config = RenderConfig::from_kdl_config(&kdl);
+        assert_eq!(config.freshness, "source");
+        assert!(config.severity_glyphs);
+        assert_eq!(RenderConfig::default().freshness, "off");
+        assert!(!RenderConfig::default().severity_glyphs);
+        let invalid = BTreeMap::from([("SHOWY_QUOTA_FRESHNESS".into(), "recent".into())]);
+        assert_eq!(RenderConfig::from_env_map(&invalid).freshness, "off");
     }
 }

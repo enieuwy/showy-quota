@@ -4,9 +4,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use showy_quota_zellij_core::{
     codexbar::{unwrap_cache_transport, MAX_USAGE_JSON_BYTES},
-    emit_prompt_segment, emit_provider_metrics, emit_rows, emit_sketchybar, render_tmux,
-    render_vertical, render_zellij, valid_provider_id, PromptOptions, RenderConfig, RenderError,
-    RenderOptions, SketchybarOptions,
+    emit_formatted_prompt_segment, emit_pick, emit_prompt_segment, emit_provider_metrics,
+    emit_rows, emit_sketchybar, render_tmux, render_vertical, render_zellij, valid_provider_id,
+    Freshness, PickOptions, PromptOptions, RenderConfig, RenderError, RenderOptions,
+    SketchybarOptions, Template, TemplateScope,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,6 +23,8 @@ enum Emit {
     Vertical,
     Metrics,
     Prompt,
+    Template,
+    Pick,
     Sketchybar,
 }
 
@@ -39,20 +42,48 @@ struct Cli {
     degraded_cli: bool,
     ansi: bool,
     provider_filter: Vec<String>,
+    template_format: Option<String>,
+    join: String,
+    pick_window: String,
+    pick_min_remaining: i32,
+    pick_json: bool,
 }
 
 fn main() {
-    if let Err(message) = run() {
+    let cli = match parse_args(std::env::args().skip(1)) {
+        Ok(cli) => cli,
+        Err(message) => {
+            eprintln!("showy-quota-render: {message}");
+            process::exit(2);
+        }
+    };
+    let template = match cli
+        .template_format
+        .as_deref()
+        .map(Template::parse)
+        .transpose()
+    {
+        Ok(template) => template,
+        Err(message) => {
+            eprintln!("showy-quota-render: {message}");
+            process::exit(2);
+        }
+    };
+    if let Err(message) = run(&cli, template.as_ref()) {
         eprintln!("showy-quota-render: {message}");
         process::exit(1);
     }
 }
 
-fn run() -> Result<(), String> {
-    let cli = parse_args(std::env::args().skip(1))?;
-    let config = scoped_config(RenderConfig::from_env(), &cli.provider_filter);
+fn run(cli: &Cli, template: Option<&Template<'_>>) -> Result<(), String> {
+    let configured = RenderConfig::from_env();
+    let config = if cli.emit == Emit::Pick {
+        configured
+    } else {
+        scoped_config(configured, &cli.provider_filter)
+    };
     let now_epoch = now_epoch()?;
-    let input = match read_input(&cli, now_epoch, &config) {
+    let input = match read_input(cli, now_epoch, &config) {
         Ok(input) => input,
         Err(_) if cli.emit == Emit::Prompt => return write_output("AI ?\n"),
         Err(err) => return Err(err),
@@ -64,8 +95,46 @@ fn run() -> Result<(), String> {
         stale,
         degraded_cli,
         now_epoch,
+        freshness: input.age_seconds.map(|age_seconds| Freshness {
+            age_seconds,
+            source: &input.source,
+        }),
         stale_providers: &input.stale_providers,
     };
+    if cli.emit == Emit::Template {
+        let mut rendered = template
+            .as_ref()
+            .expect("template format is required")
+            .render(
+                &input.payload,
+                &config,
+                now_epoch,
+                &cli.join,
+                stale,
+                TemplateScope::PerProvider,
+            )
+            .map_err(render_error)?;
+        rendered.push('\n');
+        return write_output(&rendered);
+    }
+
+    if cli.emit == Emit::Pick {
+        let selected = emit_pick(
+            &input.payload,
+            &config,
+            now_epoch,
+            PickOptions {
+                provider_filter: &cli.provider_filter,
+                window: &cli.pick_window,
+                min_remaining: cli.pick_min_remaining,
+                json: cli.pick_json,
+            },
+        )
+        .map_err(render_error)?
+        .ok_or_else(|| String::from("no provider meets the requested quota floor"))?;
+        return write_output(&format!("{selected}\n"));
+    }
+
     if cli.emit == Emit::Metrics {
         let mut rendered =
             emit_provider_metrics(&input.payload, &config, now_epoch).map_err(render_error)?;
@@ -91,16 +160,21 @@ fn run() -> Result<(), String> {
     }
 
     if cli.emit == Emit::Prompt {
-        let mut rendered = emit_prompt_segment(
-            &input.payload,
-            &config,
-            now_epoch,
-            PromptOptions {
-                provider_filter: &cli.provider_filter,
-                ansi: cli.ansi,
-                stale,
-            },
-        )
+        let prompt_options = PromptOptions {
+            provider_filter: &cli.provider_filter,
+            ansi: cli.ansi,
+            stale,
+        };
+        let mut rendered = match template.as_ref() {
+            Some(spec) => emit_formatted_prompt_segment(
+                &input.payload,
+                &config,
+                now_epoch,
+                prompt_options,
+                spec,
+            ),
+            None => emit_prompt_segment(&input.payload, &config, now_epoch, prompt_options),
+        }
         .unwrap_or_else(|_| String::from("AI ?"));
         rendered.push('\n');
         return write_output(&rendered);
@@ -159,6 +233,7 @@ fn write_output(rendered: &str) -> Result<(), String> {
 
 fn parse_args(args: impl Iterator<Item = String>) -> Result<Cli, String> {
     let mut format = Format::Zellij;
+    let mut format_option = None;
     let mut json_path = Some(String::from("-"));
     let mut json_seen = false;
     let mut from_cache = false;
@@ -167,20 +242,18 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Cli, String> {
     let mut ansi = false;
     let mut provider_filter = Vec::new();
     let mut emit = Emit::Render;
+    let mut join = String::from(" ");
+    let mut pick_window = String::from("worst");
+    let mut pick_min_remaining = 0;
+    let mut pick_json = false;
     let mut args = args;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--format" => {
-                let value = args
-                    .next()
-                    .ok_or_else(|| String::from("--format requires zellij or tmux"))?;
-                format = match value.as_str() {
-                    "zellij" => Format::Zellij,
-                    "tmux" => Format::Tmux,
-                    _ => return Err(format!("unknown format: {value}")),
-                };
+                format_option = Some(args.next().ok_or("--format requires a value")?);
             }
+            "--join" => join = args.next().ok_or("--join requires a separator")?,
             "--json" => {
                 if from_cache {
                     return Err(String::from(
@@ -204,7 +277,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Cli, String> {
             "--emit" => {
                 let value = args.next().ok_or_else(|| {
                     String::from(
-                        "--emit requires render, rows, vertical, metrics, prompt, or sketchybar",
+                        "--emit requires render, rows, vertical, metrics, prompt, template, pick, or sketchybar",
                     )
                 })?;
                 emit = match value.as_str() {
@@ -213,7 +286,9 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Cli, String> {
                     "vertical" => Emit::Vertical,
                     "metrics" => Emit::Metrics,
                     "prompt" => Emit::Prompt,
+                    "template" => Emit::Template,
                     "sketchybar" => Emit::Sketchybar,
+                    "pick" => Emit::Pick,
                     _ => return Err(format!("unknown emit mode: {value}")),
                 };
             }
@@ -222,6 +297,32 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Cli, String> {
                     .next()
                     .ok_or_else(|| String::from("--provider requires ID[,ID...]"))?;
                 provider_filter = parse_provider_filter(&value)?;
+            }
+            "--window" => {
+                let value = args.next().ok_or("--window requires a value")?;
+                if !matches!(
+                    value.as_str(),
+                    "primary" | "secondary" | "tertiary" | "worst"
+                ) {
+                    return Err(format!("invalid window: {value}"));
+                }
+                pick_window = value;
+            }
+            "--min-remaining" => {
+                let value = args.next().ok_or("--min-remaining requires 0-100")?;
+                pick_min_remaining = value
+                    .parse::<i32>()
+                    .map_err(|_| "invalid --min-remaining")?;
+                if !(0..=100).contains(&pick_min_remaining) {
+                    return Err(String::from("invalid --min-remaining"));
+                }
+            }
+            "--pick-format" => {
+                pick_json = match args.next().as_deref() {
+                    Some("id") => false,
+                    Some("json") => true,
+                    _ => return Err(String::from("--pick-format requires id or json")),
+                };
             }
             "--ansi" => ansi = true,
             "--stale" => stale = true,
@@ -232,6 +333,31 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Cli, String> {
             }
             _ => return Err(format!("unknown argument: {arg}")),
         }
+    }
+
+    let template_format = match emit {
+        Emit::Template | Emit::Prompt => {
+            if emit == Emit::Template && format_option.is_none() {
+                return Err(String::from("--emit template requires --format"));
+            }
+            if emit == Emit::Template && ansi {
+                return Err(String::from("--emit template does not support --ansi"));
+            }
+            format_option
+        }
+        _ => {
+            if let Some(value) = format_option {
+                format = match value.as_str() {
+                    "zellij" => Format::Zellij,
+                    "tmux" => Format::Tmux,
+                    _ => return Err(format!("unknown format: {value}")),
+                };
+            }
+            None
+        }
+    };
+    if emit != Emit::Template && join != " " {
+        return Err(String::from("--join requires --emit template"));
     }
 
     Ok(Cli {
@@ -246,6 +372,11 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Cli, String> {
         degraded_cli,
         ansi,
         provider_filter,
+        template_format,
+        join,
+        pick_window,
+        pick_min_remaining,
+        pick_json,
     })
 }
 
@@ -275,6 +406,8 @@ struct InputPayload {
     payload: Vec<u8>,
     stale: bool,
     degraded_cli: bool,
+    age_seconds: Option<i64>,
+    source: String,
     /// Providers whose cached slice is older than the stale horizon even
     /// though the cache file itself is current. Only the cache path can know
     /// this: `--json` input carries no publish metadata.
@@ -287,15 +420,20 @@ fn read_input(cli: &Cli, now_epoch: i64, config: &RenderConfig) -> Result<InputP
             payload: unwrap_cache_transport(read_payload(path)?).payload,
             stale: false,
             degraded_cli: false,
+            age_seconds: None,
+            source: String::new(),
             stale_providers: Vec::new(),
         }),
         Input::Cache => {
             let snapshot = read_cache_snapshot(now_epoch, config).map_err(|err| err.to_string())?;
+            let stale_providers = snapshot.freshness.stale_providers();
             Ok(InputPayload {
                 payload: snapshot.payload,
                 stale: snapshot.freshness.stale,
                 degraded_cli: snapshot.freshness.degraded_cli,
-                stale_providers: snapshot.freshness.stale_providers(),
+                age_seconds: Some(snapshot.freshness.age_seconds),
+                source: snapshot.freshness.source,
+                stale_providers,
             })
         }
     }
@@ -439,7 +577,7 @@ fn png_bar_width_from_env() -> i64 {
 
 fn print_help() {
     println!(
-        "Usage: showy-quota-render [--emit render|rows|vertical|metrics|prompt|sketchybar] [--format zellij|tmux] [--json <path|-> | --from-cache] [--provider ID[,ID...]] [--ansi] [--stale] [--degraded-cli]\n\nPrints a rendered quota strip, one line per quota window (vertical), one JSON entry per rendered chunk (rows), providerMetrics JSON, SketchyBar row data, or shell prompt segment from CodexBar JSON."
+        "Usage: showy-quota-render [--emit render|rows|vertical|metrics|prompt|template|pick|sketchybar] [--format zellij|tmux|SPEC] [--join SEP] [--json <path|-> | --from-cache] [--provider ID[,ID...]] [--ansi] [--stale] [--degraded-cli]\n\nTemplate mode requires --format SPEC and expands once per provider. Prompt accepts --format SPEC for the worst window overall. Fields: {{provider}}, {{sigil}}, {{used}}, {{remaining}}, {{countdown}}, {{class}}, {{window}}, {{stale}}. Escape braces with {{{{ and }}}}.\n\nPick mode accepts --window primary|secondary|tertiary|worst, --min-remaining 0-100, and --pick-format id|json."
     );
 }
 

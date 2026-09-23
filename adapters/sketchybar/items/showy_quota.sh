@@ -47,12 +47,14 @@
     [[ -x "${PLUGIN_PATH}" ]] || PLUGIN_PATH="${PLUGIN_DIR:-}/showy_quota.sh"
     [[ -n "${PLUGIN_PATH}" && -r "${PLUGIN_PATH}" ]] || exit 0
 
+    sketchybar --add event showy_quota_refresh
     sketchybar --add item showy_quota.trigger left \
                --set showy_quota.trigger \
                    drawing=off \
                    updates=on \
                    update_freq="${SHOWY_QUOTA_SKETCHYBAR_UPDATE_FREQ}" \
                    script="${PLUGIN_PATH}"
+    sketchybar --subscribe showy_quota.trigger showy_quota_refresh
 
     SHOWY_QUOTA_SKETCHYBAR_FORCE_REDECLARE=1 "${PLUGIN_PATH}"
 ) || true
