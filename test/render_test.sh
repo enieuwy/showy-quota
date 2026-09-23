@@ -2927,9 +2927,13 @@ assert_contains "plugin keeps the errored tertiary lane off" "--set showy_quota.
 assert_contains "plugin keeps the errored quaternary lane off" "--set showy_quota.cursor.quaternary drawing=off" "${plugin_log}"
 # The lifecycle run uses the default PNG icon path: without an incident the
 # fallback glyph renders untinted, so the warning color arrives through the
-# generated PNG cache key, not the font-icon color field.
-assert_contains "plugin tints the errored icon with the warning color" "icon-v5-cursor-" "${plugin_log}"
-assert_contains "plugin keys the errored icon on the error tint" "-error.png" "${plugin_log}"
+# generated PNG cache key, not the font-icon color field. The plugin draws a
+# PNG only when ImageMagick is installed; without it the icon is off, as in
+# the other PNG icon cases guarded above.
+if command -v magick >/dev/null 2>&1; then
+    assert_contains "plugin tints the errored icon with the warning color" "icon-v5-cursor-" "${plugin_log}"
+    assert_contains "plugin keys the errored icon on the error tint" "-error.png" "${plugin_log}"
+fi
 error_font_cache=$(mk_cache)
 seed_usage_cache "${error_font_cache}" codexbar-error-only.json serve
 seed_sketchybar_state "${error_font_cache}" cursor factory
