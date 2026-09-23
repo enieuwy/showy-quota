@@ -6,6 +6,31 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-09-23
+
+### Upgrading
+- **Rebuild and reinstall the WASM plugin.** Run `make plugin` and
+  `make install-plugin`, then `zellij action start-or-reload-plugin`, reload, or
+  open a new tab — a running session keeps the cached module. If you are on
+  Zellij 0.44, stay on showy-quota 0.8.1 until you upgrade Zellij.
+- **Rebuild `showy-quota-render`.** `showy-quota pick`, `prompt --format`, and
+  `--emit template` call render modes that only the new binary has. On a
+  symlink/dev install the shell side goes live on `git pull`, so run
+  `make install-bin` (or `make install-copy` for a copied tree).
+- **Reload SketchyBar** after updating, so the bootstrap subscribes the item to
+  the new `showy_quota_refresh` event that `showy-quota refresh` triggers.
+- **Optional: shell completions.** Run `make install-completions`. zsh needs
+  `${XDG_DATA_HOME:-$HOME/.local/share}/zsh/site-functions` on `fpath` before
+  `compinit`.
+- **Check for the two removed settings before upgrading.** Run
+  `grep -rn 'SHOWY_QUOTA_CODEXBAR_SERVE_PORT\|PILL_RADIUS\|PILL_HEIGHT' ~/.config`
+  and your `sketchybarrc`. Neither removed name warns when set — a stale
+  `SHOWY_QUOTA_CODEXBAR_SERVE_PORT` is simply ignored, and the port comes from
+  `SHOWY_QUOTA_CODEXBAR_SERVE_URL`, so fold any custom port into that URL.
+  `showy-quota --check-config` now lists unknown `SHOWY_QUOTA_*` keys in
+  `config.env`, which catches the first one there.
+
+### Added
 - `showy-quota next-reset [--provider ID] [--window W] [--epoch|--seconds|--json]`
   prints the time until a quota window resets, so `at`, cron, systemd, and CI
   can schedule work for the refill. It exits 1 when the reset is unknown.
@@ -265,17 +290,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   plugin has created that item.
 - Makefile retargeting for the long-deleted root `sketchybar/` directory, and an
   ignored fourth argument to `showy_quota_primary_label`.
-
-### Upgrading
-- **Rebuild and reinstall the WASM plugin.** Run `make plugin` and
-  `make install-plugin`, then `zellij action start-or-reload-plugin`, reload, or
-  open a new tab — a running session keeps the cached module. If you are on
-  Zellij 0.44, stay on showy-quota 0.8.1 until you upgrade Zellij.
-- **Check for the two removed settings before upgrading.** Run
-  `grep -rn 'SHOWY_QUOTA_CODEXBAR_SERVE_PORT\|PILL_RADIUS\|PILL_HEIGHT' ~/.config`
-  and your `sketchybarrc`. Neither removed name warns when set — a stale
-  `SHOWY_QUOTA_CODEXBAR_SERVE_PORT` is simply ignored, and the port comes from
-  `SHOWY_QUOTA_CODEXBAR_SERVE_URL`, so fold any custom port into that URL.
 
 ## [0.8.1] — 2026-08-17
 
@@ -1329,7 +1343,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `bin/showy-quota-fetch`: cache dir and files now persist as `0700`/`0600`
   instead of the user's default umask. CodexBar usage JSON stays user-only.
 
-[Unreleased]: https://github.com/enieuwy/showy-quota/compare/v0.8.1...HEAD
+[Unreleased]: https://github.com/enieuwy/showy-quota/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/enieuwy/showy-quota/compare/v0.8.1...v0.9.0
 [0.8.1]: https://github.com/enieuwy/showy-quota/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/enieuwy/showy-quota/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/enieuwy/showy-quota/compare/v0.6.0...v0.7.0
