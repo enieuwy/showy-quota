@@ -514,6 +514,8 @@ ci-gates: ## Run every CI gate locally; run before tagging a release.
 	@printf '\n== ci-gates 8/9: make plugin ==\n'
 	@$(MAKE_COMMAND) --no-print-directory plugin
 	@printf '\n== ci-gates 9/9: check plugin exports ==\n'
+	@python3 scripts/check_plugin_exports.py
+	@printf '\nci-gates: PASS (9/9 gates)\n'
 
 hooks: ## Install the git pre-commit hook (rustfmt check via .githooks).
 	@git config core.hooksPath .githooks
