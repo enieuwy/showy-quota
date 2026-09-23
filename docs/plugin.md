@@ -11,7 +11,7 @@ It does **not** require `zjstatus`, `showy-quota-zellij-pipe`, or any installed 
   newer one](https://zellij.dev/documentation/plugin-upgrading.html), not the
   reverse, so an older server is unsupported. Stay on showy-quota 0.8.1 if you
   cannot upgrade Zellij.
-- `codexbar` on the Zellij server `PATH`.
+- `codexbar` on the Zellij server `PATH`, unless you run [serve-only mode](#serve-only-mode).
 - A font that can render the configured caps and bar glyphs. Any Nerd Font covers the defaults.
 
 The plugin starts `codexbar serve` itself by default. It probes:
@@ -27,6 +27,34 @@ one `codexbar usage --provider <id> --format json --pretty [--status]` call per
 enabled provider. Each provider has its own in-flight flag, last-known-good
 slice, and failure backoff, so one hung or failing provider never blocks the
 rest. The merged result is marked with `⚠cli`.
+
+### Serve-only mode
+
+If you supervise `codexbar serve` yourself (a launchd agent, a systemd user
+unit, or a dotfile manager), the plugin does not need the `codexbar` CLI on the
+Zellij server `PATH`. Turn off managed serve and CLI fallback, and the plugin
+requests only `WebAccess`:
+
+```kdl
+pane size=1 borderless=true {
+    plugin location="file:~/.config/zellij/plugins/showy-quota-zellij.wasm" {
+        serve_url "http://127.0.0.1:8080"
+        manage_serve false
+        cli_fallback "off"
+    }
+}
+```
+
+The same pane ships as `adapters/zellij/layout-pane-serve-only.kdl.fragment`.
+Pre-grant it with `showy-quota --grant-zellij` (no `--manage-serve` or
+`--cli-fallback`). In this mode the plugin never opens a background pane and
+never runs a command. Before its first success it shows
+`showy-quota: CodexBar serve unavailable` while serve is down; after a success
+it keeps the last-known-good strip and marks it stale.
+
+To confirm the serve is reachable, run `make doctor` (it accepts a working
+`/usage` endpoint when `codexbar` is not on `PATH`) or `showy-quota --diagnose`
+(its `CodexBar serve` section probes `/health` at `SHOWY_QUOTA_CODEXBAR_SERVE_URL`).
 
 ## Install prebuilt WASM
 
@@ -97,6 +125,11 @@ or the user. On an outage, managed startup uses a short deterministic per-tab
 delay and re-probes before opening a background `codexbar serve` pane; the
 creator keeps that pane's identity until Zellij confirms its exit.
 
+When a tab becomes visible again, the plugin repaints its current output at
+once. It refreshes data only when its last successful result is at least one
+interval old and no request is running, so switching between fresh tabs adds
+no probes.
+
 ## Permissions
 
 The default configuration requests these permissions:
@@ -151,6 +184,18 @@ make grant-zellij-permissions PLUGIN=~/.config/zellij/plugins/showy-quota-zellij
 # or call the CLI directly:
 showy-quota --grant-zellij [/abs/path/to/plugin.wasm]
 ```
+
+To inspect a grant without writing anything:
+
+```sh
+# What would be written, plus each key's current status. Writes nothing.
+showy-quota --grant-zellij --dry-run [--manage-serve] [--cli-fallback] [path]
+# Exit 0 if any key grants every requested permission, 1 otherwise.
+showy-quota --grant-zellij --check [--manage-serve] [--cli-fallback] [path]
+```
+
+An absent permissions file counts as missing. Both modes need the plugin file
+to exist unless you pass `--force`, and you cannot combine them.
 
 macOS:
 
@@ -241,6 +286,7 @@ Common options:
 |`manage_serve`|`true`|Ask Zellij to start `codexbar serve` in a hidden background command pane when `/health` is unavailable.|
 |`serve_command`|`codexbar`|Command used for managed serve startup.|
 |`serve_port`|URL port|Port passed to `codexbar serve --port`; defaults to the port in `serve_url` so custom localhost ports stay aligned.|
+|`serve_refresh_seconds`|`120`|`--refresh-interval` passed to a plugin-managed `codexbar serve`: how often that serve re-collects provider data. Falls back to `SHOWY_QUOTA_REFRESH_SECONDS` in the KDL block, matching the shell freshness contract. Has no effect on a serve you start yourself.|
 |`interval_seconds`|`60`|Serve refresh cadence; timers are one-shot and re-armed after each tick. Serve only re-collects once per its `--refresh-interval` (a plugin-managed serve collects every 120 s), so polling much faster mostly re-downloads identical JSON.|
 |`cli_fallback`|`degraded`|`degraded` or `off`. Degraded fallback appends `degraded_cli_glyph`.|
 |`build_marker`|`false`|Opt-in stale-build warning. When `true`, the plugin periodically probes the installed `codexbar --version` and appends `⚠ver` while the running serve's `/health` version differs (detection only — never recycles a session serve). Off by default: the version probe does not run and no marker shows. Needs `cli_fallback` enabled (the probe uses `RunCommands`).|

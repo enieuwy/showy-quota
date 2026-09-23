@@ -205,9 +205,16 @@ fn shim_request_permission(_permissions: &[PermissionType]) {}
 fn shim_set_timeout(secs: f64) {
     set_timeout(secs);
 }
+#[cfg(all(test, not(target_arch = "wasm32")))]
+thread_local! {
+    static TEST_TIMER_CALLS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
 
 #[cfg(not(target_arch = "wasm32"))]
-fn shim_set_timeout(_secs: f64) {}
+fn shim_set_timeout(_secs: f64) {
+    #[cfg(test)]
+    TEST_TIMER_CALLS.with(|calls| calls.set(calls.get() + 1));
+}
 
 #[cfg(target_arch = "wasm32")]
 fn shim_web_request(
@@ -622,7 +629,31 @@ impl ZellijPlugin for State {
                 self.tick();
                 self.last_output != previous_output
             }
-            Event::Visible(true) => true,
+            Event::Visible(true) => {
+                if self.permissions_granted {
+                    self.refresh_output();
+                }
+                let interval = if self.source == Source::Cli {
+                    self.cli_interval_seconds
+                } else {
+                    self.interval_seconds
+                };
+                // A fresh snapshot needs no tab-switch probe or extra wakeup.
+                if self.permissions_granted
+                    && self
+                        .last_success_seconds
+                        .map(|last| (now_seconds() - last).max(0.0) >= interval)
+                        .unwrap_or(true)
+                    && !self.health_in_flight
+                    && !self.usage_in_flight
+                    && !self.discovery_in_flight
+                    && !self.version_probe_in_flight
+                    && !self.has_provider_work_in_flight()
+                {
+                    self.tick();
+                }
+                true
+            }
             Event::WebRequestResult(status, _headers, body, context) => {
                 let previous_output = self.last_output.clone();
                 match context.get("kind").map(String::as_str) {
@@ -2455,6 +2486,82 @@ mod tests {
         assert!(state.refresh_output());
 
         assert!(!state.update(Event::Timer(0.0)));
+    }
+
+    fn visible_serve_state(age_seconds: Option<f64>) -> State {
+        State {
+            permissions_granted: true,
+            source: Source::Serve,
+            cli_fallback: CliFallback::Off,
+            last_payload: Some(mixed_payload()),
+            last_success_seconds: age_seconds.map(|age| now_seconds() - age),
+            ..State::default()
+        }
+    }
+
+    #[test]
+    fn visible_stale_snapshot_kicks_usage_probe() {
+        let mut state = visible_serve_state(Some(61.0));
+
+        assert!(state.update(Event::Visible(true)));
+        assert_ne!(state.last_output, " showy-quota: loading ");
+        assert!(state.usage_in_flight);
+        assert_eq!(state.active_usage_generation, Some(1));
+
+        let mut without_success = visible_serve_state(None);
+        assert!(without_success.update(Event::Visible(true)));
+        assert!(without_success.usage_in_flight);
+    }
+
+    #[test]
+    fn visible_with_request_in_flight_does_not_start_duplicate() {
+        let mut usage = visible_serve_state(Some(61.0));
+        arm_usage_probe(&mut usage, 1);
+        assert!(usage.update(Event::Visible(true)));
+        assert_eq!(usage.active_usage_generation, Some(1));
+        assert_eq!(usage.health_generation, 0);
+
+        let mut health = visible_serve_state(Some(61.0));
+        arm_health_probe(&mut health, 1);
+        assert!(health.update(Event::Visible(true)));
+        assert_eq!(health.active_health_generation, Some(1));
+        assert_eq!(health.usage_generation, 0);
+
+        let mut cli = visible_serve_state(Some(61.0));
+        arm_provider_attempt(&mut cli, "codex");
+        assert!(cli.update(Event::Visible(true)));
+        assert_eq!(cli.usage_generation, 0);
+    }
+
+    #[test]
+    fn visible_fresh_snapshot_does_not_probe() {
+        let mut state = visible_serve_state(Some(1.0));
+
+        assert!(state.update(Event::Visible(true)));
+        assert_eq!(state.usage_generation, 0);
+        assert_eq!(state.health_generation, 0);
+        assert!(!state.discovery_in_flight);
+    }
+
+    #[test]
+    fn visible_stale_snapshot_does_not_arm_another_timer() {
+        let mut state = visible_serve_state(Some(61.0));
+        let before = TEST_TIMER_CALLS.with(|calls| calls.get());
+
+        assert!(state.update(Event::Visible(true)));
+        assert!(state.usage_in_flight);
+        assert_eq!(TEST_TIMER_CALLS.with(|calls| calls.get()), before);
+    }
+
+    #[test]
+    fn visible_without_permission_preserves_denial() {
+        let mut state = visible_serve_state(Some(61.0));
+        state.permissions_granted = false;
+        state.last_output = " showy-quota: permission denied ".into();
+
+        assert!(state.update(Event::Visible(true)));
+        assert_eq!(state.last_output, " showy-quota: permission denied ");
+        assert_eq!(state.usage_generation, 0);
     }
 
     #[test]

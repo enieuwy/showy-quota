@@ -12,6 +12,12 @@ BIN_DIR       ?= $(PREFIX)/bin
 DATA_DIR      ?= $(PREFIX)/share/showy-quota
 SKETCHYBAR    ?= $(HOME)/.config/sketchybar
 ZELLIJ_PLUGINS ?= $(HOME)/.config/zellij/plugins
+COMPLETIONS_DATA_HOME ?= $(if $(XDG_DATA_HOME),$(XDG_DATA_HOME),$(PREFIX)/share)
+COMPLETIONS_CONFIG_HOME ?= $(if $(XDG_CONFIG_HOME),$(XDG_CONFIG_HOME),$(HOME)/.config)
+BASH_COMPLETIONS_DIR ?= $(COMPLETIONS_DATA_HOME)/bash-completion/completions
+# Add this directory to fpath before compinit: $(ZSH_COMPLETIONS_DIR)
+ZSH_COMPLETIONS_DIR ?= $(COMPLETIONS_DATA_HOME)/zsh/site-functions
+FISH_COMPLETIONS_DIR ?= $(COMPLETIONS_CONFIG_HOME)/fish/completions
 SBAR_ITEMS    ?= $(SKETCHYBAR)/items
 SBAR_PLUGINS  ?= $(SKETCHYBAR)/plugins
 FORCE         ?= 0
@@ -50,7 +56,7 @@ RENDER_CRATE  := showy-quota-zellij-core
 RENDER_BIN    := $(REPO)/target/release/showy-quota-render
 RENDER_TARGET := $(BIN_DIR)/showy-quota-render
 
-.PHONY: help doctor check-deps diagnose install install-bin install-copy install-copy-sketchybar install-sketchybar plugin render-bin install-plugin grant-zellij-permissions install-all uninstall test lint ci-gates hooks clean
+.PHONY: help doctor check-deps diagnose install install-bin install-copy install-copy-sketchybar install-sketchybar install-completions plugin render-bin install-plugin grant-zellij-permissions install-all uninstall test lint ci-gates hooks clean
 
 help: ## Show this help.
 	@awk 'BEGIN{FS=":.*##"}/^[a-zA-Z_-]+:.*##/{printf "  \033[36m%-20s\033[0m %s\n",$$1,$$2}' $(MAKEFILE_LIST)
@@ -211,6 +217,36 @@ install-sketchybar:
 		printf 'linked %s\n' "$$target"; \
 	done
 
+install-completions: ## Link Bash, zsh, and fish completions for all three commands.
+	@mkdir -p "$(BASH_COMPLETIONS_DIR)" "$(ZSH_COMPLETIONS_DIR)" "$(FISH_COMPLETIONS_DIR)"
+	@for pair in \
+		"$(REPO)/share/completions/showy-quota.bash:$(BASH_COMPLETIONS_DIR)/showy-quota" \
+		"$(REPO)/share/completions/showy-quota.bash:$(BASH_COMPLETIONS_DIR)/showy-quota-fetch" \
+		"$(REPO)/share/completions/showy-quota.bash:$(BASH_COMPLETIONS_DIR)/showy-quota-state" \
+		"$(REPO)/share/completions/_showy-quota:$(ZSH_COMPLETIONS_DIR)/_showy-quota" \
+		"$(REPO)/share/completions/_showy-quota:$(ZSH_COMPLETIONS_DIR)/_showy-quota-fetch" \
+		"$(REPO)/share/completions/_showy-quota:$(ZSH_COMPLETIONS_DIR)/_showy-quota-state" \
+		"$(REPO)/share/completions/showy-quota.fish:$(FISH_COMPLETIONS_DIR)/showy-quota.fish" \
+		"$(REPO)/share/completions/showy-quota.fish:$(FISH_COMPLETIONS_DIR)/showy-quota-fetch.fish" \
+		"$(REPO)/share/completions/showy-quota.fish:$(FISH_COMPLETIONS_DIR)/showy-quota-state.fish"; do \
+		src=$${pair%%:*}; target=$${pair#*:}; \
+		if [ -L "$$target" ]; then \
+			cur=$$(readlink "$$target"); \
+			if [ "$$cur" = "$$src" ]; then \
+				printf 'noop  %s -> %s (already current)\n' "$$target" "$$src"; \
+				continue; \
+			fi; \
+			if [ "$(FORCE)" != "1" ]; then \
+				printf 'refusing to retarget %s\n  was: %s\n  now: %s\n  set FORCE=1 to adopt this symlink\n' "$$target" "$$cur" "$$src" >&2; \
+				exit 1; \
+			fi; \
+		elif [ -e "$$target" ]; then \
+			printf 'refusing to clobber %s (not a symlink)\n' "$$target" >&2; \
+			exit 1; \
+		fi; \
+		ln -sfn "$$src" "$$target" || exit 1; \
+		printf 'linked %s -> %s\n' "$$target" "$$src"; \
+	done
 # A real file target, not a phony one: the suite runs whatever binary is at
 # RENDER_BIN, so a stale artefact from an older checkout silently tests old
 # code. That is not hypothetical — it is what made a renderer failure
@@ -252,7 +288,7 @@ install-plugin: plugin ## Install the standalone Zellij WASM plugin (pre-grants 
 grant-zellij-permissions: ## Pre-grant Zellij plugin permissions (override path with PLUGIN=/abs/plugin.wasm).
 	@ZELLIJ_PLUGINS="$(ZELLIJ_PLUGINS)" "$(REPO)/bin/showy-quota" --grant-zellij "$(PLUGIN)"
 
-install-all: install-bin install-sketchybar install-plugin ## Install shared scripts and every optional integration.
+install-all: install-bin install-sketchybar install-plugin install-completions ## Install shared scripts and every optional integration.
 uninstall: ## Remove symlinks and copied DATA_DIR that this Makefile created.
 	@for name in $(BIN_NAMES); do \
 		src="$(REPO)/bin/$$name"; \
@@ -304,6 +340,26 @@ uninstall: ## Remove symlinks and copied DATA_DIR that this Makefile created.
 	@for pair in \
 		"$(DATA_DIR)/adapters/sketchybar/items/showy_quota.sh:$(SBAR_ITEMS)/showy_quota.sh" \
 		"$(DATA_DIR)/adapters/sketchybar/plugins/showy_quota.sh:$(SBAR_PLUGINS)/showy_quota.sh"; do \
+		src=$${pair%%:*}; target=$${pair#*:}; \
+		if [ -L "$$target" ]; then \
+			cur=$$(readlink "$$target"); \
+			if [ "$$cur" = "$$src" ]; then \
+				rm -f "$$target"; printf 'removed %s\n' "$$target"; \
+			else \
+				printf 'skip %s (points to %s)\n' "$$target" "$$cur" >&2; \
+			fi; \
+		fi; \
+	done
+	@for pair in \
+		"$(REPO)/share/completions/showy-quota.bash:$(BASH_COMPLETIONS_DIR)/showy-quota" \
+		"$(REPO)/share/completions/showy-quota.bash:$(BASH_COMPLETIONS_DIR)/showy-quota-fetch" \
+		"$(REPO)/share/completions/showy-quota.bash:$(BASH_COMPLETIONS_DIR)/showy-quota-state" \
+		"$(REPO)/share/completions/_showy-quota:$(ZSH_COMPLETIONS_DIR)/_showy-quota" \
+		"$(REPO)/share/completions/_showy-quota:$(ZSH_COMPLETIONS_DIR)/_showy-quota-fetch" \
+		"$(REPO)/share/completions/_showy-quota:$(ZSH_COMPLETIONS_DIR)/_showy-quota-state" \
+		"$(REPO)/share/completions/showy-quota.fish:$(FISH_COMPLETIONS_DIR)/showy-quota.fish" \
+		"$(REPO)/share/completions/showy-quota.fish:$(FISH_COMPLETIONS_DIR)/showy-quota-fetch.fish" \
+		"$(REPO)/share/completions/showy-quota.fish:$(FISH_COMPLETIONS_DIR)/showy-quota-state.fish"; do \
 		src=$${pair%%:*}; target=$${pair#*:}; \
 		if [ -L "$$target" ]; then \
 			cur=$$(readlink "$$target"); \

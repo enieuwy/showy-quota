@@ -1,0 +1,20 @@
+// showy-quota — standalone Zellij plugin pane, serve-only mode.
+// Use this when you supervise `codexbar serve` yourself (launchd, systemd,
+// a dotfile manager) and the Zellij server does not need the `codexbar` CLI.
+// Add inside default_tab_template (after `children`) or inside a tab block.
+// See docs/plugin.md "Serve-only mode".
+//
+// With manage_serve false and cli_fallback "off" the plugin only requests
+// WebAccess: it reads /health and /usage from the loopback serve and never
+// opens a background pane or runs a command. If serve is down before the
+// first success the pane shows "showy-quota: CodexBar serve unavailable";
+// after a success it keeps the last-known-good strip and marks it stale.
+
+pane size=1 borderless=true {
+    plugin location="file:~/.config/zellij/plugins/showy-quota-zellij.wasm" {
+        serve_url "http://127.0.0.1:8080"
+        manage_serve false
+        cli_fallback "off"
+        interval_seconds 60
+    }
+}

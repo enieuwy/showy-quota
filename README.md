@@ -96,6 +96,12 @@ bin/showy-quota-fetch     ←  shared cache envelope + flock + last-known-good
    `make install`, and `make install-plugin` refuse to clobber existing files
    unless you run with `FORCE=1`.
 
+   Shell completions (Bash, zsh, fish) for `showy-quota`, `showy-quota-fetch`,
+   and `showy-quota-state`: `make install-completions` (also part of
+   `make install-all`). For zsh, add
+   `${XDG_DATA_HOME:-$HOME/.local/share}/zsh/site-functions` to `fpath` before
+   `compinit`.
+
 3. **Wire a UI.** Pick the UI(s) you use:
 
    - **SketchyBar:** `make install-copy-sketchybar` for a release/copy install

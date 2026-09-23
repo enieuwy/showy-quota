@@ -91,6 +91,10 @@ make grant-zellij-permissions PLUGIN=~/.config/zellij/plugins/showy-quota-zellij
 showy-quota --grant-zellij [/abs/path/to/plugin.wasm]
 ```
 
+Add `--check` (read-only; exit 0 when the grant is complete) or `--dry-run`
+(print what would be written) to inspect a grant without changing it; see
+[`docs/plugin.md`](plugin.md#permissions).
+
 macOS:
 
 ```kdl

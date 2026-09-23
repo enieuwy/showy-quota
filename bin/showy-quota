@@ -26,7 +26,7 @@ THEME_NAME_RE='^[A-Za-z0-9._-]+$'
 
 usage() {
     printf '%s\n' \
-        'Usage: showy-quota [--set <name>|--unset|--current|--list|--preview <name>|--diagnose [--json] [--redact]|--grant-zellij [opts] [path]]' \
+        'Usage: showy-quota [--set <name>|--unset|--current|--list|--preview <name>|--diagnose [--json] [--redact]|--grant-zellij [--dry-run|--check] [opts] [path]]' \
         '       showy-quota guard [opts]   |   showy-quota prompt [opts]   (run either with -h for details)' \
         '' \
         'With no flags, opens an interactive theme selector when fzf and a TTY are available.' \
@@ -39,7 +39,7 @@ usage() {
         '  --list            Print available theme names, one per line' \
         '  --preview <name>  Print one ANSI preview strip for a theme' \
         '  --diagnose        Print runtime state useful for bug reports (--json for machines, --redact for paste-safe output)' \
-        '  --grant-zellij [opts] [p] Pre-grant minimal Zellij permissions; opts: --manage-serve, --cli-fallback, --force' \
+        '  --grant-zellij [opts] [p] Pre-grant or inspect Zellij permissions; opts: --dry-run, --check, --manage-serve, --cli-fallback, --force' \
         '  guard [opts]      Evaluate quota thresholds for automation (exit 0/1/2/3); "guard -h" for options' \
         '  prompt [opts]     Print a one-line quota segment for shell prompts; "prompt -h" for options' \
         '  -h, --help        Show this help'
@@ -603,6 +603,37 @@ diagnose_tools_json() {
     printf '}'
 }
 
+# Probe the configured CodexBar serve for --diagnose. Only /health is read: it
+# proves the serve process answers without asking it for /usage, which may
+# trigger a provider collection. Sets SERVE_PROBE_URL, SERVE_PROBE_STATUS
+# (disabled|non-local|no-curl|reachable|unreachable) and SERVE_PROBE_VERSION.
+diagnose_serve_probe() {
+    local url body
+    SERVE_PROBE_URL=""
+    SERVE_PROBE_STATUS=""
+    SERVE_PROBE_VERSION=""
+    # Resolve config.env + shared defaults in a subshell so they do not leak
+    # into this process and show up in the "set values only" env listing.
+    url="$(load_state_libs >/dev/null 2>&1; printf '%s' "${SHOWY_QUOTA_CODEXBAR_SERVE_URL-}")"
+    url="${url%/}"
+    SERVE_PROBE_URL="${url}"
+    if [[ -z "${url}" ]]; then
+        SERVE_PROBE_STATUS=disabled
+    elif ! [[ "${url}" =~ ^http://(127[.]0[.]0[.]1|localhost|\[::1\])(:[0-9]+)?$ ]]; then
+        # showy-quota-fetch ignores non-local serve URLs; never probe them.
+        SERVE_PROBE_STATUS=non-local
+    elif ! command -v curl >/dev/null 2>&1; then
+        SERVE_PROBE_STATUS=no-curl
+    elif body="$(curl --fail --silent --max-time 2 "${url}/health" 2>/dev/null)"; then
+        SERVE_PROBE_STATUS=reachable
+        if command -v jq >/dev/null 2>&1; then
+            SERVE_PROBE_VERSION="$(jq -r 'if type == "object" then (.version // empty | tostring) else empty end' <<< "${body}" 2>/dev/null || true)"
+        fi
+    else
+        SERVE_PROBE_STATUS=unreachable
+    fi
+}
+
 diagnose_json() {
     command -v jq >/dev/null 2>&1 || die 'jq is required for --diagnose --json'
 
@@ -660,6 +691,8 @@ diagnose_json() {
     env_json=$(diagnose_env_json)
     required_tools_json=$(diagnose_tools_json bash jq codexbar)
     optional_tools_json=$(diagnose_tools_json curl flock sketchybar magick rsvg-convert zellij tmux fzf)
+    local SERVE_PROBE_URL SERVE_PROBE_STATUS SERVE_PROBE_VERSION
+    diagnose_serve_probe
 
     jq -n \
         --arg showyQuota "$(diagnose_redact_value "${SCRIPT_PATH}")" \
@@ -683,6 +716,9 @@ diagnose_json() {
         --arg codexbarVersion "$(diagnose_redact_value "${cb_version}")" \
         --argjson codexbarAvailable "${cb_available}" \
         --argjson cachedProviderCount "${cb_cache_count_json}" \
+        --arg serveUrl "$(diagnose_redact_value "${SERVE_PROBE_URL}")" \
+        --arg serveStatus "${SERVE_PROBE_STATUS}" \
+        --arg serveVersion "$(diagnose_redact_value "${SERVE_PROBE_VERSION}")" \
         --argjson redacted "$( (( DIAGNOSE_REDACT )) && printf 'true' || printf 'false' )" \
         '{
             redacted: $redacted,
@@ -720,6 +756,12 @@ diagnose_json() {
                 path: (if $codexbarPath == "" then null else $codexbarPath end),
                 version: (if $codexbarVersion == "" then null else $codexbarVersion end),
                 cachedProviderCount: $cachedProviderCount
+            },
+            serveProbe: {
+                url: (if $serveUrl == "" then null else $serveUrl end),
+                status: $serveStatus,
+                healthReachable: ($serveStatus == "reachable"),
+                version: (if $serveVersion == "" then null else $serveVersion end)
             }
         }'
 }
@@ -799,7 +841,7 @@ diagnose() {
     printf '\n# CodexBar probe\n'
     local cb="${SHOWY_QUOTA_CODEXBAR_BIN:-codexbar}"
     if ! command -v "${cb}" >/dev/null 2>&1; then
-        printf 'codexbar binary not on PATH (set SHOWY_QUOTA_CODEXBAR_BIN or install codexbar)\n'
+        printf 'codexbar binary not on PATH (set SHOWY_QUOTA_CODEXBAR_BIN or install codexbar; serve-only setups need the serve below)\n'
     else
         # SHOWY_QUOTA_MANAGE_SERVE (default 1) spawns this exact binary, so a
         # bug report needs to name which build was running.
@@ -819,6 +861,23 @@ diagnose() {
             printf 'no cache yet; run bin/showy-quota-fetch --refresh to populate, then re-run --diagnose\n'
         fi
     fi
+
+    printf '\n# CodexBar serve\n'
+    local SERVE_PROBE_URL SERVE_PROBE_STATUS SERVE_PROBE_VERSION
+    diagnose_serve_probe
+    case "${SERVE_PROBE_STATUS}" in
+        disabled)
+            printf 'serve:        disabled (SHOWY_QUOTA_CODEXBAR_SERVE_URL is empty)\n' ;;
+        non-local)
+            printf 'serve:        %s ignored (only loopback serve URLs are used)\n' "$(diagnose_redact_value "${SERVE_PROBE_URL}")" ;;
+        no-curl)
+            printf 'serve:        %s not probed (curl missing)\n' "$(diagnose_redact_value "${SERVE_PROBE_URL}")" ;;
+        reachable)
+            printf 'serve:        %s/health reachable%s\n' "$(diagnose_redact_value "${SERVE_PROBE_URL}")" \
+                "${SERVE_PROBE_VERSION:+ (version $(diagnose_redact_value "${SERVE_PROBE_VERSION}"))}" ;;
+        *)
+            printf 'serve:        %s/health unreachable\n' "$(diagnose_redact_value "${SERVE_PROBE_URL}")" ;;
+    esac
 }
 
 zellij_permissions_file() {
@@ -853,12 +912,15 @@ resolve_abs_path() {
     printf '%s' "${path}"
 }
 
+ZELLIJ_PERMISSION_BLOCK_RE='^[[:space:]]*"?([^"{]*[^"[:space:]{])"?[[:space:]]*\{[[:space:]]*$'
+ZELLIJ_PERMISSION_CLOSE_RE='^[[:space:]]*\}[[:space:]]*$'
+
 # Rebuild a permissions file from the snapshot held under its write lock.
 write_zellij_permissions() {
     local perms_file="$1" section="keys" value
     shift
-    local block_re='^[[:space:]]*"?([^"{]*[^"[:space:]{])"?[[:space:]]*\{[[:space:]]*$'
-    local close_re='^[[:space:]]*\}[[:space:]]*$'
+    local block_re="${ZELLIJ_PERMISSION_BLOCK_RE}"
+    local close_re="${ZELLIJ_PERMISSION_CLOSE_RE}"
     local -a keys=() permissions=() kept=()
     local skipping=0 line name key managed last permission tmp
 
@@ -921,6 +983,77 @@ write_zellij_permissions() {
     fi
 }
 
+# Inspect complete blocks without opening a lock or creating a cache directory.
+# Report the last complete block when a key appears more than once.
+read_zellij_permission_status() {
+    local perms_file="$1" section="keys" value line name permission expected
+    local index=-1 i matched complete_block
+    local -a keys=() expected_permissions=() seen=() granted=() complete=() block_permissions=()
+    shift
+    while (($#)); do
+        value="$1"
+        shift
+        if [[ "${value}" == "--" && "${section}" == "keys" ]]; then
+            section="permissions"
+        elif [[ "${section}" == "keys" ]]; then
+            keys+=("${value}")
+        else
+            expected_permissions+=("${value}")
+        fi
+    done
+
+    for i in "${!keys[@]}"; do
+        seen[i]=0
+        granted[i]=""
+        complete[i]=0
+    done
+
+    if [[ -f "${perms_file}" && -r "${perms_file}" ]]; then
+        while IFS= read -r line || [[ -n "${line}" ]]; do
+            if (( index >= 0 )); then
+                if [[ "${line}" =~ ${ZELLIJ_PERMISSION_CLOSE_RE} ]]; then
+                    seen[index]=1
+                    granted[index]="${block_permissions[*]}"
+                    complete_block=1
+                    for expected in "${expected_permissions[@]}"; do
+                        matched=0
+                        for permission in "${block_permissions[@]}"; do
+                            [[ "${permission}" == "${expected}" ]] && { matched=1; break; }
+                        done
+                        (( matched )) || complete_block=0
+                    done
+                    complete[index]="${complete_block}"
+                    index=-1
+                elif [[ "${line}" =~ ^[[:space:]]*([A-Za-z][A-Za-z0-9]*)[[:space:]]*$ ]]; then
+                    block_permissions+=("${BASH_REMATCH[1]}")
+                fi
+                continue
+            fi
+            if [[ "${line}" =~ ${ZELLIJ_PERMISSION_BLOCK_RE} ]]; then
+                name="${BASH_REMATCH[1]}"
+                for i in "${!keys[@]}"; do
+                    if [[ "${name}" == "${keys[i]}" ]]; then
+                        index="${i}"
+                        block_permissions=()
+                        break
+                    fi
+                done
+            fi
+        done < "${perms_file}"
+    fi
+
+    matched=0
+    for i in "${!keys[@]}"; do
+        if (( seen[i] )); then
+            printf '  %s: present (%s)\n' "${keys[i]}" "${granted[i]}"
+            (( complete[i] )) && matched=1
+        else
+            printf '  %s: missing\n' "${keys[i]}"
+        fi
+    done
+    (( matched ))
+}
+
 # Pre-grant the standalone Zellij plugin's permissions so it never prompts on
 # first launch. The grant lives in Zellij's permissions.kdl (a cache file that
 # macOS may purge), keyed by the plugin's location; re-running this is safe and
@@ -928,7 +1061,7 @@ write_zellij_permissions() {
 # always granted; the two optional capabilities mirror the plugin's config.
 grant_zellij() {
     local plugin_arg="" plugin_path plugins_dir
-    local manage_serve=0 cli_fallback=0 force=0
+    local manage_serve=0 cli_fallback=0 force=0 dry_run=0 check=0
     local -a permissions=("WebAccess")
 
     while (($#)); do
@@ -936,6 +1069,8 @@ grant_zellij() {
             --manage-serve) manage_serve=1 ;;
             --cli-fallback) cli_fallback=1 ;;
             --force) force=1 ;;
+            --dry-run) dry_run=1 ;;
+            --check) check=1 ;;
             --)
                 shift
                 (($# <= 1)) || usage_error '--grant-zellij accepts at most one plugin path'
@@ -954,6 +1089,8 @@ grant_zellij() {
         esac
         shift
     done
+
+    (( ! dry_run || ! check )) || usage_error '--dry-run and --check are mutually exclusive'
 
     if [[ -n "${plugin_arg}" ]]; then
         plugin_path="$(resolve_abs_path "${plugin_arg}")"
@@ -984,6 +1121,27 @@ grant_zellij() {
 
     local perms_file perms_dir
     perms_file="$(zellij_permissions_file)"
+    if (( dry_run || check )); then
+        if (( dry_run )); then
+            printf 'showy-quota: Zellij permissions dry run (no changes)\n'
+        else
+            printf 'showy-quota: Zellij permissions check\n'
+        fi
+        printf '  permissions file: %s\n' "${perms_file}"
+        printf '  plugin path:      %s\n' "${plugin_path}"
+        if (( dry_run )); then
+            printf '  would write keys and permissions:\n'
+        else
+            printf '  required permissions:\n'
+        fi
+        printf '   %s\n' "${permissions[@]}"
+        if read_zellij_permission_status "${perms_file}" "${keys[@]}" -- "${permissions[@]}"; then
+            return 0
+        fi
+        (( dry_run )) && return 0
+        return 1
+    fi
+
     perms_dir="${perms_file%/*}"
     mkdir -p -- "${perms_dir}" || die "cannot create ${perms_dir}"
 

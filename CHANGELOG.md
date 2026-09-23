@@ -6,6 +6,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+- Standalone Zellij plugin: a tab that becomes visible repaints at once and,
+  when its data is at least one interval old and nothing is in flight, starts
+  the same probe a timer tick would. Fresh tabs add no probes and no timers.
+- `showy-quota --grant-zellij --dry-run` prints what a grant would write and
+  each key's current status without touching `permissions.kdl`;
+  `--grant-zellij --check` reports each key and exits 0 only when one grants
+  every requested permission.
+- Serve-only mode is documented as a supported Zellij setup
+  (`manage_serve false`, `cli_fallback "off"`, `WebAccess` only), with
+  `adapters/zellij/layout-pane-serve-only.kdl.fragment`. `--diagnose` gains a
+  `CodexBar serve` section (JSON `serveProbe`) that probes `/health` at the
+  configured loopback serve URL; it never calls `/usage`.
+- Bash, zsh, and fish completions for `showy-quota`, `showy-quota-fetch`, and
+  `showy-quota-state` (`make install-completions`, included in
+  `make install-all`).
+- `docs/plugin.md` lists the `serve_refresh_seconds` KDL key.
 - A failed refresh can now explain itself. The SketchyBar background cycle runs
   the fetcher with stderr on `/dev/null`, so `SHOWY_QUOTA_DEBUG` never reached
   it and a provider could go grey with no record of why. Set

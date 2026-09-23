@@ -1,0 +1,58 @@
+#compdef showy-quota showy-quota-fetch showy-quota-state
+
+_showy-quota() {
+    local mode="${words[2]}" previous=""
+    local -a options themes
+    (( CURRENT > 1 )) && previous="${words[CURRENT-1]}"
+
+    case "${words[1]:t}" in
+        showy-quota-fetch)
+            options=(--refresh --json --cache-only --age --path --stop-serve -h --help)
+            _describe 'option' options
+            return ;;
+        showy-quota-state)
+            options=(--json --count --providers --no-fetch -h --help)
+            _describe 'option' options
+            return ;;
+    esac
+
+    if [[ "${previous}" == --set || "${previous}" == --preview ]]; then
+        # --list reads local theme directories and prints undecorated names.
+        themes=("${(@f)$(showy-quota --list 2>/dev/null)}")
+        _describe 'theme' themes
+        return
+    fi
+    case "${mode}" in
+        guard)
+            case "${previous}" in
+                --window)
+                    options=(primary secondary tertiary worst)
+                    _describe 'window' options
+                    return ;;
+                --provider|--min-remaining|--max-used|--wait-max)
+                    _message 'value'
+                    return ;;
+            esac
+            options=(--provider --window --min-remaining --max-used --no-fetch --allow-stale --wait-max --json --quiet -h --help) ;;
+        prompt)
+            if [[ "${previous}" == --provider ]]; then
+                _message 'provider ID'
+                return
+            fi
+            options=(--ansi --provider -h --help) ;;
+        --diagnose)
+            options=(--json --redact) ;;
+        --grant-zellij)
+            if [[ "${PREFIX}" != -* ]]; then
+                _files
+                return
+            fi
+            options=(--manage-serve --cli-fallback --force --dry-run --check) ;;
+        *)
+            (( CURRENT == 2 )) || return
+            options=(--set --unset --current --list --preview --diagnose --grant-zellij guard prompt -h --help) ;;
+    esac
+    _describe 'option' options
+}
+
+_showy-quota "$@"

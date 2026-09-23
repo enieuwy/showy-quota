@@ -1275,9 +1275,59 @@ run_grant() {
     env \
         PATH="${stub_dir}:${PATH}" \
         HOME="${grant_home}" \
-        SHOWY_QUOTA_ZELLIJ_PERMISSIONS_FILE="${grant_perms}" \
+        SHOWY_QUOTA_ZELLIJ_PERMISSIONS_FILE="${grant_override_perms:-${grant_perms}}" \
         "${REPO_ROOT}/bin/showy-quota" --grant-zellij "$@"
 }
+
+# Read-only modes must report every key without creating the cache directory.
+grant_absent_file="${grant_home}/absent-cache/permissions.kdl"
+grant_absent_dir="${grant_home}/absent-cache"
+grant_check_rc=0
+grant_check_output=$(grant_override_perms="${grant_absent_file}" run_grant --check "${grant_plugin}") || grant_check_rc=$?
+assert_equals "grant --check fails when permissions file is absent" "1" "${grant_check_rc}"
+assert_contains "grant --check reports missing bare key" "${grant_plugin}: missing" "${grant_check_output}"
+assert_contains "grant --check reports missing file: URL key" "file:${grant_plugin}: missing" "${grant_check_output}"
+assert_contains "grant --check reports missing file:~ key" "file:~/.config/zellij/plugins/showy-quota-zellij-chezmoi.wasm: missing" "${grant_check_output}"
+grant_dry_rc=0
+grant_dry_output=$(grant_override_perms="${grant_absent_file}" run_grant --dry-run "${grant_plugin}") || grant_dry_rc=$?
+assert_equals "grant --dry-run succeeds with absent permissions file" "0" "${grant_dry_rc}"
+assert_contains "grant --dry-run names the permissions file" "${grant_absent_file}" "${grant_dry_output}"
+assert_contains "grant --dry-run names the plugin" "${grant_plugin}" "${grant_dry_output}"
+assert_contains "grant --dry-run shows expected permissions" "WebAccess" "${grant_dry_output}"
+assert_contains "grant --dry-run reports missing keys" "${grant_plugin}: missing" "${grant_dry_output}"
+if [[ ! -e "${grant_absent_dir}" ]]; then
+    ok "grant read-only modes do not create the permissions directory"
+else
+    fail "grant read-only modes do not create the permissions directory"
+fi
+grant_conflict_rc=0
+run_grant --dry-run --check "${grant_plugin}" >/dev/null 2>&1 || grant_conflict_rc=$?
+assert_equals "grant rejects --dry-run with --check as usage error" "2" "${grant_conflict_rc}"
+
+grant_before_checksum=$(cksum < "${grant_perms}")
+case "$(uname -s)" in
+    Darwin) grant_before_mtime=$(stat -f %m "${grant_perms}") ;;
+    *) grant_before_mtime=$(stat -c %Y "${grant_perms}") ;;
+esac
+run_grant --dry-run "${grant_plugin}" >/dev/null
+assert_equals "grant --dry-run preserves existing permissions bytes" "${grant_before_checksum}" "$(cksum < "${grant_perms}")"
+case "$(uname -s)" in
+    Darwin) grant_after_mtime=$(stat -f %m "${grant_perms}") ;;
+    *) grant_after_mtime=$(stat -c %Y "${grant_perms}") ;;
+esac
+assert_equals "grant --dry-run preserves existing permissions mtime" "${grant_before_mtime}" "${grant_after_mtime}"
+grant_check_rc=0
+grant_check_output=$(run_grant --check "${grant_plugin}") || grant_check_rc=$?
+assert_equals "grant --check fails when only an unrelated key exists" "1" "${grant_check_rc}"
+assert_contains "grant --check excludes unrelated grants" "${grant_plugin}: missing" "${grant_check_output}"
+
+grant_single_perms="${grant_home}/single-permissions.kdl"
+printf '"file:~/.config/zellij/plugins/showy-quota-zellij-chezmoi.wasm" {\n    WebAccess\n}\n' > "${grant_single_perms}"
+grant_check_rc=0
+grant_check_output=$(grant_override_perms="${grant_single_perms}" run_grant --check "${grant_plugin}") || grant_check_rc=$?
+assert_equals "grant --check accepts one matching key" "0" "${grant_check_rc}"
+assert_contains "grant --check reports matching file:~ key" "file:~/.config/zellij/plugins/showy-quota-zellij-chezmoi.wasm: present (WebAccess)" "${grant_check_output}"
+assert_contains "grant --check reports other keys missing" "${grant_plugin}: missing" "${grant_check_output}"
 
 run_grant "${grant_plugin}" >/dev/null
 grant_content="$(< "${grant_perms}")"
@@ -1288,6 +1338,15 @@ assert_contains "grant requests WebAccess by default" "WebAccess" "${grant_conte
 assert_contains "grant preserves unrelated plugin block" '"/other/plugin.wasm" {' "${grant_content}"
 assert_contains "grant preserves unrelated permission" "ReadApplicationState" "${grant_content}"
 assert_not_contains "grant omits RunCommands by default" "RunCommands" "${grant_content}"
+
+grant_check_rc=0
+grant_check_output=$(run_grant --check "${grant_plugin}") || grant_check_rc=$?
+assert_equals "grant --check succeeds with matching grant" "0" "${grant_check_rc}"
+assert_contains "grant --check reports granted permission" "${grant_plugin}: present (WebAccess)" "${grant_check_output}"
+grant_check_rc=0
+grant_check_output=$(run_grant --check --cli-fallback "${grant_plugin}") || grant_check_rc=$?
+assert_equals "grant --check fails when RunCommands is absent" "1" "${grant_check_rc}"
+assert_contains "grant --check reports partial grant" "${grant_plugin}: present (WebAccess)" "${grant_check_output}"
 
 # Re-running must not duplicate our own blocks (idempotent + self-healing).
 run_grant "${grant_plugin}" >/dev/null
@@ -1300,6 +1359,9 @@ run_grant --manage-serve --cli-fallback "${grant_plugin}" >/dev/null
 grant_optin="$(< "${grant_perms}")"
 assert_contains "grant --cli-fallback adds RunCommands" "RunCommands" "${grant_optin}"
 assert_contains "grant --manage-serve adds OpenTerminalsOrPlugins" "OpenTerminalsOrPlugins" "${grant_optin}"
+grant_check_rc=0
+run_grant --check --manage-serve --cli-fallback "${grant_plugin}" >/dev/null || grant_check_rc=$?
+assert_equals "grant --check accepts all requested permissions" "0" "${grant_check_rc}"
 # Restore the default (minimal) grant for the remaining assertions.
 run_grant "${grant_plugin}" >/dev/null
 
