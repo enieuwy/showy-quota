@@ -6422,6 +6422,11 @@ else
         "rc=${rc}; out=${envelope_publish_out}; usage.json=${envelope_publish_raw}"
 fi
 
+# A successful publish must leave no staging files behind. The previous
+# provider-metadata stage leaked one `usage.prev-meta.*` file per publish.
+envelope_leftovers=$(compgen -G "${envelope_publish_cache}/usage.prev-meta.*"; compgen -G "${envelope_publish_cache}/usage-stamp.*"; compgen -G "${envelope_publish_cache}/usage.??????") || true
+assert_equals "fetcher publish leaves no staging temp files in the cache dir" "" "${envelope_leftovers}"
+
 # showy-quota-state reads the source marker out of the envelope, not a
 # separate file.
 state_source_cache=$(mk_cache)

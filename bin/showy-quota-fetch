@@ -2074,7 +2074,8 @@ publish_cache_payload() {
     carried=$(carried_forward_providers_json)
     prev_source="$(showy_quota_cache_source)"
     prev_updated=$(( now - $(showy_quota_age_seconds "${SHOWY_QUOTA_USAGE_FILE}") ))
-    if ! printf '%s' "${out}" | jq -c \
+    local envelope_rc=0
+    printf '%s' "${out}" | jq -c \
         --arg source "${source}" \
         --arg prev_source "${prev_source}" \
         --argjson now "${now}" \
@@ -2104,7 +2105,12 @@ publish_cache_payload() {
                 )
             )
         }' \
-        > "${tmp}"; then
+        > "${tmp}" || envelope_rc=$?
+    # The staged map is consumed; drop it now on every path. The success path
+    # clears SHOWY_QUOTA_CACHE_TMP_FILES without deleting, so leaving this to
+    # the exit trap leaked one file per publish.
+    rm -f -- "${prev_file}"
+    if (( envelope_rc != 0 )); then
         rm -f -- "${tmp}"
         showy_quota_log "codexbar JSON failed validation"
         return 1
