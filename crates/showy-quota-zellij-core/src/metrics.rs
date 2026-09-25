@@ -182,7 +182,11 @@ fn provider_metric(
     let has_renderable_window = has_renderable_window(record);
     match (record.error.as_ref(), has_renderable_window) {
         (None, true) => Some(renderable_metric(record, config, now_epoch)),
-        (Some(error), false) => Some(error_metric(record, error)),
+        // An error beside usable usage (the fetch keeps last-known usage
+        // next to a fresh error) must stay visible in metrics: the rows and
+        // ring bodies draw an errored provider greyed with no lanes, so the
+        // metric is an error metric too, not a renderable one.
+        (Some(error), _) => Some(error_metric(record, error)),
         // CodexBar answered with no window object at all: the renderers
         // draw it greyed (codexbar::is_errored), so the metric says why.
         (None, false) if is_windowless(record) => Some(error_metric(
@@ -735,7 +739,7 @@ mod tests {
     }
 
     #[test]
-    fn error_with_numeric_window_is_excluded_by_state_rule() {
+    fn error_with_numeric_window_keeps_error_visible() {
         let value = emit_value(
             br#"[
                 {"provider":"codex","error":{"message":"login failed"},"usage":{"primary":{"usedPercent":10}}},
@@ -743,9 +747,18 @@ mod tests {
             ]"#,
         );
 
-        assert_eq!(value.as_array().expect("array").len(), 1);
-        assert_eq!(value[0]["provider"], "claude");
-        assert!(value[0]["error"].is_null());
+        assert_eq!(value.as_array().expect("array").len(), 2);
+        let codex = value
+            .as_array()
+            .expect("array")
+            .iter()
+            .find(|metric| metric["provider"] == "codex")
+            .expect("codex metric");
+        // The fetch keeps last-known usage beside a fresh error; the metric
+        // reports the error (an errored provider draws greyed with no
+        // lanes), not the stale windows.
+        assert_eq!(codex["error"]["kind"], "auth");
+        assert!(codex["windows"]["primary"].is_null());
     }
 
     #[test]
