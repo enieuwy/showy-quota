@@ -44,6 +44,7 @@ bin/showy-quota-fetch     ←  shared cache envelope + flock + last-known-good
 - **Pacing & thresholds:** Renders proportional pacing markers where the surface supports them and color-codes usage (good/warn/bad) based on configurable remaining-quota and time thresholds.
 - **Themeable:** Ships with Catppuccin, Nord, Dracula, Tokyo Night, and others.
 - **Low overhead:** Host bars share one cached fetcher; Zellij can use a single WASM artifact.
+- **Ring mode (SketchyBar, optional):** One ring per model family with the provider logo inside, stacked bars for shorter windows, and a hover popup per provider. Rows stay the default; ring mode needs the [SketchyBar fork](https://github.com/enieuwy/SketchyBar) (see [SketchyBar wiring](#sketchybar-wiring)).
 
 ## Quickstart
 
@@ -140,7 +141,15 @@ mode needs the SketchyBar fork
 and the badges ([upstream PR #816](https://github.com/FelixKratz/SketchyBar/pull/816)),
 neither merged upstream yet; on stock SketchyBar the plugin falls back to rows.
 
-<p><img src="docs/images/ring-strip.png" alt="showy-quota SketchyBar ring strip: one ring per provider with countdown labels" width="645"></p>
+<p align="center">
+  <img src="docs/images/ring-strip.png" alt="showy-quota SketchyBar ring strip: one ring per model family with countdown labels, pace ticks and bars" width="536">
+</p>
+
+<p align="center">
+  <img src="docs/images/ring-popup.png" alt="showy-quota ring hover popup for Command Code: a mini gauge, % left, window, length, pace and reset per window" width="298">
+</p>
+
+<p align="center"><sub>Ring mode: the strip, and the popup when you point at a provider</sub></p>
 
 ### Zellij wiring
 

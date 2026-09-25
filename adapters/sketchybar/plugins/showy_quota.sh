@@ -84,7 +84,7 @@ NOTCH_ANCHORS=(showy_quota.notch_q showy_quota.notch_e)
 # crates/showy-quota-zellij-core/src/sketchybar_frame.rs) to find lost items.
 PROVIDER_ITEM_ROLES=(icon primary secondary tertiary quaternary
     secondary_marker tertiary_marker quaternary_marker primary_marker slot label)
-# Every item one ring unit owns, in bracket order. The renderer checks the
+# Every item one ring unit owns; the strip items first, in bracket order. The renderer checks the
 # same list (`RING_UNIT_ROLES` in
 # crates/showy-quota-zellij-core/src/sketchybar_frame.rs) to find lost items.
 RING_UNIT_ITEM_ROLES=(ring ring_pace bar0 bar0_pace bar1 bar1_pace label
@@ -795,6 +795,8 @@ queue_ring_bracket() {
             members+=("showy_quota.gap.${unit}")
         fi
         for role in "${RING_UNIT_ITEM_ROLES[@]}"; do
+            # Popup rows live in the popup, not on the strip.
+            [[ "${role}" == pop_* ]] && continue
             members+=("showy_quota.${unit}.${role}")
         done
     done <<< "${units_list}"

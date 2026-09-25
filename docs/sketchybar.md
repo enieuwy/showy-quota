@@ -115,9 +115,9 @@ neither merged upstream yet. On stock SketchyBar the plugin logs once and
 falls back to the rows body. Notch placement stays a rows-body feature; in
 ring mode the pill stays left.
 
-<p><img src="images/ring-strip.png" alt="showy-quota SketchyBar ring strip: one ring per provider with countdown labels" width="645"></p>
+<p><img src="images/ring-strip.png" alt="showy-quota SketchyBar ring strip: one ring per model family with countdown labels, pace ticks and bars" width="536"></p>
 
-<p><img src="images/ring-popup.png" alt="showy-quota ring hover popup for Command Code with per-window gauges" width="670"></p>
+<p><img src="images/ring-popup.png" alt="showy-quota ring hover popup for Command Code with per-window gauges" width="298"></p>
 
 ## Pill geometry
 
