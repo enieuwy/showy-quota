@@ -171,7 +171,8 @@ install-copy-sketchybar: install-copy ## Link SketchyBar integration from copied
 	@mkdir -p "$(SBAR_ITEMS)" "$(SBAR_PLUGINS)"
 	@for pair in \
 		"$(DATA_DIR)/adapters/sketchybar/items/showy_quota.sh:$(SBAR_ITEMS)/showy_quota.sh" \
-		"$(DATA_DIR)/adapters/sketchybar/plugins/showy_quota.sh:$(SBAR_PLUGINS)/showy_quota.sh"; do \
+		"$(DATA_DIR)/adapters/sketchybar/plugins/showy_quota.sh:$(SBAR_PLUGINS)/showy_quota.sh" \
+		"$(DATA_DIR)/adapters/sketchybar/plugins/showy_quota_hover.sh:$(SBAR_PLUGINS)/showy_quota_hover.sh"; do \
 		src=$${pair%%:*}; target=$${pair#*:}; \
 		chmod +x "$$src"; \
 		if [ -L "$$target" ]; then \
@@ -196,7 +197,8 @@ install-sketchybar:
 	@mkdir -p "$(SBAR_ITEMS)" "$(SBAR_PLUGINS)"
 	@for pair in \
 		"$(REPO)/adapters/sketchybar/items/showy_quota.sh:$(SBAR_ITEMS)/showy_quota.sh" \
-		"$(REPO)/adapters/sketchybar/plugins/showy_quota.sh:$(SBAR_PLUGINS)/showy_quota.sh"; do \
+		"$(REPO)/adapters/sketchybar/plugins/showy_quota.sh:$(SBAR_PLUGINS)/showy_quota.sh" \
+		"$(REPO)/adapters/sketchybar/plugins/showy_quota_hover.sh:$(SBAR_PLUGINS)/showy_quota_hover.sh"; do \
 		src=$${pair%%:*}; target=$${pair#*:}; \
 		chmod +x "$$src"; \
 		if [ -L "$$target" ]; then \
@@ -315,7 +317,8 @@ uninstall: ## Remove symlinks and copied DATA_DIR that this Makefile created.
 	fi
 	@for pair in \
 		"$(REPO)/adapters/sketchybar/items/showy_quota.sh:$(SBAR_ITEMS)/showy_quota.sh" \
-		"$(REPO)/adapters/sketchybar/plugins/showy_quota.sh:$(SBAR_PLUGINS)/showy_quota.sh"; do \
+		"$(REPO)/adapters/sketchybar/plugins/showy_quota.sh:$(SBAR_PLUGINS)/showy_quota.sh" \
+		"$(REPO)/adapters/sketchybar/plugins/showy_quota_hover.sh:$(SBAR_PLUGINS)/showy_quota_hover.sh"; do \
 		src=$${pair%%:*}; target=$${pair#*:}; \
 		if [ -L "$$target" ]; then \
 			cur=$$(readlink "$$target"); \
@@ -340,7 +343,8 @@ uninstall: ## Remove symlinks and copied DATA_DIR that this Makefile created.
 	done
 	@for pair in \
 		"$(DATA_DIR)/adapters/sketchybar/items/showy_quota.sh:$(SBAR_ITEMS)/showy_quota.sh" \
-		"$(DATA_DIR)/adapters/sketchybar/plugins/showy_quota.sh:$(SBAR_PLUGINS)/showy_quota.sh"; do \
+		"$(DATA_DIR)/adapters/sketchybar/plugins/showy_quota.sh:$(SBAR_PLUGINS)/showy_quota.sh" \
+		"$(DATA_DIR)/adapters/sketchybar/plugins/showy_quota_hover.sh:$(SBAR_PLUGINS)/showy_quota_hover.sh"; do \
 		src=$${pair%%:*}; target=$${pair#*:}; \
 		if [ -L "$$target" ]; then \
 			cur=$$(readlink "$$target"); \
@@ -489,6 +493,7 @@ lint: ## Run shellcheck if available.
 			"$(REPO)/lib/strip.sh" \
 			"$(REPO)/adapters/sketchybar/items/showy_quota.sh" \
 			"$(REPO)/adapters/sketchybar/plugins/showy_quota.sh" \
+			"$(REPO)/adapters/sketchybar/plugins/showy_quota_hover.sh" \
 			"$(REPO)/test/render_test.sh"; \
 	else \
 		printf 'shellcheck not installed; skipping\n'; \

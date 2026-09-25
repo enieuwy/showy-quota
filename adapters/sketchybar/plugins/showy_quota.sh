@@ -84,6 +84,26 @@ NOTCH_ANCHORS=(showy_quota.notch_q showy_quota.notch_e)
 # crates/showy-quota-zellij-core/src/sketchybar_frame.rs) to find lost items.
 PROVIDER_ITEM_ROLES=(icon primary secondary tertiary quaternary
     secondary_marker tertiary_marker quaternary_marker primary_marker slot label)
+# Every item one ring unit owns, in bracket order. The renderer checks the
+# same list (`RING_UNIT_ROLES` in
+# crates/showy-quota-zellij-core/src/sketchybar_frame.rs) to find lost items.
+RING_UNIT_ITEM_ROLES=(ring ring_pace bar0 bar0_pace bar1 bar1_pace label
+    pop_title pop_header pop_row0 pop_row1 pop_row2 pop_note pop_alert0 pop_alert1)
+# Ring geometry (points), chosen from the design spikes and mirrored by the
+# renderer's ring frame: 26 pt ring, 3 pt stroke, 12 pt logos, 28x4 bars with
+# a 5 pt ring gap, 22 pt between providers (10 pt between Antigravity pools),
+# 10 pt pill edges.
+RING_DIAMETER=26
+RING_BAR_W=28
+RING_EDGE=10
+RING_PROVIDER_GAP=22
+RING_POOL_GAP=10
+BODY_FILE="${CACHE_DIR}/body.txt"
+RING_PROBE_OK="${CACHE_DIR}/ring-capable"
+RING_FALLBACK_LOGGED="${CACHE_DIR}/ring-fallback-logged"
+# The hover script lives next to this plugin (or its installed copy).
+HOVER_SCRIPT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd -P)/showy_quota_hover.sh"
+[[ -r "${HOVER_SCRIPT}" ]] || HOVER_SCRIPT="${REPO_ROOT}/adapters/sketchybar/plugins/showy_quota_hover.sh"
 if click_command_is_safe "${SHOWY_QUOTA_SKETCHYBAR_CLICK}"; then
     CLICK="${SHOWY_QUOTA_SKETCHYBAR_CLICK}"
 else
@@ -501,6 +521,321 @@ queue_notch_anchor_removal() {
     done
 }
 
+# ── ring body ────────────────────────────────────────────────────
+
+# Effective strip body for this tick: rows, unless ring was requested AND the
+# running SketchyBar implements the ring item (the fork
+# github.com/enieuwy/SketchyBar). Probes at most once an hour; on stock
+# SketchyBar logs once and falls back to rows. Assigns EFFECTIVE_BODY.
+resolve_effective_body() {
+    EFFECTIVE_BODY=rows
+    [[ "${SHOWY_QUOTA_SKETCHYBAR_BODY:-rows}" == "ring" ]] || return 0
+    local probe_age=999999
+    if [[ -f "${RING_PROBE_OK}" ]]; then
+        probe_age=$(showy_quota_age_seconds "${RING_PROBE_OK}" 2>/dev/null) || probe_age=999999
+        if (( probe_age < 3600 )); then
+            EFFECTIVE_BODY=ring
+            return 0
+        fi
+    fi
+    if sketchybar --add ring showy_quota.ring_probe left "${RING_DIAMETER}" >/dev/null 2>&1; then
+        sketchybar --remove showy_quota.ring_probe >/dev/null 2>&1 || true
+        : > "${RING_PROBE_OK}" 2>/dev/null || true
+        rm -f -- "${RING_FALLBACK_LOGGED}" 2>/dev/null || true
+        EFFECTIVE_BODY=ring
+    else
+        rm -f -- "${RING_PROBE_OK}" 2>/dev/null || true
+        if [[ ! -f "${RING_FALLBACK_LOGGED}" ]]; then
+            showy_quota_log "SHOWY_QUOTA_SKETCHYBAR_BODY=ring needs the SketchyBar fork (ring item); this bar has none, falling back to rows"
+            : > "${RING_FALLBACK_LOGGED}" 2>/dev/null || true
+        fi
+        EFFECTIVE_BODY=rows
+    fi
+}
+
+# Logo for a ring unit's provider: the app-font glyph centred in the ring
+# (pad 5 at 12 pt, mirroring the renderer's app_font_pad), the measured SF
+# Pro glyphs for Muse / Command Code, else the provider sigil.
+ring_logo_for_provider() {
+    local pid="$1"
+    RING_LOGO_GLYPH=""
+    RING_LOGO_FONT="SF Pro:Bold:12.0"
+    RING_LOGO_PAD=0
+    RING_LOGO_Y=0
+    case "${pid}" in
+        muse)
+            RING_LOGO_GLYPH="∞"
+            RING_LOGO_FONT="SF Pro:Bold:13.0"
+            RING_LOGO_Y=1
+            return 0
+            ;;
+        commandcode)
+            RING_LOGO_GLYPH="⌘"
+            RING_LOGO_FONT="SF Pro:Bold:11.0"
+            RING_LOGO_PAD=1
+            return 0
+            ;;
+    esac
+    if [[ -n "${SHOWY_QUOTA_PROVIDER_FONT_ICONS[${pid}]:-}" ]]; then
+        RING_LOGO_GLYPH="${SHOWY_QUOTA_PROVIDER_FONT_ICONS[${pid}]}"
+        RING_LOGO_FONT="sketchybar-app-font:Regular:12.0"
+        RING_LOGO_PAD=5
+    else
+        RING_LOGO_GLYPH="$(showy_quota_provider_sigil "${pid}")"
+    fi
+}
+
+# Remove every item of one ring unit (bars, label, popup rows included).
+queue_ring_unit_removal() {
+    local unit="$1"
+    SB_QUEUE+=(--remove "/^showy_quota\.${unit//./\\.}\..*$/"
+               --remove "showy_quota.gap.${unit}")
+}
+
+# Declare one ring unit. Static geometry and the hover subscription live
+# here; the per-tick frame owns every dynamic value. The subscription must
+# share the `--add` call: SketchyBar only creates the mouse tracking area
+# while the item draws, so a subscription from a later call gets no events
+# until the item redraws.
+queue_ring_unit_declaration() {
+    local unit="$1" pid="$2"
+    local base="showy_quota.${unit}" ring="showy_quota.${unit}.ring"
+    local hover_script role item
+    queue_ring_unit_removal "${unit}"
+    ring_logo_for_provider "${pid}"
+    # Pool units share the marker with their letter badge: 1.5 pt left of
+    # centre, mirroring the renderer's app_pad - 3.
+    if [[ "${unit}" != "${pid}" ]]; then
+        RING_LOGO_PAD=$(( RING_LOGO_PAD > 3 ? RING_LOGO_PAD - 3 : 0 ))
+    fi
+    load_host_settings
+    hover_script="${HOVER_SCRIPT} ${ring}"
+    local text_argb="0xff${ICON_TEXT_HEX}"
+    local track="${TRACK_ARGB}"
+    SB_QUEUE+=(--add ring "${ring}" left "${RING_DIAMETER}"
+               --set "${ring}"
+                   icon.drawing=off
+                   label.drawing=off
+                   background.drawing=off
+                   padding_left=0
+                   padding_right=0
+                   width="${RING_DIAMETER}"
+                   y_offset=0
+                   ring.line_width=3
+                   ring.cap=round
+                   ring.marker="${RING_LOGO_GLYPH}"
+                   ring.marker.drawing=on
+                   ring.marker.position=center
+                   ring.marker.font="${RING_LOGO_FONT}"
+                   ring.marker.color="${text_argb}"
+                   ring.marker.padding_left="${RING_LOGO_PAD}"
+                   ring.marker.padding_right=0
+                   ring.marker.y_offset="${RING_LOGO_Y}"
+                   popup.align=left
+                   popup.y_offset=4
+                   popup.height=20
+                   popup.blur_radius=30
+                   popup.background.color=0xd0161616
+                   popup.background.corner_radius=10
+                   popup.background.border_width=1
+                   popup.background.border_color="${track}"
+                   popup.background.shadow.drawing=on
+                   click_script="${CLICK}"
+                   script="${hover_script}"
+               --subscribe "${ring}" mouse.entered mouse.exited mouse.exited.global
+               --add ring "${base}.ring_pace" left "${RING_DIAMETER}"
+               --set "${base}.ring_pace"
+                   icon.drawing=off
+                   label.drawing=off
+                   background.drawing=off
+                   padding_left=-"${RING_DIAMETER}"
+                   padding_right=0
+                   width=0
+                   y_offset=0
+                   ring.track_color=0x00000000
+                   ring.cap=butt
+                   ring.line_width=5
+                   ring.marker.drawing=off
+                   click_script="${CLICK}"
+                   script="${hover_script}"
+               --subscribe "${base}.ring_pace" mouse.entered mouse.exited mouse.exited.global)
+    for role in bar0 bar1; do
+        item="${base}.${role}"
+        SB_QUEUE+=(--add slider "${item}" left "${RING_BAR_W}"
+                   --set "${item}"
+                       slider.percentage=0
+                       slider.highlight_color=0x00000000
+                       slider.background.color="${track}"
+                       slider.background.height=4
+                       slider.background.corner_radius=4
+                       slider.knob.drawing=off
+                       icon.drawing=off
+                       label.drawing=off
+                       background.color=0x00000000
+                       background.height=0
+                       padding_left=5
+                       padding_right=0
+                       width=0
+                       click_script="${CLICK}"
+                       script="${hover_script}"
+                   --subscribe "${item}" mouse.entered mouse.exited mouse.exited.global)
+        item="${base}.${role}_pace"
+        SB_QUEUE+=(--add slider "${item}" left "${RING_BAR_W}"
+                   --set "${item}"
+                       slider.percentage=0
+                       slider.highlight_color=0x00000000
+                       slider.background.color=0x00000000
+                       slider.background.height=4
+                       slider.knob.drawing=on
+                       slider.knob.color=0x00000000
+                       slider.knob.width=2
+                       slider.knob.padding_left=0
+                       slider.knob.padding_right=0
+                       slider.knob.background.drawing=on
+                       slider.knob.background.color="${ELAPSED_ARGB}"
+                       slider.knob.background.height=8
+                       slider.knob.background.corner_radius=0
+                       icon.drawing=off
+                       label.drawing=off
+                       background.color=0x00000000
+                       background.height=0
+                       padding_left=5
+                       padding_right=0
+                       width=0
+                       click_script="${CLICK}"
+                       script="${hover_script}"
+                   --subscribe "${item}" mouse.entered mouse.exited mouse.exited.global)
+    done
+    SB_QUEUE+=(--add item "${base}.label" left
+               --set "${base}.label"
+                   icon.drawing=off
+                   label.font="SF Pro:Semibold:10.0"
+                   label.padding_left=0
+                   label.padding_right=0
+                   width="${RING_BAR_W}"
+                   background.color=0x00000000
+                   background.height=0
+                   padding_left=5
+                   padding_right=0
+                   click_script="${CLICK}"
+                   script="${hover_script}"
+               --subscribe "${base}.label" mouse.entered mouse.exited mouse.exited.global)
+    # Popup rows: fixed slots, so the declaration never depends on the data.
+    # A popup lists its items in add order: title, alerts, header, the window
+    # rows (row 0 is always the ring window, a 14 pt mini ring; rows 1–2 are
+    # bars), then the note that explains the label.
+    for role in pop_title pop_alert0 pop_alert1 pop_header; do
+        SB_QUEUE+=(--add item "${base}.${role}" "popup.${ring}"
+                   --set "${base}.${role}" drawing=off)
+    done
+    SB_QUEUE+=(--add ring "${base}.pop_row0" "popup.${ring}" 14
+               --set "${base}.pop_row0" drawing=off
+               --add slider "${base}.pop_row1" "popup.${ring}" 14
+               --set "${base}.pop_row1" drawing=off
+               --add slider "${base}.pop_row2" "popup.${ring}" 14
+               --set "${base}.pop_row2" drawing=off
+               --add item "${base}.pop_note" "popup.${ring}"
+               --set "${base}.pop_note" drawing=off)
+}
+
+queue_ring_spacer() {
+    SB_QUEUE+=(--remove "$1"
+               --add item "$1" left
+               --set "$1"
+                   width="$2"
+                   icon.drawing=off
+                   label.drawing=off
+                   background.drawing=off
+                   padding_left=0
+                   padding_right=0)
+}
+
+# The pill edges, the gaps, and the bracket over one ring strip. Stale and
+# degraded keep their rows-body names and behaviour; overflow has no ring use.
+queue_ring_bracket() {
+    local units_list="$1" unit role
+    local -a members=()
+    SB_QUEUE+=(--remove showy_quota_bracket
+               --remove showy_quota.overflow
+               --remove showy_quota.edge.a
+               --remove showy_quota.edge.z
+               --remove showy_quota.stale
+               --add item showy_quota.stale left
+               --set showy_quota.stale
+                   drawing=off
+                   label="${SHOWY_QUOTA_STALE_GLYPH}"
+                   label.color="${COUNTDOWN_WARN_ARGB}"
+                   icon.drawing=off
+                   background.color=0x00000000
+                   background.height=0
+                   padding_left=4
+                   padding_right=2
+                   click_script="${CLICK}"
+               --remove showy_quota.degraded
+               --add item showy_quota.degraded left
+               --set showy_quota.degraded
+                   drawing=off
+                   label="${SHOWY_QUOTA_DEGRADED_CLI_GLYPH}"
+                   label.color="${COUNTDOWN_WARN_ARGB}"
+                   icon.drawing=off
+                   background.color=0x00000000
+                   background.height=0
+                   padding_left=2
+                   padding_right=4
+                   click_script="${CLICK}")
+    local first=1
+    while IFS= read -r unit; do
+        [[ -n "${unit}" ]] || continue
+        if (( first )); then
+            first=0
+        else
+            local gap_width="${RING_PROVIDER_GAP}"
+            [[ "${unit}" == "antigravity.c" ]] && gap_width="${RING_POOL_GAP}"
+            queue_ring_spacer "showy_quota.gap.${unit}" "${gap_width}"
+            members+=("showy_quota.gap.${unit}")
+        fi
+        for role in "${RING_UNIT_ITEM_ROLES[@]}"; do
+            members+=("showy_quota.${unit}.${role}")
+        done
+    done <<< "${units_list}"
+    (( ${#members[@]} > 0 )) || return 0
+    queue_ring_spacer showy_quota.edge.a "${RING_EDGE}"
+    queue_ring_spacer showy_quota.edge.z "${RING_EDGE}"
+    members=("showy_quota.edge.a" "${members[@]}" showy_quota.stale showy_quota.degraded "showy_quota.edge.z")
+    # SketchyBar appends every new left item to the end of the bar, and the
+    # spacers above are added after the unit items: put the strip in order.
+    SB_QUEUE+=(--reorder "${members[@]}")
+    SB_QUEUE+=(--add bracket showy_quota_bracket "${members[@]}"
+               --set showy_quota_bracket
+                   background.color="${SHOWY_QUOTA_SKETCHYBAR_PILL_COLOR}"
+                   background.corner_radius="${SHOWY_QUOTA_SKETCHYBAR_PILL_RADIUS}"
+                   background.height="${SHOWY_QUOTA_SKETCHYBAR_PILL_HEIGHT}")
+}
+
+# Drop every rows-body item: switching to ring must leave no slider behind.
+clear_rows_body_items() {
+    local pid role
+    while IFS= read -r pid; do
+        [[ -n "${pid}" ]] || continue
+        for role in "${PROVIDER_ITEM_ROLES[@]}"; do
+            SB_QUEUE+=(--remove "showy_quota.${pid}.${role}")
+        done
+    done <<< "$1"
+    SB_QUEUE+=(--remove showy_quota.overflow)
+    queue_notch_anchor_removal
+}
+
+# Drop every ring-body item: switching to rows must leave no ring behind.
+clear_ring_body_items() {
+    local unit
+    while IFS= read -r unit; do
+        [[ -n "${unit}" ]] || continue
+        queue_ring_unit_removal "${unit}"
+    done <<< "$1"
+    SB_QUEUE+=(--remove showy_quota.edge.a
+               --remove showy_quota.edge.z)
+}
+
 notch_placement() {
     [[ "${SHOWY_QUOTA_SKETCHYBAR_PLACEMENT}" == "notch" ]]
 }
@@ -521,6 +856,7 @@ parse_frame_output() {
     FRAME_REDECLARE="-"
     FRAME_REFRESH=0
     FRAME_PROVIDERS=""
+    FRAME_UNITS=()
     FRAME_HAS_QUERY=0
     FRAME_QUERY=()
     FRAME_ICONS=()
@@ -538,6 +874,7 @@ parse_frame_output() {
                 FRAME_PROVIDERS="${FRAME_PROVIDERS%$'\n'}"
                 ;;
             icon) FRAME_ICONS+=("${line}") ;;
+            units) wire_fields_into FRAME_UNITS "${line}" ;;
             query)
                 wire_fields_into FRAME_QUERY "${line}"
                 FRAME_HAS_QUERY=1
@@ -871,6 +1208,58 @@ apply_notch_layout() {
     return 0
 }
 
+# One ring-mode tick: declare what the frame's `units` record lists
+# (`unit=provider` pairs), drop what left, and store the units as the
+# declared set. The renderer already diffed the per-tick values; the icons
+# loop below is a no-op in ring mode (no `icon` records).
+ring_tick() {
+    local pair unit pid
+    local desired_units="" desired_providers="${FRAME_PROVIDERS}"
+    for pair in ${FRAME_UNITS[@]+"${FRAME_UNITS[@]}"}; do
+        unit="${pair%%=*}"
+        [[ -n "${unit}" ]] || continue
+        desired_units+="${desired_units:+$'\n'}${unit}"
+    done
+    redeclared=0
+    if [[ "${FRAME_REDECLARE}" != "-" ]] || (( body_changed )); then
+        redeclared=1
+        case "${FRAME_REDECLARE}" in
+            missing) showy_quota_log "sketchybar ring items missing; forcing redeclare" ;;
+            order) showy_quota_log "sketchybar items precede showy_quota.trigger; forcing redeclare" ;;
+            body) showy_quota_log "sketchybar rows items linger in ring mode; forcing redeclare" ;;
+        esac
+        load_host_settings
+        load_state_providers
+        # Notch placement is a rows-body feature; ring mode stays left.
+        queue_notch_anchor_removal
+        if (( body_changed )) && [[ "${prev_body}" != "ring" ]]; then
+            # Rows to ring (or first run): no slider may survive.
+            clear_rows_body_items "${STATE_PROVIDERS}"
+        elif (( body_changed )); then
+            clear_ring_body_items "${STATE_PROVIDERS}"
+        elif [[ "${FRAME_REDECLARE}" == "body" ]]; then
+            # A crashed switch left rows sliders behind.
+            clear_rows_body_items "${desired_providers}"
+        else
+            while IFS= read -r unit; do
+                [[ -n "${unit}" ]] || continue
+                provider_list_contains "${desired_units}" "${unit}"                     || queue_ring_unit_removal "${unit}"
+            done <<< "${STATE_PROVIDERS}"
+        fi
+        while IFS= read -r pair; do
+            unit="${pair%%=*}"
+            pid="${pair#*=}"
+            [[ -n "${unit}" && -n "${pid}" ]] && queue_ring_unit_declaration "${unit}" "${pid}"
+        done <<< "$(printf '%s\n' ${FRAME_UNITS[@]+"${FRAME_UNITS[@]}"})"
+        queue_ring_bracket "${desired_units}"
+        flush_sketchybar_queue
+        write_state_providers "${desired_units}" \
+            || showy_quota_log "failed to update sketchybar ring state"
+        printf '%s\n' "ring" > "${BODY_FILE}" 2>/dev/null || true
+        trigger_provider_change "${desired_providers}"
+    fi
+}
+
 # ── main ─────────────────────────────────────────────────────────────
 
 # Neighbour geometry changed, quota data did not: these events only re-plan
@@ -880,13 +1269,15 @@ apply_notch_layout() {
 case "${SENDER:-}" in
     front_app_switched|display_change|showy_quota_layout)
         notch_placement || exit 0
+        showy_quota_export_config
+        resolve_effective_body
+        [[ "${EFFECTIVE_BODY}" == "ring" ]] && exit 0
         if ! acquire_render_lock; then
             : > "${LAYOUT_PENDING_FILE}" 2>/dev/null || true
             exit 0
         fi
         [[ -e "${LAYOUT_PENDING_FILE}" ]] && rm -f -- "${LAYOUT_PENDING_FILE}"
         load_state_providers
-        showy_quota_export_config
         apply_notch_layout "${STATE_PROVIDERS}"
         exit 0
         ;;
@@ -900,9 +1291,23 @@ acquire_render_lock || exit 0
 # the frame this plugin sent last so a tick where nothing changed sends
 # nothing. This script declares items, rasterizes icons, and runs sketchybar.
 showy_quota_export_config
+resolve_effective_body
+# The renderer reads SHOWY_QUOTA_SKETCHYBAR_BODY itself; hand it the probed
+# value so a stock-SketchyBar fallback renders rows, not missing rings.
+SHOWY_QUOTA_SKETCHYBAR_BODY="${EFFECTIVE_BODY}"
+prev_body=""
+body_changed=0
+# No stamp on first run: the rows items are the historical default, so an
+# absent stamp means rows, not a switch. Forcing here would redeclare on
+# every fresh cache dir.
+if [[ -f "${BODY_FILE}" ]]; then
+    prev_body=$(< "${BODY_FILE}")
+    [[ "${prev_body}" != "${EFFECTIVE_BODY}" ]] && body_changed=1
+fi
 frame_flags=(--emit sketchybar-frame --from-cache --bar -
     --state "${STATE_FILE}" --frame "${FRAME_FILE}" --plan "${NOTCH_PLAN_FILE}")
 showy_quota_bool "${SHOWY_QUOTA_SKETCHYBAR_FORCE_REDECLARE-}" 0 && frame_flags+=(--force-redeclare)
+(( body_changed )) && frame_flags+=(--force-redeclare)
 (( HAVE_MAGICK )) && frame_flags+=(--icon-maker)
 
 # SketchyBar drops a reply that takes over 100 ms; the renderer then treats
@@ -928,11 +1333,15 @@ parse_frame_output "${frame_out}"
 
 desired_providers="${FRAME_PROVIDERS}"
 redeclared=0
+if [[ "${EFFECTIVE_BODY}" == "ring" ]]; then
+    ring_tick
+else
 if [[ "${FRAME_REDECLARE}" != "-" ]]; then
     redeclared=1
     case "${FRAME_REDECLARE}" in
         missing) showy_quota_log "sketchybar items missing; forcing redeclare" ;;
         order) showy_quota_log "sketchybar items precede showy_quota.trigger; forcing redeclare" ;;
+        body) showy_quota_log "sketchybar ring items linger in rows mode; forcing redeclare" ;;
     esac
     load_host_settings
     load_state_providers
@@ -941,6 +1350,21 @@ if [[ "${FRAME_REDECLARE}" != "-" ]]; then
         queue_notch_anchors
     else
         queue_notch_anchor_removal
+    fi
+    if (( body_changed )) && [[ "${prev_body}" == "ring" ]]; then
+        # Ring to rows: no ring, gap, or edge item may survive.
+        clear_ring_body_items "${STATE_PROVIDERS}"
+    elif [[ "${FRAME_REDECLARE}" == "body" ]]; then
+        # A crashed switch left ring items behind; the state already lists
+        # rows providers, so clear by the desired set instead.
+        while IFS= read -r pid; do
+            [[ -n "${pid}" ]] || continue
+            queue_ring_unit_removal "${pid}"
+            queue_ring_unit_removal "${pid}.g"
+            queue_ring_unit_removal "${pid}.c"
+        done <<< "${desired_providers}"
+        SB_QUEUE+=(--remove showy_quota.edge.a
+                   --remove showy_quota.edge.z)
     fi
     while IFS= read -r pid; do
         [[ -n "${pid}" ]] || continue
@@ -952,7 +1376,9 @@ if [[ "${FRAME_REDECLARE}" != "-" ]]; then
     queue_bracket "${desired_providers}"
     flush_sketchybar_queue
     write_state_providers "${desired_providers}" || showy_quota_log "failed to update sketchybar provider state"
+    printf '%s\n' "rows" > "${BODY_FILE}" 2>/dev/null || true
     trigger_provider_change "${desired_providers}"
+fi
 fi
 
 frame_args=("${FRAME_ARGS[@]}")
@@ -985,7 +1411,7 @@ if [[ -e "${LAYOUT_PENDING_FILE}" ]]; then
     rm -f -- "${LAYOUT_PENDING_FILE}"
     layout_due=1
 fi
-if (( layout_due )); then
+if (( layout_due )) && [[ "${EFFECTIVE_BODY}" != "ring" ]]; then
     # A redeclare replaced the items the renderer listed; re-read them.
     if (( redeclared || ! FRAME_HAS_QUERY )); then
         apply_notch_layout "${desired_providers}"

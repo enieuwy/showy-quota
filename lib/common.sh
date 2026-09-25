@@ -385,6 +385,10 @@ showy_quota_uint_config SHOWY_QUOTA_PNG_BAR_H 18 4096
 # left: one pill in SketchyBar's left group (default). notch: providers that
 # would run under the notch move right of it (position=e) inside the same pill.
 : "${SHOWY_QUOTA_SKETCHYBAR_PLACEMENT:=left}"
+# rows: today's slider rows (default, unchanged). ring: one ring per model
+# family; needs the SketchyBar fork (ring item), else the plugin falls back
+# to rows at runtime.
+: "${SHOWY_QUOTA_SKETCHYBAR_BODY:=rows}"
 : "${SHOWY_QUOTA_SKETCHYBAR_NOTCH_MARGIN:=4}"
 
 : "${SHOWY_QUOTA_SKETCHYBAR_COMPACT_PROVIDER_COUNT:=5}"
@@ -468,6 +472,13 @@ showy_quota_uint_config SHOWY_QUOTA_SKETCHYBAR_ICON_PADDING_LEFT 5 4096
 showy_quota_uint_config SHOWY_QUOTA_SKETCHYBAR_PROVIDER_ICON_FONT_PADDING_RIGHT 2 4096
 showy_quota_uint_config SHOWY_QUOTA_SKETCHYBAR_LABEL_WIDTH 32 4096
 showy_quota_uint_config SHOWY_QUOTA_SKETCHYBAR_NOTCH_MARGIN 4 4096
+case "${SHOWY_QUOTA_SKETCHYBAR_BODY}" in
+    rows|ring) ;;
+    *)
+        showy_quota_record_config_issue SHOWY_QUOTA_SKETCHYBAR_BODY "${SHOWY_QUOTA_SKETCHYBAR_BODY}" rows invalid_value
+        SHOWY_QUOTA_SKETCHYBAR_BODY=rows
+        ;;
+esac
 case "${SHOWY_QUOTA_SKETCHYBAR_PLACEMENT}" in
     left|notch) ;;
     *)
