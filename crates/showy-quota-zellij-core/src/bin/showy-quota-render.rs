@@ -1007,7 +1007,9 @@ mod bounded {
             terminate(&mut child);
             return 1;
         };
-        let (tx, rx) = mpsc::channel::<Vec<u8>>();
+        // Bounded: a slow stdout consumer stalls the reader, then the child's
+        // pipe, instead of queueing unbounded output in memory.
+        let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(4);
         std::thread::spawn(move || {
             let mut buf = vec![0u8; 65_536];
             loop {
@@ -1081,28 +1083,22 @@ mod bounded {
         }
     }
 
-    /// SIGTERM the command's group, SIGKILL after a second. Never signals a
-    /// reaped child: its pid (also the pgid) may already belong to another
-    /// process.
+    /// SIGTERM the command's group, then SIGKILL after a second, then reap.
+    /// Callers never reaped the child, so a leader that already exited stays a
+    /// zombie and still holds the pgid: signalling the group cannot hit a
+    /// reused pid, and helpers the leader left in the group are killed too.
     fn terminate(child: &mut Child) {
         let Ok(pgid) = i32::try_from(child.id()) else {
             return;
         };
-        for sig in [SIGTERM, SIGKILL] {
-            if !matches!(child.try_wait(), Ok(None)) {
-                return;
-            }
-            // SAFETY: plain syscall on a group we created and have not reaped.
-            unsafe {
-                kill(-pgid, sig);
-            }
-            let until = Instant::now() + Duration::from_secs(1);
-            while Instant::now() < until {
-                if !matches!(child.try_wait(), Ok(None)) {
-                    return;
-                }
-                std::thread::sleep(Duration::from_millis(20));
-            }
+        // SAFETY: plain syscalls on a group we created and have not reaped.
+        unsafe {
+            kill(-pgid, SIGTERM);
         }
+        std::thread::sleep(Duration::from_secs(1));
+        unsafe {
+            kill(-pgid, SIGKILL);
+        }
+        let _ = child.wait();
     }
 }

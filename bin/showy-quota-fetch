@@ -1095,11 +1095,15 @@ run_codexbar_cli_per_provider() {
 
     (( fresh_count > 0 )) || return 1
 
-    # Merge per-provider arrays into one publishable array in one jq pass;
-    # the first slice for a provider wins. Validation in
+    # One slice passes through unchanged. Otherwise merge all slices in one
+    # jq pass; the first record for a provider wins. Validation in
     # `publish_cache_payload` runs again before we publish, so a degenerate
     # merge fails closed without overwriting the existing cache.
     local merged
+    if (( ${#accumulated[@]} == 1 )); then
+        printf '%s' "${accumulated[0]}"
+        return 0
+    fi
     merged=$(printf '%s\n' "${accumulated[@]}" | jq -s -c '
         map(select(type == "array")) | add // []
         | reduce .[] as $r ([];

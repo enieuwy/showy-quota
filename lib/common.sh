@@ -614,11 +614,17 @@ showy_quota_age_seconds() {
 # `$1` (showy-quota-fetch) in the background once the cache is older than the
 # refresh interval, the same rule the SketchyBar plugin uses. The fetcher's
 # own lock keeps one refresher however many bars ask.
+# Usage: showy_quota_refresh_in_background_if_due FETCH [RENDERED]
+# RENDERED is the bar output. "AI idle"/"AI none" means the renderer drew no
+# provider (possibly from a cache the fetcher rejects), so refresh at once,
+# not by age. A fresh valid cache makes that fetch exit early.
 showy_quota_refresh_in_background_if_due() {
-    local fetch="$1" threshold="${SHOWY_QUOTA_REFRESH_SECONDS}" age
+    local fetch="$1" rendered="${2:-}" threshold="${SHOWY_QUOTA_REFRESH_SECONDS}" age
     [[ -n "${SHOWY_QUOTA_CODEXBAR_SERVE_URL}" ]] && threshold="${SHOWY_QUOTA_CODEXBAR_SERVE_REFRESH_SECONDS}"
-    age=$(showy_quota_age_seconds "${SHOWY_QUOTA_USAGE_FILE}")
-    (( age >= threshold )) || return 0
+    if [[ "${rendered}" != *"AI idle"* && "${rendered}" != *"AI none"* ]]; then
+        age=$(showy_quota_age_seconds "${SHOWY_QUOTA_USAGE_FILE}")
+        (( age >= threshold )) || return 0
+    fi
     ( "${fetch}" </dev/null >/dev/null 2>&1 & )
 }
 
