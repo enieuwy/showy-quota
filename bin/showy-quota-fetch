@@ -2112,8 +2112,10 @@ merge_error_records_with_last_known_usage() {
     local fresh="$1" prev_map="$2" merged rc=0
     merged=$(printf '%s' "${fresh}" | jq -c --slurpfile prev "${prev_map}" '
         ($prev[0] // {}) as $prevmap
-        | (map(. as $record
-                | if ($record.error != null)
+        | (. ) as $fresh_records
+        | ([$fresh_records[]
+              | . as $record
+              | if ($record.error != null)
                      and ([$record.usage?.primary, $record.usage?.secondary, $record.usage?.tertiary]
                           | map(.usedPercent? // null) | all(. == null))
                      and (($prevmap[$record.provider] | type) == "object")
@@ -2123,18 +2125,24 @@ merge_error_records_with_last_known_usage() {
                           | map(.usedPercent? // null) | any(. != null))
                    then $record | .usage = $prevmap[$record.provider]
                    else $record
-                   end)
+                   end]
           ) as $providers
         | {
             providers: $providers,
-            merged: ([$providers[]
+            # Carried-forward means this merge preserved the slice: the fresh
+            # record itself had no usable usage. A fresh record that measured
+            # its own usable usage is never carried, even when that usage
+            # happens to equal the cached one — otherwise its providerMeta
+            # timestamp would freeze at the older fetch and consumers would
+            # later mark fresh data stale.
+            merged: ([$fresh_records[]
                       | select((.error != null)
-                               and ((.usage? | type) == "object")
+                               and ([.usage?.primary, .usage?.secondary, .usage?.tertiary]
+                                    | map(.usedPercent? // null) | all(. == null))
                                and (($prevmap[.provider] | type) == "object")
-                               and (.usage == $prevmap[.provider])
-                               and ([.usage.primary,
-                                     .usage.secondary,
-                                     .usage.tertiary]
+                               and ([$prevmap[.provider].primary,
+                                     $prevmap[.provider].secondary,
+                                     $prevmap[.provider].tertiary]
                                     | map(.usedPercent? // null) | any(. != null)))
                       | .provider])
         }
