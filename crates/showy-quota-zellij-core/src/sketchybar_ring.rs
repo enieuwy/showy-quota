@@ -309,7 +309,13 @@ fn family_unit(
     let shortest_title;
     let shortest_remaining;
     let (label, label_minutes) = {
-        let shortest = bars.first().unwrap_or(&ring);
+        // An empty ring (pool exhausted) blocks every shorter window, so the
+        // label counts down to its refill instead of the shortest bar's reset.
+        let shortest = if ring.remaining == 0 && !ring.reset.is_empty() {
+            &ring
+        } else {
+            bars.first().unwrap_or(&ring)
+        };
         shortest_title = shortest.title.clone();
         shortest_remaining = shortest.remaining;
         countdown(shortest, tick.now_epoch, tick.tz)
@@ -435,7 +441,7 @@ fn unit_note(label: &str, shortest_title: &str, ring_empty: bool, has_bars: bool
         format!("{label} = time until the ring resets")
     };
     if ring_empty {
-        format!("red track = pool empty · {base}")
+        format!("red track = pool empty · {label} = until it refills")
     } else {
         base
     }
@@ -918,6 +924,13 @@ mod tests {
         assert_eq!(units[1].bars.len(), 1);
         assert_eq!(units[1].bars[0].remaining, 100);
         assert_eq!(units[1].bars[0].expected, None);
+        // The empty pool blocks the 5h window: the label counts to the refill.
+        assert_eq!(units[1].label, "18:05");
+        assert!(
+            units[1].note.contains("until it refills"),
+            "{}",
+            units[1].note
+        );
     }
 
     #[test]
