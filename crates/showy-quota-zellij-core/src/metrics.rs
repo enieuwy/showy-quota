@@ -2,7 +2,8 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::codexbar::{
-    valid_provider_id, NamedWindow, ProviderRecord, UsageWindow, MAX_USAGE_JSON_BYTES,
+    is_windowless, valid_provider_id, NamedWindow, ProviderRecord, UsageWindow,
+    MAX_USAGE_JSON_BYTES,
 };
 use crate::config::RenderConfig;
 use crate::render::RenderError;
@@ -182,9 +183,17 @@ fn provider_metric(
     match (record.error.as_ref(), has_renderable_window) {
         (None, true) => Some(renderable_metric(record, config, now_epoch)),
         (Some(error), false) => Some(error_metric(record, error)),
+        // CodexBar answered with no window object at all: the renderers
+        // draw it greyed (codexbar::is_errored), so the metric says why.
+        (None, false) if is_windowless(record) => Some(error_metric(
+            record,
+            &Value::String(QUOTA_UNAVAILABLE.to_owned()),
+        )),
         _ => None,
     }
 }
+
+const QUOTA_UNAVAILABLE: &str = "quota unavailable";
 
 fn renderable_metric(
     record: &ProviderRecord,

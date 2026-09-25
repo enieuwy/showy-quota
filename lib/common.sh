@@ -114,13 +114,13 @@ showy_quota_resolve_render_bin() {
 # Export scalar SHOWY_QUOTA_* config into the environment so the native
 # renderer (a child process) sees the configuration the shell loaded. Array
 # and associative-array vars are skipped; they are not part of the contract.
+# Every render path calls this, so it lists the arrays in one subshell
+# instead of forking a `declare -p` per variable (about 90 of them).
 showy_quota_export_config() {
-    local name decl
+    local name arrays
+    arrays=$'\n'"$(compgen -A arrayvar SHOWY_QUOTA_ 2>/dev/null)"$'\n'
     for name in ${!SHOWY_QUOTA_@}; do
-        decl="$(declare -p "${name}" 2>/dev/null || true)"
-        case "${decl}" in
-            declare\ -a*|declare\ -A*) continue ;;
-        esac
+        [[ "${arrays}" == *$'\n'"${name}"$'\n'* ]] && continue
         export "${name?}"
     done
 }
@@ -382,6 +382,10 @@ showy_quota_uint_config SHOWY_QUOTA_PNG_BAR_H 18 4096
 : "${SHOWY_QUOTA_SKETCHYBAR_PROVIDER_ICON_FONT_PADDING_RIGHT:=2}"
 : "${SHOWY_QUOTA_SKETCHYBAR_BAR_WIDTH:=$((SHOWY_QUOTA_PNG_BAR_W + 3))}"
 : "${SHOWY_QUOTA_SKETCHYBAR_LABEL_WIDTH:=32}"
+# left: one pill in SketchyBar's left group (default). notch: providers that
+# would run under the notch move right of it (position=e) inside the same pill.
+: "${SHOWY_QUOTA_SKETCHYBAR_PLACEMENT:=left}"
+: "${SHOWY_QUOTA_SKETCHYBAR_NOTCH_MARGIN:=4}"
 
 : "${SHOWY_QUOTA_SKETCHYBAR_COMPACT_PROVIDER_COUNT:=5}"
 : "${SHOWY_QUOTA_SKETCHYBAR_PILL_RADIUS:=14}"
@@ -463,6 +467,14 @@ showy_quota_uint_config SHOWY_QUOTA_SKETCHYBAR_ICON_WIDTH 22 4096
 showy_quota_uint_config SHOWY_QUOTA_SKETCHYBAR_ICON_PADDING_LEFT 5 4096
 showy_quota_uint_config SHOWY_QUOTA_SKETCHYBAR_PROVIDER_ICON_FONT_PADDING_RIGHT 2 4096
 showy_quota_uint_config SHOWY_QUOTA_SKETCHYBAR_LABEL_WIDTH 32 4096
+showy_quota_uint_config SHOWY_QUOTA_SKETCHYBAR_NOTCH_MARGIN 4 4096
+case "${SHOWY_QUOTA_SKETCHYBAR_PLACEMENT}" in
+    left|notch) ;;
+    *)
+        showy_quota_record_config_issue SHOWY_QUOTA_SKETCHYBAR_PLACEMENT "${SHOWY_QUOTA_SKETCHYBAR_PLACEMENT}" left invalid_value
+        SHOWY_QUOTA_SKETCHYBAR_PLACEMENT=left
+        ;;
+esac
 showy_quota_uint_config SHOWY_QUOTA_SKETCHYBAR_COMPACT_PROVIDER_COUNT 5 4096
 showy_quota_uint_config SHOWY_QUOTA_SKETCHYBAR_PILL_RADIUS 14 4096
 showy_quota_uint_config SHOWY_QUOTA_SKETCHYBAR_PILL_HEIGHT 28 4096

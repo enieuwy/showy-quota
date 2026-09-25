@@ -2556,12 +2556,22 @@ mod tests {
     #[test]
     fn empty_strip_says_why_it_is_empty() {
         let config = RenderConfig::default();
-        let idle = br#"[{"provider": "codex", "usage": {"primary": null}}]"#;
+        // CodexBar answered for the provider but withheld every window (Muse
+        // Code while its server hides quota): it stays on the strip greyed,
+        // not collapsed into an idle strip that hides it.
+        let unavailable = br#"[{"provider": "codex", "usage": {"primary": null}}]"#;
+        let output = render_zellij(unavailable, &config, base_options(false))
+            .expect("rendered windowless payload");
+        assert!(
+            output.contains("err") && !output.contains("AI idle"),
+            "a provider without quota windows draws as unavailable: {output}"
+        );
+        let idle = br#"[{"provider": "codex", "usage": {"primary": {"usedPercent": null}}}]"#;
         assert!(
             render_zellij(idle, &config, base_options(false))
                 .expect("rendered idle payload")
                 .contains("AI idle"),
-            "a provider with no consumed quota is idle"
+            "a window with no consumed quota is idle"
         );
 
         assert!(

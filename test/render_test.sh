@@ -184,7 +184,10 @@ cat "${SHOWY_QUOTA_TEST_SERVE_FIXTURE}"
 EOF
 chmod +x "${stub_dir}/curl"
 
-# Stub sketchybar with enough statefulness for plugin lifecycle tests.
+# Stub sketchybar with enough statefulness for plugin lifecycle tests. Each
+# declared item is a file in the state dir; `.order` keeps SketchyBar's item
+# list order so `--query bar` can answer the way the daemon does. A seeded
+# `bar` file overrides that answer.
 cat > "${stub_dir}/sketchybar" <<'EOF'
 #!/bin/sh
 log="${SHOWY_QUOTA_TEST_LOG:-/dev/null}"
@@ -196,6 +199,16 @@ while [ "$#" -gt 0 ]; do
         --query)
             shift
             item="${1:-}"
+            if [ -n "${state_dir}" ] && [ "${item}" = "bar" ]; then
+                if [ -e "${state_dir}/bar" ]; then
+                    cat "${state_dir}/bar"
+                else
+                    printf '{"items":['
+                    [ -f "${state_dir}/.order" ] && sed 's/.*/"&"/' "${state_dir}/.order" | paste -sd, -
+                    printf ']}\n'
+                fi
+                exit 0
+            fi
             if [ -n "${state_dir}" ] && [ -e "${state_dir}/${item}" ]; then
                 printf '{}\n'
                 exit 0
@@ -209,6 +222,8 @@ while [ "$#" -gt 0 ]; do
             name="${1:-}"
             if [ -n "${state_dir}" ] && [ -n "${name}" ]; then
                 : > "${state_dir}/${name}"
+                grep -qxF "${name}" "${state_dir}/.order" 2>/dev/null \
+                    || printf '%s\n' "${name}" >> "${state_dir}/.order"
             fi
             shift
             if [ "${kind}" = "item" ] && [ "$#" -gt 0 ]; then
@@ -224,6 +239,10 @@ while [ "$#" -gt 0 ]; do
             name="${1:-}"
             if [ -n "${state_dir}" ] && [ -n "${name}" ]; then
                 rm -f "${state_dir}/${name}"
+                if [ -f "${state_dir}/.order" ]; then
+                    grep -vxF "${name}" "${state_dir}/.order" > "${state_dir}/.order.tmp"
+                    mv "${state_dir}/.order.tmp" "${state_dir}/.order"
+                fi
             fi
             shift
             ;;
@@ -448,7 +467,8 @@ run_sketchybar_plugin_without_magick() {
     fixture_file=$(fixture_path "${fixture}")
     no_magick_path="${TMP}/no-magick-bin"
     mkdir -p "${no_magick_path}"
-    for tool in bash jq readlink dirname mkdir mktemp mv rm rmdir date stat sed tr cat python3; do
+    # grep and paste back the stateful sketchybar stub's item list.
+    for tool in bash jq readlink dirname mkdir mktemp mv rm rmdir date stat sed tr cat python3 grep paste; do
         if [[ "${tool}" == "bash" && -x /opt/homebrew/bin/bash ]]; then
             tool_path=/opt/homebrew/bin/bash
         else
@@ -488,29 +508,27 @@ seed_sketchybar_state() {
         printf '%s\n' "${pid}" >> "${cache}/sb/providers.txt"
     done
 }
+# Declare items the way the stub's `--add` does: a state file per item plus
+# its line in `.order`, SketchyBar's item list.
 seed_sketchybar_live_items() {
     local cache="$1"
     shift
     mkdir -p "${cache}/sb-state"
-    local pid
+    local pid role name
+    local -a names=()
     for pid in "$@"; do
-        : > "${cache}/sb-state/showy_quota.${pid}.icon"
-        : > "${cache}/sb-state/showy_quota.${pid}.primary"
-        : > "${cache}/sb-state/showy_quota.${pid}.secondary"
-        : > "${cache}/sb-state/showy_quota.${pid}.tertiary"
-        : > "${cache}/sb-state/showy_quota.${pid}.quaternary"
-        : > "${cache}/sb-state/showy_quota.${pid}.secondary_marker"
-        : > "${cache}/sb-state/showy_quota.${pid}.tertiary_marker"
-        : > "${cache}/sb-state/showy_quota.${pid}.quaternary_marker"
-        : > "${cache}/sb-state/showy_quota.${pid}.primary_marker"
-        : > "${cache}/sb-state/showy_quota.${pid}.slot"
-        : > "${cache}/sb-state/showy_quota.${pid}.label"
+        for role in icon primary secondary tertiary quaternary secondary_marker \
+            tertiary_marker quaternary_marker primary_marker slot label; do
+            names+=("showy_quota.${pid}.${role}")
+        done
     done
     if (($# > 0)); then
-        : > "${cache}/sb-state/showy_quota_bracket"
-        : > "${cache}/sb-state/showy_quota.stale"
-        : > "${cache}/sb-state/showy_quota.degraded"
+        names+=(showy_quota.overflow showy_quota.stale showy_quota.degraded showy_quota_bracket)
     fi
+    for name in "${names[@]}"; do
+        : > "${cache}/sb-state/${name}"
+        printf '%s\n' "${name}" >> "${cache}/sb-state/.order"
+    done
 }
 
 process_state() {
@@ -2361,7 +2379,7 @@ assert_contains "bootstrap adds native marker overlay" "--add slider showy_quota
 assert_contains "bootstrap recreates bracket immediately" "--add bracket showy_quota_bracket" "${item_log}"
 assert_contains "bootstrap declares stale indicator" "--add item showy_quota.stale left" "${item_log}"
 assert_contains "bootstrap declares degraded indicator" "--add item showy_quota.degraded left" "${item_log}"
-assert_contains "bootstrap places indicators rightmost in bracket" "showy_quota.cursor.label showy_quota.stale showy_quota.degraded --set showy_quota_bracket" "${item_log}"
+assert_contains "bootstrap places indicators rightmost in bracket" "showy_quota.cursor.label showy_quota.overflow showy_quota.stale showy_quota.degraded --set showy_quota_bracket" "${item_log}"
 assert_contains "bootstrap preserves icon width" "width=22" "${item_log}"
 assert_contains "bootstrap preserves native bar slot width" "showy_quota.claude.slot icon.drawing=off" "${item_log}"
 assert_contains "bootstrap preserves native bar width" "width=83" "${item_log}"
@@ -2904,10 +2922,9 @@ assert_contains "plugin adds newly visible provider" "--add item showy_quota.gem
 # previous incremental path appended the new provider at the end, which
 # placed late-arriving providers (e.g. antigravity opening mid-session)
 # to the right of providers that sort before them.
-add_codex_before_gemini=$(printf '%s' "${plugin_log}" \
-    | grep -n -F -- '--add item showy_quota.codex.label left' | head -n1 | cut -d: -f1)
-add_gemini_label=$(printf '%s' "${plugin_log}" \
-    | grep -n -F -- '--add item showy_quota.gemini.label left' | head -n1 | cut -d: -f1)
+# The stub's `.order` is SketchyBar's item list after the run.
+add_codex_before_gemini=$(grep -n -x -F 'showy_quota.codex.label' "${cache}/sb-state/.order" | head -n1 | cut -d: -f1)
+add_gemini_label=$(grep -n -x -F 'showy_quota.gemini.label' "${cache}/sb-state/.order" | head -n1 | cut -d: -f1)
 if [[ -n "${add_codex_before_gemini}" && -n "${add_gemini_label}" \
     && "${add_codex_before_gemini}" -lt "${add_gemini_label}" ]]; then
     ok "plugin re-adds declared providers ahead of new providers in sort order"
@@ -2915,7 +2932,7 @@ else
     fail "plugin re-adds declared providers ahead of new providers in sort order" \
         "codex line=${add_codex_before_gemini} gemini line=${add_gemini_label}"
 fi
-assert_contains "plugin rebuilds bracket with added native provider" "showy_quota.gemini.icon showy_quota.gemini.primary showy_quota.gemini.secondary showy_quota.gemini.tertiary showy_quota.gemini.quaternary showy_quota.gemini.secondary_marker showy_quota.gemini.tertiary_marker showy_quota.gemini.quaternary_marker showy_quota.gemini.primary_marker showy_quota.gemini.slot showy_quota.gemini.label showy_quota.cursor.icon showy_quota.cursor.primary showy_quota.cursor.secondary showy_quota.cursor.tertiary showy_quota.cursor.quaternary showy_quota.cursor.secondary_marker showy_quota.cursor.tertiary_marker showy_quota.cursor.quaternary_marker showy_quota.cursor.primary_marker showy_quota.cursor.slot showy_quota.cursor.label showy_quota.stale showy_quota.degraded --set showy_quota_bracket" "${plugin_log}"
+assert_contains "plugin rebuilds bracket with added native provider" "showy_quota.gemini.icon showy_quota.gemini.primary showy_quota.gemini.secondary showy_quota.gemini.tertiary showy_quota.gemini.quaternary showy_quota.gemini.secondary_marker showy_quota.gemini.tertiary_marker showy_quota.gemini.quaternary_marker showy_quota.gemini.primary_marker showy_quota.gemini.slot showy_quota.gemini.label showy_quota.cursor.icon showy_quota.cursor.primary showy_quota.cursor.secondary showy_quota.cursor.tertiary showy_quota.cursor.quaternary showy_quota.cursor.secondary_marker showy_quota.cursor.tertiary_marker showy_quota.cursor.quaternary_marker showy_quota.cursor.primary_marker showy_quota.cursor.slot showy_quota.cursor.label showy_quota.overflow showy_quota.stale showy_quota.degraded --set showy_quota_bracket" "${plugin_log}"
 assert_contains "plugin draws the errored provider label" "--set showy_quota.cursor.label drawing=on label=" "${plugin_log}"
 # The error-row contract is label-only: every slider stays off, the icon uses
 # the warning tint (error rows carry no incident indicator), and the row keeps
@@ -2979,6 +2996,143 @@ assert_not_contains "plugin unchanged set skips provider removals" "--remove sho
 assert_not_contains "plugin unchanged set skips bracket removal" "--remove showy_quota_bracket" "${plugin_log}"
 assert_contains "plugin unchanged set still updates providers" "--set showy_quota.claude.label" "${plugin_log}"
 
+# Regression: a plugin run that outlives `sketchybar --reload` can re-add
+# provider items before the rc re-adds front_app, so the pill drew over the
+# front-app icon. Items listed before showy_quota.trigger force a redeclare,
+# which re-adds them after it; the same live set in order stays untouched.
+for order in misplaced ordered; do
+    cache=$(mk_cache)
+    seed_sketchybar_state "${cache}" codex claude gemini cursor
+    seed_sketchybar_live_items "${cache}" codex claude gemini cursor
+    # The live item list holds every seeded item after the trigger; the
+    # misplaced case lists codex's icon ahead of front_app and the trigger.
+    if [[ "${order}" == misplaced ]]; then
+        bar_prefix='["showy_quota.codex.icon","front_app","showy_quota.trigger"]'
+    else
+        bar_prefix='["front_app","showy_quota.trigger"]'
+    fi
+    jq -R -s -c --argjson prefix "${bar_prefix}" \
+        '{items: ($prefix + ((split("\n") | map(select(length > 0))) - $prefix))}' \
+        "${cache}/sb-state/.order" > "${cache}/sb-state/bar"
+    log="${TMP}/sb-order-${order}.log"
+    run_sketchybar_plugin codexbar-mixed.json "${cache}" "${log}"
+    plugin_log="$(< "${log}")"
+    if [[ "${order}" == misplaced ]]; then
+        assert_contains "plugin redeclares items listed before its trigger" \
+            "--add item showy_quota.codex.icon left" "${plugin_log}"
+    else
+        assert_not_contains "plugin keeps items that follow its trigger" \
+            "--add item showy_quota." "${plugin_log}"
+    fi
+done
+
+# Frame diff: the plugin sends only rows SketchyBar does not already show.
+frame_cache=$(mk_cache)
+run_sketchybar_plugin codexbar-mixed.json "${frame_cache}" "${TMP}/sb-frame-first.log"
+log="${TMP}/sb-frame-same.log"
+run_sketchybar_plugin codexbar-mixed.json "${frame_cache}" "${log}"
+assert_not_contains "plugin sends nothing when every row is unchanged" \
+    "--set showy_quota." "$(< "${log}")"
+
+frame_changed_fixture="${TMP}/codexbar-frame-changed.json"
+jq 'map(if .provider == "claude" then .usage.primary.usedPercent = 50 else . end)' \
+    "${FIXTURE_DIR}/codexbar-mixed.json" > "${frame_changed_fixture}"
+seed_usage_cache "${frame_cache}" "${frame_changed_fixture}" serve
+log="${TMP}/sb-frame-changed.log"
+run_sketchybar_plugin "${frame_changed_fixture}" "${frame_cache}" "${log}"
+plugin_log="$(< "${log}")"
+assert_contains "plugin re-sends the changed row" \
+    "--set showy_quota.claude.primary drawing=on slider.percentage=50" "${plugin_log}"
+assert_not_contains "plugin leaves unchanged rows alone" "--set showy_quota.codex." "${plugin_log}"
+
+# A setting outside the rows (here the pacing marker colour) re-sends them all.
+log="${TMP}/sb-frame-context.log"
+run_sketchybar_plugin "${frame_changed_fixture}" "${frame_cache}" "${log}" \
+    SHOWY_QUOTA_PALETTE_ELAPSED=ff0000
+plugin_log="$(< "${log}")"
+assert_contains "plugin re-sends every row when a row setting changes" \
+    "--set showy_quota.codex.label" "${plugin_log}"
+assert_contains "plugin applies the changed row setting" \
+    "slider.knob.background.color=0xffff0000" "${plugin_log}"
+
+# SketchyBar restarted without the bootstrap: the items are gone although the
+# frame file still matches, so the plugin redeclares and re-sends every row.
+rm -rf -- "${frame_cache}/sb-state"
+log="${TMP}/sb-frame-restart.log"
+run_sketchybar_plugin "${frame_changed_fixture}" "${frame_cache}" "${log}" \
+    SHOWY_QUOTA_PALETTE_ELAPSED=ff0000
+plugin_log="$(< "${log}")"
+assert_contains "plugin redeclares items SketchyBar lost" \
+    "--add item showy_quota.codex.icon left" "${plugin_log}"
+assert_contains "plugin re-sends rows after a redeclare" \
+    "--set showy_quota.codex.label" "${plugin_log}"
+
+# Layout events re-plan the notch split only; they never re-send rows.
+log="${TMP}/sb-layout-event.log"
+run_sketchybar_plugin "${frame_changed_fixture}" "${frame_cache}" "${log}" \
+    SHOWY_QUOTA_PALETTE_ELAPSED=ff0000 SHOWY_QUOTA_SKETCHYBAR_PLACEMENT=notch \
+    SENDER=front_app_switched
+plugin_log="$(< "${log}")"
+assert_contains "layout event re-plans the notch split" \
+    "--set /^showy_quota\\.codex\\./ position=left" "${plugin_log}"
+assert_not_contains "layout event sends no rows" "--set showy_quota.codex.label" "${plugin_log}"
+log="${TMP}/sb-layout-event-left.log"
+: > "${log}"
+run_sketchybar_plugin "${frame_changed_fixture}" "${frame_cache}" "${log}" \
+    SHOWY_QUOTA_PALETTE_ELAPSED=ff0000 SENDER=front_app_switched
+assert_equals "layout event does nothing without notch placement" "" "$(< "${log}")"
+
+# A layout event that finds a render in flight must not be lost: it leaves a
+# note, and the next render re-plans even though no row changed. The first
+# notch render declares the anchors, so the later one has nothing to send;
+# it also leaves its own post-redeclare note, which a second render consumes.
+run_sketchybar_plugin "${frame_changed_fixture}" "${frame_cache}" "${TMP}/sb-layout-notch.log" \
+    SHOWY_QUOTA_PALETTE_ELAPSED=ff0000 SHOWY_QUOTA_SKETCHYBAR_PLACEMENT=notch
+if [[ -e "${frame_cache}/sb/layout.pending" ]]; then
+    ok "redeclare asks the next tick to re-plan the notch split"
+else
+    fail "redeclare asks the next tick to re-plan the notch split"
+fi
+run_sketchybar_plugin "${frame_changed_fixture}" "${frame_cache}" "${TMP}/sb-layout-notch-2.log" \
+    SHOWY_QUOTA_PALETTE_ELAPSED=ff0000 SHOWY_QUOTA_SKETCHYBAR_PLACEMENT=notch
+if [[ -e "${frame_cache}/sb/layout.pending" ]]; then
+    fail "the tick after a redeclare consumes the re-plan note"
+else
+    ok "the tick after a redeclare consumes the re-plan note"
+fi
+sleep 30 &
+lock_holder=$!
+mkdir -p "${frame_cache}/sb/render.lock"
+printf '%s\t%s\n' "${lock_holder}" "$(LC_ALL=C ps -p "${lock_holder}" -o lstart=)" \
+    > "${frame_cache}/sb/render.lock/owner.pid"
+log="${TMP}/sb-layout-busy.log"
+: > "${log}"
+run_sketchybar_plugin "${frame_changed_fixture}" "${frame_cache}" "${log}" \
+    SHOWY_QUOTA_PALETTE_ELAPSED=ff0000 SHOWY_QUOTA_SKETCHYBAR_PLACEMENT=notch \
+    SENDER=front_app_switched
+assert_equals "layout event skips while a render holds the lock" "" "$(< "${log}")"
+kill "${lock_holder}" 2>/dev/null || true
+wait "${lock_holder}" 2>/dev/null || true
+rm -rf -- "${frame_cache}/sb/render.lock"
+if [[ -e "${frame_cache}/sb/layout.pending" ]]; then
+    ok "layout event leaves a note for the render in flight"
+else
+    fail "layout event leaves a note for the render in flight"
+fi
+log="${TMP}/sb-layout-pending.log"
+run_sketchybar_plugin "${frame_changed_fixture}" "${frame_cache}" "${log}" \
+    SHOWY_QUOTA_PALETTE_ELAPSED=ff0000 SHOWY_QUOTA_SKETCHYBAR_PLACEMENT=notch
+plugin_log="$(< "${log}")"
+assert_not_contains "pending-layout render has no row to send" \
+    "--set showy_quota.codex.label" "${plugin_log}"
+assert_contains "render re-plans a layout the busy event left pending" \
+    "--set /^showy_quota\\.codex\\./ position=left" "${plugin_log}"
+if [[ -e "${frame_cache}/sb/layout.pending" ]]; then
+    fail "render clears the pending layout note"
+else
+    ok "render clears the pending layout note"
+fi
+
 # Regression: a newly-visible provider that sorts before an existing one
 # (the antigravity-opened-mid-session case) must end up to the *left* of
 # the later-sorting provider on the bar, not appended at the end.
@@ -2996,10 +3150,8 @@ log="${TMP}/sb-late-arrival.log"
 run_sketchybar_plugin "${late_arrival_fixture}" "${cache}" "${log}"
 plugin_log="$(< "${log}")"
 
-add_antigravity=$(printf '%s' "${plugin_log}" \
-    | grep -n -F -- '--add item showy_quota.antigravity.label left' | head -n1 | cut -d: -f1)
-add_opencodego=$(printf '%s' "${plugin_log}" \
-    | grep -n -F -- '--add item showy_quota.opencodego.label left' | head -n1 | cut -d: -f1)
+add_antigravity=$(grep -n -x -F 'showy_quota.antigravity.label' "${cache}/sb-state/.order" | head -n1 | cut -d: -f1)
+add_opencodego=$(grep -n -x -F 'showy_quota.opencodego.label' "${cache}/sb-state/.order" | head -n1 | cut -d: -f1)
 if [[ -n "${add_antigravity}" && -n "${add_opencodego}" \
     && "${add_antigravity}" -lt "${add_opencodego}" ]]; then
     ok "late-arriving provider lands ahead of later-sorting peer"
@@ -6602,15 +6754,23 @@ assert_equals "state reports the carried-forward slice's age" "1000" \
 
 # The renderer reads the same metadata straight from the cache, so the strip
 # greys exactly one chunk while the rest keep their bands.
-freshness_rows=$(
+freshness_args=$(
     env SHOWY_QUOTA_NO_CONFIG=1 \
         SHOWY_QUOTA_CACHE_DIR="${freshness_cache}" \
         SHOWY_QUOTA_REFRESH_SECONDS=60 \
         SHOWY_QUOTA_NOW_EPOCH="${freshness_now}" \
-        "${RENDER_BIN}" --emit sketchybar --from-cache 2>/dev/null | tr '\037' '\t'
+        "${RENDER_BIN}" --emit sketchybar-frame --from-cache 2>/dev/null \
+        | awk -F'\037' '$1 == "set"' | tr '\037' '\n'
 )
-freshness_gemini_row=$(printf '%s\n' "${freshness_rows}" | awk -F'\t' '$1 == "gemini" {print $9}')
-freshness_codex_row=$(printf '%s\n' "${freshness_rows}" | awk -F'\t' '$1 == "codex" {print $9}')
+# The primary slider's highlight in the `sketchybar --set` arguments.
+primary_highlight() {
+    printf '%s\n' "${freshness_args}" | awk -v item="showy_quota.$1.primary" '
+        $0 == item { found = 1; next }
+        found && $0 == "--set" { exit }
+        found && sub(/^slider\.highlight_color=/, "") { print; exit }'
+}
+freshness_gemini_row=$(primary_highlight gemini)
+freshness_codex_row=$(primary_highlight codex)
 assert_equals "the carried-forward provider renders in the stale colour" "0xff6c7086" \
     "${freshness_gemini_row}"
 # A missing row must not pass as "kept its color": the awk lookup yields an
@@ -6670,6 +6830,11 @@ assert_equals "a missing cache is reported as unavailable" "unavailable" \
 idle_reason_cache=$(mk_cache)
 printf '[{"provider":"codex","usage":{"primary":{"usedPercent":null}}}]' > "${idle_reason_cache}/usage.json"
 assert_equals "unused quota is reported as idle" "idle" \
+    "$(SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_CACHE_DIR="${idle_reason_cache}" SHOWY_QUOTA_CODEXBAR_SERVE_URL='' "${REPO_ROOT}/bin/showy-quota-state" --no-fetch --json | jq -r '.emptyReason')"
+# Muse Code while its server withholds quota: no error and no window object.
+# It draws greyed in place, so the strip is not empty.
+printf '[{"provider":"muse","error":null,"usage":{"primary":null,"secondary":null,"tertiary":null}}]' > "${idle_reason_cache}/usage.json"
+assert_equals "withheld quota counts as a rendered provider" "null" \
     "$(SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_CACHE_DIR="${idle_reason_cache}" SHOWY_QUOTA_CODEXBAR_SERVE_URL='' "${REPO_ROOT}/bin/showy-quota-state" --no-fetch --json | jq -r '.emptyReason')"
 
 # The strip label and the state token must agree; they are derived
@@ -7370,6 +7535,67 @@ if [[ "${template_error}" == *"unknownField"* ]]; then
 else
     fail "unknown template field names the field" "${template_error}"
 fi
+
+# ── sketchybar notch placement planner ───────────────────────────────
+
+# Synthetic batched query: bar, displays, then items. Anchors mark the notch
+# gap at [q_x+1, e_x+1); providers are laid out left-to-right from x=51 with
+# the live geometry (102pt icon+slot, then 3pt + 32pt label, 8pt between
+# providers). With labels=off the labels are hidden and providers sit 110pt
+# apart.
+notch_snapshot() {
+    jq -n -c --argjson n "$1" --argjson rx "$2" --argjson qx "$3" --argjson ex "$4" \
+        --arg labels "${5:-on}" '
+        def it($name; $pos; $x; $w; $on):
+            {name: $name, geometry: {position: $pos, drawing: (if $on then "on" else "off" end)},
+             bounding_rects: {"display-1": (if $on then {origin: [$x, 0], size: [$w, 32]}
+                                           else {origin: [-9999, -9999], size: [$w, 32]} end)}};
+        ($labels == "on") as $on
+        | (if $on then 145 else 110 end) as $pitch
+        | {padding_right: 18, items: []},
+          [{"arrangement-id": 1, frame: {x: 0, y: 0, w: 1728, h: 1117}}],
+          it("showy_quota.notch_q"; "q"; $qx; 1; true),
+          it("showy_quota.notch_e"; "e"; $ex; 1; true),
+          it("clock"; "right"; $rx; 60; true),
+          (range(0; $n) as $i | (51 + $pitch * $i) as $x
+              | it("showy_quota.p\($i + 1).icon"; "left"; $x; 22; true),
+                it("showy_quota.p\($i + 1).slot"; "left"; $x + 19; 83; true),
+                it("showy_quota.p\($i + 1).label"; "left"; $x + 105; 32; $on))'
+}
+
+# The planner's geometry cases live in the Rust unit tests
+# (crates/showy-quota-zellij-core/src/sketchybar_notch.rs). These pin the
+# plugin-facing contract of `--emit sketchybar-layout`: a batched query reply
+# on stdin becomes a stored plan plus the arguments that apply it.
+run_layout() {
+    local plan="$1" providers="$2"
+    env SHOWY_QUOTA_NO_CONFIG=1 "${RENDER_BIN}" --emit sketchybar-layout \
+        --plan "${plan}" --layout-providers "${providers}"
+}
+layout_plan="${TMP}/notch-layout.json"
+layout_out=$(notch_snapshot 6 1324 763 964 | run_layout "${layout_plan}" p1,p2,p3,p4,p5,p6)
+assert_contains "layout mode moves providers that would cross the notch to its right" \
+    $'--set\x1f/^showy_quota\\.p5\\./\x1fposition=e' "${layout_out}"
+assert_contains "layout mode keeps the providers that fit on the left" \
+    $'--set\x1f/^showy_quota\\.p4\\./\x1fposition=left' "${layout_out}"
+assert_contains "layout mode reports a plan that draws nothing new" $'layout\x1fok\x1f0' "${layout_out}"
+assert_equals "layout mode stores the plan it applied" '["p5","p6"]' "$(jq -c '.right' "${layout_plan}")"
+
+# The stored plan hid the labels; this one shows them again, so the plugin
+# must re-render the rows it had shrunk.
+jq -c '.compact = true' "${layout_plan}" > "${layout_plan}.tmp" && mv "${layout_plan}.tmp" "${layout_plan}"
+layout_out=$(notch_snapshot 6 1324 763 964 | run_layout "${layout_plan}" p1,p2,p3,p4,p5,p6)
+assert_contains "layout mode asks for a re-render when labels come back" $'layout\x1fok\x1f1' "${layout_out}"
+
+layout_none="${TMP}/notch-layout-none.json"
+layout_out=$(printf '' | run_layout "${layout_none}" p1)
+assert_equals "layout mode reports a dropped SketchyBar reply" $'layout\x1fnoreply' "${layout_out}"
+if [[ -e "${layout_none}" ]]; then
+    fail "layout mode keeps the stored plan when the reply was dropped"
+else
+    ok "layout mode keeps the stored plan when the reply was dropped"
+fi
+
 
 # ── summary ──────────────────────────────────────────────────────────
 

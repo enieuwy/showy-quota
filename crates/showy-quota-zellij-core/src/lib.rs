@@ -9,6 +9,8 @@ pub(crate) mod providers;
 pub mod render;
 pub(crate) mod reset;
 pub mod sketchybar;
+pub mod sketchybar_frame;
+pub mod sketchybar_notch;
 pub mod template;
 
 pub use codexbar::{
@@ -25,5 +27,5 @@ pub use render::{
     emit_rows, render_rows, render_tmux, render_vertical, render_zellij, Freshness, OutputFormat,
     RenderError, RenderOptions, RenderedRow,
 };
-pub use sketchybar::{emit_sketchybar, SketchybarOptions};
+pub use sketchybar::{sketchybar_rows, SketchybarOptions, SketchybarRow, SketchybarRows};
 pub use template::{Template, TemplateScope, DEFAULT_PROMPT_FORMAT};

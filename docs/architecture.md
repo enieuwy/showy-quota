@@ -95,7 +95,7 @@ It always requests `WebAccess`, then requests `OpenTerminalsOrPlugins` only when
 
 The plugin keeps last-known-good JSON in memory for the pane/session. If refreshes fail after a success, it continues rendering the previous data and marks it stale at `2 × interval_seconds`. That preserves the user-visible last-known-good behavior without requiring `FullHdAccess` or a disk cache.
 
-Hot-path compute is centralized in the native `showy-quota-render` binary. The tmux and advanced zjstatus shell bars only warm the cache and call `--from-cache`; the standalone Zellij plugin uses the same Rust rendering core in-process; the prompt segment comes from `--emit prompt`; and the SketchyBar plugin gets its per-provider row data (remaining percentages, elapsed markers, countdown labels, final colors, stale/shared-cycle handling) from `--emit sketchybar`. SketchyBar's shell keeps only host integration: item declaration/teardown, icon rendering and caching, click scripts, and the `sketchybar --set` calls.
+Hot-path compute is centralized in the native `showy-quota-render` binary. The tmux and advanced zjstatus shell bars only warm the cache and call `--from-cache`; the standalone Zellij plugin uses the same Rust rendering core in-process; the prompt segment comes from `--emit prompt`; and the SketchyBar plugin gets its whole tick from `--emit sketchybar-frame`: the final `sketchybar --set` arguments (rows, markers, labels, colors, icons, click scripts, stale/shared-cycle handling), diffed against the last frame sent, plus the decision to redeclare items. The notch split comes from `--emit sketchybar-layout`. SketchyBar's shell keeps only host integration: item declaration/teardown, icon rasterization, and the `sketchybar` calls.
 
 ## Terminal rendering modes
 

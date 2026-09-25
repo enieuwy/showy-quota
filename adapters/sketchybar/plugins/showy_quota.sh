@@ -66,15 +66,35 @@ validated_codexbar_resources() {
 FETCH="${SHOWY_QUOTA_FETCH_BIN:-${REPO_ROOT}/bin/showy-quota-fetch}"
 FETCH="$(showy_quota_valid_bin "${FETCH}")" || FETCH="${REPO_ROOT}/bin/showy-quota-fetch"
 CACHE_DIR="${SHOWY_QUOTA_SKETCHYBAR_IMAGE_CACHE}"
-mkdir -p -- "${CACHE_DIR}" || exit 0
-chmod 700 "${CACHE_DIR}" 2>/dev/null || true
+if [[ ! -d "${CACHE_DIR}" ]]; then
+    mkdir -p -- "${CACHE_DIR}" || exit 0
+    chmod 700 "${CACHE_DIR}" 2>/dev/null || true
+fi
 STATE_FILE="${CACHE_DIR}/providers.txt"
+# What this plugin last sent to SketchyBar, one hash per provider; the
+# renderer diffs each tick against it and writes the next one.
+FRAME_FILE="${CACHE_DIR}/frame.txt"
+# A layout event that found a render in flight, or a plan that got no reply,
+# leaves this note so the next render re-plans instead of the event being lost.
+LAYOUT_PENDING_FILE="${CACHE_DIR}/layout.pending"
+NOTCH_PLAN_FILE="${CACHE_DIR}/notch-layout.json"
+NOTCH_ANCHORS=(showy_quota.notch_q showy_quota.notch_e)
+# Every item one provider owns, in bracket order. Removal and the bracket walk
+# this list; the renderer checks the same list (`PROVIDER_ITEM_ROLES` in
+# crates/showy-quota-zellij-core/src/sketchybar_frame.rs) to find lost items.
+PROVIDER_ITEM_ROLES=(icon primary secondary tertiary quaternary
+    secondary_marker tertiary_marker quaternary_marker primary_marker slot label)
 if click_command_is_safe "${SHOWY_QUOTA_SKETCHYBAR_CLICK}"; then
     CLICK="${SHOWY_QUOTA_SKETCHYBAR_CLICK}"
 else
     CLICK="${DEFAULT_CLICK}"
 fi
-CODEXBAR_RESOURCES="$(validated_codexbar_resources || true)"
+# CODEXBAR_RESOURCES and ICON_FONT_FILE feed only icon rasterization, which a
+# tick with every icon cached never reaches; provider_icon_png resolves them
+# on first use.
+ICON_SOURCES_RESOLVED=0
+CODEXBAR_RESOURCES=""
+ICON_FONT_FILE=""
 RENDER_LOCK_DIR="${CACHE_DIR}/render.lock"
 RENDER_LOCK_OWNER="${RENDER_LOCK_DIR}/owner.pid"
 # Temp icon files awaiting cleanup by the EXIT trap (release_render_lock).
@@ -101,11 +121,15 @@ render_lock_age_seconds() {
     fi
     return 1
 }
+# `lstart` follows the caller's locale (`Fri 25 Sep …` under en_AU, `Fri Sep
+# 25 …` under C). A launchd-started SketchyBar runs the plugin without LANG,
+# so a run from a shell with a locale read a live owner's start time as a
+# reused pid and stole its lock. Pin the format.
 render_process_start_time() {
     local pid="$1" start_time
 
     [[ "${pid}" =~ ^[0-9]+$ ]] || return 1
-    start_time=$(ps -p "${pid}" -o lstart= 2>/dev/null) || return 1
+    start_time=$(LC_ALL=C ps -p "${pid}" -o lstart= 2>/dev/null) || return 1
     [[ -n "${start_time}" ]] || return 1
     printf '%s\n' "${start_time}"
 }
@@ -224,11 +248,15 @@ start_background_refresh() {
 }
 
 
-read_state_providers() {
+# Fill STATE_PROVIDERS with the provider list the last redeclare wrote.
+# Assigns a global rather than printing, so callers need no subshell.
+load_state_providers() {
+    local pid
+    STATE_PROVIDERS=""
     [[ -f "${STATE_FILE}" ]] || return 0
     while IFS= read -r pid || [[ -n "${pid}" ]]; do
         [[ -n "${pid}" ]] || continue
-        printf '%s\n' "${pid}"
+        STATE_PROVIDERS+="${STATE_PROVIDERS:+$'\n'}${pid}"
     done < "${STATE_FILE}"
 }
 
@@ -260,264 +288,263 @@ write_state_providers() {
     return "${mv_status}"
 }
 
-remove_provider_items() {
-    local pid="$1"
-    sketchybar \
-        --remove "showy_quota.${pid}.icon" \
-        --remove "showy_quota.${pid}.primary" \
-        --remove "showy_quota.${pid}.secondary" \
-        --remove "showy_quota.${pid}.tertiary" \
-        --remove "showy_quota.${pid}.quaternary" \
-        --remove "showy_quota.${pid}.secondary_marker" \
-        --remove "showy_quota.${pid}.tertiary_marker" \
-        --remove "showy_quota.${pid}.quaternary_marker" \
-        --remove "showy_quota.${pid}.primary_marker" \
-        --remove "showy_quota.${pid}.slot" \
-        --remove "showy_quota.${pid}.label" >/dev/null 2>&1 || true
+# Declarations queue into SB_QUEUE and go out as one `sketchybar` call.
+# One call per item made a full rebuild about 70 spawns long, and SketchyBar
+# drops a reply that takes over 100 ms, so under load a rebuild ran for most
+# of a minute with the pacing markers off. SketchyBar carries on past a
+# failed command inside a batch (`--remove` of an absent item), so one call
+# keeps the old per-call `|| true` semantics.
+SB_QUEUE=()
+
+flush_sketchybar_queue() {
+    (( ${#SB_QUEUE[@]} > 0 )) || return 0
+    sketchybar "${SB_QUEUE[@]}" >/dev/null 2>&1 || true
+    SB_QUEUE=()
 }
 
-declare_marker_item() {
-    local pid="$1" marker_role="$2" name
-    name="showy_quota.${pid}.${marker_role}_marker"
-    sketchybar --add slider "${name}" left "${SHOWY_QUOTA_PNG_BAR_W}" \
-               --set "${name}" \
-                   drawing=off \
-                   slider.percentage=0 \
-                   slider.highlight_color=0x00000000 \
-                   slider.background.color=0x00000000 \
-                   slider.background.height="${NATIVE_ROW_HEIGHT}" \
-                   slider.background.corner_radius=0 \
-                   slider.knob.drawing=on \
-                   slider.knob.color=0x00000000 \
-                   slider.knob.width=1 \
-                   slider.knob.padding_left=0 \
-                   slider.knob.padding_right=0 \
-                   slider.knob.background.drawing=on \
-                   slider.knob.background.color="${ELAPSED_ARGB}" \
-                   slider.knob.background.height="${NATIVE_ROW_HEIGHT}" \
-                   slider.knob.background.corner_radius=0 \
-                   icon.drawing=off \
-                   label.drawing=off \
-                   background.color=0x00000000 \
-                   background.height=0 \
-                   padding_left=0 \
-                   padding_right=0 \
-                   width=0 \
-                   click_script="${CLICK}" >/dev/null 2>&1 || true
+queue_provider_removal() {
+    local pid="$1" role
+    for role in "${PROVIDER_ITEM_ROLES[@]}"; do
+        SB_QUEUE+=(--remove "showy_quota.${pid}.${role}")
+    done
 }
 
-declare_stale_item() {
-    sketchybar --remove showy_quota.stale >/dev/null 2>&1 || true
-    sketchybar --add item showy_quota.stale left \
-               --set showy_quota.stale \
-                   drawing=off \
-                   label="${SHOWY_QUOTA_STALE_GLYPH}" \
-                   label.color="${COUNTDOWN_WARN_ARGB}" \
-                   icon.drawing=off \
-                   background.color=0x00000000 \
-                   background.height=0 \
-                   padding_left=4 \
-                   padding_right=2 \
-                   click_script="${CLICK}" >/dev/null 2>&1 || true
+# A usage row slider. Extra leading properties (`drawing=off` for the rows a
+# two-window provider does not draw) come before the shared ones.
+queue_row_slider() {
+    local name="showy_quota.$1.$2"
+    shift 2
+    SB_QUEUE+=(--add slider "${name}" left "${SHOWY_QUOTA_PNG_BAR_W}"
+               --set "${name}" "$@"
+                   slider.percentage=0
+                   slider.highlight_color=0x00000000
+                   slider.background.color="${TRACK_ARGB}"
+                   slider.background.height="${NATIVE_ROW_HEIGHT}"
+                   slider.background.corner_radius="${NATIVE_ROW_RADIUS}"
+                   slider.knob.drawing=off
+                   icon.drawing=off
+                   label.drawing=off
+                   background.color=0x00000000
+                   background.height=0
+                   padding_left=0
+                   padding_right=0
+                   width=0
+                   click_script="${CLICK}")
 }
 
-declare_degraded_item() {
-    sketchybar --remove showy_quota.degraded >/dev/null 2>&1 || true
-    sketchybar --add item showy_quota.degraded left \
-               --set showy_quota.degraded \
-                   drawing=off \
-                   label="${SHOWY_QUOTA_DEGRADED_CLI_GLYPH}" \
-                   label.color="${COUNTDOWN_WARN_ARGB}" \
-                   icon.drawing=off \
-                   background.color=0x00000000 \
-                   background.height=0 \
-                   padding_left=2 \
-                   padding_right=4 \
-                   click_script="${CLICK}" >/dev/null 2>&1 || true
+queue_marker_slider() {
+    local name="showy_quota.$1.$2_marker"
+    SB_QUEUE+=(--add slider "${name}" left "${SHOWY_QUOTA_PNG_BAR_W}"
+               --set "${name}"
+                   drawing=off
+                   slider.percentage=0
+                   slider.highlight_color=0x00000000
+                   slider.background.color=0x00000000
+                   slider.background.height="${NATIVE_ROW_HEIGHT}"
+                   slider.background.corner_radius=0
+                   slider.knob.drawing=on
+                   slider.knob.color=0x00000000
+                   slider.knob.width=1
+                   slider.knob.padding_left=0
+                   slider.knob.padding_right=0
+                   slider.knob.background.drawing=on
+                   slider.knob.background.color="${ELAPSED_ARGB}"
+                   slider.knob.background.height="${NATIVE_ROW_HEIGHT}"
+                   slider.knob.background.corner_radius=0
+                   icon.drawing=off
+                   label.drawing=off
+                   background.color=0x00000000
+                   background.height=0
+                   padding_left=0
+                   padding_right=0
+                   width=0
+                   click_script="${CLICK}")
 }
 
-declare_provider_items() {
-    local pid="$1"
-    remove_provider_items "${pid}"
+queue_provider_declaration() {
+    local pid="$1" role
+    queue_provider_removal "${pid}"
 
-    sketchybar --add item "showy_quota.${pid}.icon" left \
-               --set "showy_quota.${pid}.icon" \
-                   icon.drawing=off \
-                   label.drawing=off \
-                   background.image.drawing=off \
-                   background.image.scale="${SHOWY_QUOTA_SKETCHYBAR_ICON_SCALE}" \
-                   background.color=0x00000000 \
-                   background.height=0 \
-                   padding_left="${SHOWY_QUOTA_SKETCHYBAR_ICON_PADDING_LEFT}" \
-                   padding_right=0 \
-                   width="${SHOWY_QUOTA_SKETCHYBAR_ICON_WIDTH}" \
-                   click_script="${CLICK}" >/dev/null 2>&1 || true
+    SB_QUEUE+=(--add item "showy_quota.${pid}.icon" left
+               --set "showy_quota.${pid}.icon"
+                   icon.drawing=off
+                   label.drawing=off
+                   background.image.drawing=off
+                   background.image.scale="${SHOWY_QUOTA_SKETCHYBAR_ICON_SCALE}"
+                   background.color=0x00000000
+                   background.height=0
+                   padding_left="${SHOWY_QUOTA_SKETCHYBAR_ICON_PADDING_LEFT}"
+                   padding_right=0
+                   width="${SHOWY_QUOTA_SKETCHYBAR_ICON_WIDTH}"
+                   click_script="${CLICK}")
 
-    sketchybar --add slider "showy_quota.${pid}.primary" left "${SHOWY_QUOTA_PNG_BAR_W}" \
-               --set "showy_quota.${pid}.primary" \
-                   slider.percentage=0 \
-                   slider.highlight_color=0x00000000 \
-                   slider.background.color="${TRACK_ARGB}" \
-                   slider.background.height="${NATIVE_ROW_HEIGHT}" \
-                   slider.background.corner_radius="${NATIVE_ROW_RADIUS}" \
-                   slider.knob.drawing=off \
-                   icon.drawing=off \
-                   label.drawing=off \
-                   background.color=0x00000000 \
-                   background.height=0 \
-                   padding_left=0 \
-                   padding_right=0 \
-                   width=0 \
-                   click_script="${CLICK}" >/dev/null 2>&1 || true
+    queue_row_slider "${pid}" primary
+    queue_row_slider "${pid}" secondary
+    queue_row_slider "${pid}" tertiary drawing=off
+    queue_row_slider "${pid}" quaternary drawing=off
 
-    sketchybar --add slider "showy_quota.${pid}.secondary" left "${SHOWY_QUOTA_PNG_BAR_W}" \
-               --set "showy_quota.${pid}.secondary" \
-                   slider.percentage=0 \
-                   slider.highlight_color=0x00000000 \
-                   slider.background.color="${TRACK_ARGB}" \
-                   slider.background.height="${NATIVE_ROW_HEIGHT}" \
-                   slider.background.corner_radius="${NATIVE_ROW_RADIUS}" \
-                   slider.knob.drawing=off \
-                   icon.drawing=off \
-                   label.drawing=off \
-                   background.color=0x00000000 \
-                   background.height=0 \
-                   padding_left=0 \
-                   padding_right=0 \
-                   width=0 \
-                   click_script="${CLICK}" >/dev/null 2>&1 || true
+    for role in secondary primary tertiary quaternary; do
+        queue_marker_slider "${pid}" "${role}"
+    done
 
-    sketchybar --add slider "showy_quota.${pid}.tertiary" left "${SHOWY_QUOTA_PNG_BAR_W}" \
-               --set "showy_quota.${pid}.tertiary" \
-                   drawing=off \
-                   slider.percentage=0 \
-                   slider.highlight_color=0x00000000 \
-                   slider.background.color="${TRACK_ARGB}" \
-                   slider.background.height="${NATIVE_ROW_HEIGHT}" \
-                   slider.background.corner_radius="${NATIVE_ROW_RADIUS}" \
-                   slider.knob.drawing=off \
-                   icon.drawing=off \
-                   label.drawing=off \
-                   background.color=0x00000000 \
-                   background.height=0 \
-                   padding_left=0 \
-                   padding_right=0 \
-                   width=0 \
-                   click_script="${CLICK}" >/dev/null 2>&1 || true
-
-    sketchybar --add slider "showy_quota.${pid}.quaternary" left "${SHOWY_QUOTA_PNG_BAR_W}" \
-               --set "showy_quota.${pid}.quaternary" \
-                   drawing=off \
-                   slider.percentage=0 \
-                   slider.highlight_color=0x00000000 \
-                   slider.background.color="${TRACK_ARGB}" \
-                   slider.background.height="${NATIVE_ROW_HEIGHT}" \
-                   slider.background.corner_radius="${NATIVE_ROW_RADIUS}" \
-                   slider.knob.drawing=off \
-                   icon.drawing=off \
-                   label.drawing=off \
-                   background.color=0x00000000 \
-                   background.height=0 \
-                   padding_left=0 \
-                   padding_right=0 \
-                   width=0 \
-                   click_script="${CLICK}" >/dev/null 2>&1 || true
-
-    declare_marker_item "${pid}" secondary
-    declare_marker_item "${pid}" primary
-    declare_marker_item "${pid}" tertiary
-    declare_marker_item "${pid}" quaternary
-
-    sketchybar --add item "showy_quota.${pid}.slot" left \
-               --set "showy_quota.${pid}.slot" \
-                   icon.drawing=off \
-                   label.drawing=off \
-                   background.color=0x00000000 \
-                   background.height=0 \
-                   padding_left=0 \
-                   padding_right=0 \
-                   width="${SHOWY_QUOTA_SKETCHYBAR_BAR_WIDTH}" \
-                   click_script="${CLICK}" >/dev/null 2>&1 || true
-
-    sketchybar --add item "showy_quota.${pid}.label" left \
-               --set "showy_quota.${pid}.label" \
-                   icon.drawing=off \
-                   label.font.size=11 \
-                   label.padding_left=0 \
-                   label.padding_right=4 \
-                   label.width="${SHOWY_QUOTA_SKETCHYBAR_LABEL_WIDTH}" \
-                   label.align=left \
-                   background.color=0x00000000 \
-                   background.height=0 \
-                   click_script="${CLICK}" >/dev/null 2>&1 || true
-}
-sketchybar_item_exists() {
-    sketchybar --query "$1" >/dev/null 2>&1
+    SB_QUEUE+=(--add item "showy_quota.${pid}.slot" left
+               --set "showy_quota.${pid}.slot"
+                   icon.drawing=off
+                   label.drawing=off
+                   background.color=0x00000000
+                   background.height=0
+                   padding_left=0
+                   padding_right=0
+                   width="${SHOWY_QUOTA_SKETCHYBAR_BAR_WIDTH}"
+                   click_script="${CLICK}"
+               --add item "showy_quota.${pid}.label" left
+               --set "showy_quota.${pid}.label"
+                   icon.drawing=off
+                   label.font.size=11
+                   label.padding_left=0
+                   label.padding_right=4
+                   label.width="${SHOWY_QUOTA_SKETCHYBAR_LABEL_WIDTH}"
+                   label.align=left
+                   background.color=0x00000000
+                   background.height=0
+                   click_script="${CLICK}")
 }
 
-provider_items_declared() {
-    local pid="$1"
-    sketchybar_item_exists "showy_quota.${pid}.icon" \
-        && sketchybar_item_exists "showy_quota.${pid}.primary" \
-        && sketchybar_item_exists "showy_quota.${pid}.secondary" \
-        && sketchybar_item_exists "showy_quota.${pid}.tertiary" \
-        && sketchybar_item_exists "showy_quota.${pid}.quaternary" \
-        && sketchybar_item_exists "showy_quota.${pid}.secondary_marker" \
-        && sketchybar_item_exists "showy_quota.${pid}.tertiary_marker" \
-        && sketchybar_item_exists "showy_quota.${pid}.quaternary_marker" \
-        && sketchybar_item_exists "showy_quota.${pid}.primary_marker" \
-        && sketchybar_item_exists "showy_quota.${pid}.slot" \
-        && sketchybar_item_exists "showy_quota.${pid}.label"
-}
+# The trailing overflow/stale/degraded items and the bracket that spans every
+# provider item plus those three.
+queue_bracket() {
+    local providers="${1-}" pid role
+    local -a members=()
 
-declared_items_present() {
-    local providers="${1-}" pid
-    while IFS= read -r pid; do
-        [[ -n "${pid}" ]] || continue
-        provider_items_declared "${pid}" || return 1
-    done <<< "${providers}"
-    sketchybar_item_exists showy_quota.stale || return 1
-    sketchybar_item_exists showy_quota.degraded || return 1
-    [[ -z "${providers}" ]] || sketchybar_item_exists showy_quota_bracket
-}
-
-
-recreate_bracket() {
-    local providers="${1-}" pid
-    local bracket_items=()
-    local has_provider=0
-    sketchybar --remove showy_quota_bracket >/dev/null 2>&1 || true
-    declare_stale_item
-    declare_degraded_item
+    SB_QUEUE+=(--remove showy_quota_bracket
+               --remove showy_quota.overflow
+               --add item showy_quota.overflow left
+               --set showy_quota.overflow
+                   drawing=off
+                   label="+0"
+                   label.font.size=11
+                   label.color="${COUNTDOWN_WARN_ARGB}"
+                   icon.drawing=off
+                   background.color=0x00000000
+                   background.height=0
+                   padding_left=4
+                   padding_right=4
+                   click_script="${CLICK}"
+               --remove showy_quota.stale
+               --add item showy_quota.stale left
+               --set showy_quota.stale
+                   drawing=off
+                   label="${SHOWY_QUOTA_STALE_GLYPH}"
+                   label.color="${COUNTDOWN_WARN_ARGB}"
+                   icon.drawing=off
+                   background.color=0x00000000
+                   background.height=0
+                   padding_left=4
+                   padding_right=2
+                   click_script="${CLICK}"
+               --remove showy_quota.degraded
+               --add item showy_quota.degraded left
+               --set showy_quota.degraded
+                   drawing=off
+                   label="${SHOWY_QUOTA_DEGRADED_CLI_GLYPH}"
+                   label.color="${COUNTDOWN_WARN_ARGB}"
+                   icon.drawing=off
+                   background.color=0x00000000
+                   background.height=0
+                   padding_left=2
+                   padding_right=4
+                   click_script="${CLICK}")
 
     while IFS= read -r pid; do
         [[ -n "${pid}" ]] || continue
-        has_provider=1
-        bracket_items+=(
-            "showy_quota.${pid}.icon"
-            "showy_quota.${pid}.primary"
-            "showy_quota.${pid}.secondary"
-            "showy_quota.${pid}.tertiary"
-            "showy_quota.${pid}.quaternary"
-            "showy_quota.${pid}.secondary_marker"
-            "showy_quota.${pid}.tertiary_marker"
-            "showy_quota.${pid}.quaternary_marker"
-            "showy_quota.${pid}.primary_marker"
-            "showy_quota.${pid}.slot"
-            "showy_quota.${pid}.label"
-        )
+        for role in "${PROVIDER_ITEM_ROLES[@]}"; do
+            members+=("showy_quota.${pid}.${role}")
+        done
     done <<< "${providers}"
+    (( ${#members[@]} > 0 )) || return 0
 
-    if (( ! has_provider )); then
-        return 0
-    fi
+    members+=(showy_quota.overflow showy_quota.stale showy_quota.degraded)
+    SB_QUEUE+=(--add bracket showy_quota_bracket "${members[@]}"
+               --set showy_quota_bracket
+                   background.color="${SHOWY_QUOTA_SKETCHYBAR_PILL_COLOR}"
+                   background.corner_radius="${SHOWY_QUOTA_SKETCHYBAR_PILL_RADIUS}"
+                   background.height="${SHOWY_QUOTA_SKETCHYBAR_PILL_HEIGHT}")
+}
 
-    bracket_items+=("showy_quota.stale" "showy_quota.degraded")
-    sketchybar --add bracket showy_quota_bracket "${bracket_items[@]}" \
-               --set showy_quota_bracket \
-                   background.color="${SHOWY_QUOTA_SKETCHYBAR_PILL_COLOR}" \
-                   background.corner_radius="${SHOWY_QUOTA_SKETCHYBAR_PILL_RADIUS}" \
-                   background.height="${SHOWY_QUOTA_SKETCHYBAR_PILL_HEIGHT}" >/dev/null 2>&1 || true
+# Two 1pt anchors mark the notch gap exactly as SketchyBar reserves it: the
+# `q` anchor ends at the notch's left edge, the `e` anchor starts at its right
+# edge. They must precede the provider items in SketchyBar's item list, because
+# `e` items lay out in list order and the planner measures the right wing from
+# the `e` anchor.
+queue_notch_anchors() {
+    local anchor position
+    for anchor in "${NOTCH_ANCHORS[@]}"; do
+        position=q
+        [[ "${anchor}" == *_e ]] && position=e
+        SB_QUEUE+=(--remove "${anchor}"
+                   --add item "${anchor}" "${position}"
+                   --set "${anchor}"
+                       width=1
+                       icon.drawing=off
+                       label.drawing=off
+                       background.drawing=off
+                       padding_left=0
+                       padding_right=0
+                       updates=off)
+    done
+}
+
+queue_notch_anchor_removal() {
+    local anchor
+    for anchor in "${NOTCH_ANCHORS[@]}"; do
+        SB_QUEUE+=(--remove "${anchor}")
+    done
+}
+
+notch_placement() {
+    [[ "${SHOWY_QUOTA_SKETCHYBAR_PLACEMENT}" == "notch" ]]
+}
+
+# `showy-quota-render --emit sketchybar-*` answers in records, one per line,
+# fields separated by US and the first field a tag (the format is documented
+# in crates/showy-quota-zellij-core/src/sketchybar_frame.rs). Read the fields
+# after the tag of record $2 into the array named by $1.
+wire_fields_into() {
+    local _wf_rest=""
+    [[ "$2" == *$'\x1f'* ]] && _wf_rest="${2#*$'\x1f'}"
+    IFS=$'\x1f' read -r -a "$1" <<< "${_wf_rest}"
+}
+
+parse_frame_output() {
+    local line
+    local -a fields=()
+    FRAME_REDECLARE="-"
+    FRAME_REFRESH=0
+    FRAME_PROVIDERS=""
+    FRAME_HAS_QUERY=0
+    FRAME_QUERY=()
+    FRAME_ICONS=()
+    FRAME_ARGS=()
+    while IFS= read -r line; do
+        case "${line%%$'\x1f'*}" in
+            state)
+                wire_fields_into fields "${line}"
+                FRAME_REDECLARE="${fields[0]:--}"
+                FRAME_REFRESH="${fields[1]:-0}"
+                ;;
+            providers)
+                wire_fields_into fields "${line}"
+                printf -v FRAME_PROVIDERS '%s\n' "${fields[@]}"
+                FRAME_PROVIDERS="${FRAME_PROVIDERS%$'\n'}"
+                ;;
+            icon) FRAME_ICONS+=("${line}") ;;
+            query)
+                wire_fields_into FRAME_QUERY "${line}"
+                FRAME_HAS_QUERY=1
+                ;;
+            set) wire_fields_into FRAME_ARGS "${line}" ;;
+        esac
+    done <<< "$1"
 }
 
 trigger_provider_change() {
@@ -539,15 +566,19 @@ trigger_provider_change() {
 }
 
 clear_declared_items() {
-    local declared pid
-    declared="$(read_state_providers)"
+    local pid
+    load_state_providers
     while IFS= read -r pid; do
         [[ -n "${pid}" ]] || continue
-        remove_provider_items "${pid}"
-    done <<< "${declared}"
-    sketchybar --remove showy_quota_bracket >/dev/null 2>&1 || true
-    sketchybar --remove showy_quota.stale >/dev/null 2>&1 || true
-    sketchybar --remove showy_quota.degraded >/dev/null 2>&1 || true
+        queue_provider_removal "${pid}"
+    done <<< "${STATE_PROVIDERS}"
+    SB_QUEUE+=(--remove showy_quota_bracket
+               --remove showy_quota.overflow
+               --remove showy_quota.stale
+               --remove showy_quota.degraded)
+    queue_notch_anchor_removal
+    flush_sketchybar_queue
+    rm -f -- "${NOTCH_PLAN_FILE}" "${FRAME_FILE}" 2>/dev/null || true
     write_state_providers "" || showy_quota_log "failed to clear sketchybar provider state"
 }
 
@@ -570,111 +601,43 @@ if (( HAVE_MAGICK )) && [[ -f "${REPO_ROOT}/adapters/sketchybar/imagemagick/poli
     export MAGICK_CONFIGURE_PATH="${REPO_ROOT}/adapters/sketchybar/imagemagick${MAGICK_CONFIGURE_PATH:+:${MAGICK_CONFIGURE_PATH}}"
 fi
 
-# Bar geometry. Bars sit inside SketchyBar's pill; tweak via env.
-: "${SHOWY_QUOTA_PNG_BAR_W:=80}"
-NATIVE_ROW_HEIGHT=6
-# Default 3 == NATIVE_ROW_HEIGHT/2 → fully rounded ends. Set to 0 for a
-# squared track; intermediate values yield partial rounding.
-NATIVE_ROW_RADIUS=$(showy_quota_uint "${SHOWY_QUOTA_SKETCHYBAR_ROW_RADIUS:-3}" 3 4096)
-
-# ── ARGB helpers ─────────────────────────────────────────────────────
-
-# 6-char hex (no '#') → 0xff RRGGBB SketchyBar literal.
-argb_from_hex() { printf '0xff%s' "$1"; }
+# ── host settings ────────────────────────────────────────────────────
 
 # 6-char hex → '#RRGGBB' for ImageMagick.
 mhex() { printf '#%s' "$1"; }
 
-PRIMARY_WARN_HEX="$(showy_quota_primary_palette warn)"
-PRIMARY_BAD_HEX="$(showy_quota_primary_palette bad)"
-PRIMARY_UNKNOWN_HEX="$(showy_quota_primary_palette unknown)"
-TRACK_HEX="$(showy_quota_palette track)"
-TRACK_ARGB="$(argb_from_hex "${TRACK_HEX}")"
-ICON_TEXT_HEX="$(showy_quota_palette icon_text)"
-COUNTDOWN_WARN_HEX="$(showy_quota_palette countdown_warn)"
-COUNTDOWN_WARN_ARGB="$(argb_from_hex "${COUNTDOWN_WARN_HEX}")"
-ELAPSED_HEX="$(showy_quota_palette elapsed)"
-ELAPSED_ARGB="$(argb_from_hex "${ELAPSED_HEX}")"
+# Geometry and colors for declaring items and drawing icons. A tick that
+# declares nothing and draws no icon never needs them, and each palette
+# lookup forks, so they load on first use.
+HOST_SETTINGS_LOADED=0
+load_host_settings() {
+    (( HOST_SETTINGS_LOADED )) && return 0
+    : "${SHOWY_QUOTA_PNG_BAR_W:=80}"
+    NATIVE_ROW_HEIGHT=6
+    # Default 3 == NATIVE_ROW_HEIGHT/2 → fully rounded ends. Set to 0 for a
+    # squared track; intermediate values yield partial rounding.
+    NATIVE_ROW_RADIUS=$(showy_quota_uint "${SHOWY_QUOTA_SKETCHYBAR_ROW_RADIUS:-3}" 3 4096)
+    PRIMARY_WARN_HEX="$(showy_quota_primary_palette warn)"
+    PRIMARY_BAD_HEX="$(showy_quota_primary_palette bad)"
+    PRIMARY_UNKNOWN_HEX="$(showy_quota_primary_palette unknown)"
+    TRACK_ARGB="0xff$(showy_quota_palette track)"
+    ICON_TEXT_HEX="$(showy_quota_palette icon_text)"
+    COUNTDOWN_WARN_HEX="$(showy_quota_palette countdown_warn)"
+    COUNTDOWN_WARN_ARGB="0xff${COUNTDOWN_WARN_HEX}"
+    ELAPSED_ARGB="0xff$(showy_quota_palette elapsed)"
+    HOST_SETTINGS_LOADED=1
+}
 
-status_color_for_indicator() {
-    case "${1:-none}" in
-        minor|maintenance) printf '%s' "${PRIMARY_WARN_HEX}" ;;
-        major|critical)    printf '%s' "${PRIMARY_BAD_HEX}" ;;
-        unknown)           printf '%s' "${PRIMARY_UNKNOWN_HEX}" ;;
-        *)                 return 1 ;;
+status_color_for_indicator_into() {
+    case "${2:-none}" in
+        minor|maintenance) printf -v "$1" '%s' "${PRIMARY_WARN_HEX}" ;;
+        major|critical)    printf -v "$1" '%s' "${PRIMARY_BAD_HEX}" ;;
+        unknown)           printf -v "$1" '%s' "${PRIMARY_UNKNOWN_HEX}" ;;
+        *)                 printf -v "$1" '%s' ""; return 1 ;;
     esac
 }
 
-shell_quote() {
-    local raw="$1"
-    printf "'"
-    while [[ "${raw}" == *"'"* ]]; do
-        printf '%s' "${raw%%\'*}"
-        printf "'\\''"
-        raw="${raw#*\'}"
-    done
-    printf "%s'" "${raw}"
-}
-
-status_url_is_openable() {
-    local url="${1:-}" rest authority host port lower_host
-
-    [[ ${#url} -le 2048 ]] || return 1
-    [[ ! "${url}" =~ [[:cntrl:][:space:]] ]] || return 1
-    [[ "${url}" != *\\* ]] || return 1
-    case "${url}" in
-        http://*|https://*) ;;
-        *)                  return 1 ;;
-    esac
-
-    rest="${url#*://}"
-    authority="${rest%%[/?#]*}"
-    [[ -n "${authority}" && "${authority}" != *@* ]] || return 1
-    if [[ "${authority}" == *:* ]]; then
-        host="${authority%:*}"
-        port="${authority##*:}"
-        [[ "${host}" != *:* && "${port}" =~ ^[0-9]{1,5}$ ]] || return 1
-        (( 10#${port} >= 1 && 10#${port} <= 65535 )) || return 1
-    else
-        host="${authority}"
-    fi
-    [[ "${host}" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*$ ]] || return 1
-    [[ ! "${host}" =~ ^[0-9.]+$ ]] || return 1
-
-    lower_host="${host,,}"
-    case "${lower_host}" in
-        localhost|localhost.|*.localhost|*.localhost.) return 1 ;;
-        *) return 0 ;;
-    esac
-}
-
-click_script_for_status() {
-    local status="${1:-none}" url="${2:-}"
-    case "${status}" in
-        minor|maintenance|major|critical)
-            if status_url_is_openable "${url}"; then
-                printf 'open %s' "$(shell_quote "${url}")"
-                return
-            fi
-            ;;
-    esac
-    printf '%s' "${CLICK}"
-}
-
-# Bump when icon rendering semantics change so stale cached PNGs are replaced
-# on the next plugin tick.
-ICON_CACHE_VERSION="5"
-
-# ── provider icon: native app-font experiment ────────────────────────
-provider_font_icon() {
-    if [[ -v SHOWY_QUOTA_PROVIDER_FONT_ICONS["$1"] ]]; then
-        printf '%s' "${SHOWY_QUOTA_PROVIDER_FONT_ICONS[$1]}"
-    else
-        return 1
-    fi
-}
-
-# ── provider icon: lazily render SVG → PNG ───────────────────────────
+# ── provider icon: rasterize SVG → PNG ───────────────────────────────
 
 # ImageMagick built without the fontconfig delegate — the Homebrew default —
 # has an empty `magick -list font`, so bare `-annotate` dies with "unable to
@@ -693,7 +656,13 @@ resolve_icon_font_file() {
     done
     return 1
 }
-ICON_FONT_FILE="$(resolve_icon_font_file || true)"
+
+resolve_icon_sources() {
+    (( ICON_SOURCES_RESOLVED )) && return 0
+    CODEXBAR_RESOURCES="$(validated_codexbar_resources || true)"
+    ICON_FONT_FILE="$(resolve_icon_font_file || true)"
+    ICON_SOURCES_RESOLVED=1
+}
 
 # Drawn sigil icon for providers whose SVG is missing or unrenderable. The disc
 # color is passed in and the result is published untinted: the recolor path
@@ -768,36 +737,33 @@ should_tint_dark_icon_png() {
     (( mean < 150 && (max - min) < 30 ))
 }
 
-
-
-# Render (or reuse) the provider icon PNG and write its path into the variable
-# named by $3. It must NOT be called in a command substitution: that subshell
-# would discard the ICON_TMP_FILES registrations below and defeat EXIT-trap
-# cleanup. The local is named `dest` (not `out`) so a caller passing "out" as
-# the target name cannot have the assignment silently land on our local.
+# Rasterize the provider icon the renderer asked for (`icon` records) into
+# DEST. The renderer owns the path: it keys the file on the icon status and
+# the palette, and draws the icon once the file exists. It must NOT be called
+# in a command substitution: that subshell would discard the ICON_TMP_FILES
+# registrations below and defeat EXIT-trap cleanup.
 provider_icon_png() {
     (( HAVE_MAGICK )) || return 1
 
-    local pid="$1" status="${2:-none}" out_var="$3"
-    local status_color="" tint_color="" suffix="" dest cache_key drawn=0
-    [[ -n "${out_var}" ]] || return 1
+    local pid="$1" status="${2:-none}" dest="$3"
+    local status_color="" tint_color="" drawn=0
+    # Only ever write into our own icon cache.
+    [[ "${dest}" == "${CACHE_DIR%/}"/icon-v*.png && "${dest}" != *..* ]] || return 1
+    load_host_settings
     # An errored row with no incident indicator arrives as `error`: paint the
     # warning tint into the fallback glyph so the icon reads as an error.
     if [[ "${status}" == "error" ]]; then
         status_color="${COUNTDOWN_WARN_HEX}"
-        suffix="-error"
-    elif status_color=$(status_color_for_indicator "${status}"); then
-        suffix="-${status}"
+    else
+        status_color_for_indicator_into status_color "${status}"
     fi
-    cache_key="${ICON_TEXT_HEX}-${PRIMARY_UNKNOWN_HEX}-${PRIMARY_WARN_HEX}-${PRIMARY_BAD_HEX}"
-    dest="${CACHE_DIR}/icon-v${ICON_CACHE_VERSION}-${pid}-${cache_key}${suffix}.png"
-    [[ -s "${dest}" ]] && { printf -v "${out_var}" '%s' "${dest}"; return 0; }
 
     # Per-process tmp files in the same directory so `mv` is atomic.
     local tmp normal_tmp
     normal_tmp=$(mktemp "${CACHE_DIR}/.icon-${pid}.normal.XXXXXX") || return 1
     ICON_TMP_FILES+=("${normal_tmp}")
 
+    resolve_icon_sources
     local svg=""
     [[ -n "${CODEXBAR_RESOURCES}" ]] && svg="${CODEXBAR_RESOURCES}/ProviderIcon-${pid}.svg"
     if [[ -z "${svg}" || ! -r "${svg}" ]] || ! rasterize_provider_svg "${svg}" "${normal_tmp}"; then
@@ -835,313 +801,198 @@ provider_icon_png() {
         rm -f "${tmp}"
         return 1
     fi
-    printf -v "${out_var}" '%s' "${dest}"
 }
 
-# ── native stacked bar helpers ───────────────────────────────────────
+# ── notch placement ──────────────────────────────────────────────────
 
-clamp_slider_percentage() {
-    local pct="${1:-0}"
-    [[ "${pct}" =~ ^-?[0-9]+$ ]] || pct=0
-    (( pct < 0 )) && pct=0
-    (( pct > 100 )) && pct=100
-    printf '%s\n' "${pct}"
+# Fill LAYOUT_ITEMS with the live item names (`--emit sketchybar-query`).
+load_layout_items() {
+    local bar out
+    local -a fields=()
+    LAYOUT_ITEMS=()
+    bar=$(sketchybar --query bar 2>/dev/null) || return 1
+    [[ -n "${bar}" ]] || return 1
+    out=$("${RENDER_BIN}" --emit sketchybar-query <<< "${bar}" 2>/dev/null) || return 1
+    wire_fields_into fields "${out%%$'\n'*}"
+    LAYOUT_ITEMS=("${fields[@]}")
 }
 
-slider_click_script() {
-    local item="$1" pct="$2"
-    printf 'command -v sketchybar >/dev/null 2>&1 && sketchybar --set %s slider.percentage=%s >/dev/null 2>&1; %s' \
-        "$(shell_quote "${item}")" \
-        "$(clamp_slider_percentage "${pct}")" \
-        "${CLICK}"
+# Measure the live bar in one batched query and let the renderer plan which
+# providers sit right of the notch (`--emit sketchybar-layout`, which also
+# stores the plan). Positions change with `--set position=`, never
+# remove/re-add, so a re-split does not tear the pill down. When the plan
+# draws more than before (labels or a provider come back), re-run the plugin
+# once so the full rows are drawn. Arguments after PROVIDERS are the live item
+# names when the caller already has them.
+apply_notch_layout() {
+    local providers="${1-}" out line item
+    shift
+    notch_placement || return 0
+    [[ -n "${providers}" ]] || return 0
+
+    local -a query_args=(--query bar --query displays) fields=() args=()
+    LAYOUT_ITEMS=("$@")
+    # SketchyBar drops a reply that takes over 100 ms, which happens right
+    # after a redeclare. An empty reply would plan "no notch" and pull every
+    # provider left, so retry once, then leave the note for the next tick.
+    local measured=""
+    if (( ${#LAYOUT_ITEMS[@]} > 0 )) || load_layout_items \
+        || { sleep 0.3; load_layout_items; }; then
+        for item in "${LAYOUT_ITEMS[@]}"; do
+            query_args+=(--query "${item}")
+        done
+        measured=$(sketchybar "${query_args[@]}" 2>/dev/null) || measured=""
+    fi
+    out=""
+    if [[ -n "${measured}" ]]; then
+        out=$("${RENDER_BIN}" --emit sketchybar-layout --plan "${NOTCH_PLAN_FILE}" \
+            --layout-providers "${providers//$'\n'/,}" <<< "${measured}" 2>/dev/null) || out=""
+    fi
+    while IFS= read -r line; do
+        case "${line%%$'\x1f'*}" in
+            layout) wire_fields_into fields "${line}" ;;
+            set) wire_fields_into args "${line}" ;;
+        esac
+    done <<< "${out}"
+    if [[ "${fields[0]:-}" != "ok" ]]; then
+        showy_quota_log "notch layout: no reply from sketchybar; re-planning next tick"
+        : > "${LAYOUT_PENDING_FILE}" 2>/dev/null || true
+        return 0
+    fi
+    (( ${#args[@]} > 0 )) && sketchybar "${args[@]}" >/dev/null 2>&1
+    # Hiding happened above. Showing a label or provider again needs the full
+    # row, so re-run the plugin once when the plan draws more than before.
+    if [[ "${fields[1]:-0}" == "1" ]]; then
+        ( sleep 0.3; sketchybar --trigger showy_quota_refresh ) </dev/null >/dev/null 2>&1 &
+        disown "$!" 2>/dev/null || true
+    fi
+    return 0
 }
 
 # ── main ─────────────────────────────────────────────────────────────
 
-acquire_render_lock || exit 0
-refresh_in_background=0
-if "${FETCH}" --cache-only >/dev/null 2>&1; then
-    if [[ -n "${SHOWY_QUOTA_CODEXBAR_SERVE_URL:-}" ]]; then
-        refresh_threshold="${SHOWY_QUOTA_CODEXBAR_SERVE_REFRESH_SECONDS:-60}"
-        [[ "${refresh_threshold}" =~ ^[0-9]+$ ]] || refresh_threshold=60
-    else
-        refresh_threshold="${SHOWY_QUOTA_REFRESH_SECONDS:-120}"
-        [[ "${refresh_threshold}" =~ ^[0-9]+$ ]] || refresh_threshold=120
-    fi
-    cache_age=$(showy_quota_age_seconds "${SHOWY_QUOTA_USAGE_FILE}")
-    if [[ "${cache_age}" =~ ^[0-9]+$ ]] && (( cache_age >= refresh_threshold )); then
-        refresh_in_background=1
-    fi
-else
-    "${FETCH}" >/dev/null 2>&1 || true
-fi
-
-# Row compute (renderable filtering, elapsed markers, countdown labels,
-# window colors, stale and shared-cycle handling) lives in the native
-# renderer; this plugin only assembles SketchyBar items from the emitted
-# fields. See crates/showy-quota-zellij-core/src/sketchybar.rs for the
-# record format (US-separated fields, one provider per line, header first).
-showy_quota_export_config
-rows_payload=$("${RENDER_BIN}" --emit sketchybar --from-cache 2>/dev/null) || rows_payload=""
-
-stale=0
-degraded_cli=0
-rows=""
-if [[ -n "${rows_payload}" ]]; then
-    header="${rows_payload%%$'\n'*}"
-    [[ "${rows_payload}" == *$'\n'* ]] && rows="${rows_payload#*$'\n'}"
-    IFS=$'\x1f' read -r header_stale header_degraded <<< "${header}"
-    [[ "${header_stale}" == "1" ]] && stale=1
-    [[ "${header_degraded}" == "1" ]] && degraded_cli=1
-else
-    # No renderable cache (cold start without codexbar, or an invalid
-    # payload): mirror the empty-data path so items tear down while the
-    # stale/degraded markers still reflect the on-disk cache state.
-    showy_quota_cache_stale_for "${SHOWY_QUOTA_USAGE_FILE}" && stale=1
-    if [[ "${SHOWY_QUOTA_DEGRADED_CLI:-}" == "1" ]] \
-        || { [[ -z "${SHOWY_QUOTA_DEGRADED_CLI:-}" ]] && showy_quota_cache_degraded_cli; }; then
-        degraded_cli=1
-    fi
-fi
-if (( refresh_in_background )); then
-    start_background_refresh
-fi
-
-desired_providers=""
-while IFS=$'\x1f' read -r pid _; do
-    [[ -n "${pid}" ]] || continue
-    if [[ -n "${desired_providers}" ]]; then
-        desired_providers+=$'\n'
-    fi
-    desired_providers+="${pid}"
-done <<< "${rows}"
-declared_providers="$(read_state_providers)"
-declared_item_providers="${declared_providers}"
-force_redeclare=0
-expected_live_providers=""
-while IFS= read -r pid; do
-    [[ -n "${pid}" ]] || continue
-    if provider_list_contains "${declared_item_providers}" "${pid}"; then
-        if [[ -n "${expected_live_providers}" ]]; then
-            expected_live_providers+=$'\n'
+# Neighbour geometry changed, quota data did not: these events only re-plan
+# the notch split. The timer, showy_quota_refresh, wake, and a direct run all
+# render. A layout event that finds a render in flight leaves a note; that
+# render re-plans before it exits.
+case "${SENDER:-}" in
+    front_app_switched|display_change|showy_quota_layout)
+        notch_placement || exit 0
+        if ! acquire_render_lock; then
+            : > "${LAYOUT_PENDING_FILE}" 2>/dev/null || true
+            exit 0
         fi
-        expected_live_providers+="${pid}"
-    fi
-done <<< "${desired_providers}"
+        [[ -e "${LAYOUT_PENDING_FILE}" ]] && rm -f -- "${LAYOUT_PENDING_FILE}"
+        load_state_providers
+        apply_notch_layout "${STATE_PROVIDERS}"
+        exit 0
+        ;;
+esac
 
-if showy_quota_bool "${SHOWY_QUOTA_SKETCHYBAR_FORCE_REDECLARE-}" 0; then
-    force_redeclare=1
-    declared_item_providers=""
-elif ! declared_items_present "${expected_live_providers}"; then
-    force_redeclare=1
-    declared_item_providers=""
-    showy_quota_log "sketchybar items missing; forcing redeclare"
-elif [[ "${desired_providers}" != "${declared_providers}" ]]; then
-    # Set or order changed. SketchyBar lays items out by `--add` order
-    # within a position group, so an incremental add appends a new
-    # provider to the end regardless of where it sorts in
-    # desired_providers. Force a full teardown so positions match the
-    # desired sort.
-    force_redeclare=1
-    declared_item_providers=""
+acquire_render_lock || exit 0
+
+# All per-tick compute lives in the native renderer (`--emit
+# sketchybar-frame`, crates/showy-quota-zellij-core/src/sketchybar_frame.rs):
+# rows, the redeclare decision, and the `sketchybar` arguments, diffed against
+# the frame this plugin sent last so a tick where nothing changed sends
+# nothing. This script declares items, rasterizes icons, and runs sketchybar.
+showy_quota_export_config
+frame_flags=(--emit sketchybar-frame --from-cache --bar -
+    --state "${STATE_FILE}" --frame "${FRAME_FILE}" --plan "${NOTCH_PLAN_FILE}")
+showy_quota_bool "${SHOWY_QUOTA_SKETCHYBAR_FORCE_REDECLARE-}" 0 && frame_flags+=(--force-redeclare)
+(( HAVE_MAGICK )) && frame_flags+=(--icon-maker)
+
+# SketchyBar drops a reply that takes over 100 ms; the renderer then treats
+# the item list as unknown rather than missing.
+bar_items=$(sketchybar --query bar 2>/dev/null) || bar_items=""
+render_frame() {
+    frame_out=$("${RENDER_BIN}" "${frame_flags[@]}" "$@" <<< "${bar_items}" 2>/dev/null) || frame_out=""
+}
+
+# Cache first. A usable cache costs this tick one renderer run; only a
+# missing or unusable cache pays for a synchronous fetch. An aged cache still
+# renders now and refreshes in the background. If the fetch leaves no usable
+# cache either, the empty frame tears the providers down while stale/degraded
+# still reflect the file.
+frame_out=""
+[[ -s "${SHOWY_QUOTA_USAGE_FILE}" ]] && render_frame
+if [[ -z "${frame_out}" ]]; then
+    "${FETCH}" >/dev/null 2>&1 || true
+    render_frame --or-empty
 fi
+parse_frame_output "${frame_out}"
+(( FRAME_REFRESH )) && start_background_refresh
 
-
-if (( force_redeclare )) || [[ "${desired_providers}" != "${declared_providers}" ]]; then
+desired_providers="${FRAME_PROVIDERS}"
+redeclared=0
+if [[ "${FRAME_REDECLARE}" != "-" ]]; then
+    redeclared=1
+    case "${FRAME_REDECLARE}" in
+        missing) showy_quota_log "sketchybar items missing; forcing redeclare" ;;
+        order) showy_quota_log "sketchybar items precede showy_quota.trigger; forcing redeclare" ;;
+    esac
+    load_host_settings
+    load_state_providers
+    # Anchors go first so they precede every provider item in the `e` flow.
+    if notch_placement; then
+        queue_notch_anchors
+    else
+        queue_notch_anchor_removal
+    fi
     while IFS= read -r pid; do
         [[ -n "${pid}" ]] || continue
-        provider_list_contains "${desired_providers}" "${pid}" || remove_provider_items "${pid}"
-    done <<< "${declared_providers}"
-
+        provider_list_contains "${desired_providers}" "${pid}" || queue_provider_removal "${pid}"
+    done <<< "${STATE_PROVIDERS}"
     while IFS= read -r pid; do
-        [[ -n "${pid}" ]] || continue
-        provider_list_contains "${declared_item_providers}" "${pid}" || declare_provider_items "${pid}"
+        [[ -n "${pid}" ]] && queue_provider_declaration "${pid}"
     done <<< "${desired_providers}"
-
-    recreate_bracket "${desired_providers}"
+    queue_bracket "${desired_providers}"
+    flush_sketchybar_queue
     write_state_providers "${desired_providers}" || showy_quota_log "failed to update sketchybar provider state"
     trigger_provider_change "${desired_providers}"
 fi
 
-# shellcheck disable=SC2034  # p/s presence flags keep the record uniform
-while IFS=$'\x1f' read -r pid label color status status_url \
-    p_present rem_p_pct marker_p_pct primary_highlight \
-    s_present rem_s_pct marker_s_pct secondary_highlight \
-    t_present rem_t_pct marker_t_pct tertiary_highlight \
-    q_present rem_q_pct marker_q_pct quaternary_highlight \
-    row_error; do
-    [[ -n "${pid}" ]] || continue
-
-    icon=""
-    font_icon=""
-    # `row_error` is parsed below; icon rendering happens before that block,
-    # so derive the error state from the raw field here. An errored row with
-    # no incident indicator still needs the warning icon tint.
-    icon_errored=0
-    [[ "${row_error}" == "1" ]] && icon_errored=1
-    icon_status="${status}"
-    if (( icon_errored )) && [[ "${status}" == "none" ]]; then
-        # The PNG icon cache keys on the indicator; an errored row with no
-        # incident still needs the warning tint, and `unknown` renders the
-        # fallback glyph untinted, so synthesize the tint below instead.
-        icon_status="error"
-    fi
-    if [[ "${SHOWY_QUOTA_SKETCHYBAR_PROVIDER_ICON_MODE}" == "font" ]]; then
-        font_icon=$(provider_font_icon "${pid}" || true)
-    fi
-    # The PNG fallback populates `icon` when the font map has no glyph; the
-    # error tint travels in `icon_status` either way.
-    if [[ -z "${font_icon}" ]]; then
-        # Direct call, never $( ): see the ICON_TMP_FILES invariant.
-        provider_icon_png "${pid}" "${icon_status}" icon || icon=""
-    fi
-
-    # An errored provider has no lane at all. Without this branch the absent
-    # primary lane would draw a full bad-severity bar at zero remaining —
-    # "quota exhausted", which is precisely what the data does not say.
-    errored=0
-    [[ "${row_error}" == "1" ]] && errored=1
-    has_t=0
-    (( errored )) || [[ "${t_present}" != "1" ]] || has_t=1
-    has_q=0
-    (( errored )) || [[ "${q_present}" != "1" ]] || has_q=1
-    has_s=0
-    (( errored )) || [[ "${s_present}" != "1" ]] || has_s=1
-    if (( has_q )); then
-        primary_y=9
-        secondary_y=3
-        tertiary_y=-3
-        quaternary_y=-9
-    elif (( has_t )); then
-        primary_y=7
-        secondary_y=0
-        tertiary_y=-7
-        quaternary_y=-7
-    elif (( has_s )); then
-        primary_y=4
-        secondary_y=-4
-        tertiary_y=-4
-        quaternary_y=-4
-    else
-        # Single live window (e.g. Codex once the 5h limit is dropped): one
-        # centered full-height bar, no empty second row.
-        primary_y=0
-        secondary_y=0
-        tertiary_y=0
-        quaternary_y=0
-    fi
-
-    icon_click=$(click_script_for_status "${status}" "${status_url}")
-    # An errored row with no incident indicator has no status tint, but it is
-    # still an error: the icon must read as a warning, not as healthy. Force
-    # the tint before both the font and PNG paths.
-    font_icon_color="$(argb_from_hex "${ICON_TEXT_HEX}")"
-    font_icon_item_width=$((SHOWY_QUOTA_SKETCHYBAR_ICON_WIDTH + SHOWY_QUOTA_SKETCHYBAR_PROVIDER_ICON_FONT_PADDING_RIGHT))
-    status_icon_hex=$(status_color_for_indicator "${status}" || true)
-    if (( errored )); then
-        status_icon_hex="${COUNTDOWN_WARN_HEX}"
-    fi
-    if [[ -n "${status_icon_hex}" ]]; then
-        font_icon_color="$(argb_from_hex "${status_icon_hex}")"
-    fi
-
-    primary_item="showy_quota.${pid}.primary"
-    secondary_item="showy_quota.${pid}.secondary"
-    tertiary_item="showy_quota.${pid}.tertiary"
-    quaternary_item="showy_quota.${pid}.quaternary"
-    secondary_marker_item="showy_quota.${pid}.secondary_marker"
-    tertiary_marker_item="showy_quota.${pid}.tertiary_marker"
-    quaternary_marker_item="showy_quota.${pid}.quaternary_marker"
-    primary_marker_item="showy_quota.${pid}.primary_marker"
-
-    primary_click=$(slider_click_script "${primary_item}" "${rem_p_pct}")
-    secondary_click=$(slider_click_script "${secondary_item}" "${rem_s_pct}")
-    tertiary_click=$(slider_click_script "${tertiary_item}" "${rem_t_pct}")
-    quaternary_click=$(slider_click_script "${quaternary_item}" "${rem_q_pct}")
-    secondary_marker_click=$(slider_click_script "${secondary_marker_item}" "${marker_s_pct:-0}")
-    tertiary_marker_click=$(slider_click_script "${tertiary_marker_item}" "${marker_t_pct:-0}")
-    quaternary_marker_click=$(slider_click_script "${quaternary_marker_item}" "${marker_q_pct:-0}")
-    primary_marker_click=$(slider_click_script "${primary_marker_item}" "${marker_p_pct:-0}")
-
-    args=(
-        --set "showy_quota.${pid}.label" drawing=on label="${label}" label.color="${color}" label.width="${SHOWY_QUOTA_SKETCHYBAR_LABEL_WIDTH}" label.align=left background.color=0x00000000 background.height=0
-    )
-    if [[ -n "${font_icon}" ]]; then
-        args+=( --set "showy_quota.${pid}.icon" drawing=on icon.drawing=on icon="${font_icon}" icon.font="${SHOWY_QUOTA_SKETCHYBAR_PROVIDER_ICON_FONT}" icon.color="${font_icon_color}" icon.align=center icon.width="${SHOWY_QUOTA_SKETCHYBAR_ICON_WIDTH}" icon.padding_left=0 icon.padding_right=0 label.drawing=off background.image.drawing=off background.color=0x00000000 background.height=0 padding_left="${SHOWY_QUOTA_SKETCHYBAR_ICON_PADDING_LEFT}" padding_right=0 width="${font_icon_item_width}" click_script="${icon_click}" )
-    elif [[ -n "${icon}" && -s "${icon}" ]]; then
-        args+=( --set "showy_quota.${pid}.icon" drawing=on icon.drawing=off label.drawing=off background.image="${icon}" background.image.drawing=on background.image.scale="${SHOWY_QUOTA_SKETCHYBAR_ICON_SCALE}" background.color=0x00000000 background.height=0 padding_left="${SHOWY_QUOTA_SKETCHYBAR_ICON_PADDING_LEFT}" padding_right=0 width="${SHOWY_QUOTA_SKETCHYBAR_ICON_WIDTH}" click_script="${icon_click}" )
-    else
-        # The icon item is hidden, but its click target still covers the row
-        # slot: keep the status-page action so an errored provider without a
-        # drawable icon still reaches its status page.
-        args+=( --set "showy_quota.${pid}.icon" drawing=off click_script="${icon_click}" )
-    fi
-
-    if (( errored )); then
-        args+=(
-            --set "${primary_item}" drawing=off slider.percentage=0 background.color=0x00000000 background.height=0 padding_left=0 padding_right=0 width=0 y_offset="${primary_y}" click_script="${primary_click}"
-        )
-    else
-        args+=(
-            --set "${primary_item}" drawing=on slider.percentage="${rem_p_pct}" slider.highlight_color="${primary_highlight}" slider.background.color="${TRACK_ARGB}" slider.background.height="${NATIVE_ROW_HEIGHT}" slider.background.corner_radius="${NATIVE_ROW_RADIUS}" slider.knob.drawing=off background.color=0x00000000 background.height=0 padding_left=0 padding_right=0 width=0 y_offset="${primary_y}" click_script="${primary_click}"
-        )
-    fi
-
-    if (( has_s )); then
-        args+=( --set "${secondary_item}" drawing=on slider.percentage="${rem_s_pct}" slider.highlight_color="${secondary_highlight}" slider.background.color="${TRACK_ARGB}" slider.background.height="${NATIVE_ROW_HEIGHT}" slider.background.corner_radius="${NATIVE_ROW_RADIUS}" slider.knob.drawing=off background.color=0x00000000 background.height=0 padding_left=0 padding_right=0 width=0 y_offset="${secondary_y}" click_script="${secondary_click}" )
-    else
-        args+=( --set "${secondary_item}" drawing=off slider.percentage=0 background.color=0x00000000 background.height=0 padding_left=0 padding_right=0 width=0 y_offset="${secondary_y}" click_script="${secondary_click}" )
-    fi
-
-    if (( has_t )); then
-        args+=( --set "${tertiary_item}" drawing=on slider.percentage="${rem_t_pct}" slider.highlight_color="${tertiary_highlight}" slider.background.color="${TRACK_ARGB}" slider.background.height="${NATIVE_ROW_HEIGHT}" slider.background.corner_radius="${NATIVE_ROW_RADIUS}" slider.knob.drawing=off background.color=0x00000000 background.height=0 padding_left=0 padding_right=0 width=0 y_offset="${tertiary_y}" click_script="${tertiary_click}" )
-    else
-        args+=( --set "${tertiary_item}" drawing=off slider.percentage=0 background.color=0x00000000 background.height=0 padding_left=0 padding_right=0 width=0 y_offset="${tertiary_y}" click_script="${tertiary_click}" )
-    fi
-
-    if (( has_q )); then
-        args+=( --set "${quaternary_item}" drawing=on slider.percentage="${rem_q_pct}" slider.highlight_color="${quaternary_highlight}" slider.background.color="${TRACK_ARGB}" slider.background.height="${NATIVE_ROW_HEIGHT}" slider.background.corner_radius="${NATIVE_ROW_RADIUS}" slider.knob.drawing=off background.color=0x00000000 background.height=0 padding_left=0 padding_right=0 width=0 y_offset="${quaternary_y}" click_script="${quaternary_click}" )
-    else
-        args+=( --set "${quaternary_item}" drawing=off slider.percentage=0 background.color=0x00000000 background.height=0 padding_left=0 padding_right=0 width=0 y_offset="${quaternary_y}" click_script="${quaternary_click}" )
-    fi
-
-    if [[ -n "${marker_p_pct}" ]]; then
-        args+=( --set "${primary_marker_item}" drawing=on slider.percentage="${marker_p_pct}" slider.highlight_color=0x00000000 slider.background.color=0x00000000 slider.background.height="${NATIVE_ROW_HEIGHT}" slider.background.corner_radius=0 slider.knob.drawing=on slider.knob.color=0x00000000 slider.knob.width=1 slider.knob.padding_left=0 slider.knob.padding_right=0 slider.knob.background.drawing=on slider.knob.background.color="${ELAPSED_ARGB}" slider.knob.background.height="${NATIVE_ROW_HEIGHT}" slider.knob.background.corner_radius=0 background.color=0x00000000 background.height=0 padding_left=0 padding_right=0 width=0 y_offset="${primary_y}" click_script="${primary_marker_click}" )
-    else
-        args+=( --set "${primary_marker_item}" drawing=off slider.percentage=0 y_offset="${primary_y}" click_script="${primary_marker_click}" )
-    fi
-
-    if (( has_s )) && [[ -n "${marker_s_pct}" ]]; then
-        args+=( --set "${secondary_marker_item}" drawing=on slider.percentage="${marker_s_pct}" slider.highlight_color=0x00000000 slider.background.color=0x00000000 slider.background.height="${NATIVE_ROW_HEIGHT}" slider.background.corner_radius=0 slider.knob.drawing=on slider.knob.color=0x00000000 slider.knob.width=1 slider.knob.padding_left=0 slider.knob.padding_right=0 slider.knob.background.drawing=on slider.knob.background.color="${ELAPSED_ARGB}" slider.knob.background.height="${NATIVE_ROW_HEIGHT}" slider.knob.background.corner_radius=0 background.color=0x00000000 background.height=0 padding_left=0 padding_right=0 width=0 y_offset="${secondary_y}" click_script="${secondary_marker_click}" )
-    else
-        args+=( --set "${secondary_marker_item}" drawing=off slider.percentage=0 y_offset="${secondary_y}" click_script="${secondary_marker_click}" )
-    fi
-
-    if (( has_t )) && [[ -n "${marker_t_pct}" ]]; then
-        args+=( --set "${tertiary_marker_item}" drawing=on slider.percentage="${marker_t_pct}" slider.highlight_color=0x00000000 slider.background.color=0x00000000 slider.background.height="${NATIVE_ROW_HEIGHT}" slider.background.corner_radius=0 slider.knob.drawing=on slider.knob.color=0x00000000 slider.knob.width=1 slider.knob.padding_left=0 slider.knob.padding_right=0 slider.knob.background.drawing=on slider.knob.background.color="${ELAPSED_ARGB}" slider.knob.background.height="${NATIVE_ROW_HEIGHT}" slider.knob.background.corner_radius=0 background.color=0x00000000 background.height=0 padding_left=0 padding_right=0 width=0 y_offset="${tertiary_y}" click_script="${tertiary_marker_click}" )
-    else
-        args+=( --set "${tertiary_marker_item}" drawing=off slider.percentage=0 y_offset="${tertiary_y}" click_script="${tertiary_marker_click}" )
-    fi
-
-    if (( has_q )) && [[ -n "${marker_q_pct}" ]]; then
-        args+=( --set "${quaternary_marker_item}" drawing=on slider.percentage="${marker_q_pct}" slider.highlight_color=0x00000000 slider.background.color=0x00000000 slider.background.height="${NATIVE_ROW_HEIGHT}" slider.background.corner_radius=0 slider.knob.drawing=on slider.knob.color=0x00000000 slider.knob.width=1 slider.knob.padding_left=0 slider.knob.padding_right=0 slider.knob.background.drawing=on slider.knob.background.color="${ELAPSED_ARGB}" slider.knob.background.height="${NATIVE_ROW_HEIGHT}" slider.knob.background.corner_radius=0 background.color=0x00000000 background.height=0 padding_left=0 padding_right=0 width=0 y_offset="${quaternary_y}" click_script="${quaternary_marker_click}" )
-    else
-        args+=( --set "${quaternary_marker_item}" drawing=off slider.percentage=0 y_offset="${quaternary_y}" click_script="${quaternary_marker_click}" )
-    fi
-
-    args+=( --set "showy_quota.${pid}.slot" drawing=on icon.drawing=off label.drawing=off background.color=0x00000000 background.height=0 padding_left=0 padding_right=0 width="${SHOWY_QUOTA_SKETCHYBAR_BAR_WIDTH}" click_script="${CLICK}" )
-
-    if (( ${#args[@]} > 0 )); then
-        sketchybar "${args[@]}" >/dev/null 2>&1 || true
-    fi
-done <<< "${rows}"
-if (( stale )); then
-    sketchybar --set showy_quota.stale drawing=on label="${SHOWY_QUOTA_STALE_GLYPH}" label.color="${COUNTDOWN_WARN_ARGB}" icon.drawing=off background.color=0x00000000 background.height=0 padding_left=4 padding_right=2 click_script="${CLICK}" >/dev/null 2>&1 || true
-else
-    sketchybar --set showy_quota.stale drawing=off >/dev/null 2>&1 || true
+frame_args=("${FRAME_ARGS[@]}")
+# The renderer asks for icons it cannot draw yet. Rasterize them, then let it
+# diff again: the second frame adds just the new icons.
+icons_made=0
+for record in "${FRAME_ICONS[@]}"; do
+    icon_fields=()
+    wire_fields_into icon_fields "${record}"
+    # Direct call, never $( ): see the ICON_TMP_FILES invariant.
+    provider_icon_png "${icon_fields[0]:-}" "${icon_fields[1]:-none}" "${icon_fields[2]:-}" \
+        && icons_made=1
+done
+if (( icons_made )); then
+    render_frame --assume-declared --or-empty
+    parse_frame_output "${frame_out}"
+    frame_args+=("${FRAME_ARGS[@]}")
 fi
-if (( degraded_cli )); then
-    sketchybar --set showy_quota.degraded drawing=on label="${SHOWY_QUOTA_DEGRADED_CLI_GLYPH}" label.color="${COUNTDOWN_WARN_ARGB}" icon.drawing=off background.color=0x00000000 background.height=0 padding_left=2 padding_right=4 click_script="${CLICK}" >/dev/null 2>&1 || true
-else
-    sketchybar --set showy_quota.degraded drawing=off >/dev/null 2>&1 || true
+
+layout_due=0
+if (( ${#frame_args[@]} > 0 )); then
+    sketchybar "${frame_args[@]}" >/dev/null 2>&1 || true
+    layout_due=1
+fi
+# Wake can change the display set without any row changing.
+[[ "${SENDER:-}" == "system_woke" ]] && layout_due=1
+if [[ -e "${LAYOUT_PENDING_FILE}" ]]; then
+    rm -f -- "${LAYOUT_PENDING_FILE}"
+    layout_due=1
+fi
+if (( layout_due )); then
+    # A redeclare replaced the items the renderer listed; re-read them.
+    if (( redeclared || ! FRAME_HAS_QUERY )); then
+        apply_notch_layout "${desired_providers}"
+    else
+        apply_notch_layout "${desired_providers}" "${FRAME_QUERY[@]}"
+    fi
+    # Items a redeclare just added can lack geometry, and SketchyBar is often
+    # still too busy to answer the planner's query (seen for over a second).
+    # Re-plan once it settles; the note covers a trigger that also fails.
+    if (( redeclared )) && notch_placement; then
+        : > "${LAYOUT_PENDING_FILE}" 2>/dev/null || true
+        ( sleep 2; sketchybar --trigger showy_quota_layout ) </dev/null >/dev/null 2>&1 &
+        disown "$!" 2>/dev/null || true
+    fi
 fi

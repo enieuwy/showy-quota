@@ -32,13 +32,36 @@ Provider order is stable across additions/removals. Set
 providers are skipped. Set `SHOWY_QUOTA_PROVIDERS` when you want an ordered
 allow-list instead.
 
-Row compute happens in the native renderer: each tick the plugin warms the
-shared cache and reads final per-provider fields (remaining percentages,
-elapsed markers, countdown labels, colors, stale/shared-cycle handling) from
-`showy-quota-render --emit sketchybar --from-cache`. The shell plugin only
-manages SketchyBar items, icons, and click scripts — no `jq` or `date` runs
-on the render tick. The render binary ships with `make install-bin` /
-release tarballs; without it the plugin clears its items and logs a hint.
+All per-tick compute happens in the native renderer. Each tick the plugin
+runs `showy-quota-render --emit sketchybar-frame --from-cache` once. The
+renderer reads the cache, the live item list, and the notch plan, and prints
+the final `sketchybar --set` arguments: remaining percentages, elapsed
+markers, countdown labels, colors, icons, click scripts, and stale and
+shared-cycle handling. It also says when the items must be declared again. The
+plugin runs `showy-quota-fetch` only when the cache is missing or unusable
+(synchronously) or older than the refresh interval (in the background). The
+shell plugin declares the items, rasterizes provider icons, and runs
+`sketchybar`. The render binary ships with `make install-bin` / release
+tarballs; without it the plugin clears its items and logs a hint. Rebuild it
+(`make render-bin`) together with the plugin: the plugin needs the
+`sketchybar-*` emit modes.
+
+## Tick cost
+
+The renderer compares each provider's arguments with the ones the plugin sent
+last (`${SHOWY_QUOTA_SKETCHYBAR_IMAGE_CACHE}/frame.txt`) and emits only the
+providers that changed, which the plugin sends in one `sketchybar` call. A
+tick where nothing changed sends nothing and skips the notch re-plan.
+Countdown labels change at most once a minute, so on the default 10 s timer
+most ticks send nothing.
+
+- The comparison covers the final arguments, so a changed setting (palette,
+  glyphs, widths, icon mode, click action) re-sends every provider.
+- One `sketchybar --query bar` per tick checks that the items still exist and
+  still follow `showy_quota.trigger`. Missing or misplaced items, or a changed
+  provider set, rebuild every item in one `sketchybar` call.
+- If another script changes these items, the plugin restores them the next
+  time their arguments change, or at once after `sketchybar --reload`.
 
 
 ## Layout state
@@ -90,6 +113,52 @@ Each provider's countdown label is pinned to a fixed width
 jitter as the remaining-time string changes length (`59m` → `1:00` →
 `23:59` → `idle`). The default fits the widest countdown form (`HH:MM`); set
 it to `dynamic` to restore auto-sizing.
+
+## Notch placement
+
+Set `SHOWY_QUOTA_SKETCHYBAR_PLACEMENT=notch` (default `left`) and reload
+SketchyBar. Providers keep their order left to right; any provider that would
+run under the notch moves right of it (`position=e`). The one bracket covers
+both sides, so on the notched display the pill appears to pass behind the
+notch.
+
+Whenever a tick sends arguments, the plugin measures the bar in one batched
+`sketchybar --query` and the renderer plans the split
+(`showy-quota-render --emit sketchybar-layout`):
+
+1. The notch gap comes from two invisible 1pt anchors,
+   `showy_quota.notch_q` and `showy_quota.notch_e`, so it is exactly the gap
+   SketchyBar reserves (`notch_width`). No notch-size table is involved.
+2. The left side ends at the notch (or at an earlier `q`/`center` item). The
+   right side ends at the first `right`/`center` item, less the width of any
+   of your own `e` items, which share that flow.
+3. The planner keeps as many providers on the left as fit, and moves the rest
+   right. If the right side is still short of room, countdown labels hide on
+   every provider. If that is not enough, the providers that fit nowhere
+   collapse into a `+N` item (`showy_quota.overflow`). No item is placed under
+   the notch.
+
+Positions change with `--set position=`, so a re-split never tears the pill
+down. The split is also re-planned on `front_app_switched`, `display_change`,
+`system_woke`, and `showy_quota_layout`. Apart from `system_woke`, which
+renders too, these events only re-plan: they do not read the cache or send
+rows. An event that finds a render in flight is not dropped: it leaves a note,
+and that render or the next tick re-plans. Trigger `showy_quota_layout` from
+your own config after you show or hide an item beside the pill:
+
+```bash
+sketchybar --trigger showy_quota_layout
+```
+
+Limits:
+
+- SketchyBar reserves `notch_width` (a bar setting, default `200`), not the
+  measured notch. If you set it narrower than the real notch, items can sit
+  under it.
+- The notch gap exists only on the built-in display. On a display without a
+  notch, nothing moves. When the bar shows on several displays, the plan
+  follows the display with the widest notch gap, so an external display shows
+  the split pill with an empty middle.
 
 ## Click action
 

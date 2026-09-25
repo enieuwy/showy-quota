@@ -30,6 +30,14 @@ pub(crate) fn default_order() -> Vec<String> {
         .collect()
 }
 
+/// `sketchybar-app-font` glyph token (`:codex:`) for the provider, if mapped.
+pub(crate) fn font_icon(provider: &str) -> Option<&'static str> {
+    entries()
+        .find(|(id, _, _, _)| *id == provider)
+        .map(|(_, _, _, font)| font)
+        .filter(|font| *font != "-")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,13 +1,19 @@
 use std::io::{self, Read, Write};
+use std::path::Path;
 use std::process;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use showy_quota_zellij_core::{
     codexbar::{unwrap_cache_transport, MAX_USAGE_JSON_BYTES},
     emit_formatted_prompt_segment, emit_pick, emit_prompt_segment, emit_provider_metrics,
-    emit_rows, emit_sketchybar, render_tmux, render_vertical, render_zellij, valid_provider_id,
-    Freshness, PickOptions, PromptOptions, RenderConfig, RenderError, RenderOptions,
-    SketchybarOptions, Template, TemplateScope,
+    emit_rows, render_tmux, render_vertical, render_zellij,
+    sketchybar_frame::{
+        build_frame, parse_bar_items, redeclare_reason, wire_line, FrameInputs, FrameOutput,
+        FrameSettings,
+    },
+    sketchybar_notch::{notch_layout, parse_previous_plan, NotchSettings, PreviousPlan},
+    sketchybar_rows, valid_provider_id, Freshness, PickOptions, PromptOptions, RenderConfig,
+    RenderError, RenderOptions, SketchybarOptions, SketchybarRows, Template, TemplateScope,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,7 +31,27 @@ enum Emit {
     Prompt,
     Template,
     Pick,
-    Sketchybar,
+    SketchybarFrame,
+    SketchybarQuery,
+    SketchybarLayout,
+}
+
+/// Plugin state and flags for the SketchyBar emit modes.
+#[derive(Debug, Default)]
+struct SketchybarCli {
+    /// `sketchybar --query bar` reply; `-` reads stdin.
+    bar: Option<String>,
+    /// Provider list the last redeclare stored (`providers.txt`).
+    state: Option<String>,
+    /// Frame file: what the plugin sent last.
+    frame: Option<String>,
+    /// Notch plan file (`notch-layout.json`).
+    plan: Option<String>,
+    force_redeclare: bool,
+    assume_declared: bool,
+    icon_maker: bool,
+    or_empty: bool,
+    layout_providers: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,6 +73,7 @@ struct Cli {
     pick_window: String,
     pick_min_remaining: i32,
     pick_json: bool,
+    sketchybar: SketchybarCli,
 }
 
 fn main() {
@@ -83,6 +110,12 @@ fn run(cli: &Cli, template: Option<&Template<'_>>) -> Result<(), String> {
         scoped_config(configured, &cli.provider_filter)
     };
     let now_epoch = now_epoch()?;
+    match cli.emit {
+        Emit::SketchybarFrame => return run_sketchybar_frame(cli, &config, now_epoch),
+        Emit::SketchybarQuery => return run_sketchybar_query(cli),
+        Emit::SketchybarLayout => return run_sketchybar_layout(cli, &config),
+        _ => {}
+    }
     let input = match read_input(cli, now_epoch, &config) {
         Ok(input) => input,
         Err(_) if cli.emit == Emit::Prompt => return write_output("AI ?\n"),
@@ -138,23 +171,6 @@ fn run(cli: &Cli, template: Option<&Template<'_>>) -> Result<(), String> {
     if cli.emit == Emit::Metrics {
         let mut rendered =
             emit_provider_metrics(&input.payload, &config, now_epoch).map_err(render_error)?;
-        rendered.push('\n');
-        return write_output(&rendered);
-    }
-
-    if cli.emit == Emit::Sketchybar {
-        let mut rendered = emit_sketchybar(
-            &input.payload,
-            &config,
-            now_epoch,
-            SketchybarOptions {
-                stale,
-                degraded_cli,
-                bar_width: png_bar_width_from_env(),
-                stale_providers: &input.stale_providers,
-            },
-        )
-        .map_err(render_error)?;
         rendered.push('\n');
         return write_output(&rendered);
     }
@@ -246,6 +262,8 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Cli, String> {
     let mut pick_window = String::from("worst");
     let mut pick_min_remaining = 0;
     let mut pick_json = false;
+    let mut sketchybar = SketchybarCli::default();
+    let mut sketchybar_flag_seen = false;
     let mut args = args;
 
     while let Some(arg) = args.next() {
@@ -277,7 +295,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Cli, String> {
             "--emit" => {
                 let value = args.next().ok_or_else(|| {
                     String::from(
-                        "--emit requires render, rows, vertical, metrics, prompt, template, pick, or sketchybar",
+                        "--emit requires render, rows, vertical, metrics, prompt, template, pick, sketchybar-frame, sketchybar-query, or sketchybar-layout",
                     )
                 })?;
                 emit = match value.as_str() {
@@ -287,10 +305,34 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Cli, String> {
                     "metrics" => Emit::Metrics,
                     "prompt" => Emit::Prompt,
                     "template" => Emit::Template,
-                    "sketchybar" => Emit::Sketchybar,
                     "pick" => Emit::Pick,
+                    "sketchybar-frame" => Emit::SketchybarFrame,
+                    "sketchybar-query" => Emit::SketchybarQuery,
+                    "sketchybar-layout" => Emit::SketchybarLayout,
                     _ => return Err(format!("unknown emit mode: {value}")),
                 };
+            }
+            "--bar" | "--state" | "--frame" | "--plan" | "--layout-providers" => {
+                sketchybar_flag_seen = true;
+                let value = args
+                    .next()
+                    .ok_or_else(|| format!("{arg} requires a value"))?;
+                match arg.as_str() {
+                    "--bar" => sketchybar.bar = Some(value),
+                    "--state" => sketchybar.state = Some(value),
+                    "--frame" => sketchybar.frame = Some(value),
+                    "--plan" => sketchybar.plan = Some(value),
+                    _ => sketchybar.layout_providers = parse_provider_filter(&value)?,
+                }
+            }
+            "--force-redeclare" | "--assume-declared" | "--icon-maker" | "--or-empty" => {
+                sketchybar_flag_seen = true;
+                match arg.as_str() {
+                    "--force-redeclare" => sketchybar.force_redeclare = true,
+                    "--assume-declared" => sketchybar.assume_declared = true,
+                    "--icon-maker" => sketchybar.icon_maker = true,
+                    _ => sketchybar.or_empty = true,
+                }
             }
             "--provider" => {
                 let value = args
@@ -359,6 +401,16 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Cli, String> {
     if emit != Emit::Template && join != " " {
         return Err(String::from("--join requires --emit template"));
     }
+    if sketchybar_flag_seen
+        && !matches!(
+            emit,
+            Emit::SketchybarFrame | Emit::SketchybarQuery | Emit::SketchybarLayout
+        )
+    {
+        return Err(String::from(
+            "SketchyBar flags require --emit sketchybar-frame, sketchybar-query, or sketchybar-layout",
+        ));
+    }
 
     Ok(Cli {
         emit,
@@ -377,6 +429,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Cli, String> {
         pick_window,
         pick_min_remaining,
         pick_json,
+        sketchybar,
     })
 }
 
@@ -511,6 +564,229 @@ fn read_bounded_payload(reader: impl Read) -> io::Result<Vec<u8>> {
     Ok(payload)
 }
 
+// ── SketchyBar ─────────────────────────────────────────────────────────
+
+/// `--emit sketchybar-frame`: the plugin's whole per-tick compute. Reads the
+/// cache, the live item list (`--bar`), the stored provider list (`--state`),
+/// the notch plan (`--plan`), and the last frame (`--frame`); writes the new
+/// frame; prints the wire records described in `sketchybar_frame`.
+fn run_sketchybar_frame(cli: &Cli, config: &RenderConfig, now_epoch: i64) -> Result<(), String> {
+    let sb = &cli.sketchybar;
+    let settings = FrameSettings::from_getter(|name| std::env::var(name).ok(), config);
+
+    // An unusable cache is an error, so the plugin can fetch and retry;
+    // `--or-empty` (the retry) renders an empty frame instead, which tears
+    // the providers down while stale/degraded still reflect the file.
+    let (rows, age_seconds) = match read_input(cli, now_epoch, config) {
+        Ok(input) => {
+            let stale = cli.stale || input.stale;
+            let degraded_cli = cli.degraded_cli || input.degraded_cli;
+            let options = SketchybarOptions {
+                stale,
+                degraded_cli,
+                bar_width: png_bar_width_from_env(),
+                stale_providers: &input.stale_providers,
+            };
+            match sketchybar_rows(&input.payload, config, now_epoch, options) {
+                Ok(rows) => (rows, input.age_seconds),
+                Err(_) if sb.or_empty => (empty_rows(stale, degraded_cli), None),
+                Err(err) => return Err(render_error(err)),
+            }
+        }
+        Err(_) if sb.or_empty && cli.input == Input::Cache => {
+            use showy_quota_zellij_core::cache::{cache_paths_from_env, freshness_for_paths};
+            let freshness =
+                freshness_for_paths(&cache_paths_from_env(), now_epoch, String::from("unknown"));
+            (
+                empty_rows(
+                    cli.stale || freshness.stale,
+                    cli.degraded_cli || freshness.degraded_cli,
+                ),
+                None,
+            )
+        }
+        Err(err) => return Err(err),
+    };
+
+    let items = match &sb.bar {
+        Some(path) => read_payload(path)
+            .ok()
+            .and_then(|raw| parse_bar_items(&raw)),
+        None => None,
+    };
+    let declared = sb
+        .state
+        .as_deref()
+        .map(read_provider_list)
+        .unwrap_or_default();
+    let desired: Vec<String> = rows.rows.iter().map(|row| row.provider.clone()).collect();
+    let redeclare = if sb.assume_declared {
+        None
+    } else {
+        redeclare_reason(
+            sb.force_redeclare,
+            items.as_deref(),
+            &declared,
+            &desired,
+            settings.notch,
+        )
+    };
+
+    // The last notch plan decides what this frame draws: compact hides the
+    // countdown labels, hidden providers stay off behind the `+N` item.
+    let plan = read_plan(sb, &settings);
+    let previous_frame = match (&sb.frame, redeclare) {
+        (Some(path), None) => std::fs::read_to_string(path).ok(),
+        _ => None,
+    };
+    let icon_ready = |path: &str| {
+        std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file() && metadata.len() > 0)
+    };
+    let frame = build_frame(&FrameInputs {
+        rows: &rows,
+        settings: &settings,
+        label_drawing: !plan.compact,
+        hidden: &plan.hidden,
+        previous: previous_frame.as_deref(),
+        icon_ready: &icon_ready,
+        icon_maker: sb.icon_maker,
+    });
+    if let Some(path) = &sb.frame {
+        write_atomic(path, &frame.frame_text)?;
+    }
+
+    // Items a redeclare replaces are gone from `items`; the plugin re-queries.
+    let query = (settings.notch && redeclare.is_none())
+        .then_some(items.as_deref())
+        .flatten();
+    let output = FrameOutput {
+        redeclare,
+        refresh: background_refresh_due(age_seconds),
+        providers: desired.iter().map(String::as_str).collect(),
+        icon_requests: &frame.icon_requests,
+        query,
+        args: &frame.args,
+    };
+    write_output(&output.to_wire())
+}
+
+/// `--emit sketchybar-query`: the live item names from a `--query bar`
+/// reply on stdin, for the notch planner's batched geometry query.
+fn run_sketchybar_query(cli: &Cli) -> Result<(), String> {
+    let raw = read_payload(cli.sketchybar.bar.as_deref().unwrap_or("-"))?;
+    let items = parse_bar_items(&raw).ok_or("no readable SketchyBar item list")?;
+    let mut out = String::new();
+    wire_line(&mut out, "query", items.iter().map(String::as_str));
+    write_output(&out)
+}
+
+/// `--emit sketchybar-layout`: plan the notch split from one batched
+/// geometry query on stdin, store the plan (`--plan`), and print the
+/// arguments that apply it. `layout noreply` means SketchyBar dropped the
+/// reply and the placement stays as it is.
+fn run_sketchybar_layout(cli: &Cli, config: &RenderConfig) -> Result<(), String> {
+    let sb = &cli.sketchybar;
+    let settings = FrameSettings::from_getter(|name| std::env::var(name).ok(), config);
+    let measured = read_payload("-")?;
+    let previous = sb
+        .plan
+        .as_deref()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .map(|raw| parse_previous_plan(&raw))
+        .unwrap_or_default();
+    let notch = NotchSettings {
+        margin: settings.notch_margin as f64,
+        icon_padding_left: settings.icon_padding_left as f64,
+        label_width: settings.label_width as f64,
+        icon_width: settings.icon_width as f64,
+        bar_width: settings.slot_width as f64,
+    };
+    let mut out = String::new();
+    let Some(layout) = notch_layout(&measured, &sb.layout_providers, &notch, &previous) else {
+        wire_line(&mut out, "layout", ["noreply"]);
+        return write_output(&out);
+    };
+    if let Some(path) = &sb.plan {
+        write_atomic(path, &format!("{}\n", layout.plan_json))?;
+    }
+    wire_line(
+        &mut out,
+        "layout",
+        ["ok", if layout.reveal { "1" } else { "0" }],
+    );
+    wire_line(&mut out, "set", layout.args.iter().map(String::as_str));
+    write_output(&out)
+}
+
+fn empty_rows(stale: bool, degraded_cli: bool) -> SketchybarRows {
+    SketchybarRows {
+        stale,
+        degraded_cli,
+        rows: Vec::new(),
+    }
+}
+
+/// The notch plan that shapes this frame. Left placement ignores the file.
+fn read_plan(sb: &SketchybarCli, settings: &FrameSettings) -> PreviousPlan {
+    if !settings.notch {
+        return PreviousPlan::default();
+    }
+    sb.plan
+        .as_deref()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .map(|raw| parse_previous_plan(&raw))
+        .unwrap_or_default()
+}
+
+/// One provider id per line; invalid ids are dropped.
+fn read_provider_list(path: &str) -> Vec<String> {
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .map(str::trim)
+        .filter(|line| valid_provider_id(line))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Whether the cache is old enough for the plugin to start a background
+/// refresh: `SHOWY_QUOTA_CODEXBAR_SERVE_REFRESH_SECONDS` (60) with a serve
+/// URL, else `SHOWY_QUOTA_REFRESH_SECONDS` (120).
+fn background_refresh_due(age_seconds: Option<i64>) -> bool {
+    let Some(age) = age_seconds else {
+        return false;
+    };
+    let seconds = |name: &str, fallback: i64| {
+        std::env::var(name)
+            .ok()
+            .filter(|value| {
+                !value.is_empty() && value.len() <= 18 && value.bytes().all(|b| b.is_ascii_digit())
+            })
+            .and_then(|value| value.parse::<i64>().ok())
+            .unwrap_or(fallback)
+    };
+    let serve = std::env::var("SHOWY_QUOTA_CODEXBAR_SERVE_URL").is_ok_and(|url| !url.is_empty());
+    let threshold = if serve {
+        seconds("SHOWY_QUOTA_CODEXBAR_SERVE_REFRESH_SECONDS", 60)
+    } else {
+        seconds("SHOWY_QUOTA_REFRESH_SECONDS", 120)
+    };
+    age >= threshold
+}
+
+/// Replace `path` through a sibling temp file, so a reader never sees a
+/// half-written file.
+fn write_atomic(path: &str, content: &str) -> Result<(), String> {
+    let target = Path::new(path);
+    let tmp = target.with_extension(format!("tmp.{}", process::id()));
+    std::fs::write(&tmp, content)
+        .and_then(|()| std::fs::rename(&tmp, target))
+        .map_err(|err| {
+            let _ = std::fs::remove_file(&tmp);
+            format!("failed to write {path}: {err}")
+        })
+}
+
 fn render_error(error: RenderError) -> String {
     match error {
         RenderError::InvalidPayload => String::from("invalid JSON quota payload"),
@@ -577,7 +853,7 @@ fn png_bar_width_from_env() -> i64 {
 
 fn print_help() {
     println!(
-        "Usage: showy-quota-render [--emit render|rows|vertical|metrics|prompt|template|pick|sketchybar] [--format zellij|tmux|SPEC] [--join SEP] [--json <path|-> | --from-cache] [--provider ID[,ID...]] [--ansi] [--stale] [--degraded-cli]\n\nTemplate mode requires --format SPEC and expands once per provider. Prompt accepts --format SPEC for the worst window overall. Fields: {{provider}}, {{sigil}}, {{used}}, {{remaining}}, {{countdown}}, {{class}}, {{window}}, {{stale}}. Escape braces with {{{{ and }}}}.\n\nPick mode accepts --window primary|secondary|tertiary|worst, --min-remaining 0-100, and --pick-format id|json."
+        "Usage: showy-quota-render [--emit render|rows|vertical|metrics|prompt|template|pick|sketchybar-frame|sketchybar-query|sketchybar-layout] [--format zellij|tmux|SPEC] [--join SEP] [--json <path|-> | --from-cache] [--provider ID[,ID...]] [--ansi] [--stale] [--degraded-cli]\n\nTemplate mode requires --format SPEC and expands once per provider. Prompt accepts --format SPEC for the worst window overall. Fields: {{provider}}, {{sigil}}, {{used}}, {{remaining}}, {{countdown}}, {{class}}, {{window}}, {{stale}}. Escape braces with {{{{ and }}}}.\n\nPick mode accepts --window primary|secondary|tertiary|worst, --min-remaining 0-100, and --pick-format id|json.\n\nThe sketchybar-* modes serve the SketchyBar plugin: frame accepts --bar PATH|-, --state PATH, --frame PATH, --plan PATH, --force-redeclare, --assume-declared, --icon-maker, and --or-empty; query reads a `--query bar` reply; layout accepts --plan PATH and --layout-providers ID[,ID...] and reads the batched geometry query on stdin."
     );
 }
 

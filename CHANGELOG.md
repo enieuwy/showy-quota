@@ -6,6 +6,57 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Upgrading
+- **Rebuild `showy-quota-render` with the SketchyBar plugin.** The plugin now
+  calls `--emit sketchybar-frame`, `sketchybar-query`, and `sketchybar-layout`;
+  an older binary leaves the pill frozen. Run `make render-bin` (or
+  `make install-bin`). `--emit sketchybar` (the old row format) is removed.
+
+### Added
+- SketchyBar `SHOWY_QUOTA_SKETCHYBAR_PLACEMENT=notch` (opt-in; default `left`
+  is unchanged). Providers that would run under the MacBook notch move right of
+  it inside the same pill, so the pill appears to pass behind the notch. When
+  the right side is short of room, countdown labels hide first; providers that
+  still fit nowhere collapse into a `+N` item. Geometry is measured from
+  SketchyBar's own notch gap (two 1pt anchors at `q`/`e`), and the split is
+  re-planned on `front_app_switched`, `display_change`, `system_woke`, and a
+  new `showy_quota_layout` event. Reload SketchyBar after enabling.
+
+### Changed
+- A provider CodexBar returns with no error and no window object at all now
+  draws in place as an errored provider instead of vanishing. A window whose
+  `usedPercent` is null is still unused quota and stays idle.
+  Muse Code reports no quota while its server withholds it; the bar used to
+  drop it, and the pill jumped when it came back. The metrics JSON gives it
+  the error message `quota unavailable`. `showy-quota-state` counts it the
+  same way.
+- The SketchyBar plugin's per-tick work moved into `showy-quota-render`
+  (`--emit sketchybar-frame`): the `sketchybar --set` arguments, click
+  scripts, icon choice, the check for lost or misplaced items, and a diff
+  against the frame sent last. The notch planner moved from jq to
+  `--emit sketchybar-layout`. A tick sends only the providers whose arguments
+  changed, in one `sketchybar` call; a tick where nothing changed sends nothing
+  and skips the notch re-plan. With notch placement, `front_app_switched`,
+  `display_change`, and `showy_quota_layout` only re-plan the split. Measured
+  on a five-provider bar, a tick with nothing new: about 1.0 s of CPU and 84
+  `sketchybar` calls before, about 0.06 s and one `sketchybar --query bar`
+  after. `showy_quota_export_config` (every render path, tmux and Zellij
+  included) no longer forks once per config variable.
+
+### Fixed
+- SketchyBar: a plugin run that outlived `sketchybar --reload` could re-add
+  provider items before the rc re-added its earlier left items, and the
+  bootstrap's redeclare then lost the render lock to it, so the pill drew over
+  `front_app`. Any showy-quota item listed before `showy_quota.trigger` now
+  forces a redeclare, which puts the items back after it.
+- SketchyBar: a provider-set change rebuilt the items with one `sketchybar`
+  call per item. One live rebuild ran for about a minute, and the pacing
+  markers stayed off until it finished. The rebuild is now one call.
+- SketchyBar: the render lock compared process start times in the caller's
+  locale, so a manual plugin run from a shell with `LANG` set read the live
+  render's lock as stale and ran beside it. The start time now uses the C
+  locale.
+
 ## [0.9.0] — 2026-09-23
 
 ### Upgrading

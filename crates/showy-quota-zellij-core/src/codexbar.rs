@@ -123,6 +123,15 @@ impl Usage {
         .any(|window| window.used_percent.is_some())
     }
 
+    /// No window object at all, positional or extra. Distinct from a window
+    /// that exists with a null `usedPercent`, which is unused quota (idle).
+    pub fn reports_no_window(&self) -> bool {
+        self.primary.is_none()
+            && self.secondary.is_none()
+            && self.tertiary.is_none()
+            && self.extra_rate_windows.is_empty()
+    }
+
     /// Semantic positional slots for the renderers. A window occupies a slot
     /// only when it reports a numeric `usedPercent`. When the primary slot is
     /// absent, the present windows left-compact into the leading slots so the
@@ -313,8 +322,20 @@ pub fn payload_has_renderable_provider(records: &[ProviderRecord]) -> bool {
     records.iter().any(is_renderable)
 }
 
+/// A provider CodexBar returned that cannot draw a usage bar: either it
+/// reported an error, or it answered without any window object at all (Muse
+/// Code while its server withholds quota). Both draw greyed in place instead
+/// of vanishing. A window with a null `usedPercent` is unused quota and stays
+/// idle, not errored.
 pub fn is_errored(record: &ProviderRecord) -> bool {
-    record.error.is_some() && valid_provider_id(&record.provider) && !is_renderable(record)
+    valid_provider_id(&record.provider)
+        && !is_renderable(record)
+        && (record.error.is_some() || is_windowless(record))
+}
+
+/// No error and no window object: CodexBar answered but withheld quota.
+pub(crate) fn is_windowless(record: &ProviderRecord) -> bool {
+    record.usage.as_ref().is_none_or(Usage::reports_no_window)
 }
 
 pub(crate) fn is_renderable(record: &ProviderRecord) -> bool {

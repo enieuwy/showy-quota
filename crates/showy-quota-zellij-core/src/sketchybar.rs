@@ -1,30 +1,16 @@
-//! SketchyBar row emitter.
+//! SketchyBar rows.
 //!
-//! Ports the SketchyBar plugin's per-tick jq/date compute (renderable
-//! filtering, slot/pooled row assembly, elapsed markers, countdown label,
-//! shared-cycle and stale handling) into the native renderer so the shell
-//! plugin only assembles `sketchybar --set` arguments from final strings.
+//! The per-provider compute behind the SketchyBar pill: renderable filtering,
+//! slot/pooled lane assembly, elapsed markers, the countdown label, and
+//! shared-cycle and stale handling. `sketchybar_frame` turns these rows into
+//! the final `sketchybar --set` arguments.
 //!
-//! Output framing (fields separated by US `\x1f`, records by newline):
-//!
-//! ```text
-//! <stale 0|1> US <degraded_cli 0|1>
-//! provider US label US label_argb US status US status_url
-//!          US p_present US p_rem US p_marker US p_argb
-//!          US s_present US s_rem US s_marker US s_argb
-//!          US t_present US t_rem US t_marker US t_argb
-//!          US q_present US q_rem US q_marker US q_argb
-//!          US error
-//! ```
-//!
-//! Marker fields are empty when no elapsed marker should draw. Every color is
-//! a final `0xffRRGGBB` SketchyBar literal. The trailing `error` is `1` for a
-//! provider CodexBar could not read at all: no lane is present, and the
-//! adapter draws the label alone rather than a full bar at zero remaining.
-//! It trails the lane block so the lane fields keep their positions. The row
-//! semantics otherwise mirror the previous shell/jq pipeline byte-for-byte,
-//! including its quirks (absent lanes render remaining `0` with the
-//! bad-severity highlight; a shared cycle only suppresses the
+//! Every color is a final `0xffRRGGBB` SketchyBar literal. A marker is `None`
+//! when no elapsed marker should draw. An `error` row is a provider CodexBar
+//! could not read at all: no lane is present, and the pill draws its label
+//! alone rather than a full bar at zero remaining. The lane semantics keep the
+//! quirks of the original shell/jq pipeline (absent lanes carry remaining `0`
+//! with the bad-severity highlight; a shared cycle only suppresses the
 //! secondary/tertiary markers).
 
 use crate::codexbar::{is_errored, is_renderable, NamedWindow, ProviderRecord, UsageWindow};
@@ -33,8 +19,40 @@ use crate::metrics::parse_display_payload;
 use crate::render::{format_countdown, RenderError};
 use crate::reset::{minutes_until, reset_epoch};
 
-const FIELD_SEP: char = '\u{001f}';
-const LANE_COUNT: usize = 4;
+pub const LANE_COUNT: usize = 4;
+
+/// The rows for one tick plus the whole-cache flags.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SketchybarRows {
+    pub stale: bool,
+    pub degraded_cli: bool,
+    pub rows: Vec<SketchybarRow>,
+}
+
+/// One provider's pill: countdown label, status, and four slider lanes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SketchybarRow {
+    pub provider: String,
+    pub label: String,
+    pub label_argb: String,
+    /// Normalised status indicator (`none`, `minor`, `major`, ...).
+    pub status: String,
+    /// Status page URL with control characters stripped; empty when absent.
+    pub status_url: String,
+    pub lanes: [RowLane; LANE_COUNT],
+    pub error: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RowLane {
+    pub present: bool,
+    /// Remaining percent, 0–100.
+    pub remaining: i64,
+    /// Elapsed-marker position as a slider percentage.
+    pub marker: Option<i64>,
+    pub argb: String,
+}
+
 const MIN_BAR_WIDTH: i64 = 2;
 const MAX_BAR_WIDTH: i64 = 4_096;
 
@@ -71,44 +89,41 @@ struct Lane {
     win: String,
 }
 
-pub fn emit_sketchybar(
+pub fn sketchybar_rows(
     payload: &[u8],
     config: &RenderConfig,
     now_epoch: i64,
     options: SketchybarOptions,
-) -> Result<String, RenderError> {
+) -> Result<SketchybarRows, RenderError> {
     let options = SketchybarOptions {
         bar_width: options.bar_width.clamp(MIN_BAR_WIDTH, MAX_BAR_WIDTH),
         ..options
     };
     let records = parse_display_payload(payload)?;
-    let mut out = header(options);
 
-    let mut rows: Vec<&ProviderRecord> = records
+    let mut visible: Vec<&ProviderRecord> = records
         .iter()
         .filter(|record| {
             (is_renderable(record) || is_errored(record)) && passes_filters(record, config)
         })
         .collect();
-    sort_records(&mut rows, config);
+    sort_records(&mut visible, config);
 
-    for record in rows {
-        out.push('\n');
-        if is_errored(record) {
-            error_line(&mut out, record, config);
-        } else {
-            provider_line(&mut out, record, config, now_epoch, options);
-        }
-    }
-    Ok(out)
-}
-
-fn header(options: SketchybarOptions) -> String {
-    format!(
-        "{}{FIELD_SEP}{}",
-        u8::from(options.stale),
-        u8::from(options.degraded_cli)
-    )
+    let rows = visible
+        .into_iter()
+        .map(|record| {
+            if is_errored(record) {
+                error_row(record, config)
+            } else {
+                provider_row(record, config, now_epoch, options)
+            }
+        })
+        .collect();
+    Ok(SketchybarRows {
+        stale: options.stale,
+        degraded_cli: options.degraded_cli,
+        rows,
+    })
 }
 
 fn passes_filters(record: &ProviderRecord, config: &RenderConfig) -> bool {
@@ -145,13 +160,12 @@ fn position(items: &[String], provider: &str) -> usize {
         .unwrap_or(1_000_000)
 }
 
-fn provider_line(
-    out: &mut String,
+fn provider_row(
     record: &ProviderRecord,
     config: &RenderConfig,
     now_epoch: i64,
     options: SketchybarOptions,
-) {
+) -> SketchybarRow {
     let lanes = provider_lanes(record);
     let tz = config.reset_description_timezone_offset_minutes;
 
@@ -234,51 +248,47 @@ fn provider_line(
     }
 
     let (status, status_url) = provider_status(record);
+    let lanes = std::array::from_fn(|index| RowLane {
+        present: lanes[index].is_some(),
+        remaining: rem[index],
+        marker: markers[index],
+        argb: highlights[index].clone(),
+    });
 
-    out.push_str(&record.provider);
-    push_field(out, &label);
-    push_field(out, &label_color);
-    push_field(out, &status);
-    push_field(out, &status_url);
-    for index in 0..LANE_COUNT {
-        push_field(out, if lanes[index].is_some() { "1" } else { "0" });
-        push_field(out, &rem[index].to_string());
-        push_field(
-            out,
-            &markers[index].map(|m| m.to_string()).unwrap_or_default(),
-        );
-        push_field(out, &highlights[index]);
+    SketchybarRow {
+        provider: record.provider.clone(),
+        label,
+        label_argb: label_color,
+        status,
+        status_url,
+        lanes,
+        error: false,
     }
-    push_field(out, "0");
 }
 
 /// A provider CodexBar could not read at all (expired login, network
 /// failure). It keeps its place in the bar with an `⚠err` label and no
 /// lanes: a provider that silently disappears reads as "not configured",
 /// which is the one conclusion the data does not support. Marking the row
-/// `error` lets the adapter draw the label alone, because an absent lane
+/// `error` lets the pill draw the label alone, because an absent lane
 /// otherwise renders as a full bad-severity bar at zero remaining.
-fn error_line(out: &mut String, record: &ProviderRecord, config: &RenderConfig) {
+fn error_row(record: &ProviderRecord, config: &RenderConfig) -> SketchybarRow {
     let error_argb = argb(&config.palette_countdown_warn);
     let (status, status_url) = provider_status(record);
-
-    out.push_str(&record.provider);
-    push_field(out, &sanitize_field(&format!("{}err", config.error_glyph)));
-    push_field(out, &error_argb);
-    push_field(out, &status);
-    push_field(out, &status_url);
-    for _ in 0..LANE_COUNT {
-        push_field(out, "0");
-        push_field(out, "0");
-        push_field(out, "");
-        push_field(out, &error_argb);
+    SketchybarRow {
+        provider: record.provider.clone(),
+        label: sanitize_field(&format!("{}err", config.error_glyph)),
+        label_argb: error_argb.clone(),
+        status,
+        status_url,
+        lanes: std::array::from_fn(|_| RowLane {
+            present: false,
+            remaining: 0,
+            marker: None,
+            argb: error_argb.clone(),
+        }),
+        error: true,
     }
-    push_field(out, "1");
-}
-
-fn push_field(out: &mut String, value: &str) {
-    out.push(FIELD_SEP);
-    out.push_str(value);
 }
 
 fn argb(hex: &str) -> String {
@@ -490,21 +500,46 @@ mod tests {
         }
     }
 
-    fn emit(payload: &str, config: &RenderConfig, now: i64, options: SketchybarOptions) -> String {
-        emit_sketchybar(payload.as_bytes(), config, now, options).expect("emit succeeds")
+    fn emit(
+        payload: &str,
+        config: &RenderConfig,
+        now: i64,
+        options: SketchybarOptions,
+    ) -> SketchybarRows {
+        sketchybar_rows(payload.as_bytes(), config, now, options).expect("rows succeed")
     }
 
-    fn lines(rendered: &str) -> Vec<Vec<String>> {
-        rendered
-            .lines()
-            .map(|line| line.split(FIELD_SEP).map(str::to_string).collect())
-            .collect()
+    /// Flatten rows into positional fields so each test reads one lane slot
+    /// by index: header `[stale, degraded]`, then per row `provider, label,
+    /// label_argb, status, status_url`, four `present, remaining, marker,
+    /// argb` blocks (an absent marker is empty), and `error`.
+    fn lines(rows: &SketchybarRows) -> Vec<Vec<String>> {
+        let flag = |value: bool| String::from(if value { "1" } else { "0" });
+        let mut out = vec![vec![flag(rows.stale), flag(rows.degraded_cli)]];
+        for row in &rows.rows {
+            let mut fields = vec![
+                row.provider.clone(),
+                row.label.clone(),
+                row.label_argb.clone(),
+                row.status.clone(),
+                row.status_url.clone(),
+            ];
+            for lane in &row.lanes {
+                fields.push(flag(lane.present));
+                fields.push(lane.remaining.to_string());
+                fields.push(lane.marker.map(|m| m.to_string()).unwrap_or_default());
+                fields.push(lane.argb.clone());
+            }
+            fields.push(flag(row.error));
+            out.push(fields);
+        }
+        out
     }
 
     #[test]
     fn header_carries_stale_and_degraded_flags() {
         let config = RenderConfig::default();
-        let rendered = emit(
+        let rows = emit(
             "[]",
             &config,
             1_700_000_000,
@@ -515,7 +550,9 @@ mod tests {
                 stale_providers: &[],
             },
         );
-        assert_eq!(rendered, format!("1{FIELD_SEP}0"));
+        assert!(rows.stale);
+        assert!(!rows.degraded_cli);
+        assert!(rows.rows.is_empty());
     }
 
     #[test]
@@ -523,7 +560,7 @@ mod tests {
         let config = RenderConfig::default();
         for payload in ["{}", "null", "\"quota\"", "42"] {
             assert!(matches!(
-                emit_sketchybar(payload.as_bytes(), &config, 1_700_000_000, options()),
+                sketchybar_rows(payload.as_bytes(), &config, 1_700_000_000, options()),
                 Err(RenderError::InvalidPayload)
             ));
         }
@@ -861,6 +898,28 @@ mod tests {
         assert_eq!(error_row.last().expect("error field"), "1");
         assert_eq!(error_row[5], "0", "an errored provider has no lane");
         assert_eq!(rows[1].last().expect("error field"), "0");
+    }
+
+    #[test]
+    fn windowless_providers_keep_their_place_greyed() {
+        // Muse Code while its server withholds quota: no error, no window.
+        let config = RenderConfig {
+            provider_order: vec!["codex".into(), "muse".into(), "cursor".into()],
+            ..RenderConfig::default()
+        };
+        let payload = r#"[
+            {"provider": "codex", "usage": {"primary": {"usedPercent": 10}}},
+            {"provider": "muse", "error": null,
+             "usage": {"primary": null, "secondary": null, "tertiary": null}},
+            {"provider": "cursor", "usage": {"primary": {"usedPercent": 20}}}
+        ]"#;
+        let rendered = emit(payload, &config, 1_700_000_000, options());
+        let rows = lines(&rendered);
+        assert_eq!(rows.len(), 4);
+        assert_eq!(rows[2][0], "muse", "it keeps its slot between its peers");
+        assert_eq!(rows[2][1], "⚠err");
+        assert_eq!(rows[2].last().expect("error field"), "1");
+        assert_eq!(rows[2][5], "0", "no lane is drawn");
     }
 
     #[test]

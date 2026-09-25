@@ -56,5 +56,14 @@
                    script="${PLUGIN_PATH}"
     sketchybar --subscribe showy_quota.trigger showy_quota_refresh
 
+    # Notch placement re-plans when the space around the notch can change:
+    # the front app, the display set, and wake. Other configs can trigger
+    # `showy_quota_layout` after they show or hide a neighbour item.
+    if [[ "${SHOWY_QUOTA_SKETCHYBAR_PLACEMENT}" == "notch" ]]; then
+        sketchybar --add event showy_quota_layout
+        sketchybar --subscribe showy_quota.trigger \
+            showy_quota_layout front_app_switched display_change system_woke
+    fi
+
     SHOWY_QUOTA_SKETCHYBAR_FORCE_REDECLARE=1 "${PLUGIN_PATH}"
 ) || true

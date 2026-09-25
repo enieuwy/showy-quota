@@ -113,8 +113,15 @@ empty_reason_for() {
             and (.provider | valid_provider_id)
             and ([.usage.primary, .usage.secondary, .usage.tertiary]
                  | any(. != null and (.usedPercent | type == "number")));
+        # Mirrors codexbar::is_errored: an error, or no window object at all,
+        # draws greyed in place. A window with a null usedPercent is idle.
+        def windowless:
+            (.usage | type) != "object"
+            or ([.usage.primary, .usage.secondary, .usage.tertiary] | all(. == null)
+                and ((.usage.extraRateWindows // []) | length == 0));
         def errored:
-            (.error // null) != null and (.provider | valid_provider_id) and (renderable | not);
+            (.provider | valid_provider_id) and (renderable | not)
+            and ((.error // null) != null or windowless);
         (if type == "array" then . else [] end) as $records
         | ($records | length) as $total
         | ([ $records[] | select(renderable or errored) ] | length) as $candidates
