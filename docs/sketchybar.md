@@ -94,6 +94,31 @@ When the filtered provider set changes, the SketchyBar plugin also triggers
 `SHOWY_QUOTA_PROVIDERS` environment values. Configs that do not add/subscribe to
 that event are unaffected.
 
+## Strip body: rows or ring
+
+`SHOWY_QUOTA_SKETCHYBAR_BODY=rows` (default) keeps the slider rows described
+above, unchanged. `SHOWY_QUOTA_SKETCHYBAR_BODY=ring` draws one ring per model
+family instead: each family's longest window becomes a 26 pt ring with the
+provider logo inside, shorter windows become 28x4 pt bars under the countdown
+label (shortest first), and hovering any item of a unit opens a popup with one
+mini gauge per window, the % left, pace, and reset. Equal-length windows are
+parts of the ring's own window (Cursor's Cursor / Third Party split) and draw
+as plain bars with no pace knob; Antigravity draws two pool units (G = Gemini,
+C = Claude + GPT); Codex banked resets badge the ring; errors keep the last
+known arc in grey. Switching the body re-declares the items cleanly, leaving
+no items of the other body behind.
+
+Ring mode needs the SketchyBar fork [github.com/enieuwy/SketchyBar](https://github.com/enieuwy/SketchyBar):
+the `ring` item ([upstream PR #817](https://github.com/FelixKratz/SketchyBar/pull/817))
+and the badges ([upstream PR #816](https://github.com/FelixKratz/SketchyBar/pull/816)),
+neither merged upstream yet. On stock SketchyBar the plugin logs once and
+falls back to the rows body. Notch placement stays a rows-body feature; in
+ring mode the pill stays left.
+
+<p><img src="images/ring-strip.png" alt="showy-quota SketchyBar ring strip: one ring per provider with countdown labels" width="645"></p>
+
+<p><img src="images/ring-popup.png" alt="showy-quota ring hover popup for Command Code with per-window gauges" width="670"></p>
+
 ## Pill geometry
 
 The bracket reads `SHOWY_QUOTA_SKETCHYBAR_PILL_RADIUS`,

@@ -13,6 +13,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `make install-bin`). `--emit sketchybar` (the old row format) is removed.
 
 ### Added
+- SketchyBar `SHOWY_QUOTA_SKETCHYBAR_BODY=ring` (opt-in; default `rows` is
+  unchanged): one ring per model family — the longest window as a 26 pt ring
+  with the provider logo inside, shorter windows as stacked bars, pace ticks
+  and knobs from reset math, Antigravity G/C pool pairs, a Codex banked-reset
+  badge, hover popups with per-window gauges, and grey last-known arcs on
+  provider errors (kept beside the fresh error by the fetcher, see below).
+  Ring mode needs the SketchyBar fork
+  [github.com/enieuwy/SketchyBar](https://github.com/enieuwy/SketchyBar) — the
+  `ring` item ([upstream PR #817](https://github.com/FelixKratz/SketchyBar/pull/817))
+  and the badges ([upstream PR #816](https://github.com/FelixKratz/SketchyBar/pull/816)),
+  neither merged upstream yet; on stock SketchyBar the plugin logs once and
+  falls back to rows. Switching bodies re-declares cleanly with no leftover
+  items. See `docs/sketchybar.md` "Strip body: rows or ring".
+- `showy-quota-fetch` keeps a provider's last-known `usage` beside a fresh
+  error-only record (with its original `providerMeta` time) instead of wiping
+  it; a fresh success drops the preserved slice as before.
 - SketchyBar `SHOWY_QUOTA_SKETCHYBAR_PLACEMENT=notch` (opt-in; default `left`
   is unchanged). Providers that would run under the MacBook notch move right of
   it inside the same pill, so the pill appears to pass behind the notch. When

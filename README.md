@@ -32,7 +32,7 @@ codexbar serve → http://127.0.0.1:8080/health + /usage
 bin/showy-quota-fetch     ←  shared cache envelope + flock + last-known-good
        │  ~/.cache/showy-quota/usage.json (envelope: source + providers)
        ├──► bin/showy-quota-state                 (stable provider/layout state JSON)
-       ├──► adapters/sketchybar/plugins/showy_quota.sh    (native SketchyBar rows + icons)
+       ├──► adapters/sketchybar/plugins/showy_quota.sh    (native SketchyBar rows/rings + icons)
        ├──► bin/showy-quota-tmux-bar             (tmux #[…] markup for status-right)
        ├──► bin/showy-quota-zellij-bar           (advanced zjstatus pipe segment)
        └──► adapters/agent-cli/showy-quota-statusline  (agent-CLI status line strip)
@@ -130,6 +130,17 @@ Then reload SketchyBar (`sketchybar --reload` or quit + relaunch) once to
 load the trigger item. One icon + bar + label triple appears per provider
 currently fetching usage data; later provider adds/removals land on the next
 plugin tick without another reload.
+
+Set `SHOWY_QUOTA_SKETCHYBAR_BODY=ring` for one ring per model family instead
+of rows, with hover popups per window (see
+[`docs/sketchybar.md`](docs/sketchybar.md) "Strip body: rows or ring"). Ring
+mode needs the SketchyBar fork
+[github.com/enieuwy/SketchyBar](https://github.com/enieuwy/SketchyBar) — the
+`ring` item ([upstream PR #817](https://github.com/FelixKratz/SketchyBar/pull/817))
+and the badges ([upstream PR #816](https://github.com/FelixKratz/SketchyBar/pull/816)),
+neither merged upstream yet; on stock SketchyBar the plugin falls back to rows.
+
+<p><img src="docs/images/ring-strip.png" alt="showy-quota SketchyBar ring strip: one ring per provider with countdown labels" width="645"></p>
 
 ### Zellij wiring
 
