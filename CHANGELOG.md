@@ -23,6 +23,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   new `showy_quota_layout` event. Reload SketchyBar after enabling.
 
 ### Changed
+- The tmux and Zellij shell bars render from the cache first. They start
+  `showy-quota-fetch` in the background only when the cache is older than the
+  refresh interval, as the SketchyBar plugin does; before, every run waited on
+  a fetch even with a fresh cache. A run now costs about 45 ms of CPU and 14
+  process starts instead of 120 ms and 32 (at tmux `status-interval 5`, about
+  1.4 s to 0.5 s of CPU a minute).
+- `showy-quota-fetch` bounds each `codexbar` call with the native
+  `showy-quota-render --run-bounded` instead of a `python3` wrapper (about 1 ms
+  instead of 30 ms a call), and merges per-provider slices in one `jq` pass. A
+  six-provider CLI refresh drops from about 0.70 s to 0.40 s of shell CPU.
+  `python3` is no longer used by the fetcher; without `showy-quota-render` it
+  falls back to `timeout`/`head` as before.
 - A provider CodexBar returns with no error and no window object at all now
   draws in place as an errored provider instead of vanishing. A window whose
   `usedPercent` is null is still unused quota and stays idle.

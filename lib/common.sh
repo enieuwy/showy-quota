@@ -610,6 +610,18 @@ showy_quota_age_seconds() {
     printf '%s\n' "${age}"
 }
 
+# Terminal bars render from the cache first and refresh behind it: start
+# `$1` (showy-quota-fetch) in the background once the cache is older than the
+# refresh interval, the same rule the SketchyBar plugin uses. The fetcher's
+# own lock keeps one refresher however many bars ask.
+showy_quota_refresh_in_background_if_due() {
+    local fetch="$1" threshold="${SHOWY_QUOTA_REFRESH_SECONDS}" age
+    [[ -n "${SHOWY_QUOTA_CODEXBAR_SERVE_URL}" ]] && threshold="${SHOWY_QUOTA_CODEXBAR_SERVE_REFRESH_SECONDS}"
+    age=$(showy_quota_age_seconds "${SHOWY_QUOTA_USAGE_FILE}")
+    (( age >= threshold )) || return 0
+    ( "${fetch}" </dev/null >/dev/null 2>&1 & )
+}
+
 showy_quota_cache_source() {
     local source="unknown"
     if [[ -r "${SHOWY_QUOTA_USAGE_FILE}" ]] && showy_quota_have jq; then

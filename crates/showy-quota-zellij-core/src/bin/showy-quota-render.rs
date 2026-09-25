@@ -77,7 +77,11 @@ struct Cli {
 }
 
 fn main() {
-    let cli = match parse_args(std::env::args().skip(1)) {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("--run-bounded") {
+        process::exit(bounded::run(&args[1..]));
+    }
+    let cli = match parse_args(args.into_iter()) {
         Ok(cli) => cli,
         Err(message) => {
             eprintln!("showy-quota-render: {message}");
@@ -875,7 +879,7 @@ fn png_bar_width_from_env() -> i64 {
 
 fn print_help() {
     println!(
-        "Usage: showy-quota-render [--emit render|rows|vertical|metrics|prompt|template|pick|sketchybar-frame|sketchybar-query|sketchybar-layout] [--format zellij|tmux|SPEC] [--join SEP] [--json <path|-> | --from-cache] [--provider ID[,ID...]] [--ansi] [--stale] [--degraded-cli]\n\nTemplate mode requires --format SPEC and expands once per provider. Prompt accepts --format SPEC for the worst window overall. Fields: {{provider}}, {{sigil}}, {{used}}, {{remaining}}, {{countdown}}, {{class}}, {{window}}, {{stale}}. Escape braces with {{{{ and }}}}.\n\nPick mode accepts --window primary|secondary|tertiary|worst, --min-remaining 0-100, and --pick-format id|json.\n\nThe sketchybar-* modes serve the SketchyBar plugin: frame accepts --bar PATH|-, --state PATH, --frame PATH, --plan PATH, --force-redeclare, --assume-declared, --icon-maker, and --or-empty; query reads a `--query bar` reply; layout accepts --plan PATH and --layout-providers ID[,ID...] and reads the batched geometry query on stdin."
+        "Usage: showy-quota-render [--emit render|rows|vertical|metrics|prompt|template|pick|sketchybar-frame|sketchybar-query|sketchybar-layout] [--format zellij|tmux|SPEC] [--join SEP] [--json <path|-> | --from-cache] [--provider ID[,ID...]] [--ansi] [--stale] [--degraded-cli]\n\nTemplate mode requires --format SPEC and expands once per provider. Prompt accepts --format SPEC for the worst window overall. Fields: {{provider}}, {{sigil}}, {{used}}, {{remaining}}, {{countdown}}, {{class}}, {{window}}, {{stale}}. Escape braces with {{{{ and }}}}.\n\nPick mode accepts --window primary|secondary|tertiary|worst, --min-remaining 0-100, and --pick-format id|json.\n\n--run-bounded SECONDS MAX_BYTES CMD [ARG...] runs CMD in its own session with a hard timeout (exit 124) and an output cap (MAX_BYTES + 1 bytes pass, exit 125), for showy-quota-fetch.\n\nThe sketchybar-* modes serve the SketchyBar plugin: frame accepts --bar PATH|-, --state PATH, --frame PATH, --plan PATH, --force-redeclare, --assume-declared, --icon-maker, and --or-empty; query reads a `--query bar` reply; layout accepts --plan PATH and --layout-providers ID[,ID...] and reads the batched geometry query on stdin."
     );
 }
 
@@ -914,5 +918,191 @@ mod tests {
         .expect("metrics");
         assert!(output.contains(r#""provider":"codex""#));
         assert!(!output.contains(r#""provider":"claude""#));
+    }
+}
+
+/// `--run-bounded`: the fetcher's hard timeout and output cap around one
+/// CodexBar command, so a hung or runaway call cannot stall the refresh or
+/// grow a command substitution without bound.
+///
+/// The command runs in its own session with stdin and stderr closed. Stdout
+/// streams through until it closes; at most `MAX_BYTES + 1` bytes pass, and
+/// reaching that many ends the run with 125 so the caller sees the cap.
+/// Timeout exits 124. Either way, and on SIGINT/SIGTERM (128 + signal), the
+/// command's process group gets SIGTERM, then SIGKILL after one second. A
+/// command that finishes is never signalled, so helpers it left running
+/// survive. Otherwise the exit code is the command's (128 + signal when a
+/// signal killed it); 127 when it cannot start, 2 for bad arguments.
+mod bounded {
+    use std::io::{self, Read, Write};
+    use std::os::unix::process::{CommandExt, ExitStatusExt};
+    use std::process::{Child, Command, Stdio};
+    use std::sync::atomic::{AtomicI32, Ordering};
+    use std::sync::mpsc::{self, RecvTimeoutError};
+    use std::time::{Duration, Instant};
+
+    extern "C" {
+        fn kill(pid: i32, sig: i32) -> i32;
+        fn setsid() -> i32;
+        fn signal(sig: i32, handler: extern "C" fn(i32)) -> usize;
+    }
+
+    const SIGINT: i32 = 2;
+    const SIGKILL: i32 = 9;
+    const SIGTERM: i32 = 15;
+    const POLL: Duration = Duration::from_millis(100);
+
+    static CAUGHT: AtomicI32 = AtomicI32::new(0);
+
+    extern "C" fn on_signal(sig: i32) {
+        CAUGHT.store(sig, Ordering::SeqCst);
+    }
+
+    fn caught() -> Option<i32> {
+        match CAUGHT.load(Ordering::SeqCst) {
+            0 => None,
+            sig => Some(sig),
+        }
+    }
+
+    pub fn run(args: &[String]) -> i32 {
+        let timeout = args
+            .first()
+            .and_then(|value| value.parse::<f64>().ok())
+            .filter(|value| value.is_finite() && *value >= 0.0);
+        let max_bytes = args.get(1).and_then(|value| value.parse::<u64>().ok());
+        let (Some(timeout), Some(max_bytes), Some(program)) = (timeout, max_bytes, args.get(2))
+        else {
+            eprintln!("showy-quota-render: --run-bounded SECONDS MAX_BYTES CMD [ARG...]");
+            return 2;
+        };
+        let capture = max_bytes.saturating_add(1);
+        let deadline = Instant::now() + Duration::from_secs_f64(timeout.min(1e9));
+
+        let mut command = Command::new(program);
+        command
+            .args(&args[3..])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        // SAFETY: setsid is async-signal-safe and touches no parent state.
+        unsafe {
+            command.pre_exec(|| {
+                if setsid() == -1 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let Ok(mut child) = command.spawn() else {
+            return 127;
+        };
+        // SAFETY: the handler only stores into an atomic.
+        unsafe {
+            signal(SIGINT, on_signal);
+            signal(SIGTERM, on_signal);
+        }
+
+        let Some(mut stdout) = child.stdout.take() else {
+            terminate(&mut child);
+            return 1;
+        };
+        let (tx, rx) = mpsc::channel::<Vec<u8>>();
+        std::thread::spawn(move || {
+            let mut buf = vec![0u8; 65_536];
+            loop {
+                match stdout.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if tx.send(buf[..n].to_vec()).is_err() {
+                            break;
+                        }
+                    }
+                    Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
+                    Err(_) => break,
+                }
+            }
+        });
+
+        let out = io::stdout();
+        let mut out = out.lock();
+        let mut written = 0u64;
+        loop {
+            if let Some(sig) = caught() {
+                terminate(&mut child);
+                return 128 + sig;
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                terminate(&mut child);
+                return 124;
+            }
+            match rx.recv_timeout((deadline - now).min(POLL)) {
+                Ok(chunk) => {
+                    let room = usize::try_from(capture - written).unwrap_or(usize::MAX);
+                    let take = chunk.len().min(room);
+                    if out.write_all(&chunk[..take]).is_err() {
+                        terminate(&mut child);
+                        return 1;
+                    }
+                    written += take as u64;
+                    if written == capture {
+                        let _ = out.flush();
+                        terminate(&mut child);
+                        return 125;
+                    }
+                }
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        let _ = out.flush();
+
+        loop {
+            if let Some(sig) = caught() {
+                terminate(&mut child);
+                return 128 + sig;
+            }
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    return status
+                        .code()
+                        .unwrap_or_else(|| 128 + status.signal().unwrap_or(0));
+                }
+                Ok(None) => {}
+                Err(_) => return 1,
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                terminate(&mut child);
+                return 124;
+            }
+            std::thread::sleep((deadline - now).min(Duration::from_millis(20)));
+        }
+    }
+
+    /// SIGTERM the command's group, SIGKILL after a second. Never signals a
+    /// reaped child: its pid (also the pgid) may already belong to another
+    /// process.
+    fn terminate(child: &mut Child) {
+        let Ok(pgid) = i32::try_from(child.id()) else {
+            return;
+        };
+        for sig in [SIGTERM, SIGKILL] {
+            if !matches!(child.try_wait(), Ok(None)) {
+                return;
+            }
+            // SAFETY: plain syscall on a group we created and have not reaped.
+            unsafe {
+                kill(-pgid, sig);
+            }
+            let until = Instant::now() + Duration::from_secs(1);
+            while Instant::now() < until {
+                if !matches!(child.try_wait(), Ok(None)) {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
     }
 }

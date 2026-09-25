@@ -75,9 +75,12 @@ if [[ -n "${json_input}" ]]; then
     exit 0
 fi
 
-"${FETCH}" >/dev/null 2>&1 || true
-
-if ! out=$("${RENDER_BIN}" --format tmux --from-cache 2>/dev/null); then
-    out="$(print_ai_fallback)"
+# Cache first: a usable cache renders at once and refreshes in the
+# background when due. Only a missing or unusable cache waits for a fetch.
+if out=$("${RENDER_BIN}" --format tmux --from-cache 2>/dev/null); then
+    showy_quota_refresh_in_background_if_due "${FETCH}"
+else
+    "${FETCH}" >/dev/null 2>&1 || true
+    out=$("${RENDER_BIN}" --format tmux --from-cache 2>/dev/null) || out="$(print_ai_fallback)"
 fi
 printf '%s' "${out}"

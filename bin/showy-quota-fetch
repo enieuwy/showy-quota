@@ -1095,23 +1095,20 @@ run_codexbar_cli_per_provider() {
 
     (( fresh_count > 0 )) || return 1
 
-    # Merge per-provider arrays into one publishable array. Validation in
+    # Merge per-provider arrays into one publishable array in one jq pass;
+    # the first slice for a provider wins. Validation in
     # `publish_cache_payload` runs again before we publish, so a degenerate
     # merge fails closed without overwriting the existing cache.
     local merged
-    merged=$(printf '%s' "${accumulated[0]}")
-    local i
-    for (( i = 1; i < ${#accumulated[@]}; i++ )); do
-        merged=$(printf '%s\n%s' "${merged}" "${accumulated[$i]}" | jq -s -c '
-            map(select(type == "array")) | add // []
-            | reduce .[] as $r ([];
-                if ($r.provider | type == "string")
-                   and (any(.[]; .provider == $r.provider) | not)
-                then . + [$r]
-                else . end
-              )
-        ' 2>/dev/null) || return 1
-    done
+    merged=$(printf '%s\n' "${accumulated[@]}" | jq -s -c '
+        map(select(type == "array")) | add // []
+        | reduce .[] as $r ([];
+            if ($r.provider | type == "string")
+               and (any(.[]; .provider == $r.provider) | not)
+            then . + [$r]
+            else . end
+          )
+    ' 2>/dev/null) || return 1
 
     [[ -n "${merged}" && "${merged:0:1}" == '[' ]] || return 1
     printf '%s' "${merged}"
@@ -2010,112 +2007,13 @@ run_with_hard_timeout() {
     [[ "${max_bytes}" =~ ^[0-9]+$ ]] || return 2
     local capture_bytes=$((max_bytes + 1))
 
-    if showy_quota_have python3; then
-        python3 -c '
-import os
-import select
-import signal
-import subprocess
-import sys
-import time
-
-timeout = float(sys.argv[1])
-max_bytes = int(sys.argv[2])
-argv = sys.argv[3:]
-capture_bytes = max_bytes + 1
-
-try:
-    proc = subprocess.Popen(
-        argv,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        stdin=subprocess.DEVNULL,
-        start_new_session=True,
-    )
-except OSError:
-    sys.exit(127)
-
-def signal_group(sig):
-    # Never signal a group we have already reaped: proc.pid doubles as the pgid
-    # (start_new_session=True), and once waited on that id is free for the
-    # kernel to hand to an unrelated same-uid process or group.
-    if proc.returncode is not None:
-        return
-    # Cleanup must never raise. A reaped group answers ESRCH
-    # (ProcessLookupError); a zombie-only group answers EPERM on macOS. Neither
-    # is actionable here, and letting either escape would mask the real child
-    # exit code via the finally block below (it turned the 125 output-cap path
-    # into a bare rc=1). NOTE: this program is embedded in a single-quoted
-    # shell string, so it must never contain an apostrophe.
-    try:
-        os.killpg(proc.pid, sig)
-    except OSError:
-        pass
-
-def terminate_process():
-    signal_group(signal.SIGTERM)
-    try:
-        proc.wait(timeout=1)
-        return
-    except subprocess.TimeoutExpired:
-        pass
-    signal_group(signal.SIGKILL)
-    try:
-        proc.wait(timeout=1)
-    except subprocess.TimeoutExpired:
-        pass
-
-def handle_signal(signum, _frame):
-    terminate_process()
-    sys.exit(128 + signum)
-
-signal.signal(signal.SIGINT, handle_signal)
-signal.signal(signal.SIGTERM, handle_signal)
-
-def run():
-    deadline = time.monotonic() + timeout
-    written = 0
-    fd = proc.stdout.fileno()
-    while True:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            terminate_process()
-            sys.exit(124)
-        readable, _, _ = select.select([fd], [], [], remaining)
-        if not readable:
-            if proc.poll() is not None:
-                continue
-            terminate_process()
-            sys.exit(124)
-        chunk = os.read(fd, min(65536, capture_bytes - written))
-        if not chunk:
-            break
-        os.write(sys.stdout.fileno(), chunk)
-        written += len(chunk)
-        if written == capture_bytes:
-            terminate_process()
-            sys.exit(125)
-
-    try:
-        sys.exit(proc.wait(timeout=max(0, deadline - time.monotonic())))
-    except subprocess.TimeoutExpired:
-        terminate_process()
-        sys.exit(124)
-
-# Clean up only on ABNORMAL termination. The timeout (124) and output-cap (125)
-# branches and the signal handlers already tear down the group themselves, and
-# SystemExit from the success path must NOT reach terminate_process: the child
-# runs in its own session, so killing that group on success would also kill any
-# helper the command legitimately left running behind it. A bare finally: here
-# did exactly that on every successful invocation.
-try:
-    run()
-except SystemExit:
-    raise
-except BaseException:
-    terminate_process()
-    raise
-' "${timeout_seconds}" "${max_bytes}" "$@"
+    # The native runner costs about 1 ms; a python3 start cost about 30.
+    if [[ -z "${BOUNDED_RUNNER_RESOLVED:-}" ]]; then
+        BOUNDED_RUNNER_RESOLVED=1
+        BOUNDED_RUNNER=$(showy_quota_resolve_render_bin "${SCRIPT_DIR}" "${SCRIPT_DIR}/..") || BOUNDED_RUNNER=""
+    fi
+    if [[ -n "${BOUNDED_RUNNER}" ]]; then
+        "${BOUNDED_RUNNER}" --run-bounded "${timeout_seconds}" "${max_bytes}" "$@"
         return $?
     fi
 
@@ -2125,7 +2023,7 @@ except BaseException:
         return "${producer_rc}"
     fi
 
-    showy_quota_log "python3 or timeout/head not found; refusing uncapped command"
+    showy_quota_log "showy-quota-render or timeout/head not found; refusing uncapped command"
     return 127
 }
 

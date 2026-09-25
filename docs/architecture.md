@@ -95,7 +95,7 @@ It always requests `WebAccess`, then requests `OpenTerminalsOrPlugins` only when
 
 The plugin keeps last-known-good JSON in memory for the pane/session. If refreshes fail after a success, it continues rendering the previous data and marks it stale at `2 × interval_seconds`. That preserves the user-visible last-known-good behavior without requiring `FullHdAccess` or a disk cache.
 
-Hot-path compute is centralized in the native `showy-quota-render` binary. The tmux and advanced zjstatus shell bars only warm the cache and call `--from-cache`; the standalone Zellij plugin uses the same Rust rendering core in-process; the prompt segment comes from `--emit prompt`; and the SketchyBar plugin gets its whole tick from `--emit sketchybar-frame`: the final `sketchybar --set` arguments (rows, markers, labels, colors, icons, click scripts, stale/shared-cycle handling), diffed against the last frame sent, plus the decision to redeclare items. The notch split comes from `--emit sketchybar-layout`. SketchyBar's shell keeps only host integration: item declaration/teardown, icon rasterization, and the `sketchybar` calls.
+Hot-path compute is centralized in the native `showy-quota-render` binary. The tmux and advanced zjstatus shell bars render `--from-cache` first and start `showy-quota-fetch` in the background once the cache is older than the refresh interval (only a missing or unusable cache waits for a fetch); the standalone Zellij plugin uses the same Rust rendering core in-process; the prompt segment comes from `--emit prompt`; and the SketchyBar plugin gets its whole tick from `--emit sketchybar-frame`: the final `sketchybar --set` arguments (rows, markers, labels, colors, icons, click scripts, stale/shared-cycle handling), diffed against the last frame sent, plus the decision to redeclare items. The notch split comes from `--emit sketchybar-layout`. SketchyBar's shell keeps only host integration: item declaration/teardown, icon rasterization, and the `sketchybar` calls.
 
 ## Terminal rendering modes
 
@@ -204,7 +204,8 @@ survive it instead:
   fetch path, and never gates on `SHOWY_QUOTA_DEBUG`.
 - `<cache>/provider-failures/<id>` holds the epoch on line 1 (the only line the
   backoff check reads) and `rc=<code>` on line 2. `rc=124` is the hard timeout,
-  `rc=125` the output cap, `rc=unrenderable` a payload with no usable window,
+  `rc=125` the output cap (both enforced by `showy-quota-render --run-bounded`,
+  which runs each `codexbar` call in its own session), `rc=unrenderable` a payload with no usable window,
   and any other code comes straight from `codexbar`.
 
 A provider whose collection needs host privileges — the browser-cookie
