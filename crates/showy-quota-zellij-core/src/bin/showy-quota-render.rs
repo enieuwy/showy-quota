@@ -8,10 +8,12 @@ use showy_quota_zellij_core::{
     emit_formatted_prompt_segment, emit_pick, emit_prompt_segment, emit_provider_metrics,
     emit_rows, render_tmux, render_vertical, render_zellij,
     sketchybar_frame::{
-        build_frame, parse_bar_items, redeclare_reason, wire_line, FrameInputs, FrameOutput,
-        FrameSettings,
+        build_frame, build_ring_frame, parse_bar_items, redeclare_reason, ring_extra_items,
+        ring_redeclare_reason, wire_line, Body, FrameInputs, FrameOutput, FrameSettings,
+        RingFrameInputs,
     },
     sketchybar_notch::{notch_layout, parse_previous_plan, NotchSettings, PreviousPlan},
+    sketchybar_ring::ring_units,
     sketchybar_rows, valid_provider_id, Freshness, PickOptions, PromptOptions, RenderConfig,
     RenderError, RenderOptions, SketchybarOptions, SketchybarRows, Template, TemplateScope,
 };
@@ -578,6 +580,11 @@ fn run_sketchybar_frame(cli: &Cli, config: &RenderConfig, now_epoch: i64) -> Res
     let sb = &cli.sketchybar;
     let settings = FrameSettings::from_getter(|name| std::env::var(name).ok(), config);
 
+    // Ring mode owns its own frame path; the rows path below is unchanged.
+    if settings.body == Body::Ring {
+        return run_sketchybar_ring_frame(cli, config, now_epoch, &settings);
+    }
+
     // An unusable cache is an error, so the plugin can fetch and retry;
     // `--or-empty` (the retry) renders an empty frame instead, which tears
     // the providers down while stale/degraded still reflect the file.
@@ -670,6 +677,111 @@ fn run_sketchybar_frame(cli: &Cli, config: &RenderConfig, now_epoch: i64) -> Res
         icon_requests: &frame.icon_requests,
         query,
         args: &frame.args,
+        units: None,
+    };
+    write_output(&output.to_wire())
+}
+
+/// `--emit sketchybar-frame` with `SHOWY_QUOTA_SKETCHYBAR_BODY=ring`: the same
+/// tick contract as the rows path, but one ring per model family. Ring mode
+/// draws font logos instead of rasterized icons, so it never requests any,
+/// and it stays out of the notch planner (no `query` record).
+fn run_sketchybar_ring_frame(
+    cli: &Cli,
+    config: &RenderConfig,
+    now_epoch: i64,
+    settings: &FrameSettings,
+) -> Result<(), String> {
+    let sb = &cli.sketchybar;
+    let (units, age_seconds, stale, degraded_cli) = match read_input(cli, now_epoch, config) {
+        Ok(input) => {
+            let stale = cli.stale || input.stale;
+            let degraded_cli = cli.degraded_cli || input.degraded_cli;
+            let options = SketchybarOptions {
+                stale,
+                degraded_cli,
+                bar_width: png_bar_width_from_env(),
+                stale_providers: &input.stale_providers,
+            };
+            match ring_units(&input.payload, config, now_epoch, options) {
+                Ok(units) => (units, input.age_seconds, stale, degraded_cli),
+                Err(_) if sb.or_empty => (Vec::new(), None, stale, degraded_cli),
+                Err(err) => return Err(render_error(err)),
+            }
+        }
+        Err(_) if sb.or_empty && cli.input == Input::Cache => {
+            use showy_quota_zellij_core::cache::{cache_paths_from_env, freshness_for_paths};
+            let freshness =
+                freshness_for_paths(&cache_paths_from_env(), now_epoch, String::from("unknown"));
+            (
+                Vec::new(),
+                None,
+                cli.stale || freshness.stale,
+                cli.degraded_cli || freshness.degraded_cli,
+            )
+        }
+        Err(err) => return Err(err),
+    };
+
+    let items = match &sb.bar {
+        Some(path) => read_payload(path)
+            .ok()
+            .and_then(|raw| parse_bar_items(&raw)),
+        None => None,
+    };
+    let declared = sb
+        .state
+        .as_deref()
+        .map(read_provider_list)
+        .unwrap_or_default();
+    let desired_units: Vec<String> = units.iter().map(|unit| unit.unit.clone()).collect();
+    let mut desired_providers: Vec<String> = Vec::new();
+    for unit in &units {
+        if !desired_providers
+            .iter()
+            .any(|provider| provider == &unit.provider)
+        {
+            desired_providers.push(unit.provider.clone());
+        }
+    }
+    let extra = ring_extra_items(&units);
+    let redeclare = if sb.assume_declared {
+        None
+    } else {
+        ring_redeclare_reason(
+            sb.force_redeclare,
+            items.as_deref(),
+            &declared,
+            &desired_units,
+            &extra,
+        )
+    };
+    let previous_frame = match (&sb.frame, redeclare) {
+        (Some(path), None) => std::fs::read_to_string(path).ok(),
+        _ => None,
+    };
+    let frame = build_ring_frame(&RingFrameInputs {
+        units: &units,
+        settings,
+        stale,
+        degraded_cli,
+        previous: previous_frame.as_deref(),
+    });
+    if let Some(path) = &sb.frame {
+        write_atomic(path, &frame.frame_text)?;
+    }
+    let pairs: Vec<String> = units
+        .iter()
+        .map(|unit| format!("{}={}", unit.unit, unit.provider))
+        .collect();
+    let output = FrameOutput {
+        redeclare,
+        refresh: background_refresh_due(age_seconds),
+        providers: desired_providers.iter().map(String::as_str).collect(),
+        icon_requests: &frame.icon_requests,
+        query: None,
+        args: &frame.args,
+        units: Some(&pairs),
     };
     write_output(&output.to_wire())
 }

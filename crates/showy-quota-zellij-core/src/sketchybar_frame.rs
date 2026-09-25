@@ -22,7 +22,9 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::config::RenderConfig;
+use crate::palette::scale_hex;
 use crate::sketchybar::{RowLane, SketchybarRow, SketchybarRows, LANE_COUNT};
+use crate::sketchybar_ring::{friendly_length, RingIncident, RingUnit, RingWindow};
 
 /// Bump when icon rendering semantics change so stale cached PNGs are replaced.
 pub const ICON_CACHE_VERSION: &str = "5";
@@ -56,8 +58,17 @@ const WIRE_SEP: char = '\u{001f}';
 /// SketchyBar-only settings, read from the `SHOWY_QUOTA_*` environment the
 /// shell exports. Numbers follow the shell's `showy_quota_uint` rules; colors
 /// follow `showy_quota_normalize_hex_or_default`.
+/// Strip body. `rows` is today’s pill (the default, unchanged); `ring` is
+/// the opt-in ring mode. Anything else falls back to `rows`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Body {
+    Rows,
+    Ring,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FrameSettings {
+    pub body: Body,
     pub click: String,
     pub row_radius: i64,
     pub label_width: i64,
@@ -82,6 +93,12 @@ pub struct FrameSettings {
     pub primary_unknown: String,
     pub stale_glyph: String,
     pub degraded_glyph: String,
+    pub stale: String,
+    pub countdown: String,
+    pub time_warn_minutes: i64,
+    pub primary_good: String,
+    pub good_min_remaining: i64,
+    pub warn_min_remaining: i64,
 }
 
 impl FrameSettings {
@@ -104,6 +121,10 @@ impl FrameSettings {
             .filter(|dir| !dir.chars().any(char::is_control))
             .unwrap_or_default();
         Self {
+            body: match get("SHOWY_QUOTA_SKETCHYBAR_BODY").as_deref() {
+                Some("ring") => Body::Ring,
+                _ => Body::Rows,
+            },
             click,
             row_radius: uint("SHOWY_QUOTA_SKETCHYBAR_ROW_RADIUS", 3),
             label_width: uint("SHOWY_QUOTA_SKETCHYBAR_LABEL_WIDTH", 32),
@@ -130,6 +151,12 @@ impl FrameSettings {
             primary_unknown: hex_or(&config.palette_primary_unknown, "6c7086"),
             stale_glyph: config.stale_glyph.clone(),
             degraded_glyph: config.degraded_cli_glyph.clone(),
+            stale: hex_or(&config.palette_stale, "6c7086"),
+            countdown: hex_or(&config.palette_countdown, "7b8496"),
+            time_warn_minutes: config.time_warn_minutes,
+            primary_good: hex_or(&config.palette_primary_good, "25be6a"),
+            good_min_remaining: i64::from(config.good_min_remaining),
+            warn_min_remaining: i64::from(config.warn_min_remaining),
         }
     }
 
@@ -530,6 +557,770 @@ fn tail_args(rows: &SketchybarRows, settings: &FrameSettings) -> Vec<String> {
     args
 }
 
+// ── ring body ──────────────────────────────────────────────────────────
+
+/// Every item one ring unit owns, in bracket order. The plugin declares the
+/// same list (`RING_UNIT_ITEM_ROLES` in
+/// `adapters/sketchybar/plugins/showy_quota.sh`).
+pub const RING_UNIT_ROLES: [&str; 15] = [
+    "ring",
+    "ring_pace",
+    "bar0",
+    "bar0_pace",
+    "bar1",
+    "bar1_pace",
+    "label",
+    "pop_title",
+    "pop_header",
+    "pop_row0",
+    "pop_row1",
+    "pop_row2",
+    "pop_note",
+    "pop_alert0",
+    "pop_alert1",
+];
+
+/// Pill edge spacers; the bracket spans item rects without padding, so edges
+/// and gaps are real spacer items declared by the plugin.
+pub const RING_EDGE_A: &str = "showy_quota.edge.a";
+pub const RING_EDGE_Z: &str = "showy_quota.edge.z";
+
+/// Spacer before every unit but the first (`10` pt between Antigravity’s
+/// pools, `22` pt between providers; widths are set at declaration).
+pub fn ring_gap_item(unit: &str) -> String {
+    format!("showy_quota.gap.{unit}")
+}
+
+/// Presence-checked items beyond the unit roles: both edges and every gap.
+pub fn ring_extra_items(units: &[RingUnit]) -> Vec<String> {
+    let mut extra = vec![RING_EDGE_A.to_owned()];
+    for unit in units.iter().skip(1) {
+        extra.push(ring_gap_item(&unit.unit));
+    }
+    extra.push(RING_EDGE_Z.to_owned());
+    extra
+}
+
+const RING_DIAMETER: i64 = 26;
+const RING_STROKE: &str = "3";
+const RING_PACE_LEN: f64 = 2.5;
+const RING_BAR_W: i64 = 28;
+const RING_BAR_H: i64 = 4;
+const RING_GAP: i64 = 5;
+const RING_LABEL_FONT: &str = "SF Pro:Semibold:10.0";
+const RING_POP_FONT: &str = "Hack Nerd Font:Regular:11.0";
+const RING_POP_TITLE_FONT: &str = "SF Pro:Bold:12.0";
+const RING_POP_NOTE_FONT: &str = "SF Pro:Regular:10.0";
+const RING_POP_ALERT_FONT: &str = "SF Pro:Regular:11.0";
+const RING_POP_ALERT_ICON_FONT: &str = "SF Pro:Bold:12.0";
+const RING_POOL_FONT: &str = "SF Pro:Heavy:8.0";
+/// Banked-reset disc: dark text on blue, as chosen in the demo.
+const RING_BLUE: &str = "0xff78a9ff";
+const RING_DARK: &str = "0xff161616";
+
+impl FrameSettings {
+    /// Status colour of a window at full brightness. The rows dim
+    /// long-horizon windows; rings never do.
+    pub(crate) fn ring_window_hex(&self, remaining: i64) -> String {
+        if remaining >= self.good_min_remaining {
+            self.primary_good.clone()
+        } else if remaining >= self.warn_min_remaining {
+            self.primary_warn.clone()
+        } else {
+            self.primary_bad.clone()
+        }
+    }
+
+    pub(crate) fn ring_window_argb(&self, remaining: i64) -> String {
+        format!("0xff{}", self.ring_window_hex(remaining))
+    }
+
+    /// Empty pool (0 % left): red-tinted track derived from the bad colour.
+    pub(crate) fn empty_track_argb(&self) -> String {
+        format!("0x66{}", self.primary_bad)
+    }
+
+    fn ring_stale_argb(&self) -> String {
+        format!("0xff{}", self.stale)
+    }
+
+    fn ring_unknown_argb(&self) -> String {
+        format!("0xff{}", self.primary_unknown)
+    }
+
+    fn ring_elapsed_argb(&self) -> String {
+        format!("0xff{}", self.elapsed)
+    }
+
+    fn ring_track_argb(&self) -> String {
+        format!("0xff{}", self.track)
+    }
+
+    fn ring_countdown_argb(&self) -> String {
+        format!("0xff{}", self.countdown)
+    }
+
+    fn ring_text_argb(&self) -> String {
+        format!("0xff{}", self.icon_text)
+    }
+
+    fn ring_warn_argb(&self) -> String {
+        format!("0xff{}", self.countdown_warn)
+    }
+}
+
+pub struct RingFrameInputs<'a> {
+    pub units: &'a [RingUnit],
+    pub settings: &'a FrameSettings,
+    pub stale: bool,
+    pub degraded_cli: bool,
+    /// The last frame file; `None` sends every unit.
+    pub previous: Option<&'a str>,
+}
+
+pub fn build_ring_frame(inputs: &RingFrameInputs<'_>) -> Frame {
+    let previous = inputs.previous.map(parse_frame_text);
+    let mut args = Vec::new();
+    let mut frame_text = String::new();
+    let icon_requests = Vec::new();
+
+    let mut push_unit = |key: &str, unit: Vec<String>| {
+        let hash = format!("{:016x}", fnv1a(&unit));
+        let unchanged = previous
+            .as_ref()
+            .is_some_and(|previous| previous.get(key) == Some(&hash));
+        if !unchanged {
+            args.extend(unit);
+        }
+        frame_text.push_str(key);
+        frame_text.push(WIRE_SEP);
+        frame_text.push_str(&hash);
+        frame_text.push('\n');
+    };
+
+    for unit in inputs.units {
+        push_unit(&unit.unit, ring_unit_args(unit, inputs.settings));
+    }
+    push_unit(
+        TAIL_KEY,
+        ring_tail_args(inputs.stale, inputs.degraded_cli, inputs.settings),
+    );
+
+    Frame {
+        args,
+        frame_text,
+        icon_requests,
+    }
+}
+
+fn ring_tail_args(stale: bool, degraded_cli: bool, settings: &FrameSettings) -> Vec<String> {
+    let warn = format!("label.color=0xff{}", settings.countdown_warn);
+    let click = format!("click_script={}", settings.click);
+    let mut args: Vec<String> = vec!["--set".into(), "showy_quota.stale".into()];
+    if stale {
+        args.extend([
+            "drawing=on".into(),
+            format!("label={}", settings.stale_glyph),
+            warn.clone(),
+            "icon.drawing=off".into(),
+            "background.color=0x00000000".into(),
+            "background.height=0".into(),
+            "padding_left=4".into(),
+            "padding_right=2".into(),
+            click.clone(),
+        ]);
+    } else {
+        args.push("drawing=off".into());
+    }
+    args.extend(["--set".into(), "showy_quota.degraded".into()]);
+    if degraded_cli {
+        args.extend([
+            "drawing=on".into(),
+            format!("label={}", settings.degraded_glyph),
+            warn,
+            "icon.drawing=off".into(),
+            "background.color=0x00000000".into(),
+            "background.height=0".into(),
+            "padding_left=2".into(),
+            "padding_right=4".into(),
+            click,
+        ]);
+    } else {
+        args.push("drawing=off".into());
+    }
+    args
+}
+
+/// Logo colour: red on error, the incident tint on outage, otherwise text.
+/// Stale units keep their tint, as the rows’ icons do.
+fn ring_logo_argb(unit: &RingUnit, settings: &FrameSettings) -> String {
+    if unit.error.is_some() {
+        return settings.ring_warn_argb();
+    }
+    match unit
+        .incident
+        .as_ref()
+        .map(|incident| incident.indicator.as_str())
+    {
+        Some("minor") | Some("maintenance") => format!("0xff{}", settings.primary_warn),
+        Some("major") | Some("critical") => format!("0xff{}", settings.primary_bad),
+        _ => settings.ring_text_argb(),
+    }
+}
+
+fn ring_click(unit: &RingUnit, settings: &FrameSettings) -> String {
+    let (status, url) = match unit.incident.as_ref() {
+        Some(incident) => (incident.indicator.as_str(), incident.url.as_str()),
+        None => ("none", ""),
+    };
+    click_script_for_status(settings, status, url)
+}
+
+fn ring_unit_args(unit: &RingUnit, settings: &FrameSettings) -> Vec<String> {
+    let prefix = format!("showy_quota.{}", unit.unit);
+    let mut args: Vec<String> = Vec::with_capacity(320);
+    let mut set = |item: String, props: Vec<String>| {
+        args.push("--set".into());
+        args.push(item);
+        args.extend(props);
+    };
+    let error = unit.error.is_some();
+    let stale = unit.stale;
+    let logo = ring_logo_argb(unit, settings);
+    let click = ring_click(unit, settings);
+
+    let ring_color = if error {
+        settings.ring_unknown_argb()
+    } else if stale {
+        settings.ring_stale_argb()
+    } else {
+        settings.ring_window_argb(unit.ring.remaining)
+    };
+    let ring_track = if error || stale || unit.ring.remaining > 0 {
+        settings.ring_track_argb()
+    } else {
+        settings.empty_track_argb()
+    };
+    let mut ring_props = vec![
+        "drawing=on".into(),
+        format!("ring.value={:.2}", unit.ring.remaining as f64 / 100.0),
+        format!("ring.color={ring_color}"),
+        format!("ring.track_color={ring_track}"),
+        format!("ring.line_width={RING_STROKE}"),
+        "ring.cap=round".into(),
+        format!("ring.marker={}", unit.logo_glyph),
+        "ring.marker.drawing=on".into(),
+        "ring.marker.position=center".into(),
+        format!("ring.marker.font={}", unit.logo_font),
+        format!("ring.marker.color={logo}"),
+        format!("ring.marker.padding_left={}", unit.logo_pad),
+        "ring.marker.padding_right=0".into(),
+        format!("ring.marker.y_offset={}", unit.logo_y),
+        "icon.drawing=off".into(),
+        "label.drawing=off".into(),
+        "background.drawing=off".into(),
+        "padding_left=0".into(),
+        "padding_right=0".into(),
+        format!("width={RING_DIAMETER}"),
+        "y_offset=0".into(),
+        format!("click_script={click}"),
+    ];
+    match unit.pool {
+        Some(pool) => ring_props.extend([
+            format!("ring.marker.badge={pool}"),
+            "ring.marker.badge.drawing=on".into(),
+            format!("ring.marker.badge.font={RING_POOL_FONT}"),
+            format!("ring.marker.badge.color={}", settings.ring_text_argb()),
+            "ring.marker.badge.anchor=top_right".into(),
+            "ring.marker.badge.align=center".into(),
+            "ring.marker.badge.x_offset=0".into(),
+            "ring.marker.badge.y_offset=0".into(),
+        ]),
+        None => ring_props.push("ring.marker.badge.drawing=off".into()),
+    }
+    match unit.banked.as_ref() {
+        Some(banked) => ring_props.extend([
+            format!("ring.badge={}", banked.count),
+            "ring.badge.drawing=on".into(),
+            format!("ring.badge.font={RING_POOL_FONT}"),
+            format!("ring.badge.color={RING_DARK}"),
+            "ring.badge.anchor=top_right".into(),
+            "ring.badge.x_offset=1".into(),
+            "ring.badge.y_offset=1".into(),
+            "ring.badge.align=center".into(),
+            "ring.badge.width=11".into(),
+            "ring.badge.background.drawing=on".into(),
+            format!("ring.badge.background.color={RING_BLUE}"),
+            "ring.badge.background.height=11".into(),
+            "ring.badge.background.corner_radius=5".into(),
+        ]),
+        None => ring_props.push("ring.badge.drawing=off".into()),
+    }
+    set(format!("{prefix}.ring"), ring_props);
+
+    // Pace tick: a butt-capped arc 2.5 pt long at the time left, stroked two
+    // wider than the ring.
+    match unit.ring.expected {
+        Some(expected) if !error => {
+            let pace = expected.clamp(0, 100) as f64;
+            let span = RING_PACE_LEN / (std::f64::consts::PI * (RING_DIAMETER as f64 - 3.0));
+            let start = 270.0 + 360.0 * pace / 100.0 - 180.0 * span;
+            set(
+                format!("{prefix}.ring_pace"),
+                vec![
+                    "drawing=on".into(),
+                    format!("ring.value={span:.4}"),
+                    format!("ring.start_angle={start:.2}"),
+                    format!("ring.color={}", settings.ring_elapsed_argb()),
+                    "ring.track_color=0x00000000".into(),
+                    "ring.cap=butt".into(),
+                    "ring.line_width=5".into(),
+                    "ring.marker.drawing=off".into(),
+                    "icon.drawing=off".into(),
+                    "label.drawing=off".into(),
+                    "background.drawing=off".into(),
+                    format!("padding_left={}", -RING_DIAMETER),
+                    "padding_right=0".into(),
+                    "width=0".into(),
+                    "y_offset=0".into(),
+                    format!("click_script={}", settings.click),
+                ],
+            );
+        }
+        _ => set(
+            format!("{prefix}.ring_pace"),
+            vec!["drawing=off".into(), "ring.value=0".into()],
+        ),
+    }
+
+    // Bars: one y_offset for a lone bar, a double stack for two.
+    let double = unit.bars.len() == 2;
+    let bar_y = |index: usize| {
+        if double {
+            if index == 0 {
+                -1
+            } else {
+                -7
+            }
+        } else {
+            -6
+        }
+    };
+    let knob_h = if double { 6 } else { 8 };
+    for index in 0..2 {
+        let bar_item = format!("{prefix}.bar{index}");
+        let knob_item = format!("{prefix}.bar{index}_pace");
+        let bar_click = slider_click_script(
+            settings,
+            &bar_item,
+            unit.bars.get(index).map(|bar| bar.remaining).unwrap_or(0),
+        );
+        let knob_click = slider_click_script(
+            settings,
+            &knob_item,
+            unit.bars
+                .get(index)
+                .and_then(|bar| bar.expected)
+                .unwrap_or(0),
+        );
+        let y = bar_y(index);
+        match unit.bars.get(index) {
+            Some(bar) => {
+                let color = if stale {
+                    settings.ring_stale_argb()
+                } else {
+                    settings.ring_window_argb(bar.remaining)
+                };
+                let track = if stale || bar.remaining > 0 {
+                    settings.ring_track_argb()
+                } else {
+                    settings.empty_track_argb()
+                };
+                set(
+                    bar_item,
+                    vec![
+                        "drawing=on".into(),
+                        format!("slider.percentage={}", bar.remaining),
+                        format!("slider.highlight_color={color}"),
+                        format!("slider.background.color={track}"),
+                        format!("slider.background.height={RING_BAR_H}"),
+                        format!("slider.background.corner_radius={RING_BAR_H}"),
+                        "slider.knob.drawing=off".into(),
+                        "icon.drawing=off".into(),
+                        "label.drawing=off".into(),
+                        "background.color=0x00000000".into(),
+                        "background.height=0".into(),
+                        format!("padding_left={RING_GAP}"),
+                        "padding_right=0".into(),
+                        "width=0".into(),
+                        format!("y_offset={y}"),
+                        format!("click_script={bar_click}"),
+                    ],
+                );
+                match bar.expected {
+                    Some(expected) if !bar.breakdown => set(
+                        knob_item,
+                        vec![
+                            "drawing=on".into(),
+                            format!("slider.percentage={}", expected.clamp(0, 100)),
+                            "slider.highlight_color=0x00000000".into(),
+                            "slider.background.color=0x00000000".into(),
+                            format!("slider.background.height={knob_h}"),
+                            "slider.knob.drawing=on".into(),
+                            "slider.knob.color=0x00000000".into(),
+                            "slider.knob.width=2".into(),
+                            "slider.knob.padding_left=0".into(),
+                            "slider.knob.padding_right=0".into(),
+                            "slider.knob.background.drawing=on".into(),
+                            format!(
+                                "slider.knob.background.color={}",
+                                settings.ring_elapsed_argb()
+                            ),
+                            format!("slider.knob.background.height={knob_h}"),
+                            "slider.knob.background.corner_radius=0".into(),
+                            "icon.drawing=off".into(),
+                            "label.drawing=off".into(),
+                            "background.color=0x00000000".into(),
+                            "background.height=0".into(),
+                            format!("padding_left={RING_GAP}"),
+                            "padding_right=0".into(),
+                            "width=0".into(),
+                            format!("y_offset={y}"),
+                            format!("click_script={knob_click}"),
+                        ],
+                    ),
+                    _ => set(
+                        knob_item,
+                        vec![
+                            "drawing=off".into(),
+                            "slider.percentage=0".into(),
+                            format!("y_offset={y}"),
+                        ],
+                    ),
+                }
+            }
+            None => {
+                set(
+                    bar_item,
+                    vec![
+                        "drawing=off".into(),
+                        "slider.percentage=0".into(),
+                        format!("y_offset={y}"),
+                    ],
+                );
+                set(
+                    knob_item,
+                    vec![
+                        "drawing=off".into(),
+                        "slider.percentage=0".into(),
+                        format!("y_offset={y}"),
+                    ],
+                );
+            }
+        }
+    }
+
+    let label_y = if double {
+        8
+    } else if unit.bars.len() == 1 {
+        6
+    } else {
+        0
+    };
+    let label_color = if error {
+        settings.ring_warn_argb()
+    } else if stale {
+        settings.ring_stale_argb()
+    } else if unit
+        .label_minutes
+        .is_some_and(|minutes| minutes < settings.time_warn_minutes)
+    {
+        settings.ring_warn_argb()
+    } else {
+        settings.ring_countdown_argb()
+    };
+    set(
+        format!("{prefix}.label"),
+        vec![
+            "drawing=on".into(),
+            format!("label={}", unit.label),
+            format!("label.font={RING_LABEL_FONT}"),
+            format!("label.color={label_color}"),
+            format!("label.y_offset={label_y}"),
+            "label.padding_left=0".into(),
+            "label.padding_right=0".into(),
+            format!("width={RING_BAR_W}"),
+            "icon.drawing=off".into(),
+            "background.drawing=off".into(),
+            format!("padding_left={RING_GAP}"),
+            "padding_right=0".into(),
+            format!("click_script={}", settings.click),
+        ],
+    );
+
+    ring_popup_args(unit, settings, &prefix, &mut set);
+    args
+}
+
+/// Style-5 hover popup: title, dim header, one mini gauge per window with the
+/// % left as a `label.badge`, a grey note, and alert rows.
+fn ring_popup_args(
+    unit: &RingUnit,
+    settings: &FrameSettings,
+    prefix: &str,
+    set: &mut impl FnMut(String, Vec<String>),
+) {
+    let text = settings.ring_text_argb();
+    let countdown = settings.ring_countdown_argb();
+    let logo = ring_logo_argb(unit, settings);
+    set(
+        format!("{prefix}.pop_title"),
+        vec![
+            "drawing=on".into(),
+            format!("icon={}", unit.logo_glyph),
+            format!("icon.font={}", unit.logo_font),
+            format!("icon.color={logo}"),
+            "icon.padding_left=0".into(),
+            "icon.padding_right=8".into(),
+            format!("label={}", unit.title),
+            format!("label.font={RING_POP_TITLE_FONT}"),
+            format!("label.color={text}"),
+            "padding_left=10".into(),
+            "padding_right=10".into(),
+        ],
+    );
+
+    let error = unit.error.is_some();
+    if error {
+        set(format!("{prefix}.pop_header"), vec!["drawing=off".into()]);
+    } else {
+        set(
+            format!("{prefix}.pop_header"),
+            vec![
+                "drawing=on".into(),
+                "icon.drawing=off".into(),
+                format!(
+                    "label={}",
+                    popup_row_text(unit.name_width, "window", "len", Some("pace"), "resets in")
+                ),
+                format!("label.font={RING_POP_FONT}"),
+                format!("label.color={countdown}"),
+                "label.padding_left=58".into(),
+                "label.badge.y_offset=1".into(),
+                "label.badge.drawing=on".into(),
+                "label.badge=left".into(),
+                format!("label.badge.font={RING_POP_FONT}"),
+                format!("label.badge.color={countdown}"),
+                "label.badge.anchor=center_left".into(),
+                "label.badge.width=30".into(),
+                "label.badge.align=right".into(),
+                "label.badge.x_offset=-40".into(),
+                "padding_left=10".into(),
+                "padding_right=10".into(),
+            ],
+        );
+    }
+
+    // Row 0 is always the ring window; rows 1–2 are bars (breakdown parts
+    // draw thin and dim).
+    let mut gauges: Vec<Option<(&RingWindow, bool)>> = vec![None, None, None];
+    if !error {
+        gauges[0] = Some((&unit.ring, true));
+        for (index, bar) in unit.bars.iter().enumerate().take(2) {
+            gauges[index + 1] = Some((bar, false));
+        }
+    }
+    for (index, gauge) in gauges.into_iter().enumerate() {
+        let item = format!("{prefix}.pop_row{index}");
+        let Some((window, is_ring)) = gauge else {
+            set(item, vec!["drawing=off".into()]);
+            continue;
+        };
+        let color = if unit.stale {
+            settings.ring_stale_argb()
+        } else {
+            settings.ring_window_argb(window.remaining)
+        };
+        let track = if unit.stale || window.remaining > 0 {
+            settings.ring_track_argb()
+        } else {
+            settings.empty_track_argb()
+        };
+        let pace = match window.expected {
+            Some(expected) if !window.breakdown => {
+                Some(format!("{:+}", window.remaining - expected))
+            }
+            _ => None,
+        };
+        let text = popup_row_text(
+            unit.name_width,
+            &window.title,
+            &friendly_length(window.minutes),
+            pace.as_deref(),
+            &window.reset_text,
+        );
+        let mut props = vec![
+            "drawing=on".into(),
+            "icon.drawing=off".into(),
+            format!("label={text}"),
+            format!("label.font={RING_POP_FONT}"),
+            format!("label.color={}", settings.ring_text_argb()),
+            "label.padding_left=44".into(),
+            "label.badge.y_offset=1".into(),
+            "label.badge.drawing=on".into(),
+            format!("label.badge={}%", window.remaining),
+            format!("label.badge.font={RING_POP_FONT}"),
+            format!("label.badge.color={color}"),
+            "label.badge.anchor=center_left".into(),
+            "label.badge.width=30".into(),
+            "label.badge.align=right".into(),
+            "label.badge.x_offset=-40".into(),
+            "padding_left=10".into(),
+            "padding_right=10".into(),
+        ];
+        if is_ring {
+            props.extend([
+                format!("ring.value={:.2}", window.remaining as f64 / 100.0),
+                format!("ring.color={color}"),
+                format!("ring.track_color={track}"),
+                "ring.line_width=2.5".into(),
+                "ring.cap=round".into(),
+                "ring.marker.drawing=off".into(),
+            ]);
+        } else {
+            let height = if window.breakdown { 2 } else { 4 };
+            let gauge_color = if window.breakdown {
+                format!(
+                    "0xff{}",
+                    scale_hex(&settings.ring_window_hex(window.remaining), "0.55")
+                )
+            } else {
+                color.clone()
+            };
+            props.extend([
+                format!("slider.percentage={}", window.remaining),
+                format!("slider.highlight_color={gauge_color}"),
+                format!("slider.background.color={track}"),
+                format!("slider.background.height={height}"),
+                "slider.background.corner_radius=2".into(),
+                "slider.knob.drawing=off".into(),
+            ]);
+        }
+        set(item, props);
+    }
+
+    let note = match unit.incident.as_ref() {
+        Some(incident) => incident_note(incident),
+        None => unit.note.clone(),
+    };
+    if note.is_empty() {
+        set(format!("{prefix}.pop_note"), vec!["drawing=off".into()]);
+    } else {
+        set(
+            format!("{prefix}.pop_note"),
+            vec![
+                "drawing=on".into(),
+                "icon.drawing=off".into(),
+                format!("label={note}"),
+                format!("label.font={RING_POP_NOTE_FONT}"),
+                format!("label.color={countdown}"),
+                "padding_left=68".into(),
+                "padding_right=10".into(),
+            ],
+        );
+    }
+
+    let warn = settings.ring_warn_argb();
+    let mut alerts: Vec<(String, String, String)> = Vec::new();
+    if let Some(error) = unit.error.as_ref() {
+        if !error.message.is_empty() {
+            alerts.push(("⚠".into(), warn.clone(), error.message.clone()));
+        }
+    }
+    if let Some(incident) = unit.incident.as_ref() {
+        let color = match incident.indicator.as_str() {
+            "minor" | "maintenance" => format!("0xff{}", settings.primary_warn),
+            _ => format!("0xff{}", settings.primary_bad),
+        };
+        alerts.push(("●".into(), color, incident.description.clone()));
+    }
+    if let Some(banked) = unit.banked.as_ref() {
+        alerts.push((
+            banked.count.to_string(),
+            RING_BLUE.into(),
+            banked.note.clone(),
+        ));
+    }
+    for (index, slot) in ["pop_alert0", "pop_alert1"].iter().enumerate() {
+        match alerts.get(index) {
+            Some((glyph, color, text)) => set(
+                format!("{prefix}.{slot}"),
+                vec![
+                    "drawing=on".into(),
+                    format!("icon={glyph}"),
+                    format!("icon.font={RING_POP_ALERT_ICON_FONT}"),
+                    format!("icon.color={color}"),
+                    "icon.width=14".into(),
+                    "icon.align=center".into(),
+                    "icon.padding_left=0".into(),
+                    "icon.padding_right=0".into(),
+                    format!("label={text}"),
+                    format!("label.font={RING_POP_ALERT_FONT}"),
+                    format!("label.color={}", settings.ring_text_argb()),
+                    "label.padding_left=8".into(),
+                    "padding_left=10".into(),
+                    "padding_right=10".into(),
+                ],
+            ),
+            None => set(format!("{prefix}.{slot}"), vec!["drawing=off".into()]),
+        }
+    }
+}
+
+/// One style-5 popup line: `window len pace reset`, with the % left carried
+/// by the `label.badge`.
+fn popup_row_text(
+    name_width: usize,
+    name: &str,
+    len: &str,
+    pace: Option<&str>,
+    reset: &str,
+) -> String {
+    format!(
+        "{:<nw$}  {:>3}  {:>4}  {reset}",
+        name,
+        len,
+        pace.unwrap_or_default(),
+        nw = name_width,
+        reset = reset
+    )
+}
+
+fn incident_note(incident: &RingIncident) -> String {
+    let (logo, kind) = match incident.indicator.as_str() {
+        "minor" => ("yellow", "minor incident"),
+        "maintenance" => ("yellow", "maintenance"),
+        "major" => ("red", "major outage"),
+        "critical" => ("red", "critical outage"),
+        indicator => ("tinted", indicator),
+    };
+    let mut note = format!("{logo} logo = {kind}");
+    if status_url_is_openable(&incident.url) {
+        if let Some(host) = url_host(&incident.url) {
+            note.push_str(&format!(" · click opens {host}"));
+        }
+    }
+    note
+}
+
+fn url_host(url: &str) -> Option<String> {
+    url.split("://")
+        .nth(1)
+        .and_then(|rest| rest.split('/').next())
+        .filter(|host| !host.is_empty())
+        .map(str::to_owned)
+}
+
 /// Clicking a slider re-sets its own percentage (SketchyBar moves a slider on
 /// click) and then runs the configured click action.
 fn slider_click_script(settings: &FrameSettings, item: &str, percent: i64) -> String {
@@ -695,18 +1486,64 @@ pub fn redeclare_reason(
 }
 
 fn items_present(live: &HashSet<&str>, providers: &[&String], notch: bool) -> bool {
+    let mut tail = vec!["showy_quota.stale", "showy_quota.degraded"];
+    if !providers.is_empty() {
+        tail.extend(["showy_quota.overflow", "showy_quota_bracket"]);
+    }
+    items_present_with_roles(live, providers, &PROVIDER_ITEM_ROLES, &tail, notch)
+}
+
+fn items_present_with_roles(
+    live: &HashSet<&str>,
+    units: &[&String],
+    roles: &[&str],
+    tail: &[&str],
+    notch: bool,
+) -> bool {
     let has = |name: &str| live.contains(name);
-    let providers_present = providers.iter().all(|provider| {
-        PROVIDER_ITEM_ROLES
+    units.iter().all(|unit| {
+        roles
             .iter()
-            .all(|role| has(&format!("showy_quota.{provider}.{role}")))
-    });
-    providers_present
-        && has("showy_quota.stale")
-        && has("showy_quota.degraded")
-        && (providers.is_empty() || has("showy_quota.overflow"))
+            .all(|role| has(&format!("showy_quota.{unit}.{role}")))
+    }) && tail.iter().all(|name| has(name))
         && (!notch || (has("showy_quota.notch_q") && has("showy_quota.notch_e")))
-        && (providers.is_empty() || has("showy_quota_bracket"))
+}
+
+/// Ring-mode redeclare decision. `declared`/`desired` are unit ids (the state
+/// file stores units in ring mode); `extra` covers the edge and gap spacers.
+/// Ring mode never uses the notch anchors or the overflow item.
+pub fn ring_redeclare_reason(
+    force: bool,
+    items: Option<&[String]>,
+    declared: &[String],
+    desired: &[String],
+    extra: &[String],
+) -> Option<&'static str> {
+    if force {
+        return Some("forced");
+    }
+    if let Some(items) = items {
+        let live: HashSet<&str> = items.iter().map(String::as_str).collect();
+        let expected: Vec<&String> = desired
+            .iter()
+            .filter(|unit| declared.contains(unit))
+            .collect();
+        let mut tail: Vec<&str> = vec![
+            "showy_quota.stale",
+            "showy_quota.degraded",
+            "showy_quota_bracket",
+        ];
+        tail.extend(extra.iter().map(String::as_str));
+        if !items_present_with_roles(&live, &expected, &RING_UNIT_ROLES, &tail, false) {
+            return Some("missing");
+        }
+        if !items_follow_trigger(items) {
+            return Some("order");
+        }
+    }
+    // Same ordering rule as the rows body: any set or order change redeclares
+    // everything, so the pill keeps `--add` order.
+    (desired != declared).then_some("set")
 }
 
 /// The bootstrap adds `showy_quota.trigger` where the user's sketchybarrc
@@ -737,6 +1574,9 @@ pub struct FrameOutput<'a> {
     pub icon_requests: &'a [IconRequest],
     pub query: Option<&'a [String]>,
     pub args: &'a [String],
+    /// Ring mode only: `unit=provider` pairs for the declaration loop.
+    /// Unit and provider ids never contain `=`, so the shell splits safely.
+    pub units: Option<&'a [String]>,
 }
 
 impl FrameOutput<'_> {
@@ -761,6 +1601,9 @@ impl FrameOutput<'_> {
         }
         if let Some(query) = self.query {
             wire_line(&mut out, "query", query.iter().map(String::as_str));
+        }
+        if let Some(units) = self.units {
+            wire_line(&mut out, "units", units.iter().map(String::as_str));
         }
         wire_line(&mut out, "set", self.args.iter().map(String::as_str));
         out
@@ -1203,5 +2046,269 @@ mod tests {
         let mut out = String::new();
         wire_line(&mut out, "set", ["a\nb", "c\u{1f}d"]);
         assert_eq!(out, "set\u{1f}ab\u{1f}cd\n");
+    }
+
+    // ── ring body ────────────────────────────────────────────────────
+
+    use crate::sketchybar_ring::{ring_units, RingUnit};
+
+    fn ring_test_units(payload: &str, env: &[(&str, &str)]) -> Vec<RingUnit> {
+        let map: BTreeMap<String, String> = env
+            .iter()
+            .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+            .collect();
+        let config = RenderConfig::from_env_map(&map);
+        ring_units(
+            payload.as_bytes(),
+            &config,
+            NOW,
+            SketchybarOptions {
+                stale: false,
+                degraded_cli: false,
+                bar_width: 80,
+                stale_providers: &[],
+            },
+        )
+        .expect("ring units")
+    }
+
+    fn ring_frame(payload: &str, env: &[(&str, &str)], previous: Option<&str>) -> Frame {
+        let settings = settings(env);
+        let units = ring_test_units(payload, env);
+        build_ring_frame(&RingFrameInputs {
+            units: &units,
+            settings: &settings,
+            stale: false,
+            degraded_cli: false,
+            previous,
+        })
+    }
+
+    const RING_ENV: [(&str, &str); 1] = [("SHOWY_QUOTA_SKETCHYBAR_BODY", "ring")];
+
+    #[test]
+    fn the_ring_body_is_opt_in_and_anything_else_stays_rows() {
+        assert_eq!(settings(&[]).body, Body::Rows);
+        assert_eq!(settings(&RING_ENV).body, Body::Ring);
+        assert_eq!(
+            settings(&[("SHOWY_QUOTA_SKETCHYBAR_BODY", "circles")]).body,
+            Body::Rows
+        );
+    }
+
+    const THREE_WINDOWS: &str = r#"[{"provider":"commandcode","usage":{
+        "primary":{"usedPercent":0.0,"windowMinutes":300},
+        "secondary":{"usedPercent":45.0,"resetsAt":"2023-11-15T06:00:00Z","windowMinutes":10080},
+        "tertiary":{"usedPercent":52.0,"resetsAt":"2023-12-10T06:00:00Z","windowMinutes":43200}}}]"#;
+
+    #[test]
+    fn ring_units_draw_the_longest_window_with_stacked_bars_and_pace() {
+        let frame = ring_frame(THREE_WINDOWS, &RING_ENV, None);
+        let args = &frame.args;
+        let ring = props(args, "showy_quota.commandcode.ring");
+        assert!(ring.contains(&"ring.value=0.48"), "{ring:?}");
+        assert!(ring.contains(&"ring.color=0xff25be6a"), "{ring:?}");
+        assert!(ring.contains(&"ring.line_width=3"), "{ring:?}");
+        assert!(ring.contains(&"ring.marker=⌘"), "{ring:?}");
+        assert!(ring.contains(&"ring.marker.padding_left=1"), "{ring:?}");
+        // Double stack: 5h bar at -1, 7d bar at -7, label at +8.
+        assert!(props(args, "showy_quota.commandcode.bar0").contains(&"y_offset=-1"));
+        assert!(props(args, "showy_quota.commandcode.bar1").contains(&"y_offset=-7"));
+        assert!(props(args, "showy_quota.commandcode.label").contains(&"label.y_offset=8"));
+        assert_eq!(
+            props(args, "showy_quota.commandcode.label")[1],
+            "label=idle"
+        );
+        // Pace tick on the ring and a knob on the 7d bar; the idle 5h bar
+        // has no expected value, so no knob.
+        assert_eq!(
+            props(args, "showy_quota.commandcode.ring_pace")[0],
+            "drawing=on"
+        );
+        assert_eq!(
+            props(args, "showy_quota.commandcode.bar0_pace")[0],
+            "drawing=off"
+        );
+        assert_eq!(
+            props(args, "showy_quota.commandcode.bar1_pace")[0],
+            "drawing=on"
+        );
+        // The popup lists the ring window first with its % badge.
+        let row0 = props(args, "showy_quota.commandcode.pop_row0");
+        assert!(row0.contains(&"ring.value=0.48"), "{row0:?}");
+        assert!(row0.contains(&"label.badge=48%"), "{row0:?}");
+    }
+
+    #[test]
+    fn an_error_without_last_known_usage_has_no_arc_and_names_its_kind() {
+        let payload = r#"[{"provider":"cursor","error":{"message":"auth expired"}}]"#;
+        let frame = ring_frame(payload, &RING_ENV, None);
+        let args = &frame.args;
+        let ring = props(args, "showy_quota.cursor.ring");
+        assert!(ring.contains(&"ring.value=0.00"), "{ring:?}");
+        assert!(ring.contains(&"ring.color=0xff6c7086"), "{ring:?}");
+        assert!(props(args, "showy_quota.cursor.label").contains(&"label=auth"));
+        for role in ["bar0", "bar0_pace", "bar1", "bar1_pace"] {
+            assert_eq!(
+                props(args, &format!("showy_quota.cursor.{role}"))[0],
+                "drawing=off"
+            );
+        }
+        assert_eq!(
+            props(args, "showy_quota.cursor.pop_header")[0],
+            "drawing=off"
+        );
+        let alert = props(args, "showy_quota.cursor.pop_alert0");
+        assert!(alert.contains(&"icon=⚠"), "{alert:?}");
+        assert!(
+            alert.iter().any(|prop| prop.contains("auth expired")),
+            "{alert:?}"
+        );
+    }
+
+    #[test]
+    fn an_error_with_last_known_usage_keeps_a_grey_arc() {
+        let payload = r#"[{"provider":"claude","error":{"message":"connect timed out"},
+            "usage":{"secondary":{"usedPercent":27.0,"resetsAt":"2023-11-15T06:00:00Z","windowMinutes":10080},
+                     "updatedAt":"2023-11-14T21:40:00Z"}}]"#;
+        let frame = ring_frame(payload, &RING_ENV, None);
+        let args = &frame.args;
+        let ring = props(args, "showy_quota.claude.ring");
+        assert!(ring.contains(&"ring.value=0.73"), "{ring:?}");
+        assert!(ring.contains(&"ring.color=0xff6c7086"), "{ring:?}");
+        // Neutral track, never the red empty-pool tint: the data is stale,
+        // not exhausted.
+        assert!(ring.contains(&"ring.track_color=0xff3a3a4a"), "{ring:?}");
+        assert!(props(args, "showy_quota.claude.label").contains(&"label=net"));
+        let note = props(args, "showy_quota.claude.pop_note");
+        assert!(
+            note.iter().any(|prop| prop.contains("last known 73%")),
+            "{note:?}"
+        );
+    }
+
+    #[test]
+    fn an_incident_tints_the_logo_and_links_the_status_page() {
+        let payload = r#"[{"provider":"codex",
+            "status":{"indicator":"minor","description":"Elevated error rates","url":"https://status.openai.com/"},
+            "usage":{"secondary":{"usedPercent":30.0,"resetsAt":"2023-11-15T06:00:00Z","windowMinutes":10080}}}]"#;
+        let frame = ring_frame(payload, &RING_ENV, None);
+        let args = &frame.args;
+        let ring = props(args, "showy_quota.codex.ring");
+        assert!(ring.contains(&"ring.marker.color=0xfff0af00"), "{ring:?}");
+        assert!(
+            ring.iter()
+                .any(|prop| prop.contains("open 'https://status.openai.com/'")),
+            "{ring:?}"
+        );
+        let alert = props(args, "showy_quota.codex.pop_alert0");
+        assert!(alert.contains(&"icon=●"), "{alert:?}");
+        assert!(
+            alert
+                .iter()
+                .any(|prop| prop.contains("Elevated error rates")),
+            "{alert:?}"
+        );
+        let note = props(args, "showy_quota.codex.pop_note");
+        assert!(
+            note.iter()
+                .any(|prop| prop.contains("click opens status.openai.com")),
+            "{note:?}"
+        );
+    }
+
+    #[test]
+    fn banked_resets_badge_the_ring_and_alert_the_popup() {
+        let payload = r#"[{"provider":"codex","usage":{
+            "secondary":{"usedPercent":30.0,"resetsAt":"2023-11-15T06:00:00Z","windowMinutes":10080},
+            "codexResetCredits":{"availableCount":2,"credits":[
+                {"expires_at":"2023-12-05T04:20:20Z","status":"available"},
+                {"expires_at":"2023-12-22T20:47:00Z","status":"available"}]}}}]"#;
+        let frame = ring_frame(payload, &RING_ENV, None);
+        let args = &frame.args;
+        let ring = props(args, "showy_quota.codex.ring");
+        assert!(ring.contains(&"ring.badge=2"), "{ring:?}");
+        assert!(
+            ring.contains(&"ring.badge.background.color=0xff78a9ff"),
+            "{ring:?}"
+        );
+        let alert = props(args, "showy_quota.codex.pop_alert0");
+        assert!(alert.contains(&"icon=2"), "{alert:?}");
+        assert!(
+            alert
+                .iter()
+                .any(|prop| prop.contains("2 free resets banked")),
+            "{alert:?}"
+        );
+    }
+
+    #[test]
+    fn antigravity_pools_carry_their_letters() {
+        let payload = r#"[{"provider":"antigravity","usage":{
+            "primary":{"usedPercent":87.0,"resetsAt":"2023-11-14T23:53:20Z","windowMinutes":300},
+            "secondary":{"usedPercent":100.0,"resetsAt":"2023-11-15T06:00:00Z","windowMinutes":10080},
+            "extraRateWindows":[
+                {"id":"ag-gemini-5h","title":"Gemini 5-hour",
+                 "window":{"usedPercent":87.0,"resetsAt":"2023-11-14T23:53:20Z","windowMinutes":300}},
+                {"id":"ag-gemini-weekly","title":"Gemini weekly",
+                 "window":{"usedPercent":70.0,"resetsAt":"2023-11-20T06:00:00Z","windowMinutes":10080}},
+                {"id":"ag-3p-weekly","title":"Claude/GPT weekly",
+                 "window":{"usedPercent":100.0,"resetsAt":"2023-11-15T06:00:00Z","windowMinutes":10080}}]}}]"#;
+        let frame = ring_frame(payload, &RING_ENV, None);
+        let args = &frame.args;
+        assert!(props(args, "showy_quota.antigravity.g.ring").contains(&"ring.marker.badge=G"));
+        assert!(props(args, "showy_quota.antigravity.c.ring").contains(&"ring.marker.badge=C"));
+        // An exhausted pool keeps its status colour on a red-tinted track.
+        let pool = props(args, "showy_quota.antigravity.c.ring");
+        assert!(pool.contains(&"ring.track_color=0x66ee5396"), "{pool:?}");
+    }
+
+    #[test]
+    fn ring_frames_diff_per_unit_and_redeclare_on_missing_items() {
+        let first = ring_frame(THREE_WINDOWS, &RING_ENV, None);
+        assert!(first
+            .args
+            .contains(&"showy_quota.commandcode.ring".to_owned()));
+        let same = ring_frame(THREE_WINDOWS, &RING_ENV, Some(&first.frame_text));
+        assert!(same.args.is_empty(), "nothing changed: {:?}", same.args);
+
+        let extra = ring_extra_items(&ring_test_units(THREE_WINDOWS, &RING_ENV));
+        let live: Vec<String> = ["showy_quota.trigger", "showy_quota_bracket"]
+            .iter()
+            .map(|name| (*name).to_owned())
+            .chain(
+                RING_UNIT_ROLES
+                    .iter()
+                    .map(|role| format!("showy_quota.commandcode.{role}")),
+            )
+            .chain(
+                ["showy_quota.stale", "showy_quota.degraded"]
+                    .iter()
+                    .map(|name| (*name).to_owned()),
+            )
+            .chain(extra)
+            .collect();
+        let declared = ["commandcode".to_owned()];
+        let desired = ["commandcode".to_owned()];
+        assert_eq!(
+            ring_redeclare_reason(false, Some(&live), &declared, &desired, &[]),
+            None
+        );
+        let mut gone = live.clone();
+        gone.retain(|item| item != "showy_quota.commandcode.bar1");
+        assert_eq!(
+            ring_redeclare_reason(false, Some(&gone), &declared, &desired, &[]),
+            Some("missing")
+        );
+        assert_eq!(
+            ring_redeclare_reason(
+                false,
+                Some(&live),
+                &declared,
+                &["commandcode".to_owned(), "antigravity.g".to_owned()],
+                &[]
+            ),
+            Some("set")
+        );
     }
 }

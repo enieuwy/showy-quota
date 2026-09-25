@@ -70,7 +70,7 @@ pub struct SketchybarOptions<'a> {
 }
 
 impl SketchybarOptions<'_> {
-    fn stale_for(self, provider: &str) -> bool {
+    pub(crate) fn stale_for(self, provider: &str) -> bool {
         self.stale
             || self
                 .stale_providers
@@ -126,7 +126,7 @@ pub fn sketchybar_rows(
     })
 }
 
-fn passes_filters(record: &ProviderRecord, config: &RenderConfig) -> bool {
+pub(crate) fn passes_filters(record: &ProviderRecord, config: &RenderConfig) -> bool {
     (config.providers.is_empty() || contains(&config.providers, &record.provider))
         && !contains(&config.providers_exclude, &record.provider)
 }
@@ -138,7 +138,7 @@ fn contains(items: &[String], provider: &str) -> bool {
 /// Mirror of the shell `showy_quota_filter_renderable` ordering: the
 /// allow-list order wins, then the display order preference, else the
 /// payload order; ties break on the provider id.
-fn sort_records(records: &mut [&ProviderRecord], config: &RenderConfig) {
+pub(crate) fn sort_records(records: &mut [&ProviderRecord], config: &RenderConfig) {
     let order = if !config.providers.is_empty() {
         &config.providers
     } else if !config.provider_order.is_empty() {
@@ -450,7 +450,7 @@ fn parse_uint(value: &str) -> Option<i64> {
 /// marker on a `bar_width`-wide slider, or None when the lane has no usable
 /// reset/window (or the window arithmetic would overflow, matching the
 /// shell's checked_mul guard).
-fn elapsed_marker_x(
+pub(crate) fn elapsed_marker_x(
     reset: &str,
     win: &str,
     now_epoch: i64,
@@ -475,7 +475,7 @@ fn elapsed_marker_x(
 
 /// Mirror of the shell `marker_percentage_from_x`: nearest-percent position
 /// of a marker pixel on the slider.
-fn marker_percentage_from_x(marker: i64, bar_width: i64) -> Option<i64> {
+pub(crate) fn marker_percentage_from_x(marker: i64, bar_width: i64) -> Option<i64> {
     if bar_width <= 1 {
         return None;
     }

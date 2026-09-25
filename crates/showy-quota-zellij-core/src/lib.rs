@@ -11,6 +11,7 @@ pub(crate) mod reset;
 pub mod sketchybar;
 pub mod sketchybar_frame;
 pub mod sketchybar_notch;
+pub mod sketchybar_ring;
 pub mod template;
 
 pub use codexbar::{

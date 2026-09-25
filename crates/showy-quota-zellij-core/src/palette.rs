@@ -143,7 +143,7 @@ pub(crate) fn normalized_hex(hex: &str) -> String {
     format!("{r:02x}{g:02x}{b:02x}")
 }
 
-fn scale_hex(hex: &str, factor: &str) -> String {
+pub(crate) fn scale_hex(hex: &str, factor: &str) -> String {
     let (factor_num, factor_den) = parse_factor(factor).unwrap_or((1, 1));
     let (r, g, b) = hex_to_rgb(hex);
     format!(

@@ -80,7 +80,7 @@ struct ErrorMetric {
 
 #[derive(Serialize)]
 #[serde(rename_all = "lowercase")]
-enum ErrorKind {
+pub(crate) enum ErrorKind {
     Auth,
     Cookies,
     Network,
@@ -511,7 +511,7 @@ fn redact_home(input: &str) -> String {
 // crosses the CLI/plugin output boundary (logs, pasted diagnostics). Mirrors the
 // shell `sanitize_error_message` in bin/showy-quota-state so every consumer of
 // the metrics renderer is protected, not only the shell-state wrapper.
-fn sanitize_error_message(value: &Value) -> String {
+pub(crate) fn sanitize_error_message(value: &Value) -> String {
     let raw = match value {
         Value::Null => String::new(),
         Value::String(message) => message.clone(),
@@ -529,7 +529,7 @@ fn sanitize_error_message(value: &Value) -> String {
     redacted.chars().take(160).collect()
 }
 
-fn error_kind(message: &str) -> ErrorKind {
+pub(crate) fn error_kind(message: &str) -> ErrorKind {
     let lower = message.to_lowercase();
     if lower.contains("auth")
         || lower.contains("login")
