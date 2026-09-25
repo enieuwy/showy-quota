@@ -84,6 +84,33 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   locale, so a manual plugin run from a shell with `LANG` set read the live
   render's lock as stale and ran beside it. The start time now uses the C
   locale.
+- SketchyBar: the ring capability probe trusted the exit code of
+  `sketchybar --add ring`, which stock SketchyBar also accepts (as a generic
+  item), so stock bars wrongly selected ring mode. The probe now queries the
+  probe item back and requires `"type": "ring"`, and removes the stray probe
+  item on stock. The capability marker is tied to the running daemon
+  (pid, start time, command), so swapping the SketchyBar binary re-probes
+  instead of trusting a stale marker for an hour.
+- SketchyBar: clearing one body iterated a saved provider list, so rows for
+  a provider that left the filtered set (or a switch the previous tick never
+  recorded) lingered outside the bracket forever. Both bodies are now swept
+  by anchored `showy_quota.*` name patterns on every clear, and every rows
+  redeclare sweeps strays before declaring the desired set.
+- SketchyBar: the ring hover command was unquoted, so a plugin path with
+  spaces broke hover. Both words are now single-quoted. The hover state file
+  also had an ordering hole: a delayed exit event could overwrite a newer
+  entry and close the popup while the pointer was still over the unit.
+  Writers now claim the state only when no newer event (larger pid) recorded
+  first, and write atomically; the 0.35 s debounce is unchanged.
+- Fetcher: a fresh error record that carried its own usable usage exactly
+  equal to the cached usage was marked carried-forward, freezing
+  `providerMeta.updatedAt` at the older fetch. Carried-forward now means the
+  merge preserved the slice (the fresh record had no usable usage), so fresh
+  data keeps its own timestamp.
+- Metrics: a provider with both an error and a renderable window was dropped
+  from `--emit metrics`, hiding the outage from `showy-quota-state --json`
+  `providerMetrics`. It now reports an error metric, matching the rows and
+  ring bodies, which draw an errored provider greyed with no lanes.
 
 ## [0.9.0] — 2026-09-23
 

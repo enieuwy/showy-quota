@@ -213,7 +213,12 @@ while [ "$#" -gt 0 ]; do
             elif [ "${item}" = "displays" ]; then
                 printf '[]\n'
             elif [ -e "${state_dir}/${item}" ]; then
-                printf '{"name":"%s","geometry":{"position":"left","drawing":"on"}}\n' "${item}"
+                # The file holds the kind the item was added with; seeded
+                # files are empty and read back as generic items, the way
+                # stock SketchyBar answers an unknown type.
+                kind="$(cat "${state_dir}/${item}" 2>/dev/null)"
+                [ -n "${kind}" ] || kind="item"
+                printf '{"name":"%s","type":"%s","geometry":{"position":"left","drawing":"on"}}\n' "${item}" "${kind}"
             else
                 exit 1
             fi
@@ -225,7 +230,16 @@ while [ "$#" -gt 0 ]; do
             shift
             name="${1:-}"
             if [ -n "${state_dir}" ] && [ -n "${name}" ]; then
-                : > "${state_dir}/${name}"
+                # Remember the kind for `--query <item>`, so the ring
+                # capability probe can tell a real ring from stock
+                # SketchyBar's generic item. SHOWY_QUOTA_TEST_NO_RING
+                # simulates stock: a ring add still succeeds, but the
+                # item reads back generic.
+                stored_kind="${kind}"
+                if [ "${kind}" = "ring" ] && [ -n "${SHOWY_QUOTA_TEST_NO_RING:-}" ]; then
+                    stored_kind="item"
+                fi
+                printf '%s' "${stored_kind}" > "${state_dir}/${name}"
                 grep -qxF "${name}" "${state_dir}/.order" 2>/dev/null \
                     || printf '%s\n' "${name}" >> "${state_dir}/.order"
             fi
@@ -242,11 +256,33 @@ while [ "$#" -gt 0 ]; do
             shift
             name="${1:-}"
             if [ -n "${state_dir}" ] && [ -n "${name}" ]; then
-                rm -f "${state_dir}/${name}"
-                if [ -f "${state_dir}/.order" ]; then
-                    grep -vxF "${name}" "${state_dir}/.order" > "${state_dir}/.order.tmp"
-                    mv "${state_dir}/.order.tmp" "${state_dir}/.order"
-                fi
+                case "${name}" in
+                    /*/)
+                        # A `/regex/` removal deletes every live item whose
+                        # name matches, like the daemon; anything else is a
+                        # harmless no-match.
+                        pattern="$(printf '%s' "${name}" | sed 's|^/||; s|/$||')"
+                        for entry in "${state_dir}"/*; do
+                            [ -e "${entry}" ] || continue
+                            entry_name="$(basename "${entry}")"
+                            case "${entry_name}" in .order | bar) continue ;; esac
+                            if printf '%s' "${entry_name}" | grep -q -E "${pattern}"; then
+                                rm -f "${entry}"
+                            fi
+                        done
+                        if [ -f "${state_dir}/.order" ]; then
+                            grep -v -E "${pattern}" "${state_dir}/.order" > "${state_dir}/.order.tmp" || true
+                            mv "${state_dir}/.order.tmp" "${state_dir}/.order"
+                        fi
+                        ;;
+                    *)
+                        rm -f "${state_dir}/${name}"
+                        if [ -f "${state_dir}/.order" ]; then
+                            grep -vxF "${name}" "${state_dir}/.order" > "${state_dir}/.order.tmp"
+                            mv "${state_dir}/.order.tmp" "${state_dir}/.order"
+                        fi
+                        ;;
+                esac
             fi
             shift
             ;;
@@ -2226,6 +2262,17 @@ render_metrics_smoke=$(
 )
 assert_equals "render metrics CLI emits state providerMetrics contract" "array|string|number|true" "$(printf '%s' "${render_metrics_smoke}" | jq -r '[(type), (.[0].provider | type), (.[0].windows.primary.usedPercent | type), (.[0].error == null)] | map(tostring) | join("|")')"
 
+# A provider that reports an error beside usable usage (the fetch keeps
+# last-known usage next to a fresh error) must keep its error visible in
+# metrics: `showy-quota-state --json` reads providerMetrics, and a dropped
+# record hides the outage from consumers.
+error_usage_metrics_fixture="${TMP}/codexbar-error-with-usage.json"
+printf '%s\n' '[{"provider":"codex","error":{"message":"login failed"},"usage":{"primary":{"usedPercent":10}}}]' > "${error_usage_metrics_fixture}"
+error_usage_metrics=$(env SHOWY_QUOTA_NOW_EPOCH=4070908800 "${RENDER_BIN}" --emit metrics --json - < "${error_usage_metrics_fixture}")
+assert_equals "render metrics keeps the error of a provider with usable usage" "codex|auth" "$(printf '%s' "${error_usage_metrics}" | jq -r '.[] | select(.provider == "codex") | [.provider, .error.kind] | join("|")')"
+error_usage_state_json=$(run_state "${error_usage_metrics_fixture}" SHOWY_QUOTA_NOW_EPOCH=4070908800)
+assert_equals "state providerMetrics keeps the error of a provider with usable usage" "auth" "$(printf '%s' "${error_usage_state_json}" | jq -r '.providerMetrics[] | select(.provider == "codex") | .error.kind')"
+
 # Rows are a structured transport for surfaces that stack chunks: the band
 # travels in `severity`/`color`, so the text must stay plain unless `--ansi`
 # asks for escapes. A consumer that strips control bytes would otherwise render
@@ -2999,6 +3046,122 @@ assert_not_contains "plugin unchanged set skips bracket rebuild" "--add bracket 
 assert_not_contains "plugin unchanged set skips provider removals" "--remove showy_quota." "${plugin_log}"
 assert_not_contains "plugin unchanged set skips bracket removal" "--remove showy_quota_bracket" "${plugin_log}"
 assert_contains "plugin unchanged set still updates providers" "--set showy_quota.claude.label" "${plugin_log}"
+
+# ── sketchybar ring body ─────────────────────────────────────────────
+printf '\nsketchybar ring body\n'
+
+# Count the stub daemon's live items matching a glob: 0 when a sweep removed
+# them all. Globs, never `ls | grep` (SC2010).
+count_live_items() {
+    local dir="$1" pattern="$2" count=0 entry
+    # shellcheck disable=SC2086 # intentional glob: the caller passes `*`.
+    for entry in "${dir}"/${pattern}; do
+        [[ -e "${entry}" ]] && count=$((count + 1))
+    done
+    printf '%s' "${count}"
+}
+# The capability probe must confirm the ring item exists: stock SketchyBar
+# accepts `--add ring` with a generic item, so the exit code alone would
+# select ring mode on a bar that cannot draw it.
+ring_cache=$(mk_cache)
+ring_log="${TMP}/sb-ring-probe.log"
+run_sketchybar_plugin codexbar-mixed.json "${ring_cache}" "${ring_log}" SHOWY_QUOTA_SKETCHYBAR_BODY=ring
+ring_plugin_log="$(< "${ring_log}")"
+assert_contains "ring probe verifies the item type before selecting ring mode" "--query showy_quota.ring_probe" "${ring_plugin_log}"
+assert_contains "ring mode declares ring items after a verified probe" "--add ring showy_quota.codex.ring" "${ring_plugin_log}"
+assert_equals "ring probe item is removed after the probe" "0" "$(count_live_items "${ring_cache}/sb-state" '*ring_probe*')"
+assert_equals "verified probe stamps the ring body" "ring" "$(cat "${ring_cache}/sb/body.txt")"
+assert_equals "verified probe records a capability marker" "0" "$([[ -f "${ring_cache}/sb/ring-capable" ]] && printf '0' || printf '1')"
+
+# Stock SketchyBar (simulated by the stub's SHOWY_QUOTA_TEST_NO_RING, which
+# answers the probe add with a generic item) falls back to rows and removes
+# the stray probe item.
+stock_cache=$(mk_cache)
+stock_log="${TMP}/sb-ring-stock.log"
+run_sketchybar_plugin codexbar-mixed.json "${stock_cache}" "${stock_log}" SHOWY_QUOTA_SKETCHYBAR_BODY=ring SHOWY_QUOTA_TEST_NO_RING=1
+stock_plugin_log="$(< "${stock_log}")"
+assert_equals "stock bar falls back to rows" "rows" "$(cat "${stock_cache}/sb/body.txt")"
+assert_contains "stock fallback still draws rows" "--add item showy_quota.codex.icon" "${stock_plugin_log}"
+assert_not_contains "stock fallback declares no ring items" "--add ring showy_quota.codex.ring" "${stock_plugin_log}"
+assert_equals "stock probe item is removed after the failed probe" "0" "$(count_live_items "${stock_cache}/sb-state" '*ring_probe*')"
+assert_equals "stock probe records no capability marker" "0" "$([[ ! -e "${stock_cache}/sb/ring-capable" ]] && printf '0' || printf '1')"
+
+# The capability marker is tied to the running daemons: a fresh marker skips
+# the probe, but a marker from another instance re-probes.
+reprobe_log="${TMP}/sb-ring-reprobe.log"
+run_sketchybar_plugin codexbar-mixed.json "${ring_cache}" "${reprobe_log}" SHOWY_QUOTA_SKETCHYBAR_BODY=ring
+assert_not_contains "fresh capability marker skips the probe" "--add ring showy_quota.ring_probe" "$(< "${reprobe_log}")"
+printf 'stale-id-that-matches-no-daemon' > "${ring_cache}/sb/ring-capable"
+reprobe_log2="${TMP}/sb-ring-reprobe2.log"
+run_sketchybar_plugin codexbar-mixed.json "${ring_cache}" "${reprobe_log2}" SHOWY_QUOTA_SKETCHYBAR_BODY=ring
+assert_contains "marker from another instance re-probes" "--add ring showy_quota.ring_probe" "$(< "${reprobe_log2}")"
+
+# First ring tick after an upgrade: rows items for a provider that has since
+# left the filtered set are in neither the saved list nor the desired set, so
+# only a whole-body pattern sweep removes them.
+upgrade_cache=$(mk_cache)
+seed_sketchybar_state "${upgrade_cache}" codex
+seed_sketchybar_live_items "${upgrade_cache}" codex
+for role in icon primary secondary tertiary quaternary secondary_marker tertiary_marker quaternary_marker primary_marker slot label; do
+    : > "${upgrade_cache}/sb-state/showy_quota.factory.${role}"
+    printf '%s\n' "showy_quota.factory.${role}" >> "${upgrade_cache}/sb-state/.order"
+done
+rm -f -- "${upgrade_cache}/sb/body.txt"
+upgrade_log="${TMP}/sb-ring-upgrade.log"
+run_sketchybar_plugin codexbar-mixed.json "${upgrade_cache}" "${upgrade_log}" SHOWY_QUOTA_SKETCHYBAR_BODY=ring
+assert_contains "upgrade to ring sweeps the rows body by pattern" '--remove /^showy_quota\..*\.primary$/' "$(< "${upgrade_log}")"
+assert_equals "upgrade to ring removes rows of the filtered-out provider" "0" "$(count_live_items "${upgrade_cache}/sb-state" 'showy_quota.factory.*')"
+assert_equals "upgrade to ring stamps the ring body" "ring" "$(cat "${upgrade_cache}/sb/body.txt")"
+
+# An interrupted ring-to-rows switch can leave rows for a provider that
+# neither the saved list nor the desired set names; every rows redeclare
+# sweeps those strays before declaring the desired set.
+stray_cache=$(mk_cache)
+seed_sketchybar_state "${stray_cache}" codex claude
+printf 'rows\n' > "${stray_cache}/sb/body.txt"
+seed_sketchybar_live_items "${stray_cache}" codex claude gemini
+stray_log="${TMP}/sb-rows-stray.log"
+run_sketchybar_plugin codexbar-mixed.json "${stray_cache}" "${stray_log}" SHOWY_QUOTA_PROVIDERS='codex,claude,cursor'
+assert_equals "rows redeclare sweeps strays no list names" "0" "$(count_live_items "${stray_cache}/sb-state" 'showy_quota.gemini.*')"
+assert_contains "rows redeclare still declares the desired set" "--add item showy_quota.cursor.icon" "$(< "${stray_log}")"
+
+# The fork runs `script` via `sh -c`, so the hover command single-quotes its
+# words: a plugin path with spaces must stay one word.
+assert_contains "ring hover script quotes the plugin path" "script='${REPO_ROOT}/adapters/sketchybar/plugins/showy_quota_hover.sh' 'showy_quota.codex.ring'" "${ring_plugin_log}"
+
+# The hover state machine never lets an older event overwrite a newer one:
+# SketchyBar spawns handlers in event order, so a larger pid is newer.
+hover_parent="unittest"
+hover_state="${TMPDIR:-/tmp}/showy-quota-hover.${hover_parent}"
+hover_sb_log="${TMP}/sb-hover-stub.log"
+: > "${hover_sb_log}"
+printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "%s"\n' "${hover_sb_log}" > "${TMP}/hover-sketchybar-stub"
+chmod +x "${TMP}/hover-sketchybar-stub"
+rm -f -- "${hover_state}"
+SENDER=mouse.exited SKETCHYBAR="${TMP}/hover-sketchybar-stub" TMPDIR="${TMPDIR:-/tmp}" \
+    bash "${REPO_ROOT}/adapters/sketchybar/plugins/showy_quota_hover.sh" "${hover_parent}" &
+hover_exit_pid=$!
+wait "${hover_exit_pid}"
+assert_equals "hover exit with no newer event closes the popup" "out ${hover_exit_pid}" "$(cat "${hover_state}")"
+assert_contains "hover exit with no newer event asks to close" "popup.drawing=off" "$(< "${hover_sb_log}")"
+printf 'in 9999999999' > "${hover_state}"
+: > "${hover_sb_log}"
+SENDER=mouse.exited SKETCHYBAR="${TMP}/hover-sketchybar-stub" TMPDIR="${TMPDIR:-/tmp}" \
+    bash "${REPO_ROOT}/adapters/sketchybar/plugins/showy_quota_hover.sh" "${hover_parent}"
+assert_equals "hover exit after a newer entry leaves the state alone" "in 9999999999" "$(cat "${hover_state}")"
+assert_not_contains "hover exit after a newer entry never closes" "popup.drawing=off" "$(< "${hover_sb_log}")"
+rm -f -- "${hover_state}"
+: > "${hover_sb_log}"
+SENDER=mouse.entered SKETCHYBAR="${TMP}/hover-sketchybar-stub" TMPDIR="${TMPDIR:-/tmp}" \
+    bash "${REPO_ROOT}/adapters/sketchybar/plugins/showy_quota_hover.sh" "${hover_parent}"
+assert_contains "hover entry opens the popup" "popup.drawing=on" "$(< "${hover_sb_log}")"
+printf 'out 9999999999' > "${hover_state}"
+: > "${hover_sb_log}"
+SENDER=mouse.entered SKETCHYBAR="${TMP}/hover-sketchybar-stub" TMPDIR="${TMPDIR:-/tmp}" \
+    bash "${REPO_ROOT}/adapters/sketchybar/plugins/showy_quota_hover.sh" "${hover_parent}"
+assert_equals "hover entry after a newer exit leaves the state alone" "out 9999999999" "$(cat "${hover_state}")"
+assert_not_contains "hover entry after a newer exit never opens" "popup.drawing=on" "$(< "${hover_sb_log}")"
+rm -f -- "${hover_state}"
 
 # Regression: a plugin run that outlives `sketchybar --reload` can re-add
 # provider items before the rc re-adds front_app, so the pill drew over the
@@ -5050,6 +5213,65 @@ if (( rc == 0 )) \
     ok "fetcher keeps last-known usage beside a fresh error and drops it on success"
 else
     fail "fetcher keeps last-known usage beside a fresh error and drops it on success" "rc=${rc}; error_out=${out_error:0:160}; fresh_out=${out_fresh:0:160}; meta=${meta_before}/${meta_during}/${meta_after}"
+fi
+
+# A fresh error that carries its own usable usage is never marked
+# carried-forward, even when that usage exactly equals the cached usage.
+# Otherwise providerMeta keeps the older fetch's time and consumers later
+# mark fresh data stale.
+error_own_usage_dir="${TMP}/error-own-usage"
+mkdir -p "${error_own_usage_dir}"
+cat > "${error_own_usage_dir}/codexbar" <<EOF
+#!/bin/sh
+if [ "\${1:-}" = "config" ] && [ "\${2:-}" = "providers" ]; then
+    printf '[{"provider":"claude","enabled":true},{"provider":"codex","enabled":true}]'
+    exit 0
+fi
+provider=""
+while [ "\$#" -gt 0 ]; do
+    case "\$1" in
+        --provider) shift; provider="\${1:-}" ;;
+    esac
+    shift
+done
+case "\${SHOWY_QUOTA_TEST_SCENE:-ok}:\${provider}" in
+    claude-error-with-usage:claude)
+        printf '[{"provider":"claude","error":{"message":"boom"},"usage":{"primary":{"usedPercent":17}}}]'
+        ;;
+    *)
+        jq --arg p "\${provider}" '[.[] | select(.provider == \$p)]' \
+            < "${FIXTURE_DIR}/codexbar-mixed.json"
+        ;;
+esac
+EOF
+chmod +x "${error_own_usage_dir}/codexbar"
+error_own_usage_cache=$(mk_cache)
+fetch_error_own_usage() {
+    SHOWY_QUOTA_NO_CONFIG=1 \
+    SHOWY_QUOTA_CACHE_DIR="${error_own_usage_cache}" \
+    SHOWY_QUOTA_CODEXBAR_BIN="${error_own_usage_dir}/codexbar" \
+    SHOWY_QUOTA_CODEXBAR_SERVE_URL='' \
+    SHOWY_QUOTA_REFRESH_SECONDS=0 \
+    SHOWY_QUOTA_PROVIDERS='claude,codex' \
+    SHOWY_QUOTA_PROVIDER_FAILURE_BACKOFF_SECONDS=0 \
+    SHOWY_QUOTA_TEST_SCENE="$1" \
+    "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
+}
+rc=0
+fetch_error_own_usage ok > "${TMP}/error-own-usage-1.json" || rc=$?
+jq '.providerMeta.claude.updatedAt |= . - 3600' "${error_own_usage_cache}/usage.json" > "${TMP}/error-own-usage-backdated.json" \
+    && mv "${TMP}/error-own-usage-backdated.json" "${error_own_usage_cache}/usage.json"
+meta_old=$(jq -r '.providerMeta.claude.updatedAt' "${error_own_usage_cache}/usage.json" 2>/dev/null)
+rc=0
+fetch_error_own_usage claude-error-with-usage > "${TMP}/error-own-usage-2.json" || rc=$?
+out_own_usage=$(< "${TMP}/error-own-usage-2.json")
+meta_new=$(jq -r '.providerMeta.claude.updatedAt' "${error_own_usage_cache}/usage.json" 2>/dev/null)
+if (( rc == 0 )) \
+    && printf '%s' "${out_own_usage}" | jq -e '.[] | select(.provider == "claude") | .error.message == "boom" and .usage.primary.usedPercent == 17' >/dev/null 2>&1 \
+    && [[ "${meta_new}" -gt "${meta_old}" ]]; then
+    ok "fetcher never marks a fresh error with its own usage carried-forward"
+else
+    fail "fetcher never marks a fresh error with its own usage carried-forward" "rc=${rc}; out=${out_own_usage:0:160}; meta=${meta_old}/${meta_new}"
 fi
 
 
