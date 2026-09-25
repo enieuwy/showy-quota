@@ -526,27 +526,64 @@ queue_notch_anchor_removal() {
 
 # ── ring body ────────────────────────────────────────────────────
 
+# Identity of the SketchyBar daemon(s) the `sketchybar` client talks to:
+# one `pid + start time + command` line per process. The start time pins the
+# identity across pid reuse, and the command tells the fork (which implements
+# the ring item) from stock. `lstart` follows the caller's locale and `ps`
+# pads its columns to the caller's width (the render lock pins `LC_ALL=C`
+# for the same reason), so the locale is pinned and whitespace squeezed:
+# without that the same daemon reads back different identities tick to tick
+# and the marker below never trusts. Assigns SKETCHYBAR_DAEMON_IDENTITY,
+# empty when the daemons cannot be listed (then the probe marker falls back
+# to age alone). Callers need no subshell.
+sketchybar_daemon_identity() {
+    SKETCHYBAR_DAEMON_IDENTITY=""
+    local pids pid line identity=""
+    pids=$(pgrep -x sketchybar 2>/dev/null) || return 0
+    [[ -n "${pids}" ]] || return 0
+    for pid in ${pids}; do
+        [[ "${pid}" =~ ^[0-9]+$ ]] || return 0
+        line=$(LC_ALL=C ps -p "${pid}" -o lstart= -o command= 2>/dev/null | tr -s '[:space:]' ' ') || return 0
+        [[ -n "${line}" ]] || return 0
+        identity+="${identity:+$'\n'}${pid} ${line}"
+    done
+    SKETCHYBAR_DAEMON_IDENTITY="${identity}"
+}
+
 # Effective strip body for this tick: rows, unless ring was requested AND the
 # running SketchyBar implements the ring item (the fork
-# github.com/enieuwy/SketchyBar). Probes at most once an hour; on stock
-# SketchyBar logs once and falls back to rows. Assigns EFFECTIVE_BODY.
+# github.com/enieuwy/SketchyBar). A stock SketchyBar accepts `--add ring` by
+# creating a generic item, so the exit code proves nothing: the probe item is
+# queried back and must report `"type": "ring"`. Probes at most once an hour
+# per running daemon (the marker stores the daemon identity, so swapping the
+# bar's binary re-probes); on stock SketchyBar logs once and falls back to
+# rows. Assigns EFFECTIVE_BODY.
 resolve_effective_body() {
     EFFECTIVE_BODY=rows
     [[ "${SHOWY_QUOTA_SKETCHYBAR_BODY:-rows}" == "ring" ]] || return 0
-    local probe_age=999999
+    local probe_age=999999 stored_identity=""
+    sketchybar_daemon_identity
     if [[ -f "${RING_PROBE_OK}" ]]; then
         probe_age=$(showy_quota_age_seconds "${RING_PROBE_OK}" 2>/dev/null) || probe_age=999999
-        if (( probe_age < 3600 )); then
+        # `cat`, not `$(< ... 2>/dev/null)`: the fast path returns empty
+        # when a redirect is attached (observed on Bash 5.2), which would
+        # re-probe every tick.
+        stored_identity=$(cat "${RING_PROBE_OK}" 2>/dev/null) || stored_identity=""
+        if (( probe_age < 3600 )) && [[ "${stored_identity}" == "${SKETCHYBAR_DAEMON_IDENTITY}" ]]; then
             EFFECTIVE_BODY=ring
             return 0
         fi
     fi
-    if sketchybar --add ring showy_quota.ring_probe left "${RING_DIAMETER}" >/dev/null 2>&1; then
+    if sketchybar --add ring showy_quota.ring_probe left "${RING_DIAMETER}" >/dev/null 2>&1 \
+        && sketchybar --query showy_quota.ring_probe 2>/dev/null \
+            | grep -q -E '"type"[[:space:]]*:[[:space:]]*"ring"'; then
         sketchybar --remove showy_quota.ring_probe >/dev/null 2>&1 || true
-        : > "${RING_PROBE_OK}" 2>/dev/null || true
+        printf '%s' "${SKETCHYBAR_DAEMON_IDENTITY}" > "${RING_PROBE_OK}" 2>/dev/null || true
         rm -f -- "${RING_FALLBACK_LOGGED}" 2>/dev/null || true
         EFFECTIVE_BODY=ring
     else
+        # Stock SketchyBar keeps the generic item the failed probe created.
+        sketchybar --remove showy_quota.ring_probe >/dev/null 2>&1 || true
         rm -f -- "${RING_PROBE_OK}" 2>/dev/null || true
         if [[ ! -f "${RING_FALLBACK_LOGGED}" ]]; then
             showy_quota_log "SHOWY_QUOTA_SKETCHYBAR_BODY=ring needs the SketchyBar fork (ring item); this bar has none, falling back to rows"
@@ -612,7 +649,11 @@ queue_ring_unit_declaration() {
         RING_LOGO_PAD=$(( RING_LOGO_PAD > 3 ? RING_LOGO_PAD - 3 : 0 ))
     fi
     load_host_settings
-    hover_script="${HOVER_SCRIPT} ${ring}"
+    # The fork runs `script` via `sh -c`, so each word is single-quoted the
+    # way the renderer quotes item names inside click scripts
+    # (`shell_quote` in sketchybar_frame.rs): a plugin path with spaces must
+    # stay one word.
+    hover_script="'${HOVER_SCRIPT//\'/\'\\\'\'}' '${ring}'"
     local text_argb="0xff${ICON_TEXT_HEX}"
     local track="${TRACK_ARGB}"
     SB_QUEUE+=(--add ring "${ring}" left "${RING_DIAMETER}"
@@ -818,28 +859,38 @@ queue_ring_bracket() {
                    background.height="${SHOWY_QUOTA_SKETCHYBAR_PILL_HEIGHT}")
 }
 
-# Drop every rows-body item: switching to ring must leave no slider behind.
+# Drop every rows-body item by name pattern, not by provider list: a saved
+# list cannot name a provider that left the filtered set (or a switch the
+# previous tick never recorded), and those strays would linger outside the
+# bracket forever. The fork's `--remove` regex has no alternation, so each
+# role gets its own anchored pattern; every pattern starts with
+# `showy_quota\.`, so foreign items (`battery.ring`, `bluetooth.ring`) can
+# never match. A regex with no match is a harmless `[?]` note. Stale,
+# degraded, and the bracket keep their rows-body names in ring mode too, so
+# they are not cleared here. The `.label` pattern also matches ring unit
+# labels; every caller redeclares the incoming body right after, which
+# restores them.
 clear_rows_body_items() {
-    local pid role
-    while IFS= read -r pid; do
-        [[ -n "${pid}" ]] || continue
-        for role in "${PROVIDER_ITEM_ROLES[@]}"; do
-            SB_QUEUE+=(--remove "showy_quota.${pid}.${role}")
-        done
-    done <<< "$1"
+    local role
+    for role in "${PROVIDER_ITEM_ROLES[@]}"; do
+        SB_QUEUE+=(--remove "/^showy_quota\\..*\\.${role}$/")
+    done
     SB_QUEUE+=(--remove showy_quota.overflow)
     queue_notch_anchor_removal
 }
 
-# Drop every ring-body item: switching to rows must leave no ring behind.
+# Drop every ring-body item by name pattern, for the same reason: an
+# interrupted switch can leave ring items no saved list names. Covers the
+# unit roles (`RING_UNIT_ITEM_ROLES`) plus the gap and edge spacers. The
+# `.label` pattern also matches rows provider labels; every caller
+# redeclares the incoming body right after, which restores them.
 clear_ring_body_items() {
-    local unit
-    while IFS= read -r unit; do
-        [[ -n "${unit}" ]] || continue
-        queue_ring_unit_removal "${unit}"
-    done <<< "$1"
-    SB_QUEUE+=(--remove showy_quota.edge.a
-               --remove showy_quota.edge.z)
+    local role
+    for role in "${RING_UNIT_ITEM_ROLES[@]}"; do
+        SB_QUEUE+=(--remove "/^showy_quota\\..*\\.${role}$/")
+    done
+    SB_QUEUE+=(--remove "/^showy_quota\\.gap\\..*$/"
+               --remove "/^showy_quota\\.edge\\..*$/")
 }
 
 notch_placement() {
@@ -1240,12 +1291,14 @@ ring_tick() {
         queue_notch_anchor_removal
         if (( body_changed )) && [[ "${prev_body}" != "ring" ]]; then
             # Rows to ring (or first run): no slider may survive.
-            clear_rows_body_items "${STATE_PROVIDERS}"
+            clear_rows_body_items
         elif (( body_changed )); then
-            clear_ring_body_items "${STATE_PROVIDERS}"
+            clear_ring_body_items
         elif [[ "${FRAME_REDECLARE}" == "body" ]]; then
-            # A crashed switch left rows sliders behind.
-            clear_rows_body_items "${desired_providers}"
+            # A crashed switch left rows sliders behind; the saved list
+            # cannot name a provider that has since left the filtered set,
+            # so sweep the whole rows body by pattern.
+            clear_rows_body_items
         else
             while IFS= read -r unit; do
                 [[ -n "${unit}" ]] || continue
@@ -1351,26 +1404,26 @@ if [[ "${FRAME_REDECLARE}" != "-" ]]; then
     esac
     load_host_settings
     load_state_providers
+    if (( body_changed )) && [[ "${prev_body}" == "ring" ]]; then
+        # Ring to rows: no ring, gap, or edge item may survive.
+        clear_ring_body_items
+    elif [[ "${FRAME_REDECLARE}" == "body" ]]; then
+        # A crashed switch left ring items behind; sweep the whole ring
+        # body by pattern, since no saved list names every stray.
+        clear_ring_body_items
+    fi
+    # Sweep the rows body on every redeclare: an interrupted tick can leave
+    # rows for a provider that neither the saved list nor the desired set
+    # names (added, never recorded, then filtered out), and those partial
+    # rows would otherwise linger outside the bracket forever. The declare
+    # loop below restores every desired provider. This runs before the
+    # notch anchors so the sweep never undoes their adds.
+    clear_rows_body_items
     # Anchors go first so they precede every provider item in the `e` flow.
     if notch_placement; then
         queue_notch_anchors
     else
         queue_notch_anchor_removal
-    fi
-    if (( body_changed )) && [[ "${prev_body}" == "ring" ]]; then
-        # Ring to rows: no ring, gap, or edge item may survive.
-        clear_ring_body_items "${STATE_PROVIDERS}"
-    elif [[ "${FRAME_REDECLARE}" == "body" ]]; then
-        # A crashed switch left ring items behind; the state already lists
-        # rows providers, so clear by the desired set instead.
-        while IFS= read -r pid; do
-            [[ -n "${pid}" ]] || continue
-            queue_ring_unit_removal "${pid}"
-            queue_ring_unit_removal "${pid}.g"
-            queue_ring_unit_removal "${pid}.c"
-        done <<< "${desired_providers}"
-        SB_QUEUE+=(--remove showy_quota.edge.a
-                   --remove showy_quota.edge.z)
     fi
     while IFS= read -r pid; do
         [[ -n "${pid}" ]] || continue
