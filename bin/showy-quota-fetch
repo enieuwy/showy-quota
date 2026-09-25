@@ -2100,9 +2100,57 @@ carried_forward_providers_json() {
         < "${SHOWY_QUOTA_CARRIED_PROVIDERS_FILE}" 2>/dev/null || printf '[]'
 }
 
+# A fresh record that carries `error` but no usable usage window (CodexBar
+# answered, but could not measure this provider) must not wipe the provider's
+# last-known usage: keep the previous cache's `usage` next to the new
+# `error`, and mark the provider carried-forward so `providerMeta` keeps the
+# timestamp of the fetch that measured that usage instead of this publish.
+# A fresh success (usable usage, with or without an error) always wins, so a
+# recovered provider drops the preserved slice on the next success.
+# Prints the merged array on stdout.
+merge_error_records_with_last_known_usage() {
+    local fresh="$1" prev_map="$2" merged rc=0
+    merged=$(printf '%s' "${fresh}" | jq -c --slurpfile prev "${prev_map}" '
+        ($prev[0] // {}) as $prevmap
+        | (map(. as $record
+                | if ($record.error != null)
+                     and ([$record.usage?.primary, $record.usage?.secondary, $record.usage?.tertiary]
+                          | map(.usedPercent? // null) | all(. == null))
+                     and (($prevmap[$record.provider] | type) == "object")
+                     and ([$prevmap[$record.provider].primary,
+                           $prevmap[$record.provider].secondary,
+                           $prevmap[$record.provider].tertiary]
+                          | map(.usedPercent? // null) | any(. != null))
+                   then $record | .usage = $prevmap[$record.provider]
+                   else $record
+                   end)
+          ) as $providers
+        | {
+            providers: $providers,
+            merged: ([$providers[]
+                      | select((.error != null)
+                               and ((.usage? | type) == "object")
+                               and (($prevmap[.provider] | type) == "object")
+                               and (.usage == $prevmap[.provider])
+                               and ([.usage.primary,
+                                     .usage.secondary,
+                                     .usage.tertiary]
+                                    | map(.usedPercent? // null) | any(. != null)))
+                      | .provider])
+        }
+    ') || rc=$?
+    (( rc == 0 )) || return 1
+    local id
+    while IFS= read -r id; do
+        [[ -n "${id}" ]] || continue
+        record_carried_forward_provider "${id}"
+    done < <(printf '%s' "${merged}" | jq -r '.merged[]? | select(type == "string")' 2>/dev/null)
+    printf '%s' "${merged}" | jq -c '.providers' 2>/dev/null || return 1
+}
+
 publish_cache_payload() {
     local out="$1" source="${2:-unknown}" tmp stamp_tmp payload_marker=""
-    local now prev_file prev_source prev_updated carried
+    local now prev_file prev_usages_file prev_source prev_updated carried merged_out
     SHOWY_QUOTA_CACHE_TMP_FILES=()
     trap showy_quota_exit_cleanup EXIT
     trap 'showy_quota_exit_cleanup; exit 130' INT
@@ -2118,6 +2166,33 @@ publish_cache_payload() {
         showy_quota_log "codexbar produced no usable output"
         return 1
     fi
+    # Keep last-known usage beside fresh error records before the envelope is
+    # built: a provider CodexBar answered with `error` but no usable window
+    # inherits the previous cache's `usage` (and its `providerMeta` time, via
+    # the carried-forward mark the merge records).
+    if [[ -s "${SHOWY_QUOTA_USAGE_FILE}" ]]; then
+        prev_usages_file=$(mktemp "${SHOWY_QUOTA_CACHE_DIR}/usage.prev-usage.XXXXXX") || {
+            showy_quota_log "could not stage previous provider usage"
+            rm -f -- "${tmp}"
+            return 1
+        }
+        SHOWY_QUOTA_CACHE_TMP_FILES+=("${prev_usages_file}")
+        jq -c '(if type == "object" then (.providers // []) else . end)
+                | map(select(type == "object"
+                             and (.provider | type) == "string"
+                             and (.usage | type) == "object"))
+                | map({key: .provider, value: .usage})
+                | from_entries' \
+            "${SHOWY_QUOTA_USAGE_FILE}" > "${prev_usages_file}" 2>/dev/null \
+            || printf '{}' > "${prev_usages_file}"
+        if merged_out=$(merge_error_records_with_last_known_usage "${out}" "${prev_usages_file}"); then
+            out="${merged_out}"
+        else
+            showy_quota_log "could not merge last-known usage; publishing fresh payload"
+        fi
+        rm -f -- "${prev_usages_file}"
+    fi
+
 
     # Payload, source and per-provider metadata are built into ONE envelope
     # object here, so they can be published with a single atomic rename below:

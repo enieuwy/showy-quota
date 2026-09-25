@@ -4987,6 +4987,72 @@ else
     fail "fetcher preserves stale cache when every provider fallback fails" "rc=${rc}; cache_unchanged=$([[ \"${out}\" == \"${expected_cache}\" ]] && echo yes || echo no)"
 fi
 
+# A fresh error-only record keeps the previous cache's usage beside the new
+# error (with its original providerMeta time), and a later success drops the
+# preserved slice. Exercises `merge_error_records_with_last_known_usage`.
+error_usage_dir="${TMP}/error-keeps-usage"
+mkdir -p "${error_usage_dir}"
+cat > "${error_usage_dir}/codexbar" <<EOF
+#!/bin/sh
+if [ "\${1:-}" = "config" ] && [ "\${2:-}" = "providers" ]; then
+    printf '[{"provider":"claude","enabled":true},{"provider":"codex","enabled":true}]'
+    exit 0
+fi
+provider=""
+while [ "\$#" -gt 0 ]; do
+    case "\$1" in
+        --provider) shift; provider="\${1:-}" ;;
+    esac
+    shift
+done
+case "\${SHOWY_QUOTA_TEST_SCENE:-ok}:\${provider}" in
+    claude-error:claude)
+        printf '[{"provider":"claude","error":{"message":"Not signed in"}}]'
+        ;;
+    claude-fresh:claude)
+        printf '[{"provider":"claude","usage":{"primary":{"usedPercent":55,"resetsAt":"2026-09-30T01:29:34Z","windowMinutes":300}}}]'
+        ;;
+    *)
+        jq --arg p "\${provider}" '[.[] | select(.provider == \$p)]' \
+            < "${FIXTURE_DIR}/codexbar-mixed.json"
+        ;;
+esac
+EOF
+chmod +x "${error_usage_dir}/codexbar"
+error_usage_cache=$(mk_cache)
+fetch_error_usage() {
+    SHOWY_QUOTA_NO_CONFIG=1 \
+    SHOWY_QUOTA_CACHE_DIR="${error_usage_cache}" \
+    SHOWY_QUOTA_CODEXBAR_BIN="${error_usage_dir}/codexbar" \
+    SHOWY_QUOTA_CODEXBAR_SERVE_URL='' \
+    SHOWY_QUOTA_REFRESH_SECONDS=0 \
+    SHOWY_QUOTA_PROVIDERS='claude,codex' \
+    SHOWY_QUOTA_PROVIDER_FAILURE_BACKOFF_SECONDS=0 \
+    SHOWY_QUOTA_TEST_SCENE="$1" \
+    "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
+}
+rc=0
+fetch_error_usage ok > "${TMP}/error-usage-1.json" || rc=$?
+meta_before=$(jq -r '.providerMeta.claude.updatedAt' "${error_usage_cache}/usage.json" 2>/dev/null)
+rc=0
+fetch_error_usage claude-error > "${TMP}/error-usage-2.json" || rc=$?
+out_error=$(< "${TMP}/error-usage-2.json")
+meta_during=$(jq -r '.providerMeta.claude.updatedAt' "${error_usage_cache}/usage.json" 2>/dev/null)
+rc=0
+fetch_error_usage claude-fresh > "${TMP}/error-usage-3.json" || rc=$?
+out_fresh=$(< "${TMP}/error-usage-3.json")
+meta_after=$(jq -r '.providerMeta.claude.updatedAt' "${error_usage_cache}/usage.json" 2>/dev/null)
+if (( rc == 0 )) \
+    && printf '%s' "${out_error}" | jq -e '.[] | select(.provider == "claude") | .error.message == "Not signed in" and .usage.primary.usedPercent == 17' >/dev/null 2>&1 \
+    && [[ -n "${meta_before}" && "${meta_during}" == "${meta_before}" ]] \
+    && printf '%s' "${out_fresh}" | jq -e '.[] | select(.provider == "claude") | (has("error") | not) and .usage.primary.usedPercent == 55' >/dev/null 2>&1 \
+    && [[ "${meta_after}" -ge "${meta_during}" ]]; then
+    ok "fetcher keeps last-known usage beside a fresh error and drops it on success"
+else
+    fail "fetcher keeps last-known usage beside a fresh error and drops it on success" "rc=${rc}; error_out=${out_error:0:160}; fresh_out=${out_fresh:0:160}; meta=${meta_before}/${meta_during}/${meta_after}"
+fi
+
+
 # Config discovery failure + stale cache with no allow-list overlap should
 # fall through to the explicit allow-list rather than giving up on refresh.
 config_fail_dir="${TMP}/config-fail"
