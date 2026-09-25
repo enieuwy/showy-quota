@@ -602,8 +602,11 @@ pub fn ring_extra_items(units: &[RingUnit]) -> Vec<String> {
 }
 
 const RING_DIAMETER: i64 = 26;
+/// Extra ring-item width on the ring's left for the banked-reset badge. The
+/// plugin shrinks the spacer before each unit by the same amount.
+const RING_BADGE_ROOM: i64 = 7;
 const RING_STROKE: &str = "3";
-const RING_PACE_LEN: f64 = 2.5;
+const RING_PACE_LEN: f64 = 3.5;
 const RING_BAR_W: i64 = 28;
 const RING_BAR_H: i64 = 4;
 const RING_GAP: i64 = 5;
@@ -796,11 +799,8 @@ fn ring_unit_args(unit: &RingUnit, settings: &FrameSettings) -> Vec<String> {
     } else {
         settings.ring_window_argb(unit.ring.remaining)
     };
-    let ring_track = if error || stale || unit.ring.remaining > 0 {
-        settings.ring_track_argb()
-    } else {
-        settings.empty_track_argb()
-    };
+    // An empty ring keeps the plain grey track: no arc is the whole signal.
+    let ring_track = settings.ring_track_argb();
     let mut ring_props = vec![
         "drawing=on".into(),
         format!("ring.value={:.2}", unit.ring.remaining as f64 / 100.0),
@@ -821,7 +821,8 @@ fn ring_unit_args(unit: &RingUnit, settings: &FrameSettings) -> Vec<String> {
         "background.drawing=off".into(),
         "padding_left=0".into(),
         "padding_right=0".into(),
-        format!("width={RING_DIAMETER}"),
+        format!("width={}", RING_DIAMETER + RING_BADGE_ROOM),
+        "align=right".into(),
         "y_offset=0".into(),
         format!("click_script={click}"),
     ];
@@ -844,9 +845,11 @@ fn ring_unit_args(unit: &RingUnit, settings: &FrameSettings) -> Vec<String> {
             "ring.badge.drawing=on".into(),
             format!("ring.badge.font={RING_POOL_FONT}"),
             format!("ring.badge.color={RING_DARK}"),
-            "ring.badge.anchor=top_right".into(),
-            "ring.badge.x_offset=1".into(),
-            "ring.badge.y_offset=1".into(),
+            // Top-left, pushed off the ring into the room the item keeps on
+            // its left: on the right it would meet the label.
+            "ring.badge.anchor=top_left".into(),
+            "ring.badge.x_offset=-5".into(),
+            "ring.badge.y_offset=2".into(),
             "ring.badge.align=center".into(),
             "ring.badge.width=11".into(),
             "ring.badge.background.drawing=on".into(),
@@ -858,7 +861,7 @@ fn ring_unit_args(unit: &RingUnit, settings: &FrameSettings) -> Vec<String> {
     }
     set(format!("{prefix}.ring"), ring_props);
 
-    // Pace tick: a butt-capped arc 2.5 pt long at the time left, stroked two
+    // Pace tick: a butt-capped arc 3.5 pt long at the time left, stroked two
     // wider than the ring.
     match unit.ring.expected {
         Some(expected) if !error => {
@@ -931,7 +934,7 @@ fn ring_unit_args(unit: &RingUnit, settings: &FrameSettings) -> Vec<String> {
                 } else {
                     settings.ring_window_argb(bar.remaining)
                 };
-                let track = if stale || bar.remaining > 0 {
+                let track = if stale || bar.unknown || bar.remaining > 0 {
                     settings.ring_track_argb()
                 } else {
                     settings.empty_track_argb()
@@ -1141,7 +1144,7 @@ fn ring_popup_args(
         } else {
             settings.ring_window_argb(window.remaining)
         };
-        let track = if unit.stale || window.remaining > 0 {
+        let track = if is_ring || unit.stale || window.unknown || window.remaining > 0 {
             settings.ring_track_argb()
         } else {
             settings.empty_track_argb()
@@ -1168,7 +1171,11 @@ fn ring_popup_args(
             "label.padding_left=44".into(),
             "label.badge.y_offset=1".into(),
             "label.badge.drawing=on".into(),
-            format!("label.badge={}%", window.remaining),
+            if window.unknown {
+                "label.badge=?".into()
+            } else {
+                format!("label.badge={}%", window.remaining)
+            },
             format!("label.badge.font={RING_POP_FONT}"),
             format!("label.badge.color={color}"),
             "label.badge.anchor=center_left".into(),
@@ -1583,7 +1590,10 @@ pub fn ring_redeclare_reason(
             "showy_quota_bracket",
         ];
         tail.extend(extra.iter().map(String::as_str));
-        if !items_present_with_roles(&live, &expected, &RING_UNIT_ROLES, &tail, false) {
+        // An empty strip declares no edges or bracket: nothing to check.
+        if !expected.is_empty()
+            && !items_present_with_roles(&live, &expected, &RING_UNIT_ROLES, &tail, false)
+        {
             return Some("missing");
         }
         if !items_follow_trigger(items) {
@@ -2307,9 +2317,16 @@ mod tests {
         let args = &frame.args;
         assert!(props(args, "showy_quota.antigravity.g.ring").contains(&"ring.marker.badge=G"));
         assert!(props(args, "showy_quota.antigravity.c.ring").contains(&"ring.marker.badge=C"));
-        // An exhausted pool keeps its status colour on a red-tinted track.
-        let pool = props(args, "showy_quota.antigravity.c.ring");
-        assert!(pool.contains(&"ring.track_color=0x66ee5396"), "{pool:?}");
+        // An exhausted pool shows the same grey track as a live one, no red.
+        let track = |item: &str| {
+            props(args, item)
+                .into_iter()
+                .find(|prop| prop.starts_with("ring.track_color="))
+        };
+        assert_eq!(
+            track("showy_quota.antigravity.c.ring"),
+            track("showy_quota.antigravity.g.ring")
+        );
     }
 
     #[test]
@@ -2370,6 +2387,21 @@ mod tests {
                 &[]
             ),
             Some("set")
+        );
+    }
+
+    #[test]
+    fn an_empty_ring_strip_settles_instead_of_redeclaring_every_tick() {
+        // The plugin declares no edges or bracket when no unit is visible.
+        let live = vec![
+            "showy_quota.trigger".to_owned(),
+            "showy_quota.stale".to_owned(),
+            "showy_quota.degraded".to_owned(),
+        ];
+        let extra = ring_extra_items(&[]);
+        assert_eq!(
+            ring_redeclare_reason(false, Some(&live), &[], &[], &extra),
+            None
         );
     }
 }

@@ -22,7 +22,7 @@ use crate::config::RenderConfig;
 use crate::metrics::{error_kind, normalized_status_indicator, sanitize_error_message, ErrorKind};
 use crate::providers::{font_icon, sigil};
 use crate::render::{format_countdown, RenderError};
-use crate::reset::{minutes_until, reset_clock};
+use crate::reset::{minutes_until, reset_clock, reset_epoch};
 use crate::sketchybar::{
     elapsed_marker_x, marker_percentage_from_x, passes_filters, sort_records, SketchybarOptions,
 };
@@ -44,6 +44,9 @@ pub struct RingWindow {
     pub reset_text: String,
     /// A part of the ring’s own window rather than a shorter window: no pace.
     pub breakdown: bool,
+    /// CodexBar sent a placeholder (`usageKnown: false`): an empty track with
+    /// no pace, never a full gauge, and `?` where the percent would go.
+    pub unknown: bool,
 }
 
 /// A provider CodexBar could not measure.
@@ -304,6 +307,7 @@ fn family_unit(
             reset: String::new(),
             reset_text: "idle".into(),
             breakdown: false,
+            unknown: false,
         },
     };
     let shortest_title;
@@ -311,7 +315,7 @@ fn family_unit(
     let (label, label_minutes) = {
         // An empty ring (pool exhausted) blocks every shorter window, so the
         // label counts down to its refill instead of the shortest bar's reset.
-        let shortest = if ring.remaining == 0 && !ring.reset.is_empty() {
+        let shortest = if ring.remaining == 0 && !ring.unknown && !ring.reset.is_empty() {
             &ring
         } else {
             bars.first().unwrap_or(&ring)
@@ -331,7 +335,7 @@ fn family_unit(
     let note = unit_note(
         &label,
         &shortest_title,
-        ring.remaining == 0,
+        ring.remaining == 0 && !ring.unknown,
         bars.is_empty(),
     );
     let name_width = std::iter::once(ring.title.len())
@@ -374,7 +378,7 @@ fn family_unit(
 
 fn assemble(raw: &RawWindow, breakdown: bool, tick: TickCtx) -> RingWindow {
     let remaining = if raw.unknown {
-        100
+        0
     } else {
         (100 - raw.used.floor().clamp(0.0, 100.0) as i64).clamp(0, 100)
     };
@@ -397,6 +401,7 @@ fn assemble(raw: &RawWindow, breakdown: bool, tick: TickCtx) -> RingWindow {
         reset: raw.reset.clone(),
         reset_text: reset_text(&raw.reset, tick.now_epoch, tick.tz),
         breakdown,
+        unknown: raw.unknown,
     }
 }
 
@@ -441,7 +446,7 @@ fn unit_note(label: &str, shortest_title: &str, ring_empty: bool, has_bars: bool
         format!("{label} = time until the ring resets")
     };
     if ring_empty {
-        format!("red track = pool empty · {label} = until it refills")
+        format!("empty ring = pool empty · {label} = until it refills")
     } else {
         base
     }
@@ -604,6 +609,7 @@ fn error_unit(
             reset: String::new(),
             reset_text: "idle".into(),
             breakdown: false,
+            unknown: false,
         },
         bars: Vec::new(),
         label: kind_label.clone(),
@@ -681,8 +687,7 @@ fn banked_for(raw: &Value, now_epoch: i64, tz: Option<i16>) -> Option<RingBanked
 /// `5 Oct` for an expiry timestamp, in UTC so the date never depends on the
 /// host timezone. Empty when the timestamp does not parse.
 fn expiry_day(expires: &str, now_epoch: i64, tz: Option<i16>) -> Option<String> {
-    let minutes = minutes_until(expires, now_epoch, tz)?;
-    let epoch = now_epoch + minutes * 60;
+    let epoch = reset_epoch(expires, now_epoch, tz)?;
     let date = time::OffsetDateTime::from_unix_timestamp(epoch)
         .ok()?
         .date();
@@ -920,9 +925,10 @@ mod tests {
         assert_eq!(units[1].unit, "antigravity.c");
         assert_eq!(units[1].pool, Some('C'));
         assert_eq!(units[1].ring.remaining, 0);
-        // The unknown 5h pool draws full with no pace.
+        // The unknown 5h pool draws an empty track with no pace, never full.
         assert_eq!(units[1].bars.len(), 1);
-        assert_eq!(units[1].bars[0].remaining, 100);
+        assert!(units[1].bars[0].unknown);
+        assert_eq!(units[1].bars[0].remaining, 0);
         assert_eq!(units[1].bars[0].expected, None);
         // The empty pool blocks the 5h window: the label counts to the refill.
         assert_eq!(units[1].label, "18:05");

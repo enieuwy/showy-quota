@@ -92,8 +92,11 @@ RING_UNIT_ITEM_ROLES=(ring ring_pace bar0 bar0_pace bar1 bar1_pace label
 # Ring geometry (points), chosen from the design spikes and mirrored by the
 # renderer's ring frame: 26 pt ring, 3 pt stroke, 12 pt logos, 28x4 bars with
 # a 5 pt ring gap, 22 pt between providers (10 pt between Antigravity pools),
-# 10 pt pill edges.
+# 10 pt pill edges. The ring item is RING_BADGE_ROOM wider than the ring, on
+# its left, so the banked-reset badge can sit off the ring without clipping;
+# the spacer before each unit gives that room back, so the strip keeps its size.
 RING_DIAMETER=26
+RING_BADGE_ROOM=7
 RING_BAR_W=28
 RING_EDGE=10
 RING_PROVIDER_GAP=22
@@ -619,7 +622,8 @@ queue_ring_unit_declaration() {
                    background.drawing=off
                    padding_left=0
                    padding_right=0
-                   width="${RING_DIAMETER}"
+                   width="$(( RING_DIAMETER + RING_BADGE_ROOM ))"
+                   align=right
                    y_offset=0
                    ring.line_width=3
                    ring.cap=round
@@ -789,8 +793,8 @@ queue_ring_bracket() {
         if (( first )); then
             first=0
         else
-            local gap_width="${RING_PROVIDER_GAP}"
-            [[ "${unit}" == "antigravity.c" ]] && gap_width="${RING_POOL_GAP}"
+            local gap_width="$(( RING_PROVIDER_GAP - RING_BADGE_ROOM ))"
+            [[ "${unit}" == "antigravity.c" ]] && gap_width="$(( RING_POOL_GAP - RING_BADGE_ROOM ))"
             queue_ring_spacer "showy_quota.gap.${unit}" "${gap_width}"
             members+=("showy_quota.gap.${unit}")
         fi
@@ -801,7 +805,7 @@ queue_ring_bracket() {
         done
     done <<< "${units_list}"
     (( ${#members[@]} > 0 )) || return 0
-    queue_ring_spacer showy_quota.edge.a "${RING_EDGE}"
+    queue_ring_spacer showy_quota.edge.a "$(( RING_EDGE - RING_BADGE_ROOM ))"
     queue_ring_spacer showy_quota.edge.z "${RING_EDGE}"
     members=("showy_quota.edge.a" "${members[@]}" showy_quota.stale showy_quota.degraded "showy_quota.edge.z")
     # SketchyBar appends every new left item to the end of the bar, and the
