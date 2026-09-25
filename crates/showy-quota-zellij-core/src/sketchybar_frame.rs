@@ -1468,6 +1468,11 @@ pub fn redeclare_reason(
     }
     if let Some(items) = items {
         let live: HashSet<&str> = items.iter().map(String::as_str).collect();
+        // A crash between the body stamp and its cleanup can leave ring
+        // items behind; they never belong to the rows body.
+        if live.iter().any(|item| is_ring_body_item(item)) {
+            return Some("body");
+        }
         let expected: Vec<&String> = desired
             .iter()
             .filter(|provider| declared.contains(provider))
@@ -1483,6 +1488,25 @@ pub fn redeclare_reason(
     // an incremental add would append a new provider at the end regardless of
     // where it sorts. Any set or order change redeclares everything.
     (desired != declared).then_some("set")
+}
+
+/// A live item the rows body never owns: one provider's ring unit, or the
+/// ring pill's edge/gap spacers. The plugin removes the other body's items
+/// when it redeclares.
+fn is_ring_body_item(item: &str) -> bool {
+    let rest = match item.strip_prefix("showy_quota.") {
+        Some(rest) => rest,
+        None => return false,
+    };
+    rest.starts_with("gap.")
+        || rest.starts_with("edge.")
+        || rest.ends_with(".ring")
+        || rest.ends_with(".ring_pace")
+        || rest.ends_with(".bar0")
+        || rest.ends_with(".bar0_pace")
+        || rest.ends_with(".bar1")
+        || rest.ends_with(".bar1_pace")
+        || rest.contains(".pop_")
 }
 
 fn items_present(live: &HashSet<&str>, providers: &[&String], notch: bool) -> bool {
@@ -1509,6 +1533,28 @@ fn items_present_with_roles(
         && (!notch || (has("showy_quota.notch_q") && has("showy_quota.notch_e")))
 }
 
+/// A live item the ring body never owns: a rows slider lane, icon, slot,
+/// the overflow item, or the notch anchors (ring mode stays left).
+fn is_rows_body_item(item: &str) -> bool {
+    item == "showy_quota.overflow"
+        || item == "showy_quota.notch_q"
+        || item == "showy_quota.notch_e"
+        || {
+            match item.strip_prefix("showy_quota.") {
+                Some(rest) => {
+                    rest.ends_with(".icon")
+                        || rest.ends_with(".primary")
+                        || rest.ends_with(".secondary")
+                        || rest.ends_with(".tertiary")
+                        || rest.ends_with(".quaternary")
+                        || rest.ends_with(".slot")
+                        || rest.ends_with("_marker")
+                }
+                None => false,
+            }
+        }
+}
+
 /// Ring-mode redeclare decision. `declared`/`desired` are unit ids (the state
 /// file stores units in ring mode); `extra` covers the edge and gap spacers.
 /// Ring mode never uses the notch anchors or the overflow item.
@@ -1524,6 +1570,9 @@ pub fn ring_redeclare_reason(
     }
     if let Some(items) = items {
         let live: HashSet<&str> = items.iter().map(String::as_str).collect();
+        if live.iter().any(|item| is_rows_body_item(item)) {
+            return Some("body");
+        }
         let expected: Vec<&String> = desired
             .iter()
             .filter(|unit| declared.contains(unit))
@@ -2294,11 +2343,23 @@ mod tests {
             ring_redeclare_reason(false, Some(&live), &declared, &desired, &[]),
             None
         );
+        let mut ring_leftover = live.clone();
+        ring_leftover.push("showy_quota.commandcode.ring".to_owned());
+        assert_eq!(
+            redeclare_reason(false, Some(&ring_leftover), &declared, &desired, false),
+            Some("body")
+        );
         let mut gone = live.clone();
         gone.retain(|item| item != "showy_quota.commandcode.bar1");
         assert_eq!(
             ring_redeclare_reason(false, Some(&gone), &declared, &desired, &[]),
             Some("missing")
+        );
+        let mut rows_leftover = live.clone();
+        rows_leftover.push("showy_quota.commandcode.primary".to_owned());
+        assert_eq!(
+            ring_redeclare_reason(false, Some(&rows_leftover), &declared, &desired, &[]),
+            Some("body")
         );
         assert_eq!(
             ring_redeclare_reason(

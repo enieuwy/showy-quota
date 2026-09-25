@@ -40,7 +40,7 @@ pub struct RingWindow {
     pub expected: Option<i64>,
     /// Raw reset string (`resetsAt // resetDescription // ""`).
     pub reset: String,
-    /// Popup reset column (`resets in 2h 40m`, `idle`, `?`).
+    /// Popup reset column (`2h 40m`, `idle`, `?`); the header says "resets in".
     pub reset_text: String,
     /// A part of the ring’s own window rather than a shorter window: no pace.
     pub breakdown: bool,
@@ -334,6 +334,15 @@ fn family_unit(
         .unwrap_or(0)
         .max(6);
     let (logo_glyph, logo_font, logo_pad, logo_y) = logo_for(&record.provider);
+    // Antigravity pools share the marker with their letter badge, so the
+    // logo sits 1.5 pt left of centre (padding 3 below app_pad) and the
+    // logo-plus-letter pair reads centred.
+    let logo_pad = if pool.is_some() {
+        (logo_pad - 3).max(0)
+    } else {
+        logo_pad
+    };
+
     RingUnit {
         unit: unit.to_owned(),
         provider: record.provider.clone(),
@@ -401,7 +410,8 @@ fn expected_percent(
 
 fn reset_text(reset: &str, now_epoch: i64, tz: Option<i16>) -> String {
     match minutes_until(reset, now_epoch, tz) {
-        Some(minutes) => format!("resets in {}", friendly_duration(minutes)),
+        // The popup header already says "resets in"; the cell is the duration.
+        Some(minutes) => friendly_duration(minutes),
         None if reset.is_empty() => "idle".into(),
         None => "?".into(),
     }
@@ -897,6 +907,7 @@ mod tests {
         assert_eq!(units.len(), 2);
         assert_eq!(units[0].unit, "antigravity.g");
         assert_eq!(units[0].pool, Some('G'));
+        assert_eq!(units[0].logo_pad, 2);
         assert_eq!(units[0].ring.remaining, 30);
         assert_eq!(units[0].bars.len(), 1);
         assert_eq!(units[0].bars[0].remaining, 13);
