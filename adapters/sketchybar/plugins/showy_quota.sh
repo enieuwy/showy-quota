@@ -747,8 +747,8 @@ provider_icon_png() {
 
     local pid="$1" status="${2:-none}" dest="$3"
     local status_color="" tint_color="" drawn=0
-    # Only ever write into our own icon cache.
-    [[ "${dest}" == "${CACHE_DIR%/}"/icon-v*.png && "${dest}" != *..* ]] || return 1
+    # Only ever write a flat icon file directly inside our own icon cache.
+    [[ "${dest%/*}" -ef "${CACHE_DIR}" && "${dest##*/}" == icon-v*.png ]] || return 1
     load_host_settings
     # An errored row with no incident indicator arrives as `error`: paint the
     # warning tint into the fallback glyph so the icon reads as an error.
@@ -859,7 +859,9 @@ apply_notch_layout() {
         : > "${LAYOUT_PENDING_FILE}" 2>/dev/null || true
         return 0
     fi
-    (( ${#args[@]} > 0 )) && sketchybar "${args[@]}" >/dev/null 2>&1
+    if (( ${#args[@]} > 0 )) && ! sketchybar "${args[@]}" >/dev/null 2>&1; then
+        : > "${LAYOUT_PENDING_FILE}" 2>/dev/null || true
+    fi
     # Hiding happened above. Showing a label or provider again needs the full
     # row, so re-run the plugin once when the plan draws more than before.
     if [[ "${fields[1]:-0}" == "1" ]]; then
@@ -884,6 +886,7 @@ case "${SENDER:-}" in
         fi
         [[ -e "${LAYOUT_PENDING_FILE}" ]] && rm -f -- "${LAYOUT_PENDING_FILE}"
         load_state_providers
+        showy_quota_export_config
         apply_notch_layout "${STATE_PROVIDERS}"
         exit 0
         ;;
@@ -971,7 +974,9 @@ fi
 
 layout_due=0
 if (( ${#frame_args[@]} > 0 )); then
-    sketchybar "${frame_args[@]}" >/dev/null 2>&1 || true
+    # The renderer already stored this frame; forget it if SketchyBar refused
+    # the update, so the next tick sends every provider again.
+    sketchybar "${frame_args[@]}" >/dev/null 2>&1 || rm -f -- "${FRAME_FILE}"
     layout_due=1
 fi
 # Wake can change the display set without any row changing.

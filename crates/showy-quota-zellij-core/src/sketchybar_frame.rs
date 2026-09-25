@@ -550,10 +550,11 @@ fn click_script_for_status(settings: &FrameSettings, status: &str, url: &str) ->
     settings.click.clone()
 }
 
-/// Anchored regex for every item of one provider. Provider ids are validated
-/// to `[A-Za-z0-9_.-]`; only the dot needs escaping.
+/// Anchored regex for every item of one provider: the id, then exactly one
+/// role (roles carry no dot), so provider `a` never matches `a.b`'s items.
+/// Provider ids are validated to `[A-Za-z0-9_.-]`; only the dot needs escaping.
 pub fn provider_item_regex(provider: &str) -> String {
-    format!("/^showy_quota\\.{}\\./", provider.replace('.', "\\."))
+    format!("/^showy_quota\\.{}\\.[^.]*$/", provider.replace('.', "\\."))
 }
 
 fn on_off(value: bool) -> &'static str {
@@ -620,11 +621,23 @@ pub fn status_url_is_openable(url: &str) -> bool {
                 .iter()
                 .all(|b| b.is_ascii_alphanumeric() || *b == b'-')
     };
-    if !host.split('.').all(label_ok) || host.bytes().all(|b| b.is_ascii_digit() || b == b'.') {
+    if !host.split('.').all(label_ok) || host_is_ipv4(host) {
         return false;
     }
     let lower = host.to_ascii_lowercase();
     !(lower == "localhost" || lower.ends_with(".localhost"))
+}
+
+/// The WHATWG URL parser (which browsers follow) reads a host as IPv4 when
+/// its last label is a number: decimal, or `0x` hex. `0x7f000001` is
+/// 127.0.0.1.
+fn host_is_ipv4(host: &str) -> bool {
+    let last = host.rsplit('.').next().unwrap_or(host);
+    let hex = last.strip_prefix("0x").or_else(|| last.strip_prefix("0X"));
+    match hex {
+        Some(digits) => digits.bytes().all(|b| b.is_ascii_hexdigit()),
+        None => !last.is_empty() && last.bytes().all(|b| b.is_ascii_digit()),
+    }
 }
 
 // ── items and redeclare ────────────────────────────────────────────────
@@ -1023,7 +1036,7 @@ mod tests {
             icon_maker: false,
         });
         assert_eq!(
-            props(&frame.args, "/^showy_quota\\.claude\\./"),
+            props(&frame.args, "/^showy_quota\\.claude\\.[^.]*$/"),
             ["drawing=off"]
         );
         assert!(!frame.args.contains(&"showy_quota.claude.label".to_owned()));
@@ -1151,6 +1164,10 @@ mod tests {
             "https://status example.com/",
             "https://-bad.example.com/",
             "https://[::1]/",
+            "http://0x7f000001/",
+            "http://0x7f.1/",
+            "http://0x0/",
+            "http://status.example.com.127/",
         ] {
             assert!(!status_url_is_openable(url), "{url}");
         }

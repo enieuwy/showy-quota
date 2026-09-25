@@ -162,7 +162,18 @@ pub fn notch_layout(
             Err(_) => break,
         }
     }
-    if docs.is_empty() {
+    // A reply cut short before the notch anchors carries no geometry to plan
+    // from. Planning "no notch" from it would pull every provider left, maybe
+    // under the notch, so treat it like a dropped reply.
+    let has_item = |name: &str| {
+        docs.iter()
+            .skip(2)
+            .any(|doc| doc.get("name").and_then(Value::as_str) == Some(name))
+    };
+    if docs.is_empty()
+        || (!providers.is_empty()
+            && !(has_item("showy_quota.notch_q") && has_item("showy_quota.notch_e")))
+    {
         return None;
     }
     let plan = plan_layout(&docs, providers, settings, previous);
@@ -469,7 +480,7 @@ fn plan_layout(
     if let Some(displays) = docs.get(1).and_then(Value::as_array) {
         for candidate in displays {
             let id = candidate.get("arrangement-id").map(interp);
-            if id.as_deref() == Some(display) {
+            if id.map(|id| format!("display-{id}")).as_deref() == Some(display) {
                 display_w = candidate
                     .get("frame")
                     .and_then(|frame| frame.get("w"))
@@ -634,10 +645,8 @@ fn render_plan(plan: &Plan) -> String {
     json
 }
 
-/// Item regex for one provider: `/^showy_quota\.` + id with every `.`
-/// escaped + `\./`. Mirrors `provider_item_regex_into` in the shell plugin.
 fn provider_regex(id: &str) -> String {
-    format!("/^showy_quota\\.{}\\./", id.replace('.', "\\."))
+    crate::sketchybar_frame::provider_item_regex(id)
 }
 
 /// Port of the `sketchybar` argument loop in `apply_notch_layout`, in exact
@@ -825,6 +834,23 @@ mod tests {
     }
 
     #[test]
+    fn right_wing_stops_at_the_display_edge_without_a_neighbour() {
+        // A neighbour off the right edge must not widen the right wing past
+        // the display: the plan equals one with the neighbour at the edge
+        // (display width 1728 less the bar's 18pt right padding).
+        let previous = carried(35.0, 8.0, 8.0);
+        let offscreen = plan_of(10, &previous, 5000.0, 763.0, 964.0, true);
+        let at_edge = plan_of(10, &previous, 1710.0, 763.0, 964.0, true);
+        assert_eq!(offscreen.plan_json, at_edge.plan_json);
+        assert!(offscreen.overflow > 0 || offscreen.compact);
+    }
+
+    #[test]
+    fn a_reply_cut_before_the_anchors_counts_as_dropped() {
+        let reply = b"{\"items\":[]}\n[]\n";
+        assert!(notch_layout(reply, &ids(2), &settings(), &PreviousPlan::default()).is_none());
+    }
+    #[test]
     fn moves_crossing_providers_right() {
         let layout = plan_of(6, &carried(35.0, 8.0, 8.0), 1324.0, 763.0, 964.0, true);
         assert_eq!(
@@ -917,16 +943,10 @@ mod tests {
     }
 
     #[test]
-    fn truncated_stream_keeps_parsed_documents() {
-        // The bar parses, then garbage ends the stream. With no anchors the
-        // planner keeps the no-notch plan instead of failing.
+    fn truncated_stream_without_anchors_counts_as_dropped() {
+        // The bar parses, then garbage ends the stream before any anchor.
         let measured = b"{\"padding_right\": 18, \"items\": []}\n[1,2";
-        let layout =
-            notch_layout(measured, &ids(2), &settings(), &PreviousPlan::default()).expect("plan");
-        assert_eq!(
-            layout.plan_json,
-            "{\"notch\":false,\"compact\":false,\"right\":[],\"hidden\":[],\"overflow\":0}",
-        );
+        assert!(notch_layout(measured, &ids(2), &settings(), &PreviousPlan::default()).is_none());
     }
 
     #[test]
@@ -1074,7 +1094,7 @@ mod tests {
         let mut expected: Vec<String> = Vec::new();
         for id in ["p1", "p2", "p3", "p4", "p5", "p6", "p7"] {
             expected.push(String::from("--set"));
-            expected.push(format!("/^showy_quota\\.{id}\\./"));
+            expected.push(format!("/^showy_quota\\.{id}\\.[^.]*$/"));
             expected.push(String::from(if id == "p7" {
                 "position=e"
             } else {
@@ -1086,10 +1106,10 @@ mod tests {
         }
         for id in ["p8", "p9", "p10"] {
             expected.push(String::from("--set"));
-            expected.push(format!("/^showy_quota\\.{id}\\./"));
+            expected.push(format!("/^showy_quota\\.{id}\\.[^.]*$/"));
             expected.push(String::from("position=e"));
             expected.push(String::from("--set"));
-            expected.push(format!("/^showy_quota\\.{id}\\./"));
+            expected.push(format!("/^showy_quota\\.{id}\\.[^.]*$/"));
             expected.push(String::from("drawing=off"));
         }
         for arg in [
@@ -1126,7 +1146,7 @@ mod tests {
             layout.args,
             [
                 "--set",
-                "/^showy_quota\\.a\\.b\\./",
+                "/^showy_quota\\.a\\.b\\.[^.]*$/",
                 "position=left",
                 "--set",
                 "showy_quota.overflow",

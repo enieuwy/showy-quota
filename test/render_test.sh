@@ -197,9 +197,12 @@ echo "sketchybar $*" >> "${log}"
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --query)
+            # One invocation may batch several queries, as the notch planner
+            # does; a missing item fails the whole call like the daemon.
             shift
             item="${1:-}"
-            if [ -n "${state_dir}" ] && [ "${item}" = "bar" ]; then
+            [ -n "${state_dir}" ] || exit 1
+            if [ "${item}" = "bar" ]; then
                 if [ -e "${state_dir}/bar" ]; then
                     cat "${state_dir}/bar"
                 else
@@ -207,13 +210,14 @@ while [ "$#" -gt 0 ]; do
                     [ -f "${state_dir}/.order" ] && sed 's/.*/"&"/' "${state_dir}/.order" | paste -sd, -
                     printf ']}\n'
                 fi
-                exit 0
+            elif [ "${item}" = "displays" ]; then
+                printf '[]\n'
+            elif [ -e "${state_dir}/${item}" ]; then
+                printf '{"name":"%s","geometry":{"position":"left","drawing":"on"}}\n' "${item}"
+            else
+                exit 1
             fi
-            if [ -n "${state_dir}" ] && [ -e "${state_dir}/${item}" ]; then
-                printf '{}\n'
-                exit 0
-            fi
-            exit 1
+            shift
             ;;
         --add)
             shift
@@ -3067,15 +3071,25 @@ assert_contains "plugin redeclares items SketchyBar lost" \
 assert_contains "plugin re-sends rows after a redeclare" \
     "--set showy_quota.codex.label" "${plugin_log}"
 
-# Layout events re-plan the notch split only; they never re-send rows.
+# Layout events re-plan the notch split only; they never re-send rows. The
+# planner needs the two notch anchors, so seed them for this event alone.
+for anchor in showy_quota.notch_q showy_quota.notch_e; do
+    : > "${frame_cache}/sb-state/${anchor}"
+    printf '%s\n' "${anchor}" >> "${frame_cache}/sb-state/.order"
+done
 log="${TMP}/sb-layout-event.log"
 run_sketchybar_plugin "${frame_changed_fixture}" "${frame_cache}" "${log}" \
     SHOWY_QUOTA_PALETTE_ELAPSED=ff0000 SHOWY_QUOTA_SKETCHYBAR_PLACEMENT=notch \
     SENDER=front_app_switched
 plugin_log="$(< "${log}")"
 assert_contains "layout event re-plans the notch split" \
-    "--set /^showy_quota\\.codex\\./ position=left" "${plugin_log}"
+    "--set /^showy_quota\\.codex\\.[^.]*$/ position=left" "${plugin_log}"
 assert_not_contains "layout event sends no rows" "--set showy_quota.codex.label" "${plugin_log}"
+for anchor in showy_quota.notch_q showy_quota.notch_e; do
+    rm -f "${frame_cache}/sb-state/${anchor}"
+    grep -vxF "${anchor}" "${frame_cache}/sb-state/.order" > "${frame_cache}/sb-state/.order.tmp"
+    mv "${frame_cache}/sb-state/.order.tmp" "${frame_cache}/sb-state/.order"
+done
 log="${TMP}/sb-layout-event-left.log"
 : > "${log}"
 run_sketchybar_plugin "${frame_changed_fixture}" "${frame_cache}" "${log}" \
@@ -3126,7 +3140,7 @@ plugin_log="$(< "${log}")"
 assert_not_contains "pending-layout render has no row to send" \
     "--set showy_quota.codex.label" "${plugin_log}"
 assert_contains "render re-plans a layout the busy event left pending" \
-    "--set /^showy_quota\\.codex\\./ position=left" "${plugin_log}"
+    "--set /^showy_quota\\.codex\\.[^.]*$/ position=left" "${plugin_log}"
 if [[ -e "${frame_cache}/sb/layout.pending" ]]; then
     fail "render clears the pending layout note"
 else
@@ -7575,9 +7589,9 @@ run_layout() {
 layout_plan="${TMP}/notch-layout.json"
 layout_out=$(notch_snapshot 6 1324 763 964 | run_layout "${layout_plan}" p1,p2,p3,p4,p5,p6)
 assert_contains "layout mode moves providers that would cross the notch to its right" \
-    $'--set\x1f/^showy_quota\\.p5\\./\x1fposition=e' "${layout_out}"
+    $'--set\x1f/^showy_quota\\.p5\\.[^.]*$/\x1fposition=e' "${layout_out}"
 assert_contains "layout mode keeps the providers that fit on the left" \
-    $'--set\x1f/^showy_quota\\.p4\\./\x1fposition=left' "${layout_out}"
+    $'--set\x1f/^showy_quota\\.p4\\.[^.]*$/\x1fposition=left' "${layout_out}"
 assert_contains "layout mode reports a plan that draws nothing new" $'layout\x1fok\x1f0' "${layout_out}"
 assert_equals "layout mode stores the plan it applied" '["p5","p6"]' "$(jq -c '.right' "${layout_plan}")"
 

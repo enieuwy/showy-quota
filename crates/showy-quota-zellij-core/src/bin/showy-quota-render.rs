@@ -777,14 +777,36 @@ fn background_refresh_due(age_seconds: Option<i64>) -> bool {
 /// Replace `path` through a sibling temp file, so a reader never sees a
 /// half-written file.
 fn write_atomic(path: &str, content: &str) -> Result<(), String> {
+    use std::fs::OpenOptions;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    // `create_new` refuses an existing file or symlink at the temp name, so a
+    // planted link cannot redirect the write; a fresh suffix retries.
     let target = Path::new(path);
-    let tmp = target.with_extension(format!("tmp.{}", process::id()));
-    std::fs::write(&tmp, content)
-        .and_then(|()| std::fs::rename(&tmp, target))
-        .map_err(|err| {
-            let _ = std::fs::remove_file(&tmp);
-            format!("failed to write {path}: {err}")
-        })
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.subsec_nanos());
+    for attempt in 0..8u32 {
+        let tmp = target.with_extension(format!("tmp.{}.{stamp}.{attempt}", process::id()));
+        let file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&tmp);
+        let mut file = match file {
+            Ok(file) => file,
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(format!("failed to write {path}: {err}")),
+        };
+        return file
+            .write_all(content.as_bytes())
+            .and_then(|()| std::fs::rename(&tmp, target))
+            .map_err(|err| {
+                let _ = std::fs::remove_file(&tmp);
+                format!("failed to write {path}: {err}")
+            });
+    }
+    Err(format!("failed to write {path}: no free temp name"))
 }
 
 fn render_error(error: RenderError) -> String {
