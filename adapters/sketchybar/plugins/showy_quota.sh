@@ -96,6 +96,9 @@ RING_UNIT_ITEM_ROLES=(ring ring_pace bar0 bar0_pace bar1 bar1_pace label
 # its left, so the banked-reset badge can sit off the ring without clipping;
 # the spacer before each unit gives that room back, so the strip keeps its size.
 RING_DIAMETER=26
+# The pace tick's item: 28 pt with a 6 pt stroke sits centred on the ring's
+# 3 pt stroke (the renderer sends the same ring.width and line_width).
+RING_PACE_DIAMETER=28
 RING_BADGE_ROOM=7
 RING_BAR_W=28
 RING_EDGE=10
@@ -688,12 +691,12 @@ queue_ring_unit_declaration() {
                    click_script="${CLICK}"
                    script="${hover_script}"
                --subscribe "${ring}" mouse.entered mouse.exited mouse.exited.global
-               --add ring "${base}.ring_pace" left "${RING_DIAMETER}"
+               --add ring "${base}.ring_pace" left "${RING_PACE_DIAMETER}"
                --set "${base}.ring_pace"
                    icon.drawing=off
                    label.drawing=off
                    background.drawing=off
-                   padding_left=-"${RING_DIAMETER}"
+                   padding_left=-"$(( RING_DIAMETER + (RING_PACE_DIAMETER - RING_DIAMETER) / 2 ))"
                    padding_right=0
                    width=0
                    y_offset=0

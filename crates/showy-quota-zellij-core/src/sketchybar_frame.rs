@@ -610,6 +610,10 @@ const RING_DIAMETER: i64 = 26;
 const RING_BADGE_ROOM: i64 = 7;
 const RING_STROKE: &str = "3";
 const RING_PACE_LEN: f64 = 3.5;
+/// Pace tick stroke, and the item diameter that keeps it centred on the
+/// ring's 3 pt stroke: 1.5 pt beyond it on each side, still inside the pill.
+const RING_PACE_STROKE: i64 = 6;
+const RING_PACE_DIAMETER: i64 = 28;
 const RING_BAR_W: i64 = 28;
 const RING_BAR_H: i64 = 4;
 const RING_GAP: i64 = 5;
@@ -895,12 +899,14 @@ fn ring_unit_args(unit: &RingUnit, settings: &FrameSettings) -> Vec<String> {
     }
     set(format!("{prefix}.ring"), ring_props);
 
-    // Pace tick: a butt-capped arc 3.5 pt long at the time left, stroked two
-    // wider than the ring.
+    // Pace tick: a butt-capped arc 3.5 pt long at the time left, 6 pt wide on
+    // a 28 pt item, centred over the ring's stroke. ring.width also resizes
+    // an item declared before this change, without a redeclare.
     match unit.ring.expected {
         Some(expected) if !error => {
             let pace = expected.clamp(0, 100) as f64;
-            let span = RING_PACE_LEN / (std::f64::consts::PI * (RING_DIAMETER as f64 - 3.0));
+            let circle = (RING_PACE_DIAMETER - RING_PACE_STROKE) as f64;
+            let span = RING_PACE_LEN / (std::f64::consts::PI * circle);
             let start = 270.0 + 360.0 * pace / 100.0 - 180.0 * span;
             set(
                 format!("{prefix}.ring_pace"),
@@ -911,12 +917,16 @@ fn ring_unit_args(unit: &RingUnit, settings: &FrameSettings) -> Vec<String> {
                     format!("ring.color={}", settings.ring_elapsed_argb()),
                     "ring.track_color=0x00000000".into(),
                     "ring.cap=butt".into(),
-                    "ring.line_width=5".into(),
+                    format!("ring.width={RING_PACE_DIAMETER}"),
+                    format!("ring.line_width={RING_PACE_STROKE}"),
                     "ring.marker.drawing=off".into(),
                     "icon.drawing=off".into(),
                     "label.drawing=off".into(),
                     "background.drawing=off".into(),
-                    format!("padding_left={}", -RING_DIAMETER),
+                    format!(
+                        "padding_left={}",
+                        -(RING_DIAMETER + (RING_PACE_DIAMETER - RING_DIAMETER) / 2)
+                    ),
                     "padding_right=0".into(),
                     "width=0".into(),
                     "y_offset=0".into(),
