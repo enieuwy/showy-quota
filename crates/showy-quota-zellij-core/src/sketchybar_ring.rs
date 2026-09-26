@@ -15,6 +15,7 @@
 use serde_json::Value;
 use std::collections::HashMap;
 
+use crate::cache::MISSING_AGE_SECONDS;
 use crate::codexbar::{
     is_errored, is_renderable, valid_provider_id, ProviderRecord, MAX_USAGE_JSON_BYTES,
 };
@@ -303,14 +304,16 @@ fn family_unit(
             .then_with(|| a.cmp(&b))
     });
     let ring_minutes = ring_index.and_then(|index| raws.get(index).and_then(|raw| raw.minutes));
-    let mut bars: Vec<RingWindow> = order
+    // Every shorter window, before the two-bar display cap: a window the
+    // strip cannot show (Antigravity can carry more) still blocks the ones
+    // it can.
+    let mut all_bars: Vec<RingWindow> = order
         .into_iter()
         .filter(|index| Some(*index) != ring_index)
         .map(|index| {
             let breakdown = raws[index].minutes == ring_minutes;
             assemble(&raws[index], breakdown, tick)
         })
-        .take(2)
         .collect();
     // A lone window draws the ring only; a missing window draws nothing.
     let ring = match ring_index.and_then(|index| raws.get(index)) {
@@ -332,53 +335,67 @@ fn family_unit(
     // shortest first) is empty. Breakdown parts neither block nor dim: they
     // are the ring's own window. Stale data never claims a blocked state.
     if !tick.stale {
-        for index in 0..bars.len() {
-            if bars[index].breakdown {
+        for index in 0..all_bars.len() {
+            if all_bars[index].breakdown {
                 continue;
             }
-            let blocked = ring_empty || bars[index + 1..].iter().any(blocks);
+            let blocked = ring_empty || all_bars[index + 1..].iter().any(blocks);
             if blocked {
-                bars[index].blocked = true;
-                bars[index].expected = None;
+                all_bars[index].blocked = true;
+                all_bars[index].expected = None;
             }
         }
     }
     // The label counts to the shortest window. When that window is blocked,
     // it counts to the latest refill among the windows that block it, marked
-    // with the refill glyph so the change of meaning is visible.
-    let shortest = bars.first().unwrap_or(&ring);
-    let blocker = if shortest.blocked {
-        std::iter::once(&ring)
+    // with the refill glyph so the change of meaning is visible. The refill
+    // uses the short form (`18h`, `6d`) so it fits the label slot; the popup
+    // keeps the exact time. A blocker whose reset does not parse still marks
+    // the label (`↻?`): falling back to the blocked window's own countdown
+    // would read as "usable then".
+    let shortest = all_bars.first().unwrap_or(&ring);
+    let refill: Option<(&RingWindow, Option<i64>)> = if shortest.blocked {
+        let blockers: Vec<&RingWindow> = std::iter::once(&ring)
             .filter(|_| ring_empty)
-            .chain(bars[1..].iter().filter(|bar| blocks(bar)))
+            .chain(all_bars[1..].iter().filter(|bar| blocks(bar)))
+            .collect();
+        blockers
+            .iter()
             .filter_map(|window| {
-                minutes_until(&window.reset, tick.now_epoch, tick.tz).map(|m| (m, window))
+                minutes_until(&window.reset, tick.now_epoch, tick.tz).map(|m| (*window, Some(m)))
             })
-            .max_by_key(|(minutes, _)| *minutes)
-            .map(|(_, window)| window)
+            .max_by_key(|(_, minutes)| *minutes)
+            .or_else(|| blockers.first().map(|window| (*window, None)))
     } else {
         None
     };
-    let counted = blocker.unwrap_or(shortest);
+    let (counted, countdown_text, label_minutes) = match refill {
+        Some((window, Some(minutes))) => (window, short_age(minutes * 60), Some(minutes)),
+        Some((window, None)) => (window, "?".to_owned(), None),
+        None => {
+            let (text, minutes) = countdown(shortest, tick.now_epoch, tick.tz);
+            (shortest, text, minutes)
+        }
+    };
     let shortest_title = counted.title.clone();
     let shortest_remaining = counted.remaining;
-    let (countdown_text, label_minutes) = countdown(counted, tick.now_epoch, tick.tz);
-    let refill = if blocker.is_some() { REFILL_GLYPH } else { "" };
+    let refill_glyph = if refill.is_some() { REFILL_GLYPH } else { "" };
     let label = if tick.stale_mark {
         format!("{}{countdown_text}", config.stale_glyph)
     } else if config.severity_glyphs && !tick.stale {
         format!(
-            "{}{refill}{countdown_text}",
+            "{}{refill_glyph}{countdown_text}",
             config.severity(shortest_remaining as i32).marker()
         )
     } else {
-        format!("{refill}{countdown_text}")
+        format!("{refill_glyph}{countdown_text}")
     };
+    let bars: Vec<RingWindow> = all_bars.iter().take(2).cloned().collect();
     let note = unit_note(
         &countdown_text,
         &shortest_title,
         ring_empty,
-        blocker.is_some(),
+        refill.is_some(),
         bars.iter().any(|bar| bar.blocked),
         bars.is_empty(),
     );
@@ -450,7 +467,8 @@ pub fn apply_stale_ages(
         } else {
             whole_age
         };
-        let Some(age) = age.filter(|age| *age >= 0) else {
+        // The sentinel means "no readable mtime": there is no age to report.
+        let Some(age) = age.filter(|age| (0..MISSING_AGE_SECONDS).contains(age)) else {
             continue;
         };
         let ago = friendly_duration(age / 60);
@@ -552,8 +570,15 @@ fn unit_note(
     // "empty ring" clause rather than joining it.
     let mut parts: Vec<String> = Vec::new();
     if refill {
+        // A fallback slot name (`Secondary`) reads like an account without
+        // the word "window".
+        let window = if matches!(counted_title, "Primary" | "Secondary" | "Tertiary") {
+            format!("the {counted_title} window")
+        } else {
+            counted_title.to_owned()
+        };
         parts.push(format!(
-            "{REFILL_GLYPH}{countdown} = until {counted_title} refills"
+            "{REFILL_GLYPH}{countdown} = until {window} refills"
         ));
     } else if ring_empty && !has_bars {
         parts.push(format!(
@@ -1046,11 +1071,11 @@ mod tests {
         // The empty pool blocks the 5h window: the label counts to the
         // refill, marked so the change of meaning shows.
         assert!(units[1].bars[0].blocked);
-        assert_eq!(units[1].label, "↻18:05");
+        assert_eq!(units[1].label, "↻18h");
         assert!(
             units[1]
                 .note
-                .contains("↻18:05 = until Claude/GPT weekly refills"),
+                .contains("↻18h = until Claude/GPT weekly refills"),
             "{}",
             units[1].note
         );
@@ -1077,7 +1102,7 @@ mod tests {
         assert!(!unit.bars[1].blocked, "the empty bar itself is not blocked");
         assert!(unit.bars[1].expected.is_some());
         // Counts to the 7d refill, not the 5h reset.
-        assert_eq!(unit.label, format!("↻{}", format_countdown(8727)));
+        assert_eq!(unit.label, "↻6d");
         assert!(unit.note.contains("dim bar = blocked"), "{}", unit.note);
     }
 
@@ -1087,7 +1112,53 @@ mod tests {
         let units = units(&commandcode(10.0, 100.0, 100.0));
         let unit = &units[0];
         assert!(unit.bars[0].blocked && unit.bars[1].blocked);
-        assert_eq!(unit.label, format!("↻{}", format_countdown(31170)));
+        assert_eq!(unit.label, "↻21d");
+    }
+
+    #[test]
+    fn a_blocker_with_no_parsable_reset_still_marks_the_label() {
+        // The 7d bar is empty but its reset is unreadable: the 5h countdown
+        // would say "usable in 2:40", which is false.
+        let payload = format!(
+            r#"[{{"provider":"commandcode","usage":{{
+                "primary":{{"usedPercent":10.0,"resetsAt":"{}","windowMinutes":300}},
+                "secondary":{{"usedPercent":100.0,"resetsAt":"soon","windowMinutes":10080}},
+                "tertiary":{{"usedPercent":40.0,"resetsAt":"{}","windowMinutes":43200}}}}}}]"#,
+            reset_at(160),
+            reset_at(31170)
+        );
+        let units = units(&payload);
+        assert!(units[0].bars[0].blocked);
+        assert_eq!(units[0].label, "↻?");
+    }
+
+    #[test]
+    fn a_window_past_the_two_bar_cap_still_blocks_the_shown_bars() {
+        // Gemini pool: 7d ring, then 5h, 1d, 2d bars; only 5h and 1d show,
+        // and the hidden 2d window is empty.
+        let payload = format!(
+            r#"[{{"provider":"antigravity","usage":{{
+                "primary":{{"usedPercent":10.0,"resetsAt":"{a}","windowMinutes":300}},
+                "extraRateWindows":[
+                    {{"id":"gemini-5h","title":"Gemini 5h","window":{{"usedPercent":10.0,"resetsAt":"{a}","windowMinutes":300}}}},
+                    {{"id":"gemini-1d","title":"Gemini 1d","window":{{"usedPercent":20.0,"resetsAt":"{b}","windowMinutes":1440}}}},
+                    {{"id":"gemini-2d","title":"Gemini 2d","window":{{"usedPercent":100.0,"resetsAt":"{c}","windowMinutes":2880}}}},
+                    {{"id":"gemini-weekly","title":"Gemini weekly","window":{{"usedPercent":30.0,"resetsAt":"{d}","windowMinutes":10080}}}}
+                ]}}}}]"#,
+            a = reset_at(160),
+            b = reset_at(900),
+            c = reset_at(2000),
+            d = reset_at(8000)
+        );
+        let units = units(&payload);
+        let gemini = &units[0];
+        assert_eq!(gemini.bars.len(), 2);
+        assert!(
+            gemini.bars.iter().all(|bar| bar.blocked),
+            "{:?}",
+            gemini.bars
+        );
+        assert_eq!(gemini.label, format!("↻{}", short_age(2000 * 60)));
     }
 
     #[test]
@@ -1159,6 +1230,20 @@ mod tests {
         let mut fresh = units(&payload);
         apply_stale_ages(&mut fresh, Some(30), &ages, NOW, Some(0));
         assert_eq!(fresh[0].stale_note, None, "fresh units get no stale row");
+
+        // No readable cache mtime: the sentinel age is not a real age.
+        let mut whole = ring_units(
+            payload.as_bytes(),
+            &utc_config(),
+            NOW,
+            SketchybarOptions {
+                stale: true,
+                ..options()
+            },
+        )
+        .expect("units");
+        apply_stale_ages(&mut whole, Some(MISSING_AGE_SECONDS), &[], NOW, Some(0));
+        assert_eq!(whole[0].stale_note, None);
     }
 
     #[test]

@@ -26,13 +26,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   neither merged upstream yet; on stock SketchyBar the plugin logs once and
   falls back to rows. Switching bodies re-declares cleanly with no leftover
   items. See `docs/sketchybar.md` "Strip body: rows or ring".
-  Colours carry one meaning each: a bar blocked by an empty ring or longer
-  bar draws at the 0.55 dim shade with no pace knob, and the label then
-  counts to the blocking window's refill behind `↻`; an empty bar keeps the
-  plain track (no red tint), as an empty ring does; grey means last known,
-  not live; a provider whose own slice is stale keeps its countdown behind a
-  yellow stale glyph and its popup gives the age; a stale cache is one
-  yellow end mark with the age (`⚠ 25m`); red stays for errors.
+  Ring looks carry one meaning each (full table in the doc):
+  - A bar blocked by an empty ring or longer bar dims to 0.55 and loses its
+    pace knob. The label then counts to the refill in short form (`↻14h`).
+  - An empty bar keeps the plain track, as an empty ring does.
+  - Grey means last known, not live.
+  - A stale provider keeps its countdown behind a yellow glyph (`⚠2w`); its
+    popup gives the age. A stale cache is one yellow end mark (`⚠ 25m`).
+  - Red arcs and bars mean low quota; a red logo and label mean an error.
 - `showy-quota-fetch` keeps a provider's last-known `usage` beside a fresh
   error-only record (with its original `providerMeta` time) instead of wiping
   it; a fresh success drops the preserved slice as before.

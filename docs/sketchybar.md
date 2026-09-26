@@ -108,25 +108,49 @@ C = Claude + GPT); Codex banked resets badge the ring; errors keep the last
 known arc in grey. Switching the body re-declares the items cleanly, leaving
 no items of the other body behind.
 
-Each colour in ring mode has one meaning:
+Each look in ring mode has one meaning. Colour is never the only cue: the
+stale and refill states also add a glyph to the label, and the blocked state
+removes the pace knob.
 
 | Look | Meaning |
 |---|---|
-| Green, amber, or red arc or bar | % left, live |
+| Green, amber, or red arc or bar | % left, live; red here means low quota, not an error |
 | Arc or bar at the dim shade (colour × 0.55), no pace knob | Blocked: the ring or a longer bar is empty, so this shorter window cannot be used |
 | Plain track with no fill | Nothing left in that window (ring or bar) |
 | Grey arc or bar | Last known value, not live (stale data, or a provider error) |
+| Label `↻14h` | The shortest window is blocked; the time is until the blocking window refills |
 | Yellow label with the stale glyph (`⚠2w`) | This provider's own data is stale; the label keeps its countdown |
-| Yellow end mark with the age (`⚠ 25m`) | The whole cache is stale; the units stay grey with plain labels |
-| Red label and red logo | An error that needs action (`auth`, `net`) |
+| Yellow end mark with the age (`⚠ 25m`) | The whole cache is stale; units without an error stay grey with plain labels |
+| Red label and red logo | A provider error that needs action (`auth`, `net`) |
 
 The countdown label normally counts to the shortest window's reset. When that
-window is blocked, the label counts to the refill of the window that blocks it
-(the latest one, when several do) and starts with `↻` (`↻14h`), so the change
-of meaning shows on the strip. Stale data never claims a blocked state: a stale
-label keeps the plain countdown. A stale unit's popup starts with a yellow row
-that gives the data age and the last refresh clock. Rows mode keeps its own
-semantics: there the dim shade marks a long window.
+window is blocked, the label counts to the refill of the window that blocks
+it, in a short form (`↻14h`, `↻6d`). When several windows block it, the label
+uses the latest refill. When the blocking window has no readable reset, the
+label is `↻?`. The popup shows the exact times.
+
+Stale data never shows a blocked state, and a stale label keeps its plain
+countdown. A stale unit's popup starts with a yellow row that gives the data
+age and the last refresh time. An error takes precedence over stale data: an
+errored provider keeps its grey last-known arc, its red logo and kind label,
+and its error row in the popup.
+
+The stale label and the amber arcs share `SHOWY_QUOTA_PALETTE_PRIMARY_WARN`.
+The glyph and the grey arcs tell the stale state apart. Rows mode keeps its own
+meaning for the dim shade: there it marks a long window.
+
+Ring colours come from these settings:
+
+| Setting | Used for |
+|---|---|
+| `SHOWY_QUOTA_PALETTE_PRIMARY_GOOD`, `_WARN`, `_BAD` | Live arcs and bars; `_WARN` also colours stale labels and the stale end mark |
+| `SHOWY_QUOTA_PALETTE_TRACK` | Empty tracks |
+| `SHOWY_QUOTA_PALETTE_STALE` | Stale arcs, bars, and labels |
+| `SHOWY_QUOTA_PALETTE_COUNTDOWN_WARN` | Error labels and logos |
+| `SHOWY_QUOTA_STALE_GLYPH` | The stale glyph in labels, the end mark, and the popup row |
+
+The blocked shade is always 0.55. `SHOWY_QUOTA_PALETTE_DIM_SCALE` and the
+`SHOWY_QUOTA_PALETTE_DIM_*` overrides apply to rows mode only.
 
 Ring mode needs the SketchyBar fork [github.com/enieuwy/SketchyBar](https://github.com/enieuwy/SketchyBar):
 the `ring` item ([upstream PR #817](https://github.com/FelixKratz/SketchyBar/pull/817))

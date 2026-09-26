@@ -25,7 +25,9 @@ use crate::cache::MISSING_AGE_SECONDS;
 use crate::config::RenderConfig;
 use crate::palette::scale_hex;
 use crate::sketchybar::{RowLane, SketchybarRow, SketchybarRows, LANE_COUNT};
-use crate::sketchybar_ring::{friendly_length, short_age, RingIncident, RingUnit, RingWindow};
+use crate::sketchybar_ring::{
+    friendly_length, short_age, RingIncident, RingUnit, RingWindow, REFILL_GLYPH,
+};
 
 /// Bump when icon rendering semantics change so stale cached PNGs are replaced.
 pub const ICON_CACHE_VERSION: &str = "5";
@@ -1251,9 +1253,12 @@ fn ring_popup_args(
         set(item, props);
     }
 
+    // An incident note explains the logo tint; a refill note explains the
+    // `↻` label. When both apply the refill note wins: the label is on the
+    // strip, and the incident already has its own alert row.
     let note = match unit.incident.as_ref() {
-        Some(incident) => incident_note(incident),
-        None => unit.note.clone(),
+        Some(incident) if !unit.label.contains(REFILL_GLYPH) => incident_note(incident),
+        _ => unit.note.clone(),
     };
     if note.is_empty() {
         set(format!("{prefix}.pop_note"), vec!["drawing=off".into()]);
@@ -2249,12 +2254,14 @@ mod tests {
 
     #[test]
     fn a_blocked_bar_dims_drops_its_knob_and_an_empty_bar_keeps_the_plain_track() {
-        let settings = settings(&RING_ENV);
         let frame = ring_frame(BLOCKED_BY_BAR, &RING_ENV, None);
         let args = &frame.args;
-        let dim = format!("slider.highlight_color={}", settings.ring_blocked_argb(90));
+        // 25be6a (good) at the 0.55 shade.
         let bar0 = props(args, "showy_quota.commandcode.bar0");
-        assert!(bar0.contains(&dim.as_str()), "{bar0:?}");
+        assert!(
+            bar0.contains(&"slider.highlight_color=0xff14683a"),
+            "{bar0:?}"
+        );
         assert!(
             !bar0.contains(&"slider.highlight_color=0xff25be6a"),
             "{bar0:?}"
@@ -2273,8 +2280,7 @@ mod tests {
         assert!(label[1].starts_with("label=↻"), "{label:?}");
         // The popup row of the blocked window dims its gauge and its %.
         let row1 = props(args, "showy_quota.commandcode.pop_row1");
-        let dim_badge = format!("label.badge.color={}", settings.ring_blocked_argb(90));
-        assert!(row1.contains(&dim_badge.as_str()), "{row1:?}");
+        assert!(row1.contains(&"label.badge.color=0xff14683a"), "{row1:?}");
     }
 
     fn stale_ring_frame(stale: bool, stale_providers: &[String]) -> Frame {
