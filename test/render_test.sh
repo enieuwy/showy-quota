@@ -21,7 +21,21 @@ REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 FIXTURE_DIR="${REPO_ROOT}/test/fixtures"
 
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/showy-quota-test.XXXXXX")
-trap 'rm -rf "${TMP}"' EXIT
+# Managed-serve tests start detached `codexbar serve` stubs from ${TMP}, and
+# each test stops its own. A run cut short (a timeout, Ctrl-C) skips that
+# stop, and the stubs outlived the run for days, still holding their ports.
+# TERM runs each stub's own trap, which stops its python server. Match on the
+# mktemp directory name only: the stubs run from the resolved path
+# (/private/var/... on macOS), never the ${TMPDIR}//... spelling of ${TMP}.
+cleanup_test_tmp() {
+    local pattern pid
+    pattern=$(printf '/%s/' "${TMP##*/}" | sed 's/[][\.*^$+?(){}|]/\\&/g')
+    while IFS= read -r pid; do
+        [[ -n "${pid}" ]] && kill "${pid}" 2>/dev/null
+    done < <(pgrep -f -- "${pattern}" 2>/dev/null)
+    rm -rf "${TMP}"
+}
+trap cleanup_test_tmp EXIT
 export SHOWY_QUOTA_MANAGE_SERVE=0
 export SHOWY_QUOTA_CODEXBAR_SERVE_URL=
 
