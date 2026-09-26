@@ -9,6 +9,7 @@ use crate::codexbar::{ProviderCacheMeta, MAX_USAGE_JSON_BYTES};
 
 pub const MISSING_AGE_SECONDS: i64 = 999_999_999;
 const DEFAULT_REFRESH_SECONDS: i64 = 120;
+const DEFAULT_CLI_TIMEOUT_SECONDS: i64 = 20;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CacheFreshness {
@@ -108,7 +109,7 @@ pub fn read_cache_from_env(now_epoch: i64) -> Result<CacheSnapshot, CacheReadErr
     let freshness = freshness_from_parts(
         mtime_epoch,
         now_epoch,
-        refresh_seconds_from_env(),
+        stale_after_seconds_from_env(),
         transport.source,
         env::var("SHOWY_QUOTA_DEGRADED_CLI").ok(),
         &transport.provider_meta,
@@ -162,7 +163,7 @@ pub fn freshness_for_paths(paths: &CachePaths, now_epoch: i64, source: String) -
     freshness_from_parts(
         mtime_epoch,
         now_epoch,
-        refresh_seconds_from_env(),
+        stale_after_seconds_from_env(),
         source,
         env::var("SHOWY_QUOTA_DEGRADED_CLI").ok(),
         &[],
@@ -172,7 +173,7 @@ pub fn freshness_for_paths(paths: &CachePaths, now_epoch: i64, source: String) -
 pub fn freshness_from_parts(
     mtime_epoch: Option<i64>,
     now_epoch: i64,
-    refresh_seconds: i64,
+    stale_after_seconds: i64,
     source: String,
     degraded_cli_env: Option<String>,
     provider_meta: &[ProviderCacheMeta],
@@ -180,7 +181,7 @@ pub fn freshness_from_parts(
     freshness_from_parts_filtered(
         mtime_epoch,
         now_epoch,
-        refresh_seconds,
+        stale_after_seconds,
         source,
         degraded_cli_env,
         provider_meta,
@@ -198,14 +199,14 @@ pub fn freshness_from_parts(
 pub fn freshness_from_parts_filtered(
     mtime_epoch: Option<i64>,
     now_epoch: i64,
-    refresh_seconds: i64,
+    stale_after_seconds: i64,
     source: String,
     degraded_cli_env: Option<String>,
     provider_meta: &[ProviderCacheMeta],
     visible_providers: Option<&[String]>,
 ) -> CacheFreshness {
     let file_age_seconds = age_seconds(now_epoch, mtime_epoch);
-    let stale_after = refresh_seconds.saturating_mul(2);
+    let stale_after = stale_after_seconds;
     let stale = file_age_seconds > stale_after;
     // A provider with no recorded timestamp is as fresh as the file: a
     // legacy envelope must not invent per-provider staleness.
@@ -265,11 +266,31 @@ pub fn age_seconds(now_epoch: i64, mtime_epoch: Option<i64>) -> i64 {
     diff.abs().min(i128::from(i64::MAX)) as i64
 }
 
-pub fn refresh_seconds_from_env() -> i64 {
-    env::var("SHOWY_QUOTA_REFRESH_SECONDS")
+/// Cache age past which a surface reports stale data: two refresh intervals
+/// plus one fetch. A healthy cycle lands at refresh + one surface tick + one
+/// fetch, and the fetch was never budgeted: under load a CLI fetch that
+/// normally takes 18 s ran over 60 s, pushed the cache past a bare
+/// 2 x refresh, and greyed every unit while the fetch was still on its way.
+/// The CLI timeout bounds one fetch (providers run in parallel).
+pub fn stale_after_seconds(refresh_seconds: i64, cli_timeout_seconds: i64) -> i64 {
+    refresh_seconds
+        .saturating_mul(2)
+        .saturating_add(cli_timeout_seconds)
+}
+
+pub fn stale_after_seconds_from_env() -> i64 {
+    let refresh = env::var("SHOWY_QUOTA_REFRESH_SECONDS")
         .ok()
         .and_then(|value| parse_refresh_seconds(&value))
-        .unwrap_or(DEFAULT_REFRESH_SECONDS)
+        .unwrap_or(DEFAULT_REFRESH_SECONDS);
+    // Same parse as the fetcher's codexbar_cli_timeout_seconds: a non-number
+    // or 0 takes the default, a value past 300 is capped at 300.
+    let cli_timeout = env::var("SHOWY_QUOTA_CODEXBAR_CLI_TIMEOUT_SECONDS")
+        .ok()
+        .and_then(|value| parse_refresh_seconds(&value))
+        .filter(|value| *value > 0)
+        .map_or(DEFAULT_CLI_TIMEOUT_SECONDS, |value| value.min(300));
+    stale_after_seconds(refresh, cli_timeout)
 }
 
 pub fn parse_refresh_seconds(raw: &str) -> Option<i64> {
@@ -314,24 +335,24 @@ mod tests {
 
     #[test]
     fn freshness_matches_shell_age_stale_and_degraded_rules() {
-        let fresh = freshness_from_parts(Some(1_000), 1_100, 60, "serve".into(), None, &[]);
+        let fresh = freshness_from_parts(Some(1_000), 1_100, 120, "serve".into(), None, &[]);
         assert_eq!(fresh.age_seconds, 100);
         assert!(!fresh.stale);
         assert!(!fresh.degraded_cli);
 
-        let boundary = freshness_from_parts(Some(1_000), 1_120, 60, "serve".into(), None, &[]);
+        let boundary = freshness_from_parts(Some(1_000), 1_120, 120, "serve".into(), None, &[]);
         assert_eq!(boundary.age_seconds, 120);
         assert!(!boundary.stale);
 
-        let stale = freshness_from_parts(Some(1_000), 1_121, 60, "serve".into(), None, &[]);
+        let stale = freshness_from_parts(Some(1_000), 1_121, 120, "serve".into(), None, &[]);
         assert_eq!(stale.age_seconds, 121);
         assert!(stale.stale);
 
-        let future = freshness_from_parts(Some(1_300), 1_000, 120, "serve".into(), None, &[]);
+        let future = freshness_from_parts(Some(1_300), 1_000, 240, "serve".into(), None, &[]);
         assert_eq!(future.age_seconds, 300);
         assert!(future.stale);
 
-        let source_cli = freshness_from_parts(Some(1_000), 1_000, 120, "cli".into(), None, &[]);
+        let source_cli = freshness_from_parts(Some(1_000), 1_000, 240, "cli".into(), None, &[]);
         assert!(source_cli.degraded_cli);
 
         let env_cli = freshness_from_parts(
@@ -347,7 +368,7 @@ mod tests {
         // Tri-state override: an explicit non-"1" value forces the marker off
         // even when the source is cli (matches the shell's -z guard).
         let forced_off =
-            freshness_from_parts(Some(1_000), 1_000, 120, "cli".into(), Some("0".into()), &[]);
+            freshness_from_parts(Some(1_000), 1_000, 240, "cli".into(), Some("0".into()), &[]);
         assert!(!forced_off.degraded_cli);
         let empty_derives = freshness_from_parts(
             Some(1_000),
@@ -406,7 +427,7 @@ mod tests {
         let freshness = freshness_from_parts(
             Some(1_900),
             2_000,
-            60,
+            120,
             "serve".into(),
             None,
             &[meta("codex", "serve", None)],
@@ -479,6 +500,17 @@ mod tests {
         assert_eq!(parse_refresh_seconds(""), None);
         assert_eq!(parse_refresh_seconds("12x"), None);
         assert_eq!(parse_refresh_seconds("1234567890123456789"), None);
+    }
+
+    #[test]
+    fn stale_limit_leaves_room_for_one_fetch() {
+        // 120 s refresh, 45 s CLI timeout: a 60 s tick plus a 64 s fetch
+        // lands at 244 s, which must still read as fresh.
+        let limit = stale_after_seconds(120, 45);
+        assert_eq!(limit, 285);
+        let slow_cycle = freshness_from_parts(Some(1_000), 1_244, limit, "cli".into(), None, &[]);
+        assert!(!slow_cycle.stale);
+        assert_eq!(stale_after_seconds(120, 20), 260);
     }
 
     fn env_test_lock() -> std::sync::MutexGuard<'static, ()> {

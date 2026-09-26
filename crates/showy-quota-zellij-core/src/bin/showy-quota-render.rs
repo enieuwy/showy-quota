@@ -520,7 +520,7 @@ fn read_cache_snapshot(
     showy_quota_zellij_core::cache::CacheReadError,
 > {
     use showy_quota_zellij_core::cache::{
-        cache_paths_from_env, freshness_from_parts_filtered, refresh_seconds_from_env,
+        cache_paths_from_env, freshness_from_parts_filtered, stale_after_seconds_from_env,
     };
     use showy_quota_zellij_core::codexbar::{parse_usage_payload, valid_provider_id};
     let paths = cache_paths_from_env();
@@ -545,7 +545,7 @@ fn read_cache_snapshot(
     let freshness = freshness_from_parts_filtered(
         mtime,
         now_epoch,
-        refresh_seconds_from_env(),
+        stale_after_seconds_from_env(),
         transport.source,
         std::env::var("SHOWY_QUOTA_DEGRADED_CLI").ok(),
         &transport.provider_meta,

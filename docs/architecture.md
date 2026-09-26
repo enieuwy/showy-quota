@@ -50,7 +50,7 @@ The shell data plane is still the reliability boundary for tmux, SketchyBar, and
 
 The fetcher prints the cache's bare provider array to stdout — never the envelope wrapper — regardless of whether it just refreshed or served stale bytes; this is unchanged for every caller. Callers must not differentiate; if they want freshness data they read `--age`, and if they want the source marker they read `cache.source` from `showy-quota-state` or call `showy_quota_cache_source`. During non-forced lock contention, a caller with an existing valid cache may emit that snapshot immediately while the lock holder refreshes. Forced refresh callers wait for the holder and retry recovery first, but still fall back to an existing valid cache if no refreshed cache is published; this preserves the fetcher's last-known-good output contract.
 
-Freshness is a shared render concern. A shell cache is stale when `showy_quota_age_seconds "${SHOWY_QUOTA_USAGE_FILE}"` is greater than `SHOWY_QUOTA_REFRESH_SECONDS * 2`. Shell bar drivers pass stale/degraded flags to the native renderer so tmux and advanced zjstatus show one trailing stale indicator, grey frozen data, and hide elapsed markers; `showy-quota-state` reports the boolean and threshold.
+Freshness is a shared render concern. A shell cache is stale when `showy_quota_age_seconds "${SHOWY_QUOTA_USAGE_FILE}"` is greater than `SHOWY_QUOTA_REFRESH_SECONDS * 2 + SHOWY_QUOTA_CODEXBAR_CLI_TIMEOUT_SECONDS`: a healthy cycle lands at one refresh interval plus one surface tick plus one fetch, and a CLI fetch under load can take most of its timeout. Shell bar drivers pass stale/degraded flags to the native renderer so tmux and advanced zjstatus show one trailing stale indicator, grey frozen data, and hide elapsed markers; `showy-quota-state` reports the boolean and threshold.
 
 ### Per-provider freshness
 
@@ -242,7 +242,7 @@ The state JSON declares `schemaVersion: 1`. The draft 2020-12 contract is at `sh
 |---|---|
 | `schemaVersion` | Integer state contract version; currently `1`. |
 | `available` | Whether a valid cache was read. |
-| `stale` | Whether cache age exceeds `SHOWY_QUOTA_REFRESH_SECONDS * 2`. |
+| `stale` | Whether cache age exceeds `SHOWY_QUOTA_REFRESH_SECONDS * 2 + SHOWY_QUOTA_CODEXBAR_CLI_TIMEOUT_SECONDS`. |
 | `cache.source`, `cache.degraded` | Cache source marker (`serve`, `cli`, or `unknown`) and whether CLI fallback is visible. |
 | `cacheAgeSeconds` | Seconds since usage cache mtime, or `null` when absent. |
 | `staleAfterSeconds` | Numeric stale threshold. |

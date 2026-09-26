@@ -686,12 +686,22 @@ showy_quota_provider_ids_from_payload() {
     ' "${file}" 2>/dev/null
 }
 
-showy_quota_stale_after_seconds() { printf '%s\n' $((SHOWY_QUOTA_REFRESH_SECONDS * 2)); }
+# Two refresh intervals plus one fetch: a healthy cycle lands at refresh + one
+# surface tick + one fetch, and a CLI fetch under load can take most of its
+# timeout. Mirrors cache.rs stale_after_seconds (same timeout parse as
+# showy-quota-fetch: non-number or 0 -> 20, capped at 300).
+showy_quota_stale_after_seconds() {
+    local timeout="${SHOWY_QUOTA_CODEXBAR_CLI_TIMEOUT_SECONDS:-20}"
+    if [[ "${timeout}" =~ ^[0-9]{1,6}$ ]]; then timeout=$((10#${timeout})); else timeout=20; fi
+    (( timeout > 0 )) || timeout=20
+    (( timeout > 300 )) && timeout=300
+    printf '%s\n' $((SHOWY_QUOTA_REFRESH_SECONDS * 2 + timeout))
+}
 
 showy_quota_cache_stale_for() {
     local age
     age=$(showy_quota_age_seconds "$1")
-    (( age > SHOWY_QUOTA_REFRESH_SECONDS * 2 ))
+    (( age > $(showy_quota_stale_after_seconds) ))
 }
 
 showy_quota_parse_local_epoch() {

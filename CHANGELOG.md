@@ -80,6 +80,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   included) no longer forks once per config variable.
 
 ### Fixed
+- Stale data: the limit was `2 × SHOWY_QUOTA_REFRESH_SECONDS`, which left no
+  room for the fetch itself. Under load one CLI fetch took 64 s instead of
+  18 s, the cache crossed 240 s mid-fetch, and every surface greyed out. The
+  limit is now `2 × SHOWY_QUOTA_REFRESH_SECONDS +
+  SHOWY_QUOTA_CODEXBAR_CLI_TIMEOUT_SECONDS` (260 s by default) in the shell,
+  the renderer, and `showy-quota-state`.
+- SketchyBar: a finished background fetch now triggers a redraw, so fresh data
+  shows at once instead of on the next `UPDATE_FREQ` tick (up to 60 s later
+  with a 60 s tick). Only a fetch that wrote a new cache triggers.
 - SketchyBar: every SketchyBar start (boot or `--reload`) dropped the first
   ring declare with `codex: unbound variable`. The bootstrap exports every
   scalar `SHOWY_QUOTA_*` variable to the plugin, including the provider

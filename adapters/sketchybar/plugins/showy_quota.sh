@@ -268,8 +268,20 @@ acquire_render_lock() {
     return 1
 }
 
+# Redraw as soon as the fetch lands instead of on the next timer tick: a
+# slow fetch otherwise leaves the aged frame (possibly grey, stale) up for
+# one more UPDATE_FREQ. Only a new cache triggers: a fetch that merely waited
+# on another fetch's lock also exits 0, and triggering then would start a
+# run that sees the same aged cache and forks yet another fetch.
 start_background_refresh() {
-    ( "${FETCH}" </dev/null >/dev/null 2>&1 ) &
+    (
+        mtime() { stat -f %m -- "$1" 2>/dev/null || stat -c %Y -- "$1" 2>/dev/null; }
+        before=$(mtime "${SHOWY_QUOTA_USAGE_FILE}") || before=""
+        "${FETCH}" </dev/null >/dev/null 2>&1 || true
+        after=$(mtime "${SHOWY_QUOTA_USAGE_FILE}") || after=""
+        [[ -n "${after}" && "${after}" != "${before}" ]] \
+            && sketchybar --trigger showy_quota_refresh >/dev/null 2>&1
+    ) </dev/null >/dev/null 2>&1 &
     disown "$!" 2>/dev/null || true
 }
 

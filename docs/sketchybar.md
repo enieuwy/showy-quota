@@ -320,7 +320,9 @@ without hand-editing the config file.
 ## Stale and degraded snapshots
 
 When `${SHOWY_QUOTA_USAGE_FILE}` is older than
-`2 × SHOWY_QUOTA_REFRESH_SECONDS`, the plugin turns on the trailing
+`2 × SHOWY_QUOTA_REFRESH_SECONDS + SHOWY_QUOTA_CODEXBAR_CLI_TIMEOUT_SECONDS`
+(one fetch of headroom, so a slow fetch under load does not grey the strip
+while it is still running), the plugin turns on the trailing
 `showy_quota.stale` item inside `showy_quota_bracket`. The item renders
 `SHOWY_QUOTA_STALE_GLYPH` (default `⚠`) in `SHOWY_QUOTA_PALETTE_COUNTDOWN_WARN`.
 Provider sliders and countdown labels switch to `SHOWY_QUOTA_PALETTE_STALE`;
@@ -328,6 +330,8 @@ provider icons keep their normal status tint, and elapsed marker overlays are
 hidden so stale reset timing is not presented as live. In ring mode the item
 shows the glyph with the cache age (`⚠ 25m`) in `SHOWY_QUOTA_PALETTE_PRIMARY_WARN`,
 and the units keep plain grey labels (see the ring table above).
+The plugin redraws as soon as a background fetch writes a new cache, so the
+strip does not wait for the next `SHOWY_QUOTA_SKETCHYBAR_UPDATE_FREQ` tick.
 
 When the shared cache was refreshed from CLI fallback instead of
 `codexbar serve`, `showy_quota.degraded` renders `⚠cli` in the same warning

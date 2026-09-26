@@ -2397,7 +2397,7 @@ state_usage_file="${state_usage_cache}/usage-explicit.json"
 out=$(run_state_with_usage_file codexbar-mixed.json "${state_usage_file}")
 assert_equals "state marks fresh cache not stale" "false" "$(printf '%s' "${out}" | jq -r '.stale')"
 assert_equals "state exposes cache age" "true" "$(printf '%s' "${out}" | jq -r '.cacheAgeSeconds | type == "number"')"
-assert_equals "state exposes stale-after threshold" "240" "$(printf '%s' "${out}" | jq -r '.staleAfterSeconds')"
+assert_equals "state exposes stale-after threshold" "260" "$(printf '%s' "${out}" | jq -r '.staleAfterSeconds')"
 
 state_usage_cache=$(mk_cache)
 state_usage_file="${state_usage_cache}/usage-explicit.json"
@@ -7827,13 +7827,14 @@ if [[ "${freshness_out}" == *"42s serve" && "${freshness_out}" != *$'\033'* ]]; 
 else
     fail "cache freshness adds age and serve source without color" "${freshness_out}"
 fi
-freshness_out=$(freshness_bar age "$((freshness_epoch + 239))")
-if [[ "${freshness_out}" == *"3m" ]]; then
+freshness_out=$(freshness_bar age "$((freshness_epoch + 259))")
+# Horizon: 2 x 120 s refresh + the default 20 s CLI timeout = 260 s.
+if [[ "${freshness_out}" == *"4m" ]]; then
     ok "freshness age remains visible just before stale horizon"
 else
     fail "freshness age remains visible just before stale horizon" "${freshness_out}"
 fi
-freshness_out=$(freshness_bar age+source "$((freshness_epoch + 241))")
+freshness_out=$(freshness_bar age+source "$((freshness_epoch + 261))")
 if [[ "${freshness_out}" == *"⚠" && "${freshness_out}" != *"4m serve" ]]; then
     ok "stale marker wins over opt-in freshness suffix"
 else
