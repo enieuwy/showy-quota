@@ -155,7 +155,16 @@ The blocked shade is always 0.55. `SHOWY_QUOTA_PALETTE_DIM_SCALE` and the
 Ring mode needs the SketchyBar fork [github.com/enieuwy/SketchyBar](https://github.com/enieuwy/SketchyBar):
 the `ring` item ([upstream PR #817](https://github.com/FelixKratz/SketchyBar/pull/817))
 and the badges ([upstream PR #816](https://github.com/FelixKratz/SketchyBar/pull/816)),
-neither merged upstream yet. On stock SketchyBar the plugin logs once and
+neither merged upstream yet. The fork's `master` tracks upstream and has no
+ring; build the `local/v2.24-integration` branch:
+
+```sh
+git clone -b local/v2.24-integration https://github.com/enieuwy/SketchyBar.git
+cd SketchyBar && make
+```
+
+Run the resulting `bin/sketchybar` in place of the Homebrew one. On stock
+SketchyBar the plugin logs once and
 falls back to the rows body. Notch placement stays a rows-body feature; in
 ring mode the pill stays left.
 

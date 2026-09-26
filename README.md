@@ -139,7 +139,9 @@ mode needs the SketchyBar fork
 [github.com/enieuwy/SketchyBar](https://github.com/enieuwy/SketchyBar) — the
 `ring` item ([upstream PR #817](https://github.com/FelixKratz/SketchyBar/pull/817))
 and the badges ([upstream PR #816](https://github.com/FelixKratz/SketchyBar/pull/816)),
-neither merged upstream yet; on stock SketchyBar the plugin falls back to rows.
+neither merged upstream yet. Build the fork's `local/v2.24-integration`
+branch (its `master` tracks upstream and has no ring); on stock SketchyBar the
+plugin falls back to rows.
 
 <p align="center">
   <img src="docs/images/ring-strip.png" alt="showy-quota SketchyBar ring strip: one ring per model family with countdown labels, pace ticks and bars" width="536">
