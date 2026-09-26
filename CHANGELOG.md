@@ -80,6 +80,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   included) no longer forks once per config variable.
 
 ### Fixed
+- SketchyBar: every SketchyBar start (boot or `--reload`) dropped the first
+  ring declare with `codex: unbound variable`. The bootstrap exports every
+  scalar `SHOWY_QUOTA_*` variable to the plugin, including the provider
+  registry's "loaded" flag, but never its arrays, so the child skipped the
+  registry. The registry now guards on the array itself, so every child
+  (the plugin, the background fetch) builds its own.
+- SketchyBar ring mode: two concurrent capability probes (a layout event and
+  the timer tick) shared one probe item, so one run removed the other's probe
+  and both fell back to rows; the strip showed rows for a minute or more and
+  then redeclared the rings. Each probe now uses its own item.
 - SketchyBar: a plugin run that outlived `sketchybar --reload` could re-add
   provider items before the rc re-added its earlier left items, and the
   bootstrap's redeclare then lost the render lock to it, so the pill drew over

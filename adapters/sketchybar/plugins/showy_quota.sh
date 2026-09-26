@@ -577,16 +577,21 @@ resolve_effective_body() {
             return 0
         fi
     fi
-    if sketchybar --add ring showy_quota.ring_probe left "${RING_DIAMETER}" >/dev/null 2>&1 \
-        && sketchybar --query showy_quota.ring_probe 2>/dev/null \
+    # One probe item per process: the layout path probes outside the render
+    # lock, and with one shared name a concurrent run's `--add` failed
+    # ("already exists") and its cleanup removed the other run's probe, so
+    # both fell back to rows and the strip flashed rows for a tick or more.
+    local probe="showy_quota.ring_probe.$$"
+    if sketchybar --add ring "${probe}" left "${RING_DIAMETER}" >/dev/null 2>&1 \
+        && sketchybar --query "${probe}" 2>/dev/null \
             | grep -q -E '"type"[[:space:]]*:[[:space:]]*"ring"'; then
-        sketchybar --remove showy_quota.ring_probe >/dev/null 2>&1 || true
+        sketchybar --remove "${probe}" >/dev/null 2>&1 || true
         printf '%s' "${SKETCHYBAR_DAEMON_IDENTITY}" > "${RING_PROBE_OK}" 2>/dev/null || true
         rm -f -- "${RING_FALLBACK_LOGGED}" 2>/dev/null || true
         EFFECTIVE_BODY=ring
     else
         # Stock SketchyBar keeps the generic item the failed probe created.
-        sketchybar --remove showy_quota.ring_probe >/dev/null 2>&1 || true
+        sketchybar --remove "${probe}" >/dev/null 2>&1 || true
         rm -f -- "${RING_PROBE_OK}" 2>/dev/null || true
         if [[ ! -f "${RING_FALLBACK_LOGGED}" ]]; then
             showy_quota_log "SHOWY_QUOTA_SKETCHYBAR_BODY=ring needs the SketchyBar fork (ring item); this bar has none, falling back to rows"

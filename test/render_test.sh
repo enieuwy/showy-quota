@@ -3110,6 +3110,17 @@ reprobe_log2="${TMP}/sb-ring-reprobe2.log"
 run_sketchybar_plugin codexbar-mixed.json "${ring_cache}" "${reprobe_log2}" SHOWY_QUOTA_SKETCHYBAR_BODY=ring
 assert_contains "marker from another instance re-probes" "--add ring showy_quota.ring_probe" "$(< "${reprobe_log2}")"
 
+# Boot path: the items bootstrap exports every scalar SHOWY_QUOTA_* variable
+# and runs the plugin as its child. Arrays are never exported, so the child
+# must build the provider registry itself; an inherited scalar "loaded" flag
+# once skipped that, and the first ring declare after every SketchyBar start
+# died on `codex: unbound variable`.
+boot_cache=$(mk_cache)
+boot_log="${TMP}/sb-ring-boot.log"
+boot_err=$(run_sketchybar_items codexbar-mixed.json "${boot_cache}" "${boot_log}" SHOWY_QUOTA_SKETCHYBAR_BODY=ring 2>&1 >/dev/null)
+assert_contains "bootstrap-run plugin declares the ring units" "--add ring showy_quota.codex.ring" "$(< "${boot_log}")"
+assert_not_contains "bootstrap-run plugin keeps the registry" "unbound variable" "${boot_err}"
+
 # First ring tick after an upgrade: rows items for a provider that has since
 # left the filtered set are in neither the saved list nor the desired set, so
 # only a whole-body pattern sweep removes them.
