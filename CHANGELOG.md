@@ -100,8 +100,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   spaces broke hover. Both words are now single-quoted. The hover state file
   also had an ordering hole: a delayed exit event could overwrite a newer
   entry and close the popup while the pointer was still over the unit.
-  Writers now claim the state only when no newer event (larger pid) recorded
-  first, and write atomically; the 0.35 s debounce is unchanged.
+  Writers now claim the state only when no newer event recorded first, and
+  write atomically; the 0.35 s debounce is unchanged. "Newer" compares pids
+  modulo the macOS wrap at 99999, and a record blocks only for 2 s: a plain
+  numeric compare let one large pid, left in the state file before the wrap,
+  refuse every later event, and hover stopped working until the file was
+  removed. Legacy `word pid` records count as stale.
 - Fetcher: a fresh error record that carried its own usable usage exactly
   equal to the cached usage was marked carried-forward, freezing
   `providerMeta.updatedAt` at the older fetch. Carried-forward now means the

@@ -3130,37 +3130,52 @@ assert_contains "rows redeclare still declares the desired set" "--add item show
 assert_contains "ring hover script quotes the plugin path" "script='${REPO_ROOT}/adapters/sketchybar/plugins/showy_quota_hover.sh' 'showy_quota.codex.ring'" "${ring_plugin_log}"
 
 # The hover state machine never lets an older event overwrite a newer one:
-# SketchyBar spawns handlers in event order, so a larger pid is newer.
+# SketchyBar spawns handlers in event order, and a pid is fixed at fork.
+# Records are `word pid epoch`; a record blocks only while fresh, and pids
+# compare modulo the macOS wrap at 99999.
 hover_parent="unittest"
 hover_state="${TMPDIR:-/tmp}/showy-quota-hover.${hover_parent}"
 hover_sb_log="${TMP}/sb-hover-stub.log"
 : > "${hover_sb_log}"
 printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "%s"\n' "${hover_sb_log}" > "${TMP}/hover-sketchybar-stub"
 chmod +x "${TMP}/hover-sketchybar-stub"
+run_hover() {
+    SENDER="$1" SKETCHYBAR="${TMP}/hover-sketchybar-stub" TMPDIR="${TMPDIR:-/tmp}" \
+        bash "${REPO_ROOT}/adapters/sketchybar/plugins/showy_quota_hover.sh" "${hover_parent}"
+}
+# A pid well ahead of any handler spawned next, wrapped like the kernel does.
+hover_newer_pid=$(( ($(sh -c 'echo $$') + 1000) % 100000 ))
+hover_now=$(date +%s)
 rm -f -- "${hover_state}"
 SENDER=mouse.exited SKETCHYBAR="${TMP}/hover-sketchybar-stub" TMPDIR="${TMPDIR:-/tmp}" \
     bash "${REPO_ROOT}/adapters/sketchybar/plugins/showy_quota_hover.sh" "${hover_parent}" &
 hover_exit_pid=$!
 wait "${hover_exit_pid}"
-assert_equals "hover exit with no newer event closes the popup" "out ${hover_exit_pid}" "$(cat "${hover_state}")"
+assert_contains "hover exit with no newer event records itself" "out ${hover_exit_pid} " "$(cat "${hover_state}")"
 assert_contains "hover exit with no newer event asks to close" "popup.drawing=off" "$(< "${hover_sb_log}")"
-printf 'in 9999999999' > "${hover_state}"
+printf 'in %s %s' "${hover_newer_pid}" "${hover_now}" > "${hover_state}"
 : > "${hover_sb_log}"
-SENDER=mouse.exited SKETCHYBAR="${TMP}/hover-sketchybar-stub" TMPDIR="${TMPDIR:-/tmp}" \
-    bash "${REPO_ROOT}/adapters/sketchybar/plugins/showy_quota_hover.sh" "${hover_parent}"
-assert_equals "hover exit after a newer entry leaves the state alone" "in 9999999999" "$(cat "${hover_state}")"
+run_hover mouse.exited
+assert_equals "hover exit after a newer entry leaves the state alone" "in ${hover_newer_pid} ${hover_now}" "$(cat "${hover_state}")"
 assert_not_contains "hover exit after a newer entry never closes" "popup.drawing=off" "$(< "${hover_sb_log}")"
 rm -f -- "${hover_state}"
 : > "${hover_sb_log}"
-SENDER=mouse.entered SKETCHYBAR="${TMP}/hover-sketchybar-stub" TMPDIR="${TMPDIR:-/tmp}" \
-    bash "${REPO_ROOT}/adapters/sketchybar/plugins/showy_quota_hover.sh" "${hover_parent}"
+run_hover mouse.entered
 assert_contains "hover entry opens the popup" "popup.drawing=on" "$(< "${hover_sb_log}")"
-printf 'out 9999999999' > "${hover_state}"
+printf 'out %s %s' "${hover_newer_pid}" "${hover_now}" > "${hover_state}"
 : > "${hover_sb_log}"
-SENDER=mouse.entered SKETCHYBAR="${TMP}/hover-sketchybar-stub" TMPDIR="${TMPDIR:-/tmp}" \
-    bash "${REPO_ROOT}/adapters/sketchybar/plugins/showy_quota_hover.sh" "${hover_parent}"
-assert_equals "hover entry after a newer exit leaves the state alone" "out 9999999999" "$(cat "${hover_state}")"
+run_hover mouse.entered
+assert_equals "hover entry after a newer exit leaves the state alone" "out ${hover_newer_pid} ${hover_now}" "$(cat "${hover_state}")"
 assert_not_contains "hover entry after a newer exit never opens" "popup.drawing=on" "$(< "${hover_sb_log}")"
+# Regression: after the pid wrap, a record left minutes ago by a large pid
+# refused every later claim, so hover died until the file was removed. Stale
+# records and legacy `word pid` records never block.
+for hover_old in "out ${hover_newer_pid} $(( hover_now - 60 ))" "out 99285"; do
+    printf '%s' "${hover_old}" > "${hover_state}"
+    : > "${hover_sb_log}"
+    run_hover mouse.entered
+    assert_contains "hover entry overrides old record '${hover_old}'" "popup.drawing=on" "$(< "${hover_sb_log}")"
+done
 rm -f -- "${hover_state}"
 
 # Regression: a plugin run that outlives `sketchybar --reload` can re-add

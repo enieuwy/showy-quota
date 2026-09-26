@@ -9,12 +9,18 @@
 # pace overlay overlap). An exit waits 0.35 s and closes only if no entry
 # happened since.
 #
-# SketchyBar spawns handlers in event order, so a larger pid means a newer
-# event. A delayed older event must never overwrite a newer one: each writer
-# claims the state file only when the recorded pid is its own or older, and
-# a refused claim means a newer event already decided, so the writer exits
-# without touching the popup. Writes go through a temp file plus rename so a
-# concurrent reader never sees a half-written state.
+# SketchyBar spawns handlers in event order, and a pid is fixed at fork, so
+# pid order is spawn order. A delayed older event must never overwrite a
+# newer one: each writer claims the state file only when no newer event holds
+# it, and a refused claim means a newer event already decided, so the writer
+# exits without touching the popup. Writes go through a temp file plus rename
+# so a concurrent reader never sees a half-written state.
+#
+# Pids wrap (macOS: at 99999), so a raw numeric compare goes wrong after a
+# wrap and a stale large pid would refuse every later claim forever. Two
+# guards: the compare is modular, and a recorded event only blocks for
+# HOVER_RACE_SECONDS. Racing handlers spawn within milliseconds; an older
+# record has no claim left to protect.
 
 set -uo pipefail
 
@@ -29,27 +35,42 @@ esac
 
 state="${TMPDIR:-/tmp}/showy-quota-hover.${parent}"
 
-# Claim the state file for (`word`, pid): overwrite only when the recorded
-# event is absent, malformed, or older-or-equal. Returns 1 when a newer event
-# already claimed it, in which case the caller must leave the popup alone.
+readonly PID_SPACE=100000
+readonly HOVER_RACE_SECONDS=2
+now="${EPOCHSECONDS:-$(date +%s)}"
+
+# Succeeds when pid $1 was spawned after pid $2, modulo the pid wrap.
+pid_is_newer() {
+    local d=$(( (10#$1 - 10#$2 + PID_SPACE) % PID_SPACE ))
+    (( d > 0 && d < PID_SPACE / 2 ))
+}
+
+# Claim the state file for (`word`, pid): refuse only when a recent record
+# (within HOVER_RACE_SECONDS) holds a newer pid. Absent, malformed, legacy
+# two-field, or stale records are overwritten. Returns 1 on refusal, in which
+# case the caller must leave the popup alone. On success, `claimed` holds the
+# written record.
 claim_hover_state() {
-    local word="$1" pid="$2" current recorded
+    local word="$1" pid="$2" current rec_word rec_pid rec_time extra
     current=$(cat "${state}" 2>/dev/null) || current=""
-    case "${current}" in
-        in\ * | out\ *)
-            recorded="${current#* }"
-            case "${recorded}" in
-                "" | *[!0-9]*) ;; # Foreign junk: overwrite below.
-                # Numeric compare: a larger pid is the newer event.
-                *) (( 10#${recorded} > 10#${pid} )) && return 1 ;;
+    read -r rec_word rec_pid rec_time extra <<< "${current}"
+    case "${rec_word}:${extra}" in
+        in: | out:)
+            case "${rec_pid}:${rec_time}" in
+                :* | *: | *[!0-9:]*) ;; # Malformed or legacy: overwrite below.
+                *)
+                    if (( now - 10#${rec_time} <= HOVER_RACE_SECONDS )) \
+                        && pid_is_newer "${rec_pid}" "${pid}"; then
+                        return 1
+                    fi
+                    ;;
             esac
             ;;
-        "") ;;
-        *) ;;
     esac
+    claimed="${word} ${pid} ${now}"
     local tmp
     tmp=$(mktemp "${state}.XXXXXX" 2>/dev/null) || return 1
-    printf '%s %s' "${word}" "${pid}" > "${tmp}" 2>/dev/null || {
+    printf '%s' "${claimed}" > "${tmp}" 2>/dev/null || {
         rm -f -- "${tmp}" 2>/dev/null
         return 1
     }
@@ -68,7 +89,7 @@ case "${SENDER:-}" in
     mouse.exited | mouse.exited.global)
         claim_hover_state "out" "$$" || exit 0
         sleep 0.35
-        [[ $(cat "${state}" 2>/dev/null) == "out $$" ]] \
+        [[ $(cat "${state}" 2>/dev/null) == "${claimed}" ]] \
             && "${SB}" --set "${parent}" popup.drawing=off >/dev/null 2>&1
         ;;
 esac
