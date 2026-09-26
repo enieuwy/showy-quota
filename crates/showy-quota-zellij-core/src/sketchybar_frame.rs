@@ -21,10 +21,11 @@
 
 use std::collections::{HashMap, HashSet};
 
+use crate::cache::MISSING_AGE_SECONDS;
 use crate::config::RenderConfig;
 use crate::palette::scale_hex;
 use crate::sketchybar::{RowLane, SketchybarRow, SketchybarRows, LANE_COUNT};
-use crate::sketchybar_ring::{friendly_length, RingIncident, RingUnit, RingWindow};
+use crate::sketchybar_ring::{friendly_length, short_age, RingIncident, RingUnit, RingWindow};
 
 /// Bump when icon rendering semantics change so stale cached PNGs are replaced.
 pub const ICON_CACHE_VERSION: &str = "5";
@@ -638,9 +639,19 @@ impl FrameSettings {
         format!("0xff{}", self.ring_window_hex(remaining))
     }
 
-    /// Empty pool (0 % left): red-tinted track derived from the bad colour.
-    pub(crate) fn empty_track_argb(&self) -> String {
-        format!("0x66{}", self.primary_bad)
+    /// A blocked window: its status colour at the dim shade the rows use
+    /// for long windows.
+    pub(crate) fn ring_blocked_argb(&self, remaining: i64) -> String {
+        format!(
+            "0xff{}",
+            scale_hex(&self.ring_window_hex(remaining), "0.55")
+        )
+    }
+
+    /// Stale data that may still be right: the status warning colour, not
+    /// the red countdown-warn used for errors.
+    fn ring_primary_warn_argb(&self) -> String {
+        format!("0xff{}", self.primary_warn)
     }
 
     fn ring_stale_argb(&self) -> String {
@@ -676,6 +687,8 @@ pub struct RingFrameInputs<'a> {
     pub units: &'a [RingUnit],
     pub settings: &'a FrameSettings,
     pub stale: bool,
+    /// Cache age behind a stale strip, shown in the end mark (`⚠ 25m`).
+    pub stale_age_seconds: Option<i64>,
     pub degraded_cli: bool,
     /// The last frame file; `None` sends every unit.
     pub previous: Option<&'a str>,
@@ -706,7 +719,12 @@ pub fn build_ring_frame(inputs: &RingFrameInputs<'_>) -> Frame {
     }
     push_unit(
         TAIL_KEY,
-        ring_tail_args(inputs.stale, inputs.degraded_cli, inputs.settings),
+        ring_tail_args(
+            inputs.stale,
+            inputs.stale_age_seconds,
+            inputs.degraded_cli,
+            inputs.settings,
+        ),
     );
 
     Frame {
@@ -716,15 +734,29 @@ pub fn build_ring_frame(inputs: &RingFrameInputs<'_>) -> Frame {
     }
 }
 
-fn ring_tail_args(stale: bool, degraded_cli: bool, settings: &FrameSettings) -> Vec<String> {
+/// The strip's end marks. A stale cache is one yellow mark with the data age
+/// (`⚠ 25m`): one signal for one cause, in the colour for "old, may still be
+/// right" rather than the red of an error.
+fn ring_tail_args(
+    stale: bool,
+    stale_age_seconds: Option<i64>,
+    degraded_cli: bool,
+    settings: &FrameSettings,
+) -> Vec<String> {
     let warn = format!("label.color=0xff{}", settings.countdown_warn);
     let click = format!("click_script={}", settings.click);
     let mut args: Vec<String> = vec!["--set".into(), "showy_quota.stale".into()];
     if stale {
+        let label = match stale_age_seconds {
+            Some(age) if (0..MISSING_AGE_SECONDS).contains(&age) => {
+                format!("{} {}", settings.stale_glyph, short_age(age))
+            }
+            _ => settings.stale_glyph.clone(),
+        };
         args.extend([
             "drawing=on".into(),
-            format!("label={}", settings.stale_glyph),
-            warn.clone(),
+            format!("label={label}"),
+            format!("label.color={}", settings.ring_primary_warn_argb()),
             "icon.drawing=off".into(),
             "background.color=0x00000000".into(),
             "background.height=0".into(),
@@ -931,14 +963,14 @@ fn ring_unit_args(unit: &RingUnit, settings: &FrameSettings) -> Vec<String> {
             Some(bar) => {
                 let color = if stale {
                     settings.ring_stale_argb()
+                } else if bar.blocked {
+                    settings.ring_blocked_argb(bar.remaining)
                 } else {
                     settings.ring_window_argb(bar.remaining)
                 };
-                let track = if stale || bar.unknown || bar.remaining > 0 {
-                    settings.ring_track_argb()
-                } else {
-                    settings.empty_track_argb()
-                };
+                // An empty bar keeps the plain track, as an empty ring does:
+                // no fill is the whole signal.
+                let track = settings.ring_track_argb();
                 set(
                     bar_item,
                     vec![
@@ -1030,8 +1062,13 @@ fn ring_unit_args(unit: &RingUnit, settings: &FrameSettings) -> Vec<String> {
     } else {
         0
     };
+    // Red = an error that needs action; yellow = this provider's data is
+    // stale (the label keeps its countdown behind the stale glyph); grey =
+    // the whole cache is stale and the strip's end mark says so once.
     let label_color = if error {
         settings.ring_warn_argb()
+    } else if unit.stale_mark {
+        settings.ring_primary_warn_argb()
     } else if stale {
         settings.ring_stale_argb()
     } else if unit
@@ -1141,14 +1178,12 @@ fn ring_popup_args(
         };
         let color = if unit.stale {
             settings.ring_stale_argb()
+        } else if window.blocked {
+            settings.ring_blocked_argb(window.remaining)
         } else {
             settings.ring_window_argb(window.remaining)
         };
-        let track = if is_ring || unit.stale || window.unknown || window.remaining > 0 {
-            settings.ring_track_argb()
-        } else {
-            settings.empty_track_argb()
-        };
+        let track = settings.ring_track_argb();
         let pace = match window.expected {
             Some(expected) if !window.breakdown => {
                 Some(format!("{:+}", window.remaining - expected))
@@ -1243,6 +1278,13 @@ fn ring_popup_args(
         if !error.message.is_empty() {
             alerts.push(("⚠".into(), warn.clone(), error.message.clone()));
         }
+    }
+    if let Some(note) = unit.stale_note.as_ref() {
+        alerts.push((
+            settings.stale_glyph.clone(),
+            settings.ring_primary_warn_argb(),
+            note.clone(),
+        ));
     }
     if let Some(incident) = unit.incident.as_ref() {
         let color = match incident.indicator.as_str() {
@@ -2138,6 +2180,7 @@ mod tests {
             units: &units,
             settings: &settings,
             stale: false,
+            stale_age_seconds: None,
             degraded_cli: false,
             previous,
         })
@@ -2196,6 +2239,103 @@ mod tests {
         let row0 = props(args, "showy_quota.commandcode.pop_row0");
         assert!(row0.contains(&"ring.value=0.48"), "{row0:?}");
         assert!(row0.contains(&"label.badge=48%"), "{row0:?}");
+    }
+
+    // 5h under an empty 7d bar, inside a 30d ring that still has quota.
+    const BLOCKED_BY_BAR: &str = r#"[{"provider":"commandcode","usage":{
+        "primary":{"usedPercent":10.0,"resetsAt":"2023-11-14T23:00:00Z","windowMinutes":300},
+        "secondary":{"usedPercent":100.0,"resetsAt":"2023-11-15T06:00:00Z","windowMinutes":10080},
+        "tertiary":{"usedPercent":52.0,"resetsAt":"2023-12-10T06:00:00Z","windowMinutes":43200}}}]"#;
+
+    #[test]
+    fn a_blocked_bar_dims_drops_its_knob_and_an_empty_bar_keeps_the_plain_track() {
+        let settings = settings(&RING_ENV);
+        let frame = ring_frame(BLOCKED_BY_BAR, &RING_ENV, None);
+        let args = &frame.args;
+        let dim = format!("slider.highlight_color={}", settings.ring_blocked_argb(90));
+        let bar0 = props(args, "showy_quota.commandcode.bar0");
+        assert!(bar0.contains(&dim.as_str()), "{bar0:?}");
+        assert!(
+            !bar0.contains(&"slider.highlight_color=0xff25be6a"),
+            "{bar0:?}"
+        );
+        assert_eq!(
+            props(args, "showy_quota.commandcode.bar0_pace")[0],
+            "drawing=off"
+        );
+        // The empty 7d bar: plain track, never the red tint.
+        let bar1 = props(args, "showy_quota.commandcode.bar1");
+        assert!(
+            bar1.contains(&"slider.background.color=0xff3a3a4a"),
+            "{bar1:?}"
+        );
+        let label = props(args, "showy_quota.commandcode.label");
+        assert!(label[1].starts_with("label=↻"), "{label:?}");
+        // The popup row of the blocked window dims its gauge and its %.
+        let row1 = props(args, "showy_quota.commandcode.pop_row1");
+        let dim_badge = format!("label.badge.color={}", settings.ring_blocked_argb(90));
+        assert!(row1.contains(&dim_badge.as_str()), "{row1:?}");
+    }
+
+    fn stale_ring_frame(stale: bool, stale_providers: &[String]) -> Frame {
+        let settings = settings(&RING_ENV);
+        let config = RenderConfig::from_env_map(&BTreeMap::new());
+        let mut units = ring_units(
+            THREE_WINDOWS.as_bytes(),
+            &config,
+            NOW,
+            SketchybarOptions {
+                stale,
+                degraded_cli: false,
+                bar_width: 80,
+                stale_providers,
+            },
+        )
+        .expect("ring units");
+        let ages = vec![(String::from("commandcode"), 1500)];
+        crate::sketchybar_ring::apply_stale_ages(&mut units, Some(1500), &ages, NOW, Some(0));
+        build_ring_frame(&RingFrameInputs {
+            units: &units,
+            settings: &settings,
+            stale,
+            stale_age_seconds: Some(1500),
+            degraded_cli: false,
+            previous: None,
+        })
+    }
+
+    #[test]
+    fn a_stale_provider_keeps_its_countdown_behind_a_yellow_glyph() {
+        let own = vec![String::from("commandcode")];
+        let frame = stale_ring_frame(false, &own);
+        let args = &frame.args;
+        let label = props(args, "showy_quota.commandcode.label");
+        assert_eq!(label[1], "label=⚠idle");
+        assert!(label.contains(&"label.color=0xfff0af00"), "{label:?}");
+        let ring = props(args, "showy_quota.commandcode.ring");
+        assert!(ring.contains(&"ring.color=0xff6c7086"), "{ring:?}");
+        let alert = props(args, "showy_quota.commandcode.pop_alert0");
+        assert!(alert.contains(&"icon.color=0xfff0af00"), "{alert:?}");
+        assert!(
+            alert
+                .iter()
+                .any(|prop| prop.contains("Last refresh 25m ago")),
+            "{alert:?}"
+        );
+        assert_eq!(props(args, "showy_quota.stale")[0], "drawing=off");
+    }
+
+    #[test]
+    fn a_stale_cache_is_one_yellow_end_mark_with_its_age() {
+        let frame = stale_ring_frame(true, &[]);
+        let args = &frame.args;
+        let tail = props(args, "showy_quota.stale");
+        assert!(tail.contains(&"label=⚠ 25m"), "{tail:?}");
+        assert!(tail.contains(&"label.color=0xfff0af00"), "{tail:?}");
+        // Units stay grey with their plain countdown: no per-unit glyph.
+        let label = props(args, "showy_quota.commandcode.label");
+        assert_eq!(label[1], "label=idle");
+        assert!(label.contains(&"label.color=0xff6c7086"), "{label:?}");
     }
 
     #[test]

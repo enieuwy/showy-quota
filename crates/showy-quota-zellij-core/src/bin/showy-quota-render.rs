@@ -13,7 +13,7 @@ use showy_quota_zellij_core::{
         RingFrameInputs,
     },
     sketchybar_notch::{notch_layout, parse_previous_plan, NotchSettings, PreviousPlan},
-    sketchybar_ring::ring_units,
+    sketchybar_ring::{apply_stale_ages, ring_units},
     sketchybar_rows, valid_provider_id, Freshness, PickOptions, PromptOptions, RenderConfig,
     RenderError, RenderOptions, SketchybarOptions, SketchybarRows, Template, TemplateScope,
 };
@@ -471,6 +471,9 @@ struct InputPayload {
     /// though the cache file itself is current. Only the cache path can know
     /// this: `--json` input carries no publish metadata.
     stale_providers: Vec<String>,
+    /// Each provider's own slice age in seconds, for the ring popup's stale
+    /// row. Empty for `--json` input.
+    provider_ages: Vec<(String, i64)>,
 }
 
 fn read_input(cli: &Cli, now_epoch: i64, config: &RenderConfig) -> Result<InputPayload, String> {
@@ -482,10 +485,17 @@ fn read_input(cli: &Cli, now_epoch: i64, config: &RenderConfig) -> Result<InputP
             age_seconds: None,
             source: String::new(),
             stale_providers: Vec::new(),
+            provider_ages: Vec::new(),
         }),
         Input::Cache => {
             let snapshot = read_cache_snapshot(now_epoch, config).map_err(|err| err.to_string())?;
             let stale_providers = snapshot.freshness.stale_providers();
+            let provider_ages = snapshot
+                .freshness
+                .providers
+                .iter()
+                .map(|provider| (provider.provider.clone(), provider.age_seconds))
+                .collect();
             Ok(InputPayload {
                 payload: snapshot.payload,
                 stale: snapshot.freshness.stale,
@@ -493,6 +503,7 @@ fn read_input(cli: &Cli, now_epoch: i64, config: &RenderConfig) -> Result<InputP
                 age_seconds: Some(snapshot.freshness.age_seconds),
                 source: snapshot.freshness.source,
                 stale_providers,
+                provider_ages,
             })
         }
     }
@@ -704,7 +715,16 @@ fn run_sketchybar_ring_frame(
                 stale_providers: &input.stale_providers,
             };
             match ring_units(&input.payload, config, now_epoch, options) {
-                Ok(units) => (units, input.age_seconds, stale, degraded_cli),
+                Ok(mut units) => {
+                    apply_stale_ages(
+                        &mut units,
+                        input.age_seconds,
+                        &input.provider_ages,
+                        now_epoch,
+                        config.reset_description_timezone_offset_minutes,
+                    );
+                    (units, input.age_seconds, stale, degraded_cli)
+                }
                 Err(_) if sb.or_empty => (Vec::new(), None, stale, degraded_cli),
                 Err(err) => return Err(render_error(err)),
             }
@@ -764,6 +784,7 @@ fn run_sketchybar_ring_frame(
         units: &units,
         settings,
         stale,
+        stale_age_seconds: age_seconds,
         degraded_cli,
         previous: previous_frame.as_deref(),
     });

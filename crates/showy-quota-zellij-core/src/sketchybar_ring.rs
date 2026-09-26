@@ -22,7 +22,7 @@ use crate::config::RenderConfig;
 use crate::metrics::{error_kind, normalized_status_indicator, sanitize_error_message, ErrorKind};
 use crate::providers::{font_icon, sigil};
 use crate::render::{format_countdown, RenderError};
-use crate::reset::{minutes_until, reset_clock, reset_epoch};
+use crate::reset::{epoch_clock, minutes_until, reset_clock, reset_epoch};
 use crate::sketchybar::{
     elapsed_marker_x, marker_percentage_from_x, passes_filters, sort_records, SketchybarOptions,
 };
@@ -47,6 +47,9 @@ pub struct RingWindow {
     /// CodexBar sent a placeholder (`usageKnown: false`): an empty track with
     /// no pace, never a full gauge, and `?` where the percent would go.
     pub unknown: bool,
+    /// A shorter window that cannot be used because the ring or a longer bar
+    /// is empty: drawn at the dim shade with no pace.
+    pub blocked: bool,
 }
 
 /// A provider CodexBar could not measure.
@@ -93,7 +96,8 @@ pub struct RingUnit {
     pub ring: RingWindow,
     /// Shorter windows, shortest first; at most two (three slots exist).
     pub bars: Vec<RingWindow>,
-    /// Strip countdown label: the shortest window’s countdown.
+    /// Strip countdown label: the shortest window’s countdown, or, when that
+    /// window is blocked, `↻` plus the refill of the window that blocks it.
     pub label: String,
     /// Countdown minutes behind the label, when the reset parses.
     pub label_minutes: Option<i64>,
@@ -103,12 +107,21 @@ pub struct RingUnit {
     pub note: String,
     /// Widest popup row name; the popup columns align to it (minimum 6).
     pub name_width: usize,
-    /// Whole-strip or per-provider staleness: grey, no pace.
+    /// Whole-strip or per-provider staleness: grey, no pace, never blocked.
     pub stale: bool,
+    /// This provider’s own slice is stale (the cache itself is not): the
+    /// label carries the stale glyph in the warning colour.
+    pub stale_mark: bool,
+    /// Popup row for a stale unit: the data age and last refresh clock. Set
+    /// by [`apply_stale_ages`].
+    pub stale_note: Option<String>,
     pub error: Option<RingError>,
     pub incident: Option<RingIncident>,
     pub banked: Option<RingBanked>,
 }
+
+/// Prefix of a label that counts to the refill of a blocking window.
+pub const REFILL_GLYPH: &str = "↻";
 
 const SLOT_NAMES: [&str; 3] = ["primary", "secondary", "tertiary"];
 
@@ -119,6 +132,7 @@ struct TickCtx {
     bar_width: i64,
     tz: Option<i16>,
     stale: bool,
+    stale_mark: bool,
 }
 
 /// The ring units for one tick, in pill order. Filters and sorts providers
@@ -188,23 +202,25 @@ fn provider_units(
     options: &SketchybarOptions,
 ) -> Vec<RingUnit> {
     let stale = options.stale_for(&record.provider);
+    let stale_mark = stale && !options.stale;
     let tz = config.reset_description_timezone_offset_minutes;
     let bar_width = options.bar_width.clamp(2, 4_096);
     if is_errored(record) {
         return vec![error_unit(record, raw, config, now_epoch, stale)];
-    }
-    if record.provider == "antigravity" {
-        let pools = antigravity_units(record, raw, config, now_epoch, bar_width, tz, stale);
-        if !pools.is_empty() {
-            return pools;
-        }
     }
     let tick = TickCtx {
         now_epoch,
         bar_width,
         tz,
         stale,
+        stale_mark,
     };
+    if record.provider == "antigravity" {
+        let pools = antigravity_units(record, raw, config, tick);
+        if !pools.is_empty() {
+            return pools;
+        }
+    }
     vec![family_unit(
         &record.provider,
         &display_name(&record.provider),
@@ -287,7 +303,7 @@ fn family_unit(
             .then_with(|| a.cmp(&b))
     });
     let ring_minutes = ring_index.and_then(|index| raws.get(index).and_then(|raw| raw.minutes));
-    let bars: Vec<RingWindow> = order
+    let mut bars: Vec<RingWindow> = order
         .into_iter()
         .filter(|index| Some(*index) != ring_index)
         .map(|index| {
@@ -308,34 +324,62 @@ fn family_unit(
             reset_text: "idle".into(),
             breakdown: false,
             unknown: false,
+            blocked: false,
         },
     };
-    let shortest_title;
-    let shortest_remaining;
-    let (label, label_minutes) = {
-        // An empty ring (pool exhausted) blocks every shorter window, so the
-        // label counts down to its refill instead of the shortest bar's reset.
-        let shortest = if ring.remaining == 0 && !ring.unknown && !ring.reset.is_empty() {
-            &ring
-        } else {
-            bars.first().unwrap_or(&ring)
-        };
-        shortest_title = shortest.title.clone();
-        shortest_remaining = shortest.remaining;
-        countdown(shortest, tick.now_epoch, tick.tz)
+    let ring_empty = ring.remaining == 0 && !ring.unknown;
+    // A bar is blocked when the ring or a longer bar (later: bars run
+    // shortest first) is empty. Breakdown parts neither block nor dim: they
+    // are the ring's own window. Stale data never claims a blocked state.
+    if !tick.stale {
+        for index in 0..bars.len() {
+            if bars[index].breakdown {
+                continue;
+            }
+            let blocked = ring_empty || bars[index + 1..].iter().any(blocks);
+            if blocked {
+                bars[index].blocked = true;
+                bars[index].expected = None;
+            }
+        }
+    }
+    // The label counts to the shortest window. When that window is blocked,
+    // it counts to the latest refill among the windows that block it, marked
+    // with the refill glyph so the change of meaning is visible.
+    let shortest = bars.first().unwrap_or(&ring);
+    let blocker = if shortest.blocked {
+        std::iter::once(&ring)
+            .filter(|_| ring_empty)
+            .chain(bars[1..].iter().filter(|bar| blocks(bar)))
+            .filter_map(|window| {
+                minutes_until(&window.reset, tick.now_epoch, tick.tz).map(|m| (m, window))
+            })
+            .max_by_key(|(minutes, _)| *minutes)
+            .map(|(_, window)| window)
+    } else {
+        None
     };
-    let label = if config.severity_glyphs && !tick.stale {
+    let counted = blocker.unwrap_or(shortest);
+    let shortest_title = counted.title.clone();
+    let shortest_remaining = counted.remaining;
+    let (countdown_text, label_minutes) = countdown(counted, tick.now_epoch, tick.tz);
+    let refill = if blocker.is_some() { REFILL_GLYPH } else { "" };
+    let label = if tick.stale_mark {
+        format!("{}{countdown_text}", config.stale_glyph)
+    } else if config.severity_glyphs && !tick.stale {
         format!(
-            "{}{label}",
+            "{}{refill}{countdown_text}",
             config.severity(shortest_remaining as i32).marker()
         )
     } else {
-        label
+        format!("{refill}{countdown_text}")
     };
     let note = unit_note(
-        &label,
+        &countdown_text,
         &shortest_title,
-        ring.remaining == 0 && !ring.unknown,
+        ring_empty,
+        blocker.is_some(),
+        bars.iter().any(|bar| bar.blocked),
         bars.is_empty(),
     );
     let name_width = std::iter::once(ring.title.len())
@@ -370,9 +414,64 @@ fn family_unit(
         note,
         name_width,
         stale: tick.stale,
+        stale_mark: tick.stale_mark,
+        stale_note: None,
         error: None,
         incident: incident_for(record, raw),
         banked: banked_for(raw, tick.now_epoch, tick.tz),
+    }
+}
+
+/// An empty, known, time-window bar (not a breakdown part) blocks every
+/// shorter window.
+fn blocks(window: &RingWindow) -> bool {
+    !window.breakdown && !window.unknown && window.remaining == 0
+}
+
+/// Fill each stale unit's popup row: `whole_age` (seconds) for a stale
+/// cache, the provider's own slice age for a stale-marked unit. Errored
+/// units keep their error rows instead.
+pub fn apply_stale_ages(
+    units: &mut [RingUnit],
+    whole_age: Option<i64>,
+    provider_ages: &[(String, i64)],
+    now_epoch: i64,
+    tz: Option<i16>,
+) {
+    for unit in units
+        .iter_mut()
+        .filter(|unit| unit.stale && unit.error.is_none())
+    {
+        let age = if unit.stale_mark {
+            provider_ages
+                .iter()
+                .find(|(provider, _)| provider == &unit.provider)
+                .map(|(_, age)| *age)
+        } else {
+            whole_age
+        };
+        let Some(age) = age.filter(|age| *age >= 0) else {
+            continue;
+        };
+        let ago = friendly_duration(age / 60);
+        unit.stale_note = Some(match epoch_clock(now_epoch - age, tz) {
+            Some(clock) => {
+                format!("Last refresh {ago} ago ({clock}). These are the last known values.")
+            }
+            None => format!("Last refresh {ago} ago. These are the last known values."),
+        });
+    }
+}
+
+/// `25m` / `3h` / `2d`: a data age short enough for the strip.
+pub fn short_age(seconds: i64) -> String {
+    let minutes = seconds.max(0) / 60;
+    if minutes < 60 {
+        format!("{minutes}m")
+    } else if minutes < 1440 {
+        format!("{}h", minutes / 60)
+    } else {
+        format!("{}d", minutes / 1440)
     }
 }
 
@@ -402,6 +501,7 @@ fn assemble(raw: &RawWindow, breakdown: bool, tick: TickCtx) -> RingWindow {
         reset_text: reset_text(&raw.reset, tick.now_epoch, tick.tz),
         breakdown,
         unknown: raw.unknown,
+        blocked: false,
     }
 }
 
@@ -436,20 +536,38 @@ fn countdown(window: &RingWindow, now_epoch: i64, tz: Option<i16>) -> (String, O
     }
 }
 
-fn unit_note(label: &str, shortest_title: &str, ring_empty: bool, has_bars: bool) -> String {
-    if label == "idle" {
-        return format!("idle = the {shortest_title} window has not started");
+fn unit_note(
+    countdown: &str,
+    counted_title: &str,
+    ring_empty: bool,
+    refill: bool,
+    dim_bars: bool,
+    has_bars: bool,
+) -> String {
+    if countdown == "idle" {
+        return format!("idle = the {counted_title} window has not started");
     }
-    let base = if has_bars {
-        format!("{label} = time until the bar resets")
+    // Short enough for the popup: SketchyBar clips a long note at its edge.
+    // The refill clause already names the empty window, so it replaces the
+    // "empty ring" clause rather than joining it.
+    let mut parts: Vec<String> = Vec::new();
+    if refill {
+        parts.push(format!(
+            "{REFILL_GLYPH}{countdown} = until {counted_title} refills"
+        ));
+    } else if ring_empty && !has_bars {
+        parts.push(format!(
+            "empty ring = pool empty · {countdown} = until it refills"
+        ));
+    } else if has_bars {
+        parts.push(format!("{countdown} = time until the bar resets"));
     } else {
-        format!("{label} = time until the ring resets")
-    };
-    if ring_empty {
-        format!("empty ring = pool empty · {label} = until it refills")
-    } else {
-        base
+        parts.push(format!("{countdown} = time until the ring resets"));
     }
+    if dim_bars {
+        parts.push("dim bar = blocked".into());
+    }
+    parts.join(" · ")
 }
 
 /// Antigravity’s two pools from `extraRateWindows`: Gemini versus the rest.
@@ -459,10 +577,7 @@ fn antigravity_units(
     record: &ProviderRecord,
     raw: &Value,
     config: &RenderConfig,
-    now_epoch: i64,
-    bar_width: i64,
-    tz: Option<i16>,
-    stale: bool,
+    tick: TickCtx,
 ) -> Vec<RingUnit> {
     let usage = match record.usage.as_ref() {
         Some(usage) => usage,
@@ -520,12 +635,7 @@ fn antigravity_units(
             record,
             raw,
             config,
-            TickCtx {
-                now_epoch,
-                bar_width,
-                tz,
-                stale,
-            },
+            tick,
         )
     })
     .collect()
@@ -610,6 +720,7 @@ fn error_unit(
             reset_text: "idle".into(),
             breakdown: false,
             unknown: false,
+            blocked: false,
         },
         bars: Vec::new(),
         label: kind_label.clone(),
@@ -618,6 +729,8 @@ fn error_unit(
         note,
         name_width: 6,
         stale,
+        stale_mark: false,
+        stale_note: None,
         error: Some(RingError {
             kind_label,
             message,
@@ -796,7 +909,7 @@ fn sanitize(value: &str) -> String {
 mod tests {
     use super::*;
 
-    const NOW: i64 = 1_786_118_400; // 2026-08-04T00:00:00Z
+    const NOW: i64 = 1_786_118_400; // 2026-08-07T16:00:00Z
 
     fn config() -> RenderConfig {
         RenderConfig::default()
@@ -930,13 +1043,122 @@ mod tests {
         assert!(units[1].bars[0].unknown);
         assert_eq!(units[1].bars[0].remaining, 0);
         assert_eq!(units[1].bars[0].expected, None);
-        // The empty pool blocks the 5h window: the label counts to the refill.
-        assert_eq!(units[1].label, "18:05");
+        // The empty pool blocks the 5h window: the label counts to the
+        // refill, marked so the change of meaning shows.
+        assert!(units[1].bars[0].blocked);
+        assert_eq!(units[1].label, "↻18:05");
         assert!(
-            units[1].note.contains("until it refills"),
+            units[1]
+                .note
+                .contains("↻18:05 = until Claude/GPT weekly refills"),
             "{}",
             units[1].note
         );
+    }
+
+    fn commandcode(five_used: f64, week_used: f64, month_used: f64) -> String {
+        format!(
+            r#"[{{"provider":"commandcode","usage":{{
+                "primary":{{"usedPercent":{five_used},"resetsAt":"{}","windowMinutes":300}},
+                "secondary":{{"usedPercent":{week_used},"resetsAt":"{}","windowMinutes":10080}},
+                "tertiary":{{"usedPercent":{month_used},"resetsAt":"{}","windowMinutes":43200}}}}}}]"#,
+            reset_at(160),
+            reset_at(8727),
+            reset_at(31170)
+        )
+    }
+
+    #[test]
+    fn an_empty_longer_bar_blocks_only_the_shorter_bars() {
+        let units = units(&commandcode(10.0, 100.0, 40.0));
+        let unit = &units[0];
+        assert!(unit.bars[0].blocked, "5h under an empty 7d bar");
+        assert_eq!(unit.bars[0].expected, None, "a blocked bar has no pace");
+        assert!(!unit.bars[1].blocked, "the empty bar itself is not blocked");
+        assert!(unit.bars[1].expected.is_some());
+        // Counts to the 7d refill, not the 5h reset.
+        assert_eq!(unit.label, format!("↻{}", format_countdown(8727)));
+        assert!(unit.note.contains("dim bar = blocked"), "{}", unit.note);
+    }
+
+    #[test]
+    fn the_label_counts_to_the_latest_refill_among_the_blockers() {
+        // Both the 30d ring and the 7d bar are empty: usable only after both.
+        let units = units(&commandcode(10.0, 100.0, 100.0));
+        let unit = &units[0];
+        assert!(unit.bars[0].blocked && unit.bars[1].blocked);
+        assert_eq!(unit.label, format!("↻{}", format_countdown(31170)));
+    }
+
+    #[test]
+    fn an_empty_shortest_bar_with_nothing_longer_empty_keeps_its_own_countdown() {
+        let units = units(&commandcode(100.0, 40.0, 40.0));
+        let unit = &units[0];
+        assert!(unit.bars.iter().all(|bar| !bar.blocked));
+        assert_eq!(unit.label, format_countdown(160));
+    }
+
+    #[test]
+    fn stale_units_keep_their_countdown_and_never_claim_blocked() {
+        let payload = commandcode(10.0, 100.0, 40.0);
+        let own = vec![String::from("commandcode")];
+        let marked = ring_units(
+            payload.as_bytes(),
+            &config(),
+            NOW,
+            SketchybarOptions {
+                stale_providers: &own,
+                ..options()
+            },
+        )
+        .expect("units");
+        assert!(marked[0].stale_mark);
+        assert!(marked[0].bars.iter().all(|bar| !bar.blocked));
+        // Stale glyph plus the plain 5h countdown: no refill substitution.
+        assert_eq!(marked[0].label, format!("⚠{}", format_countdown(160)));
+
+        let whole = ring_units(
+            payload.as_bytes(),
+            &config(),
+            NOW,
+            SketchybarOptions {
+                stale: true,
+                ..options()
+            },
+        )
+        .expect("units");
+        assert!(whole[0].stale && !whole[0].stale_mark);
+        assert_eq!(
+            whole[0].label,
+            format_countdown(160),
+            "the end mark carries the glyph"
+        );
+    }
+
+    #[test]
+    fn stale_ages_fill_the_popup_row_from_the_right_clock() {
+        let payload = commandcode(10.0, 40.0, 40.0);
+        let own = vec![String::from("commandcode")];
+        let mut marked = ring_units(
+            payload.as_bytes(),
+            &utc_config(),
+            NOW,
+            SketchybarOptions {
+                stale_providers: &own,
+                ..options()
+            },
+        )
+        .expect("units");
+        let ages = vec![(String::from("commandcode"), 25 * 60)];
+        apply_stale_ages(&mut marked, Some(30), &ages, NOW, Some(0));
+        assert_eq!(
+            marked[0].stale_note.as_deref(),
+            Some("Last refresh 25m ago (15:35). These are the last known values.")
+        );
+
+        let mut fresh = units(&payload);
+        apply_stale_ages(&mut fresh, Some(30), &ages, NOW, Some(0));
+        assert_eq!(fresh[0].stale_note, None, "fresh units get no stale row");
     }
 
     #[test]

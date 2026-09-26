@@ -108,6 +108,26 @@ C = Claude + GPT); Codex banked resets badge the ring; errors keep the last
 known arc in grey. Switching the body re-declares the items cleanly, leaving
 no items of the other body behind.
 
+Each colour in ring mode has one meaning:
+
+| Look | Meaning |
+|---|---|
+| Green, amber, or red arc or bar | % left, live |
+| Arc or bar at the dim shade (colour × 0.55), no pace knob | Blocked: the ring or a longer bar is empty, so this shorter window cannot be used |
+| Plain track with no fill | Nothing left in that window (ring or bar) |
+| Grey arc or bar | Last known value, not live (stale data, or a provider error) |
+| Yellow label with the stale glyph (`⚠2w`) | This provider's own data is stale; the label keeps its countdown |
+| Yellow end mark with the age (`⚠ 25m`) | The whole cache is stale; the units stay grey with plain labels |
+| Red label and red logo | An error that needs action (`auth`, `net`) |
+
+The countdown label normally counts to the shortest window's reset. When that
+window is blocked, the label counts to the refill of the window that blocks it
+(the latest one, when several do) and starts with `↻` (`↻14h`), so the change
+of meaning shows on the strip. Stale data never claims a blocked state: a stale
+label keeps the plain countdown. A stale unit's popup starts with a yellow row
+that gives the data age and the last refresh clock. Rows mode keeps its own
+semantics: there the dim shade marks a long window.
+
 Ring mode needs the SketchyBar fork [github.com/enieuwy/SketchyBar](https://github.com/enieuwy/SketchyBar):
 the `ring` item ([upstream PR #817](https://github.com/FelixKratz/SketchyBar/pull/817))
 and the badges ([upstream PR #816](https://github.com/FelixKratz/SketchyBar/pull/816)),
@@ -272,7 +292,9 @@ When `${SHOWY_QUOTA_USAGE_FILE}` is older than
 `SHOWY_QUOTA_STALE_GLYPH` (default `⚠`) in `SHOWY_QUOTA_PALETTE_COUNTDOWN_WARN`.
 Provider sliders and countdown labels switch to `SHOWY_QUOTA_PALETTE_STALE`;
 provider icons keep their normal status tint, and elapsed marker overlays are
-hidden so stale reset timing is not presented as live.
+hidden so stale reset timing is not presented as live. In ring mode the item
+shows the glyph with the cache age (`⚠ 25m`) in `SHOWY_QUOTA_PALETTE_PRIMARY_WARN`,
+and the units keep plain grey labels (see the ring table above).
 
 When the shared cache was refreshed from CLI fallback instead of
 `codexbar serve`, `showy_quota.degraded` renders `⚠cli` in the same warning

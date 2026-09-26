@@ -44,6 +44,15 @@ pub(crate) fn reset_clock(
     reset_description_offset_minutes: Option<i16>,
 ) -> Option<String> {
     let epoch = reset_epoch(raw, now_epoch, reset_description_offset_minutes)?;
+    epoch_clock(epoch, reset_description_offset_minutes)
+}
+
+/// Local wall-clock time (`09:35`) of an epoch, in the same frame as
+/// [`reset_clock`].
+pub(crate) fn epoch_clock(
+    epoch: i64,
+    reset_description_offset_minutes: Option<i16>,
+) -> Option<String> {
     let utc = OffsetDateTime::from_unix_timestamp(epoch).ok()?;
     let offset = configured_reset_description_offset(reset_description_offset_minutes)
         .unwrap_or_else(|| local_offset_at(utc));
