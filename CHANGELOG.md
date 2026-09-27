@@ -80,6 +80,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   included) no longer forks once per config variable.
 
 ### Fixed
+- The fetcher no longer lets CodexBar's offline fallback wipe a provider's
+  last-known usage. When Antigravity's live probes fail (seen under heavy
+  load), CodexBar answers with no error, no positional window, and one
+  `usageKnown:false` placeholder (`antigravity-offline-conversations`); that
+  record replaced the good slice and every surface dropped Antigravity, and
+  each drop and return fully redeclared the SketchyBar ring strip. A record
+  that measured nothing — no numeric positional window and only
+  `usageKnown:false` extras — now keeps the previous usage and its
+  `providerMeta` time, exactly like an error-only record, so the provider
+  goes stale in place instead of vanishing. The standalone Zellij plugin
+  applies the same rule (shared `carry_last_known_usage` in the core) on
+  both its serve and per-provider CLI paths (a carried serve slice now ages
+  into its own stale mark while other providers keep the snapshot fresh);
+  its CLI path previously also replaced last-known usage with an error-only
+  record.
 - SketchyBar ring mode: a plugin run that stopped between the probe's
   `--add` and `--remove` left an empty ring beside the strip. Probes now draw
   off, and each tick removes probe items whose run is gone. A probe that gets

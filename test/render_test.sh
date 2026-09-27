@@ -5283,6 +5283,67 @@ else
     fail "fetcher keeps last-known usage beside a fresh error and drops it on success" "rc=${rc}; error_out=${out_error:0:160}; fresh_out=${out_fresh:0:160}; meta=${meta_before}/${meta_during}/${meta_after}"
 fi
 
+# CodexBar's offline fallback (live probes failed) answers with no error and
+# only `usageKnown:false` placeholder windows. It measured nothing, so it must
+# keep the last-known usage like an error does, instead of replacing it and
+# dropping the provider's units. A windowless error-free record (Muse
+# withholding quota) is not carried.
+offline_usage_dir="${TMP}/offline-keeps-usage"
+mkdir -p "${offline_usage_dir}"
+cat > "${offline_usage_dir}/codexbar" <<EOF
+#!/bin/sh
+if [ "\${1:-}" = "config" ] && [ "\${2:-}" = "providers" ]; then
+    printf '[{"provider":"antigravity","enabled":true},{"provider":"muse","enabled":true}]'
+    exit 0
+fi
+provider=""
+while [ "\$#" -gt 0 ]; do
+    case "\$1" in
+        --provider) shift; provider="\${1:-}" ;;
+    esac
+    shift
+done
+case "\${SHOWY_QUOTA_TEST_SCENE:-ok}:\${provider}" in
+    ok:antigravity) cat "${FIXTURE_DIR}/codexbar-antigravity-quad.json" ;;
+    offline:antigravity) cat "${FIXTURE_DIR}/codexbar-antigravity-offline.json" ;;
+    ok:muse) printf '[{"provider":"muse","usage":{"primary":{"usedPercent":20,"resetsAt":"2026-09-30T01:29:34Z","windowMinutes":300}}}]' ;;
+    offline:muse) printf '[{"provider":"muse","usage":{}}]' ;;
+esac
+EOF
+chmod +x "${offline_usage_dir}/codexbar"
+offline_usage_cache=$(mk_cache)
+fetch_offline_usage() {
+    SHOWY_QUOTA_NO_CONFIG=1 \
+    SHOWY_QUOTA_CACHE_DIR="${offline_usage_cache}" \
+    SHOWY_QUOTA_CODEXBAR_BIN="${offline_usage_dir}/codexbar" \
+    SHOWY_QUOTA_CODEXBAR_SERVE_URL='' \
+    SHOWY_QUOTA_REFRESH_SECONDS=0 \
+    SHOWY_QUOTA_PROVIDERS='antigravity,muse' \
+    SHOWY_QUOTA_PROVIDERS_EXCLUDE='' \
+    SHOWY_QUOTA_PROVIDER_FAILURE_BACKOFF_SECONDS=0 \
+    SHOWY_QUOTA_TEST_SCENE="$1" \
+    "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
+}
+rc=0
+fetch_offline_usage ok > /dev/null || rc=$?
+meta_before=$(jq -r '.providerMeta.antigravity.updatedAt' "${offline_usage_cache}/usage.json" 2>/dev/null)
+sleep 1
+fetch_offline_usage offline > "${TMP}/offline-usage.json" || rc=$?
+out_offline=$(< "${TMP}/offline-usage.json")
+meta_during=$(jq -r '.providerMeta.antigravity.updatedAt' "${offline_usage_cache}/usage.json" 2>/dev/null)
+units_offline=$(env SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_CACHE_DIR="${offline_usage_cache}" \
+    SHOWY_QUOTA_PROVIDERS='antigravity' "${RENDER_BIN}" --emit metrics --from-cache 2>/dev/null \
+    | jq -r '[.. | objects | select(has("provider")) | .provider] | unique | join(",")' 2>/dev/null)
+if (( rc == 0 )) \
+    && printf '%s' "${out_offline}" | jq -e '.[] | select(.provider == "antigravity") | .usage.primary.usedPercent != null and ([.usage.extraRateWindows[].id | startswith("antigravity-quota-summary-")] | length == 4 and all)' >/dev/null 2>&1 \
+    && printf '%s' "${out_offline}" | jq -e '.[] | select(.provider == "muse") | .usage.primary == null' >/dev/null 2>&1 \
+    && [[ -n "${meta_before}" && "${meta_during}" == "${meta_before}" ]] \
+    && [[ "${units_offline}" == "antigravity" ]]; then
+    ok "fetcher keeps last-known usage when CodexBar answers with offline placeholders only"
+else
+    fail "fetcher keeps last-known usage when CodexBar answers with offline placeholders only" "rc=${rc}; out=${out_offline:0:200}; meta=${meta_before}/${meta_during}; units=${units_offline}"
+fi
+
 # A fresh error that carries its own usable usage is never marked
 # carried-forward, even when that usage exactly equals the cached usage.
 # Otherwise providerMeta keeps the older fetch's time and consumers later

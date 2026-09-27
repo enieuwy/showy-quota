@@ -15,9 +15,9 @@ pub mod sketchybar_ring;
 pub mod template;
 
 pub use codexbar::{
-    is_errored, parse_provider_config_payload, parse_usage_payload, parse_usage_payload_indexed,
-    payload_has_renderable_provider, provider_ids_from_records, valid_provider_id,
-    ProviderConfigError, ProviderRecord,
+    carry_last_known_usage, is_errored, parse_provider_config_payload, parse_usage_payload,
+    parse_usage_payload_indexed, payload_has_renderable_provider, provider_ids_from_records,
+    valid_provider_id, ProviderConfigError, ProviderRecord,
 };
 pub use config::RenderConfig;
 pub use metrics::{emit_provider_metrics, emit_provider_metrics_with_visible, MetricsWithVisible};

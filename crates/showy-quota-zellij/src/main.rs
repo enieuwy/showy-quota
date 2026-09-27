@@ -3,11 +3,13 @@
 use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use showy_quota_zellij_core::codexbar::MAX_USAGE_JSON_BYTES;
 use showy_quota_zellij_core::palette::hex_to_rgb;
 use showy_quota_zellij_core::{
-    parse_provider_config_payload, parse_usage_payload, parse_usage_payload_indexed,
-    payload_has_renderable_provider, provider_ids_from_records, render_zellij, valid_provider_id,
-    Freshness, ProviderConfigError, ProviderRecord, RenderConfig, RenderOptions,
+    carry_last_known_usage, parse_provider_config_payload, parse_usage_payload,
+    parse_usage_payload_indexed, payload_has_renderable_provider, provider_ids_from_records,
+    render_zellij, valid_provider_id, Freshness, ProviderConfigError, ProviderRecord, RenderConfig,
+    RenderOptions,
 };
 use zellij_tile::prelude::*;
 
@@ -1638,8 +1640,18 @@ impl State {
             .provider_states
             .entry(provider.to_string())
             .or_default();
+        // An answer that measured nothing (error, or CodexBar's offline
+        // placeholder) keeps the last-known usage and its measurement time,
+        // so the provider goes stale in place instead of vanishing.
+        let mut record = record;
+        let carried = match (record.as_mut(), entry.last_record.as_ref()) {
+            (Some(fresh), Some(previous)) => carry_last_known_usage(fresh, previous),
+            _ => false,
+        };
         entry.last_record = record;
-        entry.last_record_seconds = Some(now);
+        if !carried {
+            entry.last_record_seconds = Some(now);
+        }
         entry.last_result_empty = entry.last_record.is_none();
         entry.last_failure_seconds = None;
         entry.consecutive_failures = 0;
@@ -1883,10 +1895,13 @@ impl State {
 
         // When serve returns a fresh aggregate, refresh per-provider state so
         // a future degraded transition has a baseline of every record CodexBar
-        // just published.
-        if source == Source::Serve {
-            self.seed_provider_states_from_payload(&records, &payload);
-        }
+        // just published. A record that measured nothing keeps its last-known
+        // usage, so the payload may be rewritten.
+        let payload = if source == Source::Serve {
+            self.seed_provider_states_from_payload(&records, payload)
+        } else {
+            payload
+        };
         self.last_payload = Some(payload);
         self.last_success_seconds = Some(now_seconds());
         self.set_source(source);
@@ -1894,34 +1909,60 @@ impl State {
         true
     }
 
-    fn seed_provider_states_from_payload(&mut self, records: &[ProviderRecord], payload: &[u8]) {
-        let Ok(indexed) = parse_usage_payload_indexed(payload) else {
-            return;
+    /// Store every serve record as its provider's baseline and return the
+    /// payload to publish. A record that measured nothing (an error, or
+    /// CodexBar's offline placeholder) keeps the previous record's usage and
+    /// measurement time instead of replacing it, so one provider's probe
+    /// failure cannot drop it from an otherwise healthy snapshot.
+    fn seed_provider_states_from_payload(
+        &mut self,
+        records: &[ProviderRecord],
+        payload: Vec<u8>,
+    ) -> Vec<u8> {
+        let Ok(indexed) = parse_usage_payload_indexed(&payload) else {
+            return payload;
         };
         debug_assert_eq!(indexed.len(), records.len());
-        let Ok(value) = serde_json::from_slice::<serde_json::Value>(payload) else {
-            return;
+        let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(&payload) else {
+            return payload;
         };
-        let Some(array) = value.as_array() else {
-            return;
+        let Some(array) = value.as_array_mut() else {
+            return payload;
         };
         // Index by the record's ORIGINAL array position: the validated list is a
         // subsequence, so a positional zip would store another record's raw JSON
         // under this provider's id.
         let measured_at = now_seconds();
+        let mut any_carried = false;
         for (index, record) in &indexed {
             if !valid_provider_id(&record.provider) {
                 continue;
             }
-            let Some(value) = array.get(*index) else {
+            let Some(value) = array.get_mut(*index) else {
                 continue;
             };
             let entry = self
                 .provider_states
                 .entry(record.provider.clone())
                 .or_default();
+            let carried = entry
+                .last_record
+                .as_ref()
+                .is_some_and(|previous| carry_last_known_usage(value, previous));
+            any_carried |= carried;
             entry.last_record = Some(value.clone());
-            entry.last_record_seconds = Some(measured_at);
+            if !carried {
+                entry.last_record_seconds = Some(measured_at);
+            }
+        }
+        if !any_carried {
+            return payload;
+        }
+        // Restoring older usage can grow the array; never publish past the
+        // parser's cap, or every later accept would fail to parse.
+        match serde_json::to_vec(&value) {
+            Ok(bytes) if bytes.len() <= MAX_USAGE_JSON_BYTES => bytes,
+            _ => payload,
         }
     }
 
@@ -1937,12 +1978,14 @@ impl State {
         true
     }
 
-    /// Providers whose carried-forward slice has aged past the stale horizon
-    /// while the published payload as a whole has not. Empty for a serve
-    /// snapshot (one fetch, one age) and empty once the bar is wholly stale,
+    /// Providers whose slice has aged past the stale horizon while the
+    /// published payload as a whole has not: a CLI slice carried across
+    /// failed attempts, or a serve slice whose record measured nothing and
+    /// kept its last-known usage (every measured serve record is re-stamped on
+    /// accept, so it never appears here). Empty once the bar is wholly stale,
     /// because the strip already carries that marker once.
     fn stale_provider_slices(&self, now_seconds: f64, interval: f64, stale: bool) -> Vec<String> {
-        if stale || self.source != Source::Cli {
+        if stale {
             return Vec::new();
         }
         self.provider_states
@@ -3851,6 +3894,83 @@ wait \"$__p\" 2>/dev/null; rm -rf \"$__d\"' EXIT"
         assert_eq!(extract_provider_record(b"[]", "codex"), Ok(None));
     }
 
+    fn antigravity_quad_record() -> serde_json::Value {
+        let quad = include_str!("../../../test/fixtures/codexbar-antigravity-quad.json");
+        serde_json::from_str::<serde_json::Value>(quad).expect("quad fixture")[0].clone()
+    }
+
+    const ANTIGRAVITY_OFFLINE: &str =
+        include_str!("../../../test/fixtures/codexbar-antigravity-offline.json");
+
+    #[test]
+    fn cli_offline_placeholder_keeps_last_known_usage_and_age() {
+        let good = antigravity_quad_record();
+        let mut state = State {
+            source: Source::Cli,
+            discovered_providers: vec!["antigravity".to_string()],
+            discovered_providers_at: Some(now_seconds()),
+            ..State::default()
+        };
+        let provider = state
+            .provider_states
+            .entry("antigravity".to_string())
+            .or_default();
+        provider.in_flight = true;
+        provider.active_attempt_token = Some("provider-1".to_string());
+        provider.last_record = Some(good.clone());
+        provider.last_record_seconds = Some(1_000.0);
+
+        state.handle_provider_fallback_result(
+            "antigravity",
+            Some("provider-1"),
+            Some(0),
+            ANTIGRAVITY_OFFLINE.as_bytes().to_vec(),
+        );
+
+        let provider = state.provider_states.get("antigravity").expect("state");
+        let record = provider.last_record.as_ref().expect("record kept");
+        assert_eq!(record["usage"], good["usage"]);
+        assert_eq!(provider.last_record_seconds, Some(1_000.0));
+        assert!(state.last_output.contains("AG"), "{:?}", state.last_output);
+    }
+
+    #[test]
+    fn serve_offline_placeholder_keeps_last_known_usage_beside_healthy_providers() {
+        let good = antigravity_quad_record();
+        let codex = serde_json::json!({"provider":"codex","usage":{"primary":{"usedPercent":10,"windowMinutes":300}}});
+        let mut state = State::default();
+        let first = serde_json::to_vec(&serde_json::json!([good, codex])).expect("payload");
+        assert!(state.accept_payload(first, Source::Serve));
+        let seeded_at = state.provider_states["antigravity"].last_record_seconds;
+
+        let offline = serde_json::from_str::<serde_json::Value>(ANTIGRAVITY_OFFLINE)
+            .expect("offline fixture")[0]
+            .clone();
+        let second = serde_json::to_vec(&serde_json::json!([offline, codex])).expect("payload");
+        assert!(state.accept_payload(second, Source::Serve));
+
+        let published: serde_json::Value =
+            serde_json::from_slice(state.last_payload.as_deref().expect("payload")).expect("json");
+        assert_eq!(published[0]["usage"], good["usage"]);
+        assert_eq!(
+            state.provider_states["antigravity"].last_record_seconds,
+            seeded_at
+        );
+        assert!(state.last_output.contains("AG"), "{:?}", state.last_output);
+        // The carried slice ages on its own while codex keeps serve healthy:
+        // once its measurement is past the horizon, it alone is marked.
+        let now = now_seconds();
+        state
+            .provider_states
+            .get_mut("antigravity")
+            .expect("state")
+            .last_record_seconds = Some(now - 1_000.0);
+        assert_eq!(
+            state.stale_provider_slices(now, 60.0, false),
+            vec!["antigravity".to_string()]
+        );
+    }
+
     #[test]
     fn seeding_binds_each_provider_to_its_own_raw_record() {
         // First element is dropped by validation; the survivors must still be
@@ -3858,7 +3978,7 @@ wait \"$__p\" 2>/dev/null; rm -rf \"$__d\"' EXIT"
         let payload = br#"[{"provider":"bad/id","usage":{"primary":{"usedPercent":1}}},{"provider":"codex","usage":{"primary":{"usedPercent":11}}},{"provider":"claude","usage":{"primary":{"usedPercent":22}}}]"#;
         let records = parse_usage_payload(payload).expect("payload parses");
         let mut state = State::default();
-        state.seed_provider_states_from_payload(&records, payload);
+        state.seed_provider_states_from_payload(&records, payload.to_vec());
 
         for (provider, used) in [("codex", 11.0), ("claude", 22.0)] {
             let raw = state

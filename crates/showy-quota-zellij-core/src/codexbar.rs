@@ -347,6 +347,54 @@ pub(crate) fn is_renderable(record: &ProviderRecord) -> bool {
             .is_some_and(Usage::has_renderable_window)
 }
 
+/// CodexBar answered for this provider but measured nothing: no positional
+/// window with a numeric `usedPercent`, and either an `error` or only
+/// `usageKnown:false` extra windows (its offline fallback, e.g. Antigravity's
+/// `antigravity-offline-conversations` placeholder when live probes fail).
+/// A record with no window at all and no error (Muse withholding quota) is
+/// not covered: it renders greyed in place. Mirrors the shell fetcher's
+/// `merge_error_records_with_last_known_usage` predicate.
+pub fn measured_nothing(record: &ProviderRecord) -> bool {
+    let usage = record.usage.as_ref();
+    if usage.is_some_and(Usage::has_renderable_window) {
+        return false;
+    }
+    record.error.is_some()
+        || usage.is_some_and(|usage| {
+            !usage.extra_rate_windows.is_empty()
+                && usage
+                    .extra_rate_windows
+                    .iter()
+                    .all(|window| window.usage_known == Some(false))
+        })
+}
+
+/// Keep the previous record's `usage` beside a fresh record that measured
+/// nothing, when the previous one had a usable window. Returns whether the
+/// usage was carried; the caller then keeps the previous measurement time.
+/// A fresh record that measured its own usable usage always wins.
+pub fn carry_last_known_usage(fresh: &mut serde_json::Value, previous: &serde_json::Value) -> bool {
+    let parse =
+        |value: &serde_json::Value| serde_json::from_value::<ProviderRecord>(value.clone()).ok();
+    let (Some(fresh_record), Some(previous_record)) = (parse(fresh), parse(previous)) else {
+        return false;
+    };
+    if fresh_record.provider != previous_record.provider
+        || !measured_nothing(&fresh_record)
+        || !previous_record
+            .usage
+            .as_ref()
+            .is_some_and(Usage::has_renderable_window)
+    {
+        return false;
+    }
+    let (Some(usage), Some(object)) = (previous.get("usage"), fresh.as_object_mut()) else {
+        return false;
+    };
+    object.insert("usage".to_owned(), usage.clone());
+    true
+}
+
 /// Shared provider-id predicate, byte-for-byte with the shell's
 /// `valid_provider_id`: the character-class check plus rejection of leading
 /// dashes (argv flag injection) and the path components `.` and `..`, which

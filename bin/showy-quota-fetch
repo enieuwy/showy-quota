@@ -2100,11 +2100,16 @@ carried_forward_providers_json() {
         < "${SHOWY_QUOTA_CARRIED_PROVIDERS_FILE}" 2>/dev/null || printf '[]'
 }
 
-# A fresh record that carries `error` but no usable usage window (CodexBar
-# answered, but could not measure this provider) must not wipe the provider's
-# last-known usage: keep the previous cache's `usage` next to the new
-# `error`, and mark the provider carried-forward so `providerMeta` keeps the
-# timestamp of the fetch that measured that usage instead of this publish.
+# A fresh record that measured nothing must not wipe the provider's
+# last-known usage: keep the previous cache's `usage` next to the fresh
+# record's other fields, and mark the provider carried-forward so
+# `providerMeta` keeps the timestamp of the fetch that measured that usage
+# instead of this publish. "Measured nothing" means no positional window with
+# a numeric `usedPercent`, and either an `error` or only `usageKnown:false`
+# extra windows (CodexBar's offline fallback, e.g. Antigravity's
+# `antigravity-offline-conversations` placeholder when its live probes fail).
+# A record with no window at all and no error (Muse withholding quota) is not
+# covered: it still renders greyed in place.
 # A fresh success (usable usage, with or without an error) always wins, so a
 # recovered provider drops the preserved slice on the next success.
 # Prints the merged array on stdout.
@@ -2112,20 +2117,22 @@ merge_error_records_with_last_known_usage() {
     local fresh="$1" prev_map="$2" merged rc=0
     merged=$(printf '%s' "${fresh}" | jq -c --slurpfile prev "${prev_map}" '
         ($prev[0] // {}) as $prevmap
-        | (. ) as $fresh_records
+        | def usable($u):
+            [$u.primary?, $u.secondary?, $u.tertiary?]
+            | map(.usedPercent? | type == "number") | any;
+          # `usageKnown == false` is tested explicitly: `false // x` is `x`.
+          def unknown_only:
+            (.usage?.extraRateWindows? // []) as $extra
+            | ($extra | type) == "array" and ($extra | length) > 0
+              and all($extra[]; (type == "object") and (.usageKnown? == false));
+          def carries:
+            (usable(.usage) | not)
+            and ((.error != null) or unknown_only)
+            and (($prevmap[.provider] | type) == "object")
+            and usable($prevmap[.provider]);
+          (. ) as $fresh_records
         | ([$fresh_records[]
-              | . as $record
-              | if ($record.error != null)
-                     and ([$record.usage?.primary, $record.usage?.secondary, $record.usage?.tertiary]
-                          | map(.usedPercent? // null) | all(. == null))
-                     and (($prevmap[$record.provider] | type) == "object")
-                     and ([$prevmap[$record.provider].primary,
-                           $prevmap[$record.provider].secondary,
-                           $prevmap[$record.provider].tertiary]
-                          | map(.usedPercent? // null) | any(. != null))
-                   then $record | .usage = $prevmap[$record.provider]
-                   else $record
-                   end]
+              | if carries then .usage = $prevmap[.provider] else . end]
           ) as $providers
         | {
             providers: $providers,
@@ -2135,16 +2142,7 @@ merge_error_records_with_last_known_usage() {
             # happens to equal the cached one — otherwise its providerMeta
             # timestamp would freeze at the older fetch and consumers would
             # later mark fresh data stale.
-            merged: ([$fresh_records[]
-                      | select((.error != null)
-                               and ([.usage?.primary, .usage?.secondary, .usage?.tertiary]
-                                    | map(.usedPercent? // null) | all(. == null))
-                               and (($prevmap[.provider] | type) == "object")
-                               and ([$prevmap[.provider].primary,
-                                     $prevmap[.provider].secondary,
-                                     $prevmap[.provider].tertiary]
-                                    | map(.usedPercent? // null) | any(. != null)))
-                      | .provider])
+            merged: [$fresh_records[] | select(carries) | .provider]
         }
     ') || rc=$?
     (( rc == 0 )) || return 1
