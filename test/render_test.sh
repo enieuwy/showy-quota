@@ -215,6 +215,10 @@ while [ "$#" -gt 0 ]; do
             # does; a missing item fails the whole call like the daemon.
             shift
             item="${1:-}"
+            # Under load SketchyBar drops a reply that takes over 100 ms.
+            case "${item}" in
+                showy_quota.ring_probe.*) [ -n "${SHOWY_QUOTA_TEST_PROBE_NO_REPLY:-}" ] && exit 0 ;;
+            esac
             [ -n "${state_dir}" ] || exit 1
             if [ "${item}" = "bar" ]; then
                 if [ -e "${state_dir}/bar" ]; then
@@ -3109,6 +3113,30 @@ printf 'stale-id-that-matches-no-daemon' > "${ring_cache}/sb/ring-capable"
 reprobe_log2="${TMP}/sb-ring-reprobe2.log"
 run_sketchybar_plugin codexbar-mixed.json "${ring_cache}" "${reprobe_log2}" SHOWY_QUOTA_SKETCHYBAR_BODY=ring
 assert_contains "marker from another instance re-probes" "--add ring showy_quota.ring_probe" "$(< "${reprobe_log2}")"
+assert_contains "probe item never draws" "--set showy_quota.ring_probe.* drawing=off" "$(grep -o -- '--set showy_quota.ring_probe.[0-9]* drawing=off' "${reprobe_log2}" | sed 's/probe\.[0-9]*/probe.*/')"
+
+# A probe with no reply (SketchyBar drops replies over 100 ms under load)
+# proves nothing: a ring strip stays ring and keeps its marker instead of
+# flipping to rows and redeclaring.
+printf 'stale-id-that-matches-no-daemon' > "${ring_cache}/sb/ring-capable"
+noreply_log="${TMP}/sb-ring-noreply.log"
+run_sketchybar_plugin codexbar-mixed.json "${ring_cache}" "${noreply_log}" \
+    SHOWY_QUOTA_SKETCHYBAR_BODY=ring SHOWY_QUOTA_TEST_PROBE_NO_REPLY=1
+assert_equals "probe without a reply keeps the ring body" "ring" "$(cat "${ring_cache}/sb/body.txt")"
+assert_not_contains "probe without a reply declares no rows" "--add item showy_quota.codex.icon" "$(< "${noreply_log}")"
+assert_equals "probe without a reply keeps the marker" "0" "$([[ -e "${ring_cache}/sb/ring-capable" ]] && printf '0' || printf '1')"
+
+# A probe whose run died between --add and --remove is swept on the next
+# tick; a live run's probe (this shell's pid) is left alone.
+: > "${ring_cache}/sb-state/showy_quota.ring_probe.999999"
+printf 'showy_quota.ring_probe.999999\n' >> "${ring_cache}/sb-state/.order"
+: > "${ring_cache}/sb-state/showy_quota.ring_probe.$$"
+printf 'showy_quota.ring_probe.%s\n' "$$" >> "${ring_cache}/sb-state/.order"
+orphan_log="${TMP}/sb-ring-orphan.log"
+run_sketchybar_plugin codexbar-mixed.json "${ring_cache}" "${orphan_log}" SHOWY_QUOTA_SKETCHYBAR_BODY=ring
+assert_equals "orphan probe of a dead run is removed" "0" "$(count_live_items "${ring_cache}/sb-state" 'showy_quota.ring_probe.999999')"
+assert_equals "probe of a live run is kept" "1" "$(count_live_items "${ring_cache}/sb-state" "showy_quota.ring_probe.$$")"
+rm -f "${ring_cache}/sb-state/showy_quota.ring_probe.$$"
 
 # Boot path: the items bootstrap exports every scalar SHOWY_QUOTA_* variable
 # and runs the plugin as its child. Arrays are never exported, so the child

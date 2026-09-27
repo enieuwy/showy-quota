@@ -553,16 +553,43 @@ queue_notch_anchor_removal() {
 # to age alone). Callers need no subshell.
 sketchybar_daemon_identity() {
     SKETCHYBAR_DAEMON_IDENTITY=""
-    local pids pid line identity=""
+    local pids pid line args identity=""
     pids=$(pgrep -x sketchybar 2>/dev/null) || return 0
     [[ -n "${pids}" ]] || return 0
     for pid in ${pids}; do
         [[ "${pid}" =~ ^[0-9]+$ ]] || return 0
-        line=$(LC_ALL=C ps -p "${pid}" -o lstart= -o command= 2>/dev/null | tr -s '[:space:]' ' ') || return 0
-        [[ -n "${line}" ]] || return 0
+        # `sketchybar --set/--query/...` clients share the daemon's name.
+        # One that exited before `ps` read it is skipped, not fatal, and a
+        # live one is skipped by its arguments: the daemon runs bare or with
+        # `--config`/`-c`. Counting clients made the identity differ tick to
+        # tick (or come out empty), so the hourly marker kept re-probing.
+        line=$(LC_ALL=C ps -p "${pid}" -o lstart= -o command= 2>/dev/null | tr -s '[:space:]' ' ') || continue
+        [[ -n "${line}" ]] || continue
+        # lstart is five words (`Sat Sep 26 14:27:01 2026`), then the path.
+        read -r _ _ _ _ _ _ args <<< "${line}"
+        case "${args}" in
+            ""|--config*|-c\ *) ;;
+            *) continue ;;
+        esac
         identity+="${identity:+$'\n'}${pid} ${line}"
     done
     SKETCHYBAR_DAEMON_IDENTITY="${identity}"
+}
+
+# Remove probe items left by a run that died between `--add` and `--remove`
+# (one drew as an empty ring beside the strip). Probe names carry their
+# run's pid, so only probes whose run is gone are swept; a live concurrent
+# probe is left alone. $1 is a `--query bar` reply; no spawn unless a
+# leftover exists.
+sweep_orphan_probes() {
+    local reply="$1" item pid
+    [[ "${reply}" == *showy_quota.ring_probe.* ]] || return 0
+    while read -r item; do
+        pid="${item##*.}"
+        [[ "${pid}" =~ ^[0-9]+$ ]] || continue
+        kill -0 "${pid}" 2>/dev/null && continue
+        sketchybar --remove "${item}" >/dev/null 2>&1 || true
+    done < <(grep -o 'showy_quota\.ring_probe\.[0-9]*' <<< "${reply}" | sort -u)
 }
 
 # Effective strip body for this tick: rows, unless ring was requested AND the
@@ -593,17 +620,24 @@ resolve_effective_body() {
     # lock, and with one shared name a concurrent run's `--add` failed
     # ("already exists") and its cleanup removed the other run's probe, so
     # both fell back to rows and the strip flashed rows for a tick or more.
-    local probe="showy_quota.ring_probe.$$"
-    if sketchybar --add ring "${probe}" left "${RING_DIAMETER}" >/dev/null 2>&1 \
-        && sketchybar --query "${probe}" 2>/dev/null \
-            | grep -q -E '"type"[[:space:]]*:[[:space:]]*"ring"'; then
-        sketchybar --remove "${probe}" >/dev/null 2>&1 || true
+    # drawing=off in the same call: a probe left behind never draws.
+    local probe="showy_quota.ring_probe.$$" reply=""
+    if sketchybar --add ring "${probe}" left "${RING_DIAMETER}" \
+        --set "${probe}" drawing=off >/dev/null 2>&1; then
+        reply=$(sketchybar --query "${probe}" 2>/dev/null) || reply=""
+    fi
+    sketchybar --remove "${probe}" >/dev/null 2>&1 || true
+    if grep -q -E '"type"[[:space:]]*:[[:space:]]*"ring"' <<< "${reply}"; then
         printf '%s' "${SKETCHYBAR_DAEMON_IDENTITY}" > "${RING_PROBE_OK}" 2>/dev/null || true
         rm -f -- "${RING_FALLBACK_LOGGED}" 2>/dev/null || true
         EFFECTIVE_BODY=ring
+    elif [[ -z "${reply}" ]]; then
+        # No reply proves nothing: SketchyBar drops a reply that takes over
+        # 100 ms, which happens under load. Keep the previous body and the
+        # marker; the next tick probes again.
+        [[ "$(cat "${BODY_FILE}" 2>/dev/null)" == "ring" ]] && EFFECTIVE_BODY=ring
     else
-        # Stock SketchyBar keeps the generic item the failed probe created.
-        sketchybar --remove "${probe}" >/dev/null 2>&1 || true
+        # A reply of another type: stock SketchyBar.
         rm -f -- "${RING_PROBE_OK}" 2>/dev/null || true
         if [[ ! -f "${RING_FALLBACK_LOGGED}" ]]; then
             showy_quota_log "SHOWY_QUOTA_SKETCHYBAR_BODY=ring needs the SketchyBar fork (ring item); this bar has none, falling back to rows"
@@ -1392,6 +1426,7 @@ showy_quota_bool "${SHOWY_QUOTA_SKETCHYBAR_FORCE_REDECLARE-}" 0 && frame_flags+=
 # SketchyBar drops a reply that takes over 100 ms; the renderer then treats
 # the item list as unknown rather than missing.
 bar_items=$(sketchybar --query bar 2>/dev/null) || bar_items=""
+sweep_orphan_probes "${bar_items}"
 render_frame() {
     frame_out=$("${RENDER_BIN}" "${frame_flags[@]}" "$@" <<< "${bar_items}" 2>/dev/null) || frame_out=""
 }

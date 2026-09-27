@@ -80,6 +80,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   included) no longer forks once per config variable.
 
 ### Fixed
+- SketchyBar ring mode: a plugin run that stopped between the probe's
+  `--add` and `--remove` left an empty ring beside the strip. Probes now draw
+  off, and each tick removes probe items whose run is gone. A probe that gets
+  no reply (SketchyBar drops replies over 100 ms under load) keeps the
+  previous body instead of falling back to rows, so the strip no longer
+  flips to rows and back under load. The daemon identity for the hourly
+  probe marker skips `sketchybar` client processes.
 - Stale data: the limit was `2 × SHOWY_QUOTA_REFRESH_SECONDS`, which left no
   room for the fetch itself. Under load one CLI fetch took 64 s instead of
   18 s, the cache crossed 240 s mid-fetch, and every surface greyed out. The
