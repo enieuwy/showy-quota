@@ -3182,6 +3182,24 @@ assert_contains "rows redeclare still declares the desired set" "--add item show
 # words: a plugin path with spaces must stay one word.
 assert_contains "ring hover script quotes the plugin path" "script='${REPO_ROOT}/adapters/sketchybar/plugins/showy_quota_hover.sh' 'showy_quota.codex.ring'" "${ring_plugin_log}"
 
+# Popup modes (SHOWY_QUOTA_SKETCHYBAR_POPUP). click, the default: unit items
+# take only the click, so moving the pointer over the strip starts no
+# process, and one hidden item closes popups when the pointer leaves the bar.
+assert_contains "click popups subscribe unit items to the click only" "--subscribe showy_quota.codex.label mouse.clicked --" "${ring_plugin_log}"
+assert_not_contains "click popups never subscribe pointer moves" "mouse.entered" "${ring_plugin_log}"
+assert_contains "click popups declare the closer on the global exit" "--subscribe showy_quota.popup_close mouse.exited.global" "${ring_plugin_log}"
+popup_cache=$(mk_cache)
+run_sketchybar_plugin codexbar-mixed.json "${popup_cache}" "${TMP}/sb-popup-click.log" SHOWY_QUOTA_SKETCHYBAR_BODY=ring
+popup_log="${TMP}/sb-popup-hover.log"
+run_sketchybar_plugin codexbar-mixed.json "${popup_cache}" "${popup_log}" SHOWY_QUOTA_SKETCHYBAR_BODY=ring SHOWY_QUOTA_SKETCHYBAR_POPUP=hover
+assert_contains "a popup mode change redeclares with hover subscriptions" "--subscribe showy_quota.codex.ring mouse.entered mouse.exited mouse.exited.global" "$(< "${popup_log}")"
+assert_equals "hover popups drop the closer" "0" "$(count_live_items "${popup_cache}/sb-state" 'showy_quota.popup_close')"
+assert_equals "the popup mode stamp follows the setting" "hover" "$(cat "${popup_cache}/sb/popup.txt")"
+popup_log="${TMP}/sb-popup-off.log"
+run_sketchybar_plugin codexbar-mixed.json "${popup_cache}" "${popup_log}" SHOWY_QUOTA_SKETCHYBAR_BODY=ring SHOWY_QUOTA_SKETCHYBAR_POPUP=off
+assert_contains "popups off still redeclares the units" "--add ring showy_quota.codex.ring" "$(< "${popup_log}")"
+assert_not_contains "popups off subscribes nothing" "--subscribe showy_quota.codex" "$(< "${popup_log}")"
+
 # The hover state machine never lets an older event overwrite a newer one:
 # SketchyBar spawns handlers in event order, and a pid is fixed at fork.
 # Records are `word pid epoch`; a record blocks only while fresh, and pids
@@ -3230,6 +3248,45 @@ for hover_old in "out ${hover_newer_pid} $(( hover_now - 60 ))" "out 99285"; do
     assert_contains "hover entry overrides old record '${hover_old}'" "popup.drawing=on" "$(< "${hover_sb_log}")"
 done
 rm -f -- "${hover_state}"
+
+# Dwell: a pointer that passes over the strip (an exit claims the state
+# while the entry waits) opens nothing, so it never covers the top row of
+# the window the pointer is heading for.
+: > "${hover_sb_log}"
+run_hover mouse.entered &
+hover_entry_pid=$!
+sleep 0.1
+printf 'out %s %s' "$(( (hover_entry_pid + 1000) % 100000 ))" "$(date +%s)" > "${hover_state}"
+wait "${hover_entry_pid}"
+assert_not_contains "hover entry followed by an exit within the dwell never opens" "popup.drawing=on" "$(< "${hover_sb_log}")"
+rm -f -- "${hover_state}"
+
+# Click popups: a left click opens the unit's popup and closes any other; a
+# second left click closes it; a right click belongs to the click action.
+# The closer asks sketchybar only while a click opened a popup.
+popup_open_file="${TMPDIR:-/tmp}/showy-quota-popup.open"
+rm -f -- "${popup_open_file}"
+run_click() {
+    SENDER="$1" BUTTON="${2:-left}" SKETCHYBAR="${TMP}/hover-sketchybar-stub" TMPDIR="${TMPDIR:-/tmp}" \
+        bash "${REPO_ROOT}/adapters/sketchybar/plugins/showy_quota_hover.sh" "${3:-${hover_parent}}"
+}
+: > "${hover_sb_log}"
+run_click mouse.clicked left
+assert_equals "left click opens this popup and closes the others" \
+    "--set /^showy_quota\\..*\\.ring\$/ popup.drawing=off --set ${hover_parent} popup.drawing=on" "$(< "${hover_sb_log}")"
+: > "${hover_sb_log}"
+run_click mouse.clicked right
+assert_equals "right click leaves the popup to the click action" "" "$(< "${hover_sb_log}")"
+run_click mouse.clicked left
+assert_equals "second left click closes the popup" "--set ${hover_parent} popup.drawing=off" "$(< "${hover_sb_log}")"
+: > "${hover_sb_log}"
+run_click mouse.exited.global left --close-all
+assert_equals "closer with no open popup calls nothing" "" "$(< "${hover_sb_log}")"
+run_click mouse.clicked left
+: > "${hover_sb_log}"
+run_click mouse.exited.global left --close-all
+assert_equals "closer closes an open popup" "--set /^showy_quota\\..*\\.ring\$/ popup.drawing=off" "$(< "${hover_sb_log}")"
+rm -f -- "${popup_open_file}"
 
 # Regression: a plugin run that outlives `sketchybar --reload` can re-add
 # provider items before the rc re-adds front_app, so the pill drew over the

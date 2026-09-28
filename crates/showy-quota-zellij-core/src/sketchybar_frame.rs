@@ -73,6 +73,9 @@ pub enum Body {
 pub struct FrameSettings {
     pub body: Body,
     pub click: String,
+    /// `SHOWY_QUOTA_SKETCHYBAR_POPUP=click`: ring unit items run the click
+    /// action on a right click only.
+    pub popup_on_click: bool,
     pub row_radius: i64,
     pub label_width: i64,
     pub slot_width: i64,
@@ -129,6 +132,12 @@ impl FrameSettings {
                 _ => Body::Rows,
             },
             click,
+            // Ring popups: `click` (the default) owns the left click; `hover`
+            // and `off` leave every click to the click action.
+            popup_on_click: !matches!(
+                get("SHOWY_QUOTA_SKETCHYBAR_POPUP").as_deref(),
+                Some("hover") | Some("off")
+            ),
             row_radius: uint("SHOWY_QUOTA_SKETCHYBAR_ROW_RADIUS", 3),
             label_width: uint("SHOWY_QUOTA_SKETCHYBAR_LABEL_WIDTH", 32),
             slot_width: uint("SHOWY_QUOTA_SKETCHYBAR_BAR_WIDTH", slider_width + 3),
@@ -411,7 +420,7 @@ fn row_args(
         let item = format!("showy_quota.{pid}.{role}");
         let click = format!(
             "click_script={}",
-            slider_click_script(settings, &item, lane.remaining)
+            slider_click_script(&item, lane.remaining, &settings.click)
         );
         // The primary lane always draws unless the provider errored.
         let drawn = if index == 0 { !row.error } else { has(lane) };
@@ -453,7 +462,7 @@ fn row_args(
         let item = format!("showy_quota.{pid}.{role}_marker");
         let click = format!(
             "click_script={}",
-            slider_click_script(settings, &item, lane.marker.unwrap_or(0))
+            slider_click_script(&item, lane.marker.unwrap_or(0), &settings.click)
         );
         let marker = lane.marker.filter(|_| index == 0 || has(lane));
         let props = match marker {
@@ -814,7 +823,7 @@ fn ring_click(unit: &RingUnit, settings: &FrameSettings) -> String {
         Some(incident) => (incident.indicator.as_str(), incident.url.as_str()),
         None => ("none", ""),
     };
-    click_script_for_status(settings, status, url)
+    unit_click_action(settings, &click_script_for_status(settings, status, url))
 }
 
 fn ring_unit_args(unit: &RingUnit, settings: &FrameSettings) -> Vec<String> {
@@ -930,7 +939,10 @@ fn ring_unit_args(unit: &RingUnit, settings: &FrameSettings) -> Vec<String> {
                     "padding_right=0".into(),
                     "width=0".into(),
                     "y_offset=0".into(),
-                    format!("click_script={}", settings.click),
+                    format!(
+                        "click_script={}",
+                        unit_click_action(settings, &settings.click)
+                    ),
                 ],
             );
         }
@@ -958,17 +970,17 @@ fn ring_unit_args(unit: &RingUnit, settings: &FrameSettings) -> Vec<String> {
         let bar_item = format!("{prefix}.bar{index}");
         let knob_item = format!("{prefix}.bar{index}_pace");
         let bar_click = slider_click_script(
-            settings,
             &bar_item,
             unit.bars.get(index).map(|bar| bar.remaining).unwrap_or(0),
+            &unit_click_action(settings, &settings.click),
         );
         let knob_click = slider_click_script(
-            settings,
             &knob_item,
             unit.bars
                 .get(index)
                 .and_then(|bar| bar.expected)
                 .unwrap_or(0),
+            &unit_click_action(settings, &settings.click),
         );
         let y = bar_y(index);
         match unit.bars.get(index) {
@@ -1106,7 +1118,10 @@ fn ring_unit_args(unit: &RingUnit, settings: &FrameSettings) -> Vec<String> {
             "background.drawing=off".into(),
             format!("padding_left={RING_GAP}"),
             "padding_right=0".into(),
-            format!("click_script={}", settings.click),
+            format!(
+                "click_script={}",
+                unit_click_action(settings, &settings.click)
+            ),
         ],
     );
 
@@ -1386,14 +1401,25 @@ fn url_host(url: &str) -> Option<String> {
 }
 
 /// Clicking a slider re-sets its own percentage (SketchyBar moves a slider on
-/// click) and then runs the configured click action.
-fn slider_click_script(settings: &FrameSettings, item: &str, percent: i64) -> String {
+/// click) and then runs `action`.
+fn slider_click_script(item: &str, percent: i64, action: &str) -> String {
     format!(
         "command -v sketchybar >/dev/null 2>&1 && sketchybar --set {} slider.percentage={} >/dev/null 2>&1; {}",
         shell_quote(item),
         percent.clamp(0, 100),
-        settings.click
+        action
     )
+}
+
+/// A ring unit item's click action. With click popups a left click belongs
+/// to the popup (the plugin subscribes `mouse.clicked`), so the action runs
+/// on a right click only; SketchyBar passes the button as `$BUTTON`.
+fn unit_click_action(settings: &FrameSettings, action: &str) -> String {
+    if settings.popup_on_click {
+        format!("[ \"$BUTTON\" = right ] && {action}")
+    } else {
+        action.to_owned()
+    }
 }
 
 fn click_script_for_status(settings: &FrameSettings, status: &str, url: &str) -> String {
@@ -2217,6 +2243,34 @@ mod tests {
         "primary":{"usedPercent":0.0,"windowMinutes":300},
         "secondary":{"usedPercent":45.0,"resetsAt":"2023-11-15T06:00:00Z","windowMinutes":10080},
         "tertiary":{"usedPercent":52.0,"resetsAt":"2023-12-10T06:00:00Z","windowMinutes":43200}}}]"#;
+
+    #[test]
+    fn click_popups_leave_the_click_action_to_the_right_button() {
+        // Default (click): a left click opens the popup, so every strip item
+        // of the unit runs the click action on a right click only.
+        let gated = format!("click_script=[ \"$BUTTON\" = right ] && {DEFAULT_CLICK}");
+        let frame = ring_frame(THREE_WINDOWS, &RING_ENV, None);
+        for role in ["ring", "ring_pace", "label"] {
+            let item = props(&frame.args, &format!("showy_quota.commandcode.{role}"));
+            assert!(item.contains(&gated.as_str()), "{role}: {item:?}");
+        }
+        let bar = props(&frame.args, "showy_quota.commandcode.bar0");
+        assert!(
+            bar.iter().any(
+                |prop| prop.ends_with(&format!("; [ \"$BUTTON\" = right ] && {DEFAULT_CLICK}"))
+            ),
+            "{bar:?}"
+        );
+        // Hover popups keep the click action on every click.
+        let hover = [
+            ("SHOWY_QUOTA_SKETCHYBAR_BODY", "ring"),
+            ("SHOWY_QUOTA_SKETCHYBAR_POPUP", "hover"),
+        ];
+        let frame = ring_frame(THREE_WINDOWS, &hover, None);
+        let label = props(&frame.args, "showy_quota.commandcode.label");
+        let plain = format!("click_script={DEFAULT_CLICK}");
+        assert!(label.contains(&plain.as_str()), "{label:?}");
+    }
 
     #[test]
     fn ring_units_draw_the_longest_window_with_stacked_bars_and_pace() {

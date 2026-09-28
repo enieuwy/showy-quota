@@ -17,7 +17,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   unchanged): one ring per model family — the longest window as a 26 pt ring
   with the provider logo inside, shorter windows as stacked bars, pace ticks
   and knobs from reset math, Antigravity G/C pool pairs, a Codex banked-reset
-  badge, hover popups with per-window gauges, and grey last-known arcs on
+  badge, click popups with per-window gauges, and grey last-known arcs on
   provider errors (kept beside the fresh error by the fetcher, see below).
   Ring mode needs the SketchyBar fork
   [github.com/enieuwy/SketchyBar](https://github.com/enieuwy/SketchyBar) — the
@@ -34,6 +34,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   - A stale provider keeps its countdown behind a yellow glyph (`⚠2w`); its
     popup gives the age. A stale cache is one yellow end mark (`⚠ 25m`).
   - Red arcs and bars mean low quota; a red logo and label mean an error.
+  Popups follow `SHOWY_QUOTA_SKETCHYBAR_POPUP`:
+  - `click` (default): a left click opens a unit's popup; a right click runs
+    the click action. Moving the pointer starts no process.
+  - `hover`: the popup opens after the pointer rests 0.4 s, so a pointer
+    that crosses the strip to reach a window's top row opens nothing.
+  - `off`: no popup.
 - `showy-quota-fetch` keeps a provider's last-known `usage` beside a fresh
   error-only record (with its original `providerMeta` time) instead of wiping
   it; a fresh success drops the preserved slice as before.

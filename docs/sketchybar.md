@@ -100,13 +100,30 @@ that event are unaffected.
 above, unchanged. `SHOWY_QUOTA_SKETCHYBAR_BODY=ring` draws one ring per model
 family instead: each family's longest window becomes a 26 pt ring with the
 provider logo inside, shorter windows become 28x4 pt bars under the countdown
-label (shortest first), and hovering any item of a unit opens a popup with one
-mini gauge per window, the % left, pace, and reset. Equal-length windows are
-parts of the ring's own window (Cursor's Cursor / Third Party split) and draw
-as plain bars with no pace knob; Antigravity draws two pool units (G = Gemini,
-C = Claude + GPT); Codex banked resets badge the ring; errors keep the last
-known arc in grey. Switching the body re-declares the items cleanly, leaving
-no items of the other body behind.
+label (shortest first), and a click on any item of a unit opens a popup with
+one mini gauge per window, the % left, pace, and reset. Equal-length windows
+are parts of the ring's own window (Cursor's Cursor / Third Party split) and
+draw as plain bars with no pace knob; Antigravity draws two pool units (G =
+Gemini, C = Claude + GPT); Codex banked resets badge the ring; errors keep
+the last known arc in grey. Switching the body re-declares the items
+cleanly, leaving no items of the other body behind.
+
+`SHOWY_QUOTA_SKETCHYBAR_POPUP` chooses how a unit's popup opens:
+
+| Value | Opens | Closes | Click action (`SHOWY_QUOTA_SKETCHYBAR_CLICK`) |
+|---|---|---|---|
+| `click` (default) | Left click on the unit | A second left click, a left click on another unit, or the pointer leaving the bar and its popups | Right click |
+| `hover` | The pointer resting 0.4 s on the unit | The pointer leaving the unit for 0.35 s | Any click |
+| `off` | Never | — | Any click |
+
+Hover popups opened whenever the pointer crossed the strip on its way to a
+window's top row, and covered that row. `click` avoids that and costs
+nothing while the pointer moves: the unit items subscribe to the click
+only, and one hidden item (`showy_quota.popup_close`) takes the global exit.
+`hover` starts a short process for every entry and exit of every item (about
+50–70 for one pass over a seven-unit strip); the 0.4 s dwell keeps a
+passing pointer from opening anything. A change of the setting re-declares
+the ring units on the next tick.
 
 Each look in ring mode has one meaning. Colour is never the only cue: the
 stale and refill states also add a glyph to the label, and the blocked state

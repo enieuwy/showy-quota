@@ -133,7 +133,7 @@ currently fetching usage data; later provider adds/removals land on the next
 plugin tick without another reload.
 
 Set `SHOWY_QUOTA_SKETCHYBAR_BODY=ring` for one ring per model family instead
-of rows, with hover popups per window (see
+of rows, with click popups per window (see
 [`docs/sketchybar.md`](docs/sketchybar.md) "Strip body: rows or ring"). Ring
 mode needs the SketchyBar fork
 [github.com/enieuwy/SketchyBar](https://github.com/enieuwy/SketchyBar) — the

@@ -389,6 +389,10 @@ showy_quota_uint_config SHOWY_QUOTA_PNG_BAR_H 18 4096
 # family; needs the SketchyBar fork (ring item), else the plugin falls back
 # to rows at runtime.
 : "${SHOWY_QUOTA_SKETCHYBAR_BODY:=rows}"
+# Ring popups. click: a left click opens a unit's popup, a right click runs
+# the click action (default). hover: the pointer opens it after resting
+# 0.4 s. off: no popup.
+: "${SHOWY_QUOTA_SKETCHYBAR_POPUP:=click}"
 : "${SHOWY_QUOTA_SKETCHYBAR_NOTCH_MARGIN:=4}"
 
 : "${SHOWY_QUOTA_SKETCHYBAR_COMPACT_PROVIDER_COUNT:=5}"
@@ -477,6 +481,13 @@ case "${SHOWY_QUOTA_SKETCHYBAR_BODY}" in
     *)
         showy_quota_record_config_issue SHOWY_QUOTA_SKETCHYBAR_BODY "${SHOWY_QUOTA_SKETCHYBAR_BODY}" rows invalid_value
         SHOWY_QUOTA_SKETCHYBAR_BODY=rows
+        ;;
+esac
+case "${SHOWY_QUOTA_SKETCHYBAR_POPUP}" in
+    click|hover|off) ;;
+    *)
+        showy_quota_record_config_issue SHOWY_QUOTA_SKETCHYBAR_POPUP "${SHOWY_QUOTA_SKETCHYBAR_POPUP}" click invalid_value
+        SHOWY_QUOTA_SKETCHYBAR_POPUP=click
         ;;
 esac
 case "${SHOWY_QUOTA_SKETCHYBAR_PLACEMENT}" in

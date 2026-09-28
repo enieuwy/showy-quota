@@ -105,6 +105,7 @@ RING_EDGE=10
 RING_PROVIDER_GAP=22
 RING_POOL_GAP=10
 BODY_FILE="${CACHE_DIR}/body.txt"
+POPUP_MODE_FILE="${CACHE_DIR}/popup.txt"
 RING_PROBE_OK="${CACHE_DIR}/ring-capable"
 RING_FALLBACK_LOGGED="${CACHE_DIR}/ring-fallback-logged"
 # The hover script lives next to this plugin (or its installed copy).
@@ -679,6 +680,32 @@ ring_logo_for_provider() {
     fi
 }
 
+# Subscribe one unit item to the events of the popup mode
+# (SHOWY_QUOTA_SKETCHYBAR_POPUP): `click` wants only the click, so moving the
+# pointer over the strip starts no process; `hover` wants entry and exit;
+# `off` subscribes to nothing.
+queue_popup_subscription() {
+    case "${SHOWY_QUOTA_SKETCHYBAR_POPUP}" in
+        click) SB_QUEUE+=(--subscribe "$1" mouse.clicked) ;;
+        hover) SB_QUEUE+=(--subscribe "$1" mouse.entered mouse.exited mouse.exited.global) ;;
+    esac
+}
+
+# Click mode closes an open popup when the pointer leaves the bar and its
+# popups. `mouse.exited.global` goes to every subscriber, so one hidden item
+# takes it, not the 49 unit items. `updates=on`: a hidden item is not
+# "shown", and SketchyBar skips its script under the default `when_shown`.
+queue_popup_closer() {
+    SB_QUEUE+=(--remove showy_quota.popup_close)
+    [[ "${SHOWY_QUOTA_SKETCHYBAR_POPUP}" == "click" ]] || return 0
+    SB_QUEUE+=(--add item showy_quota.popup_close left
+               --set showy_quota.popup_close
+                   drawing=off
+                   updates=on
+                   script="'${HOVER_SCRIPT//\'/\'\\\'\'}' --close-all"
+               --subscribe showy_quota.popup_close mouse.exited.global)
+}
+
 # Remove every item of one ring unit (bars, label, popup rows included).
 queue_ring_unit_removal() {
     local unit="$1"
@@ -686,11 +713,11 @@ queue_ring_unit_removal() {
                --remove "showy_quota.gap.${unit}")
 }
 
-# Declare one ring unit. Static geometry and the hover subscription live
+# Declare one ring unit. Static geometry and the popup subscription live
 # here; the per-tick frame owns every dynamic value. The subscription must
-# share the `--add` call: SketchyBar only creates the mouse tracking area
-# while the item draws, so a subscription from a later call gets no events
-# until the item redraws.
+# share the `--add` call (one queued sketchybar call): SketchyBar only
+# creates the mouse tracking area while the item draws, so a subscription
+# from a later call gets no events until the item redraws.
 queue_ring_unit_declaration() {
     local unit="$1" pid="$2"
     local base="showy_quota.${unit}" ring="showy_quota.${unit}.ring"
@@ -708,6 +735,7 @@ queue_ring_unit_declaration() {
     # (`shell_quote` in sketchybar_frame.rs): a plugin path with spaces must
     # stay one word.
     hover_script="'${HOVER_SCRIPT//\'/\'\\\'\'}' '${ring}'"
+    [[ "${SHOWY_QUOTA_SKETCHYBAR_POPUP}" == "off" ]] && hover_script=""
     local text_argb="0xff${ICON_TEXT_HEX}"
     local track="${TRACK_ARGB}"
     SB_QUEUE+=(--add ring "${ring}" left "${RING_DIAMETER}"
@@ -740,9 +768,9 @@ queue_ring_unit_declaration() {
                    popup.background.border_color="${track}"
                    popup.background.shadow.drawing=on
                    click_script="${CLICK}"
-                   script="${hover_script}"
-               --subscribe "${ring}" mouse.entered mouse.exited mouse.exited.global
-               --add ring "${base}.ring_pace" left "${RING_PACE_DIAMETER}"
+                   script="${hover_script}")
+    queue_popup_subscription "${ring}"
+    SB_QUEUE+=(--add ring "${base}.ring_pace" left "${RING_PACE_DIAMETER}"
                --set "${base}.ring_pace"
                    icon.drawing=off
                    label.drawing=off
@@ -756,8 +784,8 @@ queue_ring_unit_declaration() {
                    ring.line_width=5
                    ring.marker.drawing=off
                    click_script="${CLICK}"
-                   script="${hover_script}"
-               --subscribe "${base}.ring_pace" mouse.entered mouse.exited mouse.exited.global)
+                   script="${hover_script}")
+    queue_popup_subscription "${base}.ring_pace"
     for role in bar0 bar1; do
         item="${base}.${role}"
         SB_QUEUE+=(--add slider "${item}" left "${RING_BAR_W}"
@@ -776,8 +804,8 @@ queue_ring_unit_declaration() {
                        padding_right=0
                        width=0
                        click_script="${CLICK}"
-                       script="${hover_script}"
-                   --subscribe "${item}" mouse.entered mouse.exited mouse.exited.global)
+                       script="${hover_script}")
+        queue_popup_subscription "${item}"
         item="${base}.${role}_pace"
         SB_QUEUE+=(--add slider "${item}" left "${RING_BAR_W}"
                    --set "${item}"
@@ -802,8 +830,8 @@ queue_ring_unit_declaration() {
                        padding_right=0
                        width=0
                        click_script="${CLICK}"
-                       script="${hover_script}"
-                   --subscribe "${item}" mouse.entered mouse.exited mouse.exited.global)
+                       script="${hover_script}")
+        queue_popup_subscription "${item}"
     done
     SB_QUEUE+=(--add item "${base}.label" left
                --set "${base}.label"
@@ -817,8 +845,8 @@ queue_ring_unit_declaration() {
                    padding_left=5
                    padding_right=0
                    click_script="${CLICK}"
-                   script="${hover_script}"
-               --subscribe "${base}.label" mouse.entered mouse.exited mouse.exited.global)
+                   script="${hover_script}")
+    queue_popup_subscription "${base}.label"
     # Popup rows: fixed slots, so the declaration never depends on the data.
     # A popup lists its items in add order: title, alerts, header, the window
     # rows (row 0 is always the ring window, a 14 pt mini ring; rows 1–2 are
@@ -944,7 +972,8 @@ clear_ring_body_items() {
         SB_QUEUE+=(--remove "/^showy_quota\\..*\\.${role}$/")
     done
     SB_QUEUE+=(--remove "/^showy_quota\\.gap\\..*$/"
-               --remove "/^showy_quota\\.edge\\..*$/")
+               --remove "/^showy_quota\\.edge\\..*$/"
+               --remove showy_quota.popup_close)
 }
 
 notch_placement() {
@@ -1343,11 +1372,12 @@ ring_tick() {
         load_state_providers
         # Notch placement is a rows-body feature; ring mode stays left.
         queue_notch_anchor_removal
-        if (( body_changed )) && [[ "${prev_body}" != "ring" ]]; then
-            # Rows to ring (or first run): no slider may survive.
+        if [[ "${prev_body}" != "ring" ]]; then
+            # Rows to ring, first run, or an upgrade with no stamp: no slider
+            # may survive. Keyed on the stamp, not the renderer's reason: a
+            # forced redeclare (popup mode change) reports `forced`, never
+            # `body`, even when rows linger.
             clear_rows_body_items
-        elif (( body_changed )); then
-            clear_ring_body_items
         elif [[ "${FRAME_REDECLARE}" == "body" ]]; then
             # A crashed switch left rows sliders behind; the saved list
             # cannot name a provider that has since left the filtered set,
@@ -1365,10 +1395,15 @@ ring_tick() {
             [[ -n "${unit}" && -n "${pid}" ]] && queue_ring_unit_declaration "${unit}" "${pid}"
         done <<< "$(printf '%s\n' ${FRAME_UNITS[@]+"${FRAME_UNITS[@]}"})"
         queue_ring_bracket "${desired_units}"
+        queue_popup_closer
         flush_sketchybar_queue
         write_state_providers "${desired_units}" \
             || showy_quota_log "failed to update sketchybar ring state"
         printf '%s\n' "ring" > "${BODY_FILE}" 2>/dev/null || true
+        printf '%s\n' "${SHOWY_QUOTA_SKETCHYBAR_POPUP}" > "${POPUP_MODE_FILE}" 2>/dev/null || true
+        # The redeclare closed every popup; a stale "open" note would make
+        # the next click on that unit a no-op close.
+        rm -f -- "${TMPDIR:-/tmp}/showy-quota-popup.open" 2>/dev/null || true
         trigger_provider_change "${desired_providers}"
     fi
 }
@@ -1417,10 +1452,17 @@ if [[ -f "${BODY_FILE}" ]]; then
     prev_body=$(< "${BODY_FILE}")
     [[ "${prev_body}" != "${EFFECTIVE_BODY}" ]] && body_changed=1
 fi
+# Ring mode: the popup mode lives in the declared subscriptions, so a change
+# redeclares. An absent stamp (first run, or an upgrade) redeclares once.
+popup_changed=0
+if [[ "${EFFECTIVE_BODY}" == "ring" ]] \
+    && [[ "$(cat "${POPUP_MODE_FILE}" 2>/dev/null)" != "${SHOWY_QUOTA_SKETCHYBAR_POPUP}" ]]; then
+    popup_changed=1
+fi
 frame_flags=(--emit sketchybar-frame --from-cache --bar -
     --state "${STATE_FILE}" --frame "${FRAME_FILE}" --plan "${NOTCH_PLAN_FILE}")
 showy_quota_bool "${SHOWY_QUOTA_SKETCHYBAR_FORCE_REDECLARE-}" 0 && frame_flags+=(--force-redeclare)
-(( body_changed )) && frame_flags+=(--force-redeclare)
+(( body_changed || popup_changed )) && frame_flags+=(--force-redeclare)
 (( HAVE_MAGICK )) && frame_flags+=(--icon-maker)
 
 # SketchyBar drops a reply that takes over 100 ms; the renderer then treats
