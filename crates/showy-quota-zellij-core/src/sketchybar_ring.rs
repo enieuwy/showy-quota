@@ -74,7 +74,8 @@ pub struct RingIncident {
     pub url: String,
 }
 
-/// Codex banked rate-limit resets (`usage.codexResetCredits`).
+/// Banked rate-limit resets: Codex `usage.codexResetCredits`, or the generic
+/// `Limit Reset Credits` detail row CodexBar emits for Claude and Grok.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RingBanked {
     pub count: i64,
@@ -789,8 +790,55 @@ fn incident_for(record: &ProviderRecord, raw: &Value) -> Option<RingIncident> {
     })
 }
 
+/// CodexBar's label for the reset-inventory row in `usage.details`.
+const RESET_CREDITS_DETAIL_LABEL: &str = "Limit Reset Credits";
+
 fn banked_for(raw: &Value, now_epoch: i64, tz: Option<i16>) -> Option<RingBanked> {
-    let credits = raw.get("usage")?.get("codexResetCredits")?;
+    let usage = raw.get("usage")?;
+    match usage.get("codexResetCredits") {
+        Some(credits) => codex_banked(credits, now_epoch, tz),
+        None => detail_banked(usage),
+    }
+}
+
+/// Claude and Grok carry no structured inventory in CLI/serve JSON; CodexBar
+/// renders it as a `details` row (`value` "N available", `secondaryValue`
+/// "Expires …" formatted at fetch time), so the expiry is shown verbatim.
+fn detail_banked(usage: &Value) -> Option<RingBanked> {
+    let row = usage
+        .get("details")?
+        .as_array()?
+        .iter()
+        .filter_map(|section| section.get("rows").and_then(Value::as_array))
+        .flatten()
+        .find(|row| row.get("label").and_then(Value::as_str) == Some(RESET_CREDITS_DETAIL_LABEL))?;
+    let count = row
+        .get("value")?
+        .as_str()?
+        .split_whitespace()
+        .next()?
+        .parse::<i64>()
+        .ok()?;
+    if count <= 0 {
+        return None;
+    }
+    let plural = if count == 1 { "reset" } else { "resets" };
+    let expiry = row
+        .get("secondaryValue")
+        .and_then(Value::as_str)
+        .map(sanitize)
+        .filter(|expiry| !expiry.is_empty());
+    let note = match expiry {
+        Some(expiry) => match expiry.strip_prefix("Expires ") {
+            Some(when) => format!("{count} free {plural} banked · next expires {when}"),
+            None => format!("{count} free {plural} banked · {expiry}"),
+        },
+        None => format!("{count} free {plural} banked"),
+    };
+    Some(RingBanked { count, note })
+}
+
+fn codex_banked(credits: &Value, now_epoch: i64, tz: Option<i16>) -> Option<RingBanked> {
     let count = credits.get("availableCount")?.as_i64()?;
     if count <= 0 {
         return None;
@@ -1309,6 +1357,38 @@ mod tests {
             banked.note
         );
         assert!(banked.note.contains("(5 Oct)"), "{}", banked.note);
+    }
+
+    #[test]
+    fn claude_detail_row_resets_report_the_count_and_expiry() {
+        let payload = format!(
+            r#"[{{"provider":"claude","usage":{{
+                "secondary":{{"usedPercent":30.0,"resetsAt":"{}","windowMinutes":10080}},
+                "details":[{{"rows":[
+                    {{"label":"Other","value":"9 available"}},
+                    {{"label":"Limit Reset Credits","value":"2 available",
+                      "secondaryValue":"Expires Oct 23 at 12:00 AM"}}]}}]}}}}]"#,
+            reset_at(9349)
+        );
+        let units = units(&payload);
+        let banked = units[0].banked.as_ref().expect("banked");
+        assert_eq!(banked.count, 2);
+        assert_eq!(
+            banked.note,
+            "2 free resets banked · next expires Oct 23 at 12:00 AM"
+        );
+    }
+
+    #[test]
+    fn codex_inventory_wins_over_a_detail_row() {
+        let payload = format!(
+            r#"[{{"provider":"codex","usage":{{
+                "secondary":{{"usedPercent":30.0,"resetsAt":"{}","windowMinutes":10080}},
+                "codexResetCredits":{{"availableCount":0,"credits":[]}},
+                "details":[{{"rows":[{{"label":"Limit Reset Credits","value":"3 available"}}]}}]}}}}]"#,
+            reset_at(9349)
+        );
+        assert!(units(&payload)[0].banked.is_none());
     }
 
     #[test]

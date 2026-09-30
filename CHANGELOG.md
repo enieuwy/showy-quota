@@ -16,9 +16,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - SketchyBar `SHOWY_QUOTA_SKETCHYBAR_BODY=ring` (opt-in; default `rows` is
   unchanged): one ring per model family — the longest window as a 26 pt ring
   with the provider logo inside, shorter windows as stacked bars, pace ticks
-  and knobs from reset math, Antigravity G/C pool pairs, a Codex banked-reset
-  badge, click popups with per-window gauges, and grey last-known arcs on
-  provider errors (kept beside the fresh error by the fetcher, see below).
+  and knobs from reset math, Antigravity G/C pool pairs, a banked-reset badge
+  (Codex `codexResetCredits`, or the `Limit Reset Credits` detail row CodexBar
+  emits for Claude and Grok), click popups with per-window gauges, and grey
+  last-known arcs on provider errors (kept beside the fresh error by the
+  fetcher, see below).
   Ring mode needs the SketchyBar fork
   [github.com/enieuwy/SketchyBar](https://github.com/enieuwy/SketchyBar) — the
   `ring` item ([upstream PR #817](https://github.com/FelixKratz/SketchyBar/pull/817))

@@ -104,7 +104,9 @@ label (shortest first), and a click on any item of a unit opens a popup with
 one mini gauge per window, the % left, pace, and reset. Equal-length windows
 are parts of the ring's own window (Cursor's Cursor / Third Party split) and
 draw as plain bars with no pace knob; Antigravity draws two pool units (G =
-Gemini, C = Claude + GPT); Codex banked resets badge the ring; errors keep
+Gemini, C = Claude + GPT); banked resets badge the ring (Codex from
+`usage.codexResetCredits`, Claude and Grok from the `Limit Reset Credits` row
+in `usage.details`, whose expiry text shows verbatim); errors keep
 the last known arc in grey. Switching the body re-declares the items
 cleanly, leaving no items of the other body behind.
 
