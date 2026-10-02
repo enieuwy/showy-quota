@@ -1543,8 +1543,8 @@ fi
 fi
 
 frame_args=("${FRAME_ARGS[@]}")
-# The renderer asks for icons it cannot draw yet. Rasterize them, then diff
-# against acknowledged state again; the combined send includes the new icons.
+# The renderer asks for icons it cannot draw yet. Rasterize them, then build
+# the complete final frame; only that frame may be sent and acknowledged.
 icons_made=0
 for record in "${FRAME_ICONS[@]}"; do
     icon_fields=()
@@ -1554,9 +1554,14 @@ for record in "${FRAME_ICONS[@]}"; do
         && icons_made=1
 done
 if (( icons_made )); then
-    render_frame --assume-declared --or-empty
-    parse_frame_output "${frame_out}"
-    frame_args+=("${FRAME_ARGS[@]}")
+    render_frame --force-redeclare --or-empty
+    if [[ -n "${frame_out}" ]]; then
+        parse_frame_output "${frame_out}"
+        frame_args=("${FRAME_ARGS[@]}")
+    else
+        # Do not send the pre-rasterization frame or acknowledge unsent hashes.
+        frame_args=()
+    fi
 fi
 
 layout_due=0

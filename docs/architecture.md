@@ -42,6 +42,13 @@ The shell data plane is still the reliability boundary for tmux, SketchyBar, and
 - Payload and source commit via a **single atomic `rename(2)`**: the fetcher builds the whole envelope (payload + source) in one temp file and publishes it with one `mv`, so a reader can never observe a NEW payload paired with STALE (or missing) source metadata — there is no second file whose independent commit order could reopen that race. The generation stamp still commits last, since `cache_payload_marker` is derived from the published payload's on-disk identity (inode/mtime/size) and can only be minted once that identity is stable. CLI source is visibly degraded as `⚠cli`.
 - `flock` path: `${SHOWY_QUOTA_CACHE_DIR}/usage.lock`
 - owner-scoped `mkdir` fallback path: `${SHOWY_QUOTA_CACHE_DIR}/usage.lock.d`
+  `owner.pid` contains the PID and its process start time (`ps lstart`, with
+  locale `C` and timezone `UTC`). A matching running owner keeps the lock
+  regardless of its age. A matching but hung owner retains it until the
+  process exits or stops. A confirmed start-time mismatch permits recovery
+  without signaling the unrelated process. Dead, stopped, zombie, and
+  sufficiently old ambiguous owners still permit recovery. PID-only records
+  lack a verified identity and follow the ambiguous-owner wait horizon.
 - Validation: `jq` must accept either shape — a bare array of provider objects, or an envelope whose `providers` field is one. If a usage window is present, its `usedPercent` must be numeric before publication.
 - Corrupt cache quarantine: if the existing usage cache fails validation before
   a fetcher-owned refresh path runs, it is moved to
@@ -171,7 +178,25 @@ Run `python3 docs/scripts/preview-quad-octants.py` to test a terminal and previe
 
 `dual2` splits a model-pooled provider into one standalone `dual` per pool (`AGᴳ` Gemini, `AGᶜ` Claude+GPT), each rendered by the normal `dual` path (half-blocks, every terminal). It pairs `usage.extraRateWindows` by family (session+weekly), unions any positional pool not carried by the extras, and a single pool stays one plain `dual`. Auto-detection treats a provider as model-pooled only when its extras carry *more* pools than the positional slots expose, so a coincidental `windowMinutes`/`resetsAt` collision between a positional slot and one extra (e.g. Codex's main weekly and its Spark weekly) is not mistaken for pooling. Force per provider via `PROVIDER_MODES=<provider>=dual2`.
 
-Window slots are semantic in every mode: a provider is renderable when any of its primary/secondary/tertiary windows reports a numeric `usedPercent`, and each present window renders in its own row, marker, and color role. A gap keeps later windows in place (a missing secondary never pulls the tertiary up), with one exception: when the **primary** slot is absent, the present windows left-compact into the leading slots so the live window drives the primary row and countdown. This is how Codex renders after OpenAI temporarily removed the 5h limit (`usage.primary: null`): the weekly cap promotes into the primary row with its real reset countdown instead of an empty top row and an `idle` label. A provider left with exactly **one** live window renders as a single full-height bar — a solid `█` body in the terminals, one centered native row on SketchyBar — with no empty second row or stranded lane, because one limit is one bar. A promoted window with no reset that is still full reads `idle`, and a provider with no present window at all is `idle`. Promotion is a render-only view — `showy-quota-state` still reports the raw positional windows untouched.
+Window slots are semantic in every mode. A provider is renderable when any
+primary/secondary/tertiary window reports a numeric `usedPercent`. Each live
+window renders in its own row, marker, and color role. A gap keeps later
+windows in place: a missing secondary never pulls the tertiary up. The
+exception is the **primary** slot. When it is absent, present windows
+left-compact into the leading slots so the live window drives the primary row
+and countdown.
+
+This is how Codex renders after OpenAI temporarily removed the 5h limit
+(`usage.primary: null`). The weekly cap promotes into the primary row with
+its real reset countdown instead of an empty top row and an `idle` label.
+A provider with exactly **one** live window renders as a single full-height
+bar: a solid `█` body in the terminals, or one centered native SketchyBar row.
+It has no empty second row or stranded lane. A promoted window with no reset
+that is still full reads `idle`, and a provider with no present window at all
+is `idle`.
+
+Promotion changes only the render view. `showy-quota-state` still reports the
+raw positional windows untouched.
 
 Color and pacing follow each window's **horizon**, not its row position. A window is dimmed — its severity color scaled by `SHOWY_QUOTA_PALETTE_DIM_SCALE` / `palette_dim_scale` (default `0.55`), or an explicit `SHOWY_QUOTA_PALETTE_DIM_*` override — when its `windowMinutes` is at or beyond `SHOWY_QUOTA_DIM_WINDOW_MINUTES` / `dim_window_minutes` (default `10080`, i.e. weekly or monthly). Shorter live tiers (5h, daily) stay at full brightness, and windows without a known `windowMinutes` are treated as bright. So a time-tiered provider (Codex/Claude: 5h + weekly) shows a bright 5h row over a dimmed weekly row; Antigravity's split Gemini and Claude+GPT pools each show a bright 5h row over a dimmed weekly row; uniform daily pools (Gemini) dim none. The `dual` body draws a pacing marker on each row; the mono bodies draw only the configured marker slots.
 

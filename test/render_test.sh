@@ -2942,6 +2942,20 @@ EOF
             "path=${stroke_icon_path} maxima.a=${stroke_alpha}"
     fi
 
+    # A regenerated PNG can restore exactly the acknowledged image hash.
+    # The final send must not retain the first pass's drawing=off arguments.
+    run_sketchybar_plugin "${stroke_fixture}" "${cache}" "${log}" \
+        SHOWY_QUOTA_CODEXBAR_RESOURCES="${stroke_resource_dir}" SHOWY_QUOTA_NOW_EPOCH=1786118400
+    rm -f -- "${stroke_icon_path}"
+    restored_icon_log="${TMP}/sb-restored-icon.log"
+    run_sketchybar_plugin "${stroke_fixture}" "${cache}" "${restored_icon_log}" \
+        SHOWY_QUOTA_CODEXBAR_RESOURCES="${stroke_resource_dir}" SHOWY_QUOTA_NOW_EPOCH=1786118400
+    assert_contains "regenerated icon draws despite matching acknowledged hash" \
+        "showy_quota.opencode.icon drawing=on icon.drawing=off label.drawing=off background.image=${stroke_icon_path}" \
+        "$(< "${restored_icon_log}")"
+    assert_not_contains "regenerated icon does not send the missing-image frame" \
+        "--set showy_quota.opencode.icon drawing=off" "$(< "${restored_icon_log}")"
+
     # Without librsvg the MSVG path cannot draw the icon at all, so the drawn
     # two-letter sigil must take over rather than leaving an empty slot.
     no_rsvg_dir="${TMP}/no-rsvg-bin"
@@ -6024,7 +6038,10 @@ counter="${cache}/recovered-aged-lock-call-count"
 sleep 30 &
 owner_pid=$!
 mkdir "${cache}/usage.lock.d"
-printf '%s\n' "${owner_pid}" > "${cache}/usage.lock.d/owner.pid"
+owner_start=$(LC_ALL=C TZ=UTC ps -ww -o lstart= -p "${owner_pid}")
+owner_start="${owner_start#"${owner_start%%[![:space:]]*}"}"
+owner_start="${owner_start%"${owner_start##*[![:space:]]}"}"
+printf '%s %s\n' "${owner_pid}" "${owner_start}" > "${cache}/usage.lock.d/owner.pid"
 touch -t 198801010000 "${cache}/usage.lock.d"
 rc=0
 out=$(
@@ -6032,15 +6049,47 @@ out=$(
     SHOWY_QUOTA_CACHE_DIR="${cache}" \
     SHOWY_QUOTA_CODEXBAR_BIN="${slow_dir}/codexbar" \
     SHOWY_QUOTA_FORCE_NO_FLOCK=1 \
+    SHOWY_QUOTA_LOCK_WAIT_TENTHS=1 \
     SHOWY_QUOTA_TEST_COUNTER="${counter}" \
     "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
 ) || rc=$?
 kill -KILL "${owner_pid}" 2>/dev/null || true
 wait "${owner_pid}" 2>/dev/null || true
-if (( rc == 0 )) && printf '%s' "${out}" | jq -e 'type == "array"' >/dev/null 2>&1; then
-    ok "mkdir path: recovers aged live owner lock"
+if (( rc != 0 )) && [[ ! -s "${counter}" ]] \
+    && [[ "$(< "${cache}/usage.lock.d/owner.pid")" == "${owner_pid} ${owner_start}" ]]; then
+    ok "mkdir path: retains aged live owner lock without collecting"
 else
-    fail "mkdir path: recovers aged live owner lock" "rc=${rc}"
+    fail "mkdir path: retains aged live owner lock without collecting" "rc=${rc}"
+fi
+
+cache=$(mk_cache)
+counter="${cache}/reused-pid-lock-call-count"
+: > "${counter}"
+sleep 30 &
+owner_pid=$!
+mkdir "${cache}/usage.lock.d"
+# This live PID belongs to a different process than the recorded lock owner.
+printf '%s %s\n' "${owner_pid}" "Fri Jan  1 00:00:00 1988" > "${cache}/usage.lock.d/owner.pid"
+rc=0
+out=$(
+    SHOWY_QUOTA_NO_CONFIG=1 \
+    SHOWY_QUOTA_CACHE_DIR="${cache}" \
+    SHOWY_QUOTA_CODEXBAR_BIN="${slow_dir}/codexbar" \
+    SHOWY_QUOTA_FORCE_NO_FLOCK=1 \
+    SHOWY_QUOTA_PROVIDERS=codex \
+    SHOWY_QUOTA_TEST_COUNTER="${counter}" \
+    "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
+) || rc=$?
+unrelated_alive=0
+kill -0 "${owner_pid}" 2>/dev/null && unrelated_alive=1
+kill -KILL "${owner_pid}" 2>/dev/null || true
+wait "${owner_pid}" 2>/dev/null || true
+if (( rc == 0 && unrelated_alive )) && [[ "$(< "${counter}")" == "x" ]] \
+    && printf '%s' "${out}" | jq -e 'any(.provider == "codex")' >/dev/null 2>&1 \
+    && [[ ! -d "${cache}/usage.lock.d" ]]; then
+    ok "mkdir path: recovers reused PID without signaling the unrelated owner"
+else
+    fail "mkdir path: recovers reused PID without signaling the unrelated owner" "rc=${rc}"
 fi
 
 for owner_case in empty malformed; do

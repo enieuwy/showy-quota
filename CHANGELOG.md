@@ -58,6 +58,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - SketchyBar frame hashes advance only after the plugin's final `sketchybar`
   send succeeds. A failed or interrupted send keeps the last acknowledged
   frame, so the next tick retries the redraw.
+- SketchyBar icon regeneration sends the complete image-enabled frame before
+  acknowledging it. A restored PNG no longer leaves an unchanged icon hidden.
+- Fetcher mkdir-lock recovery verifies the owner's PID and process start time.
+  It retains a matching running owner regardless of lock or heartbeat age,
+  preventing duplicate provider collection during long refreshes. A matching
+  but hung owner keeps the lock until it exits or stops. PID reuse permits
+  recovery without signaling the unrelated process.
 - Usage parsing keeps positional placeholder windows with no numeric
   `usedPercent`, so a live sibling window still renders.
 - Prompt output marks the selected provider stale when its carried-forward

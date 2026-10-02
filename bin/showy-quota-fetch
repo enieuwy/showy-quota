@@ -129,6 +129,7 @@ fi
 #   2 = lock was held by another worker; caller may wait for cache;
 #   3 = mkdir lock owner is ambiguous; caller should wait then retry recovery.
 SHOWY_QUOTA_HELD_LOCK_DIR=""
+SHOWY_QUOTA_HELD_LOCK_OWNER=""
 SHOWY_QUOTA_CACHE_TMP_FILES=()
 
 showy_quota_touch_mkdir_lock_heartbeat() {
@@ -139,22 +140,21 @@ showy_quota_touch_mkdir_lock_heartbeat() {
     heartbeat_file="${lock_dir}/owner.heartbeat"
     if [[ -r "${owner_file}" ]] \
         && IFS= read -r owner_pid < "${owner_file}" \
-        && [[ "${owner_pid}" == "$$" ]]
+        && [[ "${owner_pid}" == "${SHOWY_QUOTA_HELD_LOCK_OWNER}" ]]
     then
         : > "${heartbeat_file}" 2>/dev/null || true
     fi
 }
 
-# Publication fence: a holder whose mkdir lease was reclaimed (stale
-# heartbeat after the long absolute bound) must not publish a cache
-# generation over the new owner's work. With no held lease (direct callers
-# outside the refresh lock) publication is permitted unchanged.
+# Publication fence: a stopped holder can resume after recovery. It must not
+# publish over the new owner's work. Without a held lock (direct callers
+# outside the refresh lock), publication remains permitted.
 showy_quota_refresh_lease_still_owned() {
     local lock_dir="${SHOWY_QUOTA_HELD_LOCK_DIR:-}" owner_pid=""
     [[ -n "${lock_dir}" ]] || return 0
     if [[ -r "${lock_dir}/owner.pid" ]] \
         && IFS= read -r owner_pid < "${lock_dir}/owner.pid" \
-        && [[ "${owner_pid}" == "$$" ]]
+        && [[ "${owner_pid}" == "${SHOWY_QUOTA_HELD_LOCK_OWNER}" ]]
     then
         return 0
     fi
@@ -168,13 +168,15 @@ showy_quota_release_mkdir_lock() {
         local owner_pid=""
         if [[ ! -e "${owner_file}" ]]; then
             showy_quota_log "not releasing mkdir lock without owner.pid"
-        elif [[ -r "${owner_file}" ]] && IFS= read -r owner_pid < "${owner_file}" && [[ "${owner_pid}" == "$$" ]]; then
+        elif [[ -r "${owner_file}" ]] && IFS= read -r owner_pid < "${owner_file}" \
+            && [[ "${owner_pid}" == "${SHOWY_QUOTA_HELD_LOCK_OWNER}" ]]; then
             rm -f -- "${owner_file}" "${heartbeat_file}"
             rmdir -- "${SHOWY_QUOTA_HELD_LOCK_DIR}" 2>/dev/null || true
         else
             showy_quota_log "not releasing mkdir lock now owned by pid ${owner_pid:-unknown}"
         fi
         SHOWY_QUOTA_HELD_LOCK_DIR=""
+        SHOWY_QUOTA_HELD_LOCK_OWNER=""
     fi
 }
 
@@ -224,6 +226,15 @@ showy_quota_process_state() {
     return 1
 }
 
+showy_quota_process_start() {
+    local pid="$1" start=""
+    start=$(LC_ALL=C TZ=UTC ps -ww -o lstart= -p "${pid}" 2>/dev/null) || return 1
+    start="${start#"${start%%[![:space:]]*}"}"
+    start="${start%"${start##*[![:space:]]}"}"
+    [[ -n "${start}" ]] || return 1
+    printf '%s\n' "${start}"
+}
+
 showy_quota_lock_age_seconds() {
     local lock_dir="$1"
     local now mtime
@@ -239,11 +250,19 @@ showy_quota_lock_age_seconds() {
 showy_quota_run_with_mkdir_lock() {
     local lock_dir="$1"
     shift
-    if ! printf '%s\n' "$$" > "${lock_dir}/owner.pid"; then
+    local owner_start="" owner_record=""
+    if ! owner_start=$(showy_quota_process_start "$$"); then
+        rmdir -- "${lock_dir}" 2>/dev/null || true
+        return 1
+    fi
+    owner_record="$$ ${owner_start}"
+    if ! printf '%s\n' "${owner_record}" > "${lock_dir}/owner.pid"; then
+        rm -f -- "${lock_dir}/owner.pid"
         rmdir -- "${lock_dir}" 2>/dev/null || true
         return 1
     fi
     SHOWY_QUOTA_HELD_LOCK_DIR="${lock_dir}"
+    SHOWY_QUOTA_HELD_LOCK_OWNER="${owner_record}"
     showy_quota_touch_mkdir_lock_heartbeat
     local rc=0
     "$@" || rc=$?
@@ -255,19 +274,16 @@ showy_quota_recover_mkdir_lock() {
     local lock_dir="$1"
     local owner_file="${lock_dir}/owner.pid"
     local heartbeat_file="${lock_dir}/owner.heartbeat"
-    local owner_pid=""
+    local owner_pid="" owner_start="" live_start=""
     local stale_reason="ownerless"
-    local lock_age="" heartbeat_age=""
-    # A live owner may perform one bounded CLI request per configured provider.
-    # Only a stalled heartbeat beyond this much larger absolute lease can be
-    # reclaimed; normal refresh cadence is never evidence of owner death.
-    local hard_max_age=$((SHOWY_QUOTA_REFRESH_SECONDS * 10))
-    local heartbeat_max_age=$((SHOWY_QUOTA_REFRESH_SECONDS * 2))
-    (( hard_max_age < 1800 )) && hard_max_age=1800
-    (( heartbeat_max_age < 240 )) && heartbeat_max_age=240
+    local lock_age=""
+    # A running owner can legitimately spend an arbitrary time collecting
+    # multiple providers. Neither lock age nor a paused heartbeat proves it
+    # has stopped; a running but hung owner retains the lock until it exits
+    # or stops. Recovery below handles dead, stopped, and ambiguous owners.
 
     if [[ -r "${owner_file}" ]]; then
-        IFS= read -r owner_pid < "${owner_file}" || owner_pid=""
+        IFS=' ' read -r owner_pid owner_start < "${owner_file}" || owner_pid=""
         if [[ "${owner_pid}" =~ ^[0-9]+$ ]]; then
             if ! kill -0 "${owner_pid}" 2>/dev/null; then
                 rm -f -- "${owner_file}" "${heartbeat_file}"
@@ -278,10 +294,8 @@ showy_quota_recover_mkdir_lock() {
             fi
             local owner_state=""
             owner_state=$(showy_quota_process_state "${owner_pid}" || true)
-            # Stopped and zombie owners cannot renew their lease or publish a
-            # cache generation. Treat them as non-running owners so renderers
-            # recover promptly instead of waiting for the long live-owner
-            # heartbeat ceiling.
+            # Stopped and zombie owners cannot publish. A stopped owner that
+            # resumes must pass the publication fence before writing.
             if [[ "${owner_state}" == [TZ]* ]]; then
                 rm -f -- "${owner_file}" "${heartbeat_file}"
                 if rmdir -- "${lock_dir}" 2>/dev/null; then
@@ -290,30 +304,27 @@ showy_quota_recover_mkdir_lock() {
                 fi
             fi
 
-
-            if lock_age=$(showy_quota_lock_age_seconds "${lock_dir}") \
-                && (( lock_age >= hard_max_age ))
-            then
-                heartbeat_age=$(showy_quota_lock_age_seconds "${heartbeat_file}" 2>/dev/null) \
-                    || heartbeat_age="${lock_age}"
-                if (( heartbeat_age >= heartbeat_max_age )); then
-                    rm -f -- "${owner_file}" "${heartbeat_file}"
-                    if rmdir -- "${lock_dir}" 2>/dev/null; then
-                        showy_quota_log "recovered unresponsive mkdir lock owned by live pid ${owner_pid} (lock ${lock_age}s, heartbeat ${heartbeat_age}s)"
-                        return 0
-                    fi
+            if [[ -n "${owner_start}" ]]; then
+                # An unavailable process query does not prove PID reuse.
+                live_start=$(showy_quota_process_start "${owner_pid}") || return 1
+                [[ "${live_start}" == "${owner_start}" ]] && return 1
+                rm -f -- "${owner_file}" "${heartbeat_file}"
+                if rmdir -- "${lock_dir}" 2>/dev/null; then
+                    showy_quota_log "recovered reused-pid mkdir lock (pid ${owner_pid})"
+                    return 0
                 fi
+                return 1
             fi
-            return 1
+            stale_reason="unverified-owner"
+        else
+            stale_reason="malformed-owner"
         fi
-        stale_reason="malformed-owner"
     elif [[ -e "${owner_file}" ]]; then
         stale_reason="unreadable-owner"
     fi
 
-    # Crash windows: mkdir succeeded but owner.pid was never written,
-    # was truncated before the PID landed, or is not readable. Only steal
-    # these ambiguous locks after the normal wait horizon has elapsed.
+    # Crash windows and legacy PID-only records lack a verified identity.
+    # Recover these ambiguous locks only after the normal wait horizon.
     local max_age
     max_age=$(( (SHOWY_QUOTA_LOCK_WAIT_TENTHS + 9) / 10 ))
     (( max_age < 1 )) && max_age=1

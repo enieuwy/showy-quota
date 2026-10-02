@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # showy-quota — shared helpers.
 #
+# This file is sourced by every script in bin/ and by the SketchyBar item +
 # plugin. Loading it initializes config, themes, and defaults. Config/theme
 # checks can run stat, and theme path resolution can run dirname; keep other
 # external work inside helpers until callers need it.
