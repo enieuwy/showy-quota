@@ -154,12 +154,15 @@ re-prompt means the grant is missing for that path. On macOS the grant lives in
 a cache file that the OS can purge under disk pressure, which is the usual cause
 of an "occasional" prompt.
 
-`make install-plugin` pre-grants this for the installed path, so a fresh install
-is prompt-free on first launch. The grant is best-effort and never fails the
-install. It only covers first launch: a later macOS cache purge still drops the
-grant and re-prompts, so re-run `make grant-zellij-permissions` (idempotent) if
-the prompt returns. This is an upstream limitation — Zellij stores grants in its
-OS cache dir with no relocation override ([zellij#5071](https://github.com/zellij-org/zellij/issues/5071)).
+`make install-plugin` pre-grants `WebAccess` for the installed path. The default
+plugin configuration also requests `OpenTerminalsOrPlugins` and `RunCommands`,
+so this grant alone does not make first launch prompt-free. To pre-grant all
+default permissions, run `showy-quota --grant-zellij --manage-serve --cli-fallback`
+with the installed plugin path. The grant is best-effort and never fails the
+install. A later macOS cache purge drops the grant and causes another prompt;
+re-run the grant command with the same flags if the prompt returns. Zellij stores
+grants in its OS cache dir with no relocation override
+([zellij#5071](https://github.com/zellij-org/zellij/issues/5071)).
 
 You do not need this repo to silence the prompt. Standalone, pick one:
 
@@ -175,7 +178,8 @@ You do not need this repo to silence the prompt. Standalone, pick one:
    run `codexbar serve` yourself); the plugin then only asks for `WebAccess`.
 
 If you already have the repo or the shell tools installed, the bundled helper
-just writes the same block for you and is safe to re-run:
+grants `WebAccess` by default and is safe to re-run. Add `--manage-serve` and
+`--cli-fallback` to the CLI command to match the default plugin configuration:
 
 ```sh
 make grant-zellij-permissions

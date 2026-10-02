@@ -43,8 +43,11 @@ reset and `windowMinutes`, e.g. Cursor's Total/Auto/API) stay at full brightness
 and draw a single pacing marker instead of dimming every row and repeating the
 identical one.
 
-When the cache is older than `2 × SHOWY_QUOTA_REFRESH_SECONDS`, tmux gets one
-trailing `SHOWY_QUOTA_STALE_GLYPH` (default `⚠`) after the last provider. The
+When the cache age exceeds `2 × SHOWY_QUOTA_REFRESH_SECONDS +
+SHOWY_QUOTA_CODEXBAR_CLI_TIMEOUT_SECONDS`, tmux gets one trailing
+`SHOWY_QUOTA_STALE_GLYPH` (default `⚠`) after the last provider. The CLI timeout
+adds headroom for a fetch under load; it defaults to `20` seconds and caps at
+`300` seconds, with invalid or zero values falling back to `20`. The
 cap glyphs, sigil background, separator, bar fill cells, and countdown
 foreground use `SHOWY_QUOTA_PALETTE_STALE`; sigil letters and the strip
 background stay unchanged, and elapsed markers are hidden. When the shared cache

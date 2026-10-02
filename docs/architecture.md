@@ -68,12 +68,67 @@ chunk, no pacing marker) while its fresh neighbors keep their colors. A
 Providers without metadata inherit the file's freshness rather than
 inventing their own.
 
-Refreshes prefer `${SHOWY_QUOTA_CODEXBAR_SERVE_URL%/}/usage` with `curl`; the default base URL is `http://127.0.0.1:8080`. The `/health` probe uses `SHOWY_QUOTA_CODEXBAR_SERVE_TIMEOUT_SECONDS` (default `10`) for fast liveness detection, while the `/usage` probe uses the larger `SHOWY_QUOTA_CODEXBAR_SERVE_USAGE_TIMEOUT_SECONDS` (default `30`): a healthy `codexbar serve` bounds collection per provider and can take up to ~0.8x its request deadline (~24s by default) to return the healthy providers when a slow one degrades to an error row, so reusing the short health timeout here would abandon that usable partial response and fall back to visibly degraded CLI data whenever any provider is briefly slow. Before falling back to CLI, `showy-quota-fetch` probes `/health` and, with `SHOWY_QUOTA_MANAGE_SERVE=1` (default), starts `codexbar serve` on the port implied by `SHOWY_QUOTA_CODEXBAR_SERVE_URL` (default `8080`) in the background with a pidfile. `SHOWY_QUOTA_CODEXBAR_SERVE_PORT` is now a compatibility override; when both are set and disagree, the fetcher logs a warning and prefers the URL port. Set `SHOWY_QUOTA_MANAGE_SERVE=0` to disable managed startup, or `SHOWY_QUOTA_CODEXBAR_SERVE_URL=` to skip HTTP entirely. When an existing cache is still fresh under `SHOWY_QUOTA_REFRESH_SECONDS`, the fetcher may still refresh from `codexbar serve` every `SHOWY_QUOTA_CODEXBAR_SERVE_REFRESH_SECONDS` so bars repaint shortly after the server's own response cache changes. Failed HTTP probes keep serving the existing cache; they do not invoke the slower CLI fallback until the normal refresh interval expires.
+Refreshes prefer `${SHOWY_QUOTA_CODEXBAR_SERVE_URL%/}/usage` with `curl`.
+The default base URL is `http://127.0.0.1:8080`. The `/health` probe uses
+`SHOWY_QUOTA_CODEXBAR_SERVE_TIMEOUT_SECONDS` (default `10`) for fast liveness
+detection. The `/usage` probe uses the larger
+`SHOWY_QUOTA_CODEXBAR_SERVE_USAGE_TIMEOUT_SECONDS` (default `30`). A healthy
+`codexbar serve` bounds collection per provider. It can use up to ~0.8x its
+request deadline (~24s by default) to return healthy providers when a slow
+provider degrades to an error row. The short health timeout would abandon that
+usable partial response and fall back to visibly degraded CLI data whenever a
+provider is briefly slow.
 
-Refresh cadence is deliberately derived from one knob. `SHOWY_QUOTA_REFRESH_SECONDS` (default `120`) is the freshness contract: a managed `codexbar serve` is started with `--refresh-interval` equal to it (so serve never collects more often than the contract promises), and the `/usage` poll re-reads at half of it (`SHOWY_QUOTA_CODEXBAR_SERVE_REFRESH_SECONDS`, default `60`). Worst-case displayed data age is therefore ~1.5x the contract — inside the 2x stale horizon — and quota windows move on hour scales, so oversampling buys nothing except battery drain. `SHOWY_QUOTA_MANAGE_SERVE=1` stays the default on purpose: a resident serve performs the same collection work the CLI fallback would, minus a full CodexBar process launch per refresh, and degrades per provider instead of failing the whole snapshot. Both cadence knobs accept explicit overrides.
+Before CLI fallback, `showy-quota-fetch` probes `/health` and, with
+`SHOWY_QUOTA_MANAGE_SERVE=1` (default), starts `codexbar serve` in the
+background with a pidfile. It uses the port from
+`SHOWY_QUOTA_CODEXBAR_SERVE_URL` (default `8080`). The
+`SHOWY_QUOTA_CODEXBAR_SERVE_PORT` setting remains a compatibility override.
+When both are set and disagree, the fetcher logs a warning and prefers the URL
+port. Set `SHOWY_QUOTA_MANAGE_SERVE=0` to disable managed startup, or set
+`SHOWY_QUOTA_CODEXBAR_SERVE_URL=` to skip HTTP entirely. While an existing
+cache stays fresh under `SHOWY_QUOTA_REFRESH_SECONDS`, the fetcher may still
+refresh from `codexbar serve` every
+`SHOWY_QUOTA_CODEXBAR_SERVE_REFRESH_SECONDS`, so bars repaint after the
+server's response cache changes. Failed HTTP probes keep serving the existing
+cache; they do not invoke CLI fallback until the normal refresh interval ends.
 
-When a healthy `codexbar serve` reports a build `version` on `/health`, `showy-quota-fetch` reuses it only if that build matches the installed `codexbar --version`. Both the `/health` value and `codexbar --version` are reduced to a comparable version token (the first `v?`-digit field, `v` stripped) — the same normalization glean's stale-serve detector uses — so a `CodexBar`-prefixed `/health` value is not mistaken for a stale build, and a transient bare `CodexBar` yields no token (reuse, never recycle). On a real mismatch (e.g. a CodexBar update left a stale in-memory binary serving the port) it recycles the serve — terminating a managed serve through its pidfile, or freeing the configured port of a foreign serve after verifying each `lsof` listener PID is actually a CodexBar serve (command basename plus a `serve` argument) — and starts a fresh build. Listeners that fail verification are never signaled, and there is no name-based `pkill` fallback: when the port cannot be safely freed, the stale serve is reused. A serve whose `/health` omits `version` is reused unchanged, so the gate is a no-op for builds that predate the field. Recycling only happens with `SHOWY_QUOTA_MANAGE_SERVE=1`, runs under the existing fetch lock, and falls back to reuse when no recycle mechanism is available.
-The configured `codexbar` binary is resolved to an absolute path before `--version` and before launching a managed serve, because CodexBar reads its version from the app bundle via `argv[0]` — invoked by a bare command name it reports no version (in `--version` and serve `/health`), which would otherwise leave the gate inert and make showy-quota's own recycled serves omit `/health.version`.
+Refresh cadence comes from one knob. `SHOWY_QUOTA_REFRESH_SECONDS` (default
+`120`) defines the freshness contract. A managed `codexbar serve` starts with
+`--refresh-interval` equal to it, so serve never collects more often than the
+contract promises. The `/usage` poll re-reads at half that cadence
+(`SHOWY_QUOTA_CODEXBAR_SERVE_REFRESH_SECONDS`, default `60`). Worst-case
+displayed data age is ~1.5x the contract, inside the 2x stale horizon. Quota
+windows move on hour scales, so oversampling only drains battery.
+`SHOWY_QUOTA_MANAGE_SERVE=1` stays the default: a resident serve performs the
+same collection work as CLI fallback without a full CodexBar process launch
+per refresh. It also degrades per provider instead of failing the whole
+snapshot. Both cadence knobs accept explicit overrides.
+
+When a healthy `codexbar serve` reports a build `version` on `/health`,
+`showy-quota-fetch` reuses it only if that build matches the installed
+`codexbar --version`. Both values are reduced to a comparable version token:
+the first `v?`-digit field, with `v` stripped. This matches glean's stale-serve
+detector. A `CodexBar`-prefixed `/health` value therefore does not look stale.
+A transient bare `CodexBar` yields no token, so the fetcher reuses the serve
+and never recycles it.
+
+On a real mismatch, such as an update that leaves a stale in-memory binary
+serving the port, the fetcher recycles the serve and starts a fresh build. It
+terminates a managed serve through its pidfile. For a foreign serve, it frees
+the configured port only after it verifies each `lsof` listener PID as a
+CodexBar serve, using the command basename plus a `serve` argument. It never
+signals unverified listeners and has no name-based `pkill` fallback. If it
+cannot safely free the port, it reuses the stale serve. It also reuses a serve
+whose `/health` omits `version`, so builds that predate the field bypass the
+gate. Recycling requires `SHOWY_QUOTA_MANAGE_SERVE=1`, runs under the existing
+fetch lock, and falls back to reuse when no recycle mechanism is available.
+
+The fetcher resolves the configured `codexbar` binary to an absolute path
+before `--version` and before launching a managed serve. CodexBar reads its
+version from the app bundle via `argv[0]`. A bare command name reports no
+version in `--version` or serve `/health`. The version gate would then be
+inert, and showy-quota's recycled serves would omit `/health.version`.
 
 ### Managed serve controls
 

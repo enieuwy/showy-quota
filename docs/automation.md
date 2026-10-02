@@ -246,8 +246,10 @@ percentage, and a `H:MM`-style countdown to reset (matching the strips; omitted
 when the reset time is unknown). `--provider ID` restricts the segment to one
 provider. With no data (empty cache) it prints `AI ?`.
 
-- `--ansi` adds a 16-color severity color: green when remaining ≥ 50, yellow
-  when ≥ 20, red below 20. `NO_COLOR` suppresses color entirely.
+- `--ansi` adds a 16-color severity color using the shared configurable
+  remaining-quota thresholds: green at or above `SHOWY_QUOTA_GOOD_MIN_REMAINING`
+  (default `40`), yellow at or above `SHOWY_QUOTA_WARN_MIN_REMAINING`
+  (default `15`), and red below it. `NO_COLOR` suppresses color entirely.
 - A stale cache appends the configured stale glyph (`SHOWY_QUOTA_STALE_GLYPH`,
   default `⚠`).
 - `prompt` **always exits 0** (except on a bad flag) — a prompt segment must

@@ -93,9 +93,11 @@ bin/showy-quota-fetch     ←  shared cache envelope + flock + last-known-good
 
    Zellij's standalone plugin can still be installed by downloading
    `showy-quota-zellij.wasm`; see [`docs/plugin.md`](docs/plugin.md). From
-   source, `make install-plugin` builds and installs it. `make install-copy`,
-   `make install`, and `make install-plugin` refuse to clobber existing files
-   unless you run with `FORCE=1`.
+   source, `make install-plugin` builds and installs it. `make install-copy`
+   replaces the runtime trees in `DATA_DIR` without requiring `FORCE=1`.
+   Both `make install-copy` and `make install` refuse to replace regular
+   command files; retargeting existing command symlinks requires `FORCE=1`.
+   `make install-plugin` requires `FORCE=1` to replace a different plugin binary.
 
    Shell completions (Bash, zsh, fish) for `showy-quota`, `showy-quota-fetch`,
    and `showy-quota-state`: `make install-completions` (also part of

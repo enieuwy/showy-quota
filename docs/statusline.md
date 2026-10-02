@@ -93,9 +93,12 @@ and show the resulting line.
 
 ## Environment knobs
 
-The statusline adapter reads two of its own knobs and passes everything else
-through to the bar. Set them in the environment your agent CLI inherits (your
-shell profile, or `~/.config/showy-quota/config.env`, which the bar sources):
+The statusline adapter reads its own knobs before it starts the bar.
+Set `SHOWY_QUOTA_STATUSLINE_WIDTH`, `SHOWY_QUOTA_STATUSLINE_CAPS`, and
+`SHOWY_QUOTA_BAR_BIN` in the environment your agent CLI inherits, such as your
+shell profile. The adapter does not source `~/.config/showy-quota/config.env`;
+these knobs work there only if you source and export them before starting
+the adapter. The bar sources that file later for shared rendering settings:
 
 | Variable | Default | Meaning |
 |---|---|---|

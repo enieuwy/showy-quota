@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # showy-quota — shared helpers.
 #
-# This file is sourced by every script in bin/ and by the SketchyBar item +
-# plugin. It must stay self-contained: no external commands at load time.
+# plugin. Loading it initializes config, themes, and defaults. Config/theme
+# checks can run stat, and theme path resolution can run dirname; keep other
+# external work inside helpers until callers need it.
 
 if [ "${BASH_VERSINFO[0]:-0}" -lt 4 ]; then
     printf 'showy-quota: bash 4+ required (running %s). On macOS, install Homebrew bash and ensure it precedes /bin/bash on PATH.\n' "${BASH_VERSION:-unknown}" >&2
