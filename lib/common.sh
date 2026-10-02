@@ -123,6 +123,9 @@ showy_quota_export_config() {
         [[ "${arrays}" == *$'\n'"${name}"$'\n'* ]] && continue
         export "${name?}"
     done
+    # The shell already resolves bundled/custom theme data into explicit keys.
+    # Do not ask the native embedded catalog to resolve a custom theme name.
+    export -n SHOWY_QUOTA_THEME 2>/dev/null || true
 }
 
 # Validate a configured status glyph. Glyphs reach `sketchybar --set` and the
@@ -256,10 +259,7 @@ showy_quota_load_config() {
 
     theme="${SHOWY_QUOTA_THEME:-}"
     [[ -n "${theme}" ]] || return 0
-    # SHOWY_QUOTA_THEME is interpolated into a path that gets sourced as shell.
-    # Restrict it to a bare theme name (same charset the CLI enforces) so a value
-    # like '../../../tmp/evil' cannot traverse out of the themes dir and source
-    # an arbitrary .env file.
+    # Theme names select declarative data, never executable user shell files.
     if [[ ! "${theme}" =~ ^[A-Za-z0-9._-]+$ ]]; then
         # Ignore the malformed/hostile name and keep rendering with defaults
         # rather than aborting the renderer under `set -e`.
@@ -269,26 +269,27 @@ showy_quota_load_config() {
     fi
 
     repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
-    for theme_path in \
-        "${config_dir}/themes/${theme}.env" \
-        "${repo_root}/share/themes/${theme}.env"
-    do
-        if showy_quota_safe_source_file "${theme_path}"; then
-            # shellcheck disable=SC1090
-            . "${theme_path}"
-            return 0
-        fi
-    done
+    local theme_json key value
+    theme_path="${config_dir}/themes/${theme}.json"
+    if [[ -f "${theme_path}" ]]; then
+        theme_json="$(jq -ce -L "${repo_root}/share/themes" 'include "validate"; if valid_theme then . else error("invalid theme") end' "${theme_path}")" || return 1
+    else
+        theme_json="$(jq -ce -L "${repo_root}/share/themes" --arg name "${theme}" 'include "validate"; .[$name] | if valid_theme then . else error("unknown or invalid theme") end' "${repo_root}/share/themes/catalog.json")" || return 1
+    fi
+    while IFS= read -r key && IFS= read -r value; do
+        [[ -v "${key}" ]] || printf -v "${key}" '%s' "${value}"
+    done < <(jq -r 'to_entries[] | .key,.value' <<<"${theme_json}")
+    return 0
 
-    printf 'showy-quota: theme %q not found\n' "${theme}" >&2
-    return 1
 }
 showy_quota_load_config
 
 # ── defaults ───────────────────────────────────────────────────────────
 
-: "${SHOWY_QUOTA_REFRESH_SECONDS:=120}"
-: "${SHOWY_QUOTA_LOCK_WAIT_TENTHS:=100}"
+# shellcheck disable=SC1091
+. "${BASH_SOURCE[0]%/*}/providers.sh"
+# shellcheck disable=SC1091
+. "${BASH_SOURCE[0]%/*}/config-defaults.sh"
 # Upper bound (bytes) on a CodexBar usage payload the shell data plane will
 # validate/publish. Mirrors the native parser's MAX_USAGE_JSON_BYTES and the
 # `--max-filesize` cap on the /usage probe so the CLI-fallback and cache parse
@@ -318,107 +319,6 @@ else
     fi
     unset _swq_max_usage_json_bytes
 fi
-: "${SHOWY_QUOTA_CACHE_DIR:=${XDG_CACHE_HOME:-${HOME}/.cache}/showy-quota}"
-: "${SHOWY_QUOTA_CODEXBAR_BIN:=codexbar}"
-: "${SHOWY_QUOTA_CODEXBAR_SERVE_URL=http://127.0.0.1:8080}"
-: "${SHOWY_QUOTA_CODEXBAR_SERVE_REFRESH_INTERVAL_SECONDS:=}" # derived from REFRESH_SECONDS below
-: "${SHOWY_QUOTA_CODEXBAR_SERVE_START_WAIT_TENTHS:=30}"
-: "${SHOWY_QUOTA_MANAGE_SERVE:=1}"
-: "${SHOWY_QUOTA_CODEXBAR_SERVE_TIMEOUT_SECONDS:=10}"
-: "${SHOWY_QUOTA_CODEXBAR_SERVE_USAGE_TIMEOUT_SECONDS:=30}"
-: "${SHOWY_QUOTA_CODEXBAR_SERVE_REFRESH_SECONDS:=}" # derived from REFRESH_SECONDS below
-: "${SHOWY_QUOTA_CODEXBAR_CLI_TIMEOUT_SECONDS:=20}"
-: "${SHOWY_QUOTA_CODEXBAR_SERVE_FAILURES_BEFORE_RESTART:=3}"
-: "${SHOWY_QUOTA_CODEXBAR_SERVE_FAILURES_BEFORE_CLI:=${SHOWY_QUOTA_CODEXBAR_SERVE_FAILURES_BEFORE_RESTART}}"
-: "${SHOWY_QUOTA_CODEXBAR_SERVE_FAILURE_BACKOFF_SECONDS:=60}"
-: "${SHOWY_QUOTA_CODEXBAR_CLI_FAILURE_BACKOFF_SECONDS:=${SHOWY_QUOTA_REFRESH_SECONDS}}"
-: "${SHOWY_QUOTA_CODEXBAR_CONFIG_PROVIDERS_TIMEOUT_SECONDS:=5}"
-: "${SHOWY_QUOTA_CODEXBAR_CONFIG_PROVIDERS_BACKOFF_SECONDS:=60}"
-: "${SHOWY_QUOTA_PROVIDER_FAILURE_BACKOFF_SECONDS:=${SHOWY_QUOTA_REFRESH_SECONDS}}"
-: "${SHOWY_QUOTA_PROVIDERS:=}"
-: "${SHOWY_QUOTA_PROVIDERS_EXCLUDE:=}"
-# shellcheck disable=SC1091
-. "${BASH_SOURCE[0]%/*}/providers.sh"
-: "${SHOWY_QUOTA_PROVIDER_ORDER:=${SHOWY_QUOTA_PROVIDER_DEFAULT_ORDER}}"
-: "${SHOWY_QUOTA_INCLUDE_STATUS:=1}"
-
-: "${SHOWY_QUOTA_PALETTE_PRIMARY_GOOD:=25be6a}"
-: "${SHOWY_QUOTA_PALETTE_PRIMARY_WARN:=f0af00}"
-: "${SHOWY_QUOTA_PALETTE_PRIMARY_BAD:=ee5396}"
-: "${SHOWY_QUOTA_PALETTE_PRIMARY_UNKNOWN:=6c7086}"
-: "${SHOWY_QUOTA_PALETTE_DIM_SCALE:=0.55}"
-: "${SHOWY_QUOTA_DIM_WINDOW_MINUTES:=10080}"
-: "${SHOWY_QUOTA_PALETTE_BG:=161616}"
-: "${SHOWY_QUOTA_PALETTE_SURFACE:=2a2a2a}"
-: "${SHOWY_QUOTA_PALETTE_TRACK:=3a3a4a}"
-: "${SHOWY_QUOTA_PALETTE_ICON_TEXT:=f2f4f8}"
-: "${SHOWY_QUOTA_PALETTE_COUNTDOWN:=7b8496}"
-: "${SHOWY_QUOTA_PALETTE_COUNTDOWN_WARN:=${SHOWY_QUOTA_PALETTE_PRIMARY_BAD}}"
-: "${SHOWY_QUOTA_PALETTE_STALE:=${SHOWY_QUOTA_PALETTE_PRIMARY_UNKNOWN}}"
-: "${SHOWY_QUOTA_PALETTE_ELAPSED:=be95ff}"
-: "${SHOWY_QUOTA_PALETTE_ELAPSED_LONG:=3ddbd9}"
-: "${SHOWY_QUOTA_STALE_GLYPH:=⚠}"
-: "${SHOWY_QUOTA_DEGRADED_CLI_GLYPH:=⚠cli}"
-
-: "${SHOWY_QUOTA_GOOD_MIN_REMAINING:=40}"
-: "${SHOWY_QUOTA_WARN_MIN_REMAINING:=15}"
-: "${SHOWY_QUOTA_TIME_WARN_MINUTES:=30}"
-
-: "${SHOWY_QUOTA_CODEXBAR_RESOURCES:=/Applications/CodexBar.app/Contents/Resources}"
-: "${SHOWY_QUOTA_SKETCHYBAR_IMAGE_CACHE:=${SHOWY_QUOTA_CACHE_DIR}/sketchybar}"
-: "${SHOWY_QUOTA_SKETCHYBAR_CLICK:=open -b com.steipete.codexbar}"
-: "${SHOWY_QUOTA_SKETCHYBAR_UPDATE_FREQ:=10}"
-: "${SHOWY_QUOTA_PNG_BAR_W:=80}"
-: "${SHOWY_QUOTA_PNG_BAR_H:=18}"
-# Validate the PNG bar dimensions here (before the bar-width default derives
-# from PNG_BAR_W) so a non-numeric value cannot abort sourcing under `set -u`.
-showy_quota_uint_config SHOWY_QUOTA_PNG_BAR_W 80 4096
-showy_quota_uint_config SHOWY_QUOTA_PNG_BAR_H 18 4096
-: "${SHOWY_QUOTA_SKETCHYBAR_ICON_WIDTH:=22}"
-: "${SHOWY_QUOTA_SKETCHYBAR_ICON_PADDING_LEFT:=5}"
-: "${SHOWY_QUOTA_SKETCHYBAR_ICON_SCALE:=0.28}"
-: "${SHOWY_QUOTA_SKETCHYBAR_PROVIDER_ICON_MODE:=svg}"
-: "${SHOWY_QUOTA_SKETCHYBAR_PROVIDER_ICON_FONT:=sketchybar-app-font:Regular:14.0}"
-: "${SHOWY_QUOTA_SKETCHYBAR_PROVIDER_ICON_FONT_PADDING_RIGHT:=2}"
-: "${SHOWY_QUOTA_SKETCHYBAR_BAR_WIDTH:=$((SHOWY_QUOTA_PNG_BAR_W + 3))}"
-: "${SHOWY_QUOTA_SKETCHYBAR_LABEL_WIDTH:=32}"
-# left: one pill in SketchyBar's left group (default). notch: providers that
-# would run under the notch move right of it (position=e) inside the same pill.
-: "${SHOWY_QUOTA_SKETCHYBAR_PLACEMENT:=left}"
-# rows: today's slider rows (default, unchanged). ring: one ring per model
-# family; needs the SketchyBar fork (ring item), else the plugin falls back
-# to rows at runtime.
-: "${SHOWY_QUOTA_SKETCHYBAR_BODY:=rows}"
-# Ring popups. click: a left click opens a unit's popup, a right click runs
-# the click action (default). hover: the pointer opens it after resting
-# 0.4 s. off: no popup.
-: "${SHOWY_QUOTA_SKETCHYBAR_POPUP:=click}"
-: "${SHOWY_QUOTA_SKETCHYBAR_NOTCH_MARGIN:=4}"
-
-: "${SHOWY_QUOTA_SKETCHYBAR_COMPACT_PROVIDER_COUNT:=5}"
-: "${SHOWY_QUOTA_SKETCHYBAR_PILL_RADIUS:=14}"
-: "${SHOWY_QUOTA_SKETCHYBAR_PILL_HEIGHT:=28}"
-: "${SHOWY_QUOTA_SKETCHYBAR_PILL_COLOR:=0xcc24273a}"
-: "${SHOWY_QUOTA_ZELLIJ_WIDGET:=pipe_showy_quota}"
-: "${SHOWY_QUOTA_ZELLIJ_PIPE_NAME:=showy-quota}"
-: "${SHOWY_QUOTA_ZELLIJ_PIPE_INTERVAL:=10}"
-: "${SHOWY_QUOTA_ZELLIJ_PIPE_TIMEOUT_TENTHS:=20}"
-: "${SHOWY_QUOTA_ZELLIJ_BAR_WIDTH:=12}"
-: "${SHOWY_QUOTA_TERMINAL_BAR_MODE:=auto}"
-: "${SHOWY_QUOTA_PROVIDER_MODES:=gemini=mono3,cursor=mono3}"
-: "${SHOWY_QUOTA_MONO_COLOR_MODE:=lowest}"
-: "${SHOWY_QUOTA_MONO_MARKERS:=primary}"
-: "${SHOWY_QUOTA_ZELLIJ_BIN:=zellij}"
-: "${SHOWY_QUOTA_ZELLIJ_PLUGIN:=}"
-: "${SHOWY_QUOTA_USAGE_FILE:=${SHOWY_QUOTA_CACHE_DIR}/usage.json}"
-: "${SHOWY_QUOTA_USAGE_STAMP:=${SHOWY_QUOTA_CACHE_DIR}/usage.json.updated-at}"
-: "${SHOWY_QUOTA_CODEXBAR_SERVE_PID_FILE:=${SHOWY_QUOTA_CACHE_DIR}/codexbar-serve.pid}"
-: "${SHOWY_QUOTA_USAGE_LOCK:=${SHOWY_QUOTA_CACHE_DIR}/usage.lock}"
-: "${SHOWY_QUOTA_CODEXBAR_SERVE_FAILURE_STAMP:=${SHOWY_QUOTA_CACHE_DIR}/serve-failed-at}"
-: "${SHOWY_QUOTA_CODEXBAR_SERVE_FAILURE_COUNT_FILE:=${SHOWY_QUOTA_CACHE_DIR}/serve-failed-count}"
-: "${SHOWY_QUOTA_CODEXBAR_CLI_FAILURE_STAMP:=${SHOWY_QUOTA_CACHE_DIR}/cli-failed-at}"
-: "${SHOWY_QUOTA_CODEXBAR_CONFIG_PROVIDERS_FAILURE_STAMP:=${SHOWY_QUOTA_CACHE_DIR}/config-providers-failed-at}"
-: "${SHOWY_QUOTA_PROVIDER_FAILURE_DIR:=${SHOWY_QUOTA_CACHE_DIR}/provider-failures}"
 
 # ── numeric config validation ──────────────────────────────────────────
 # Malformed integer config (typos, empties) must not silently corrupt
@@ -914,14 +814,55 @@ showy_quota_primary_label() {
     showy_quota_format_countdown "${minutes}"
 }
 
+# Resolve the same global -> provider -> horizon -> slot policy as the core.
+# Args: provider, semantic slot, duration in minutes. Results stay in this shell.
+showy_quota_resolve_policy() {
+    local provider="${1:-}" slot="${2:-}" minutes="${3:-0}"
+    local horizon=live map wanted token scope field value pass
+    local -a tokens=()
+    SQ_POLICY_GOOD="${SHOWY_QUOTA_GOOD_MIN_REMAINING}"
+    SQ_POLICY_WARN="${SHOWY_QUOTA_WARN_MIN_REMAINING}"
+    if [[ "${minutes}" =~ ^[0-9]+$ ]] && (( ${#minutes} <= 9 )) \
+        && (( 10#${minutes} >= SHOWY_QUOTA_DIM_WINDOW_MINUTES )); then horizon=cap; fi
+    for pass in provider horizon provider_horizon slot provider_slot; do
+        map="${SHOWY_QUOTA_WINDOW_THRESHOLDS:-}"
+        case "${pass}" in
+            provider) map="${SHOWY_QUOTA_PROVIDER_THRESHOLDS:-}"; wanted="${provider}" ;;
+            horizon) wanted="${horizon}" ;;
+            provider_horizon) wanted="${provider}.${horizon}" ;;
+            slot) wanted="${slot}" ;;
+            provider_slot) wanted="${provider}.${slot}" ;;
+        esac
+        [[ -n "${wanted}" ]] || continue
+        IFS=',;' read -r -a tokens <<< "${map}"
+        scope=""
+        for token in "${tokens[@]}"; do
+            token="${token//[[:space:]]/}"
+            if [[ "${token}" == *=* ]]; then scope="${token%%=*}"; token="${token#*=}"; fi
+            [[ "${scope}" == "${wanted}" && "${token}" == *:* ]] || continue
+            field="${token%%:*}"; value="${token#*:}"
+            if [[ ! "${value}" =~ ^[0-9]+$ ]] || (( ${#value} > 9 )); then continue; fi
+            value=$((10#${value}))
+            case "${field}" in
+                good) (( value <= 100 )) && SQ_POLICY_GOOD="${value}" ;;
+                warn) (( value <= 100 )) && SQ_POLICY_WARN="${value}" ;;
+            esac
+        done
+        if (( SQ_POLICY_GOOD < SQ_POLICY_WARN )); then
+            value="${SQ_POLICY_GOOD}"; SQ_POLICY_GOOD="${SQ_POLICY_WARN}"; SQ_POLICY_WARN="${value}"
+        fi
+    done
+}
+
 # Map remaining-percent → palette key (good|warn|bad|unknown).
 showy_quota_color_key() {
     local remaining="$1"
     [[ "${remaining}" =~ ^-?[0-9]+([.][0-9]+)?$ ]] || { printf 'unknown'; return; }
     remaining="${remaining%%.*}"
     [[ "${remaining}" == "-0" ]] && remaining=0
-    if (( remaining >= SHOWY_QUOTA_GOOD_MIN_REMAINING )); then printf 'good'
-    elif (( remaining >= SHOWY_QUOTA_WARN_MIN_REMAINING )); then printf 'warn'
+    showy_quota_resolve_policy "${2:-}" "${3:-}" "${4:-0}"
+    if (( remaining >= SQ_POLICY_GOOD )); then printf 'good'
+    elif (( remaining >= SQ_POLICY_WARN )); then printf 'warn'
     else printf 'bad'
     fi
 }
@@ -1139,7 +1080,7 @@ showy_quota_is_long_window() {
 # dimmed when the window is a long-horizon cap. Args: $1 = remaining, $2 = is_long.
 showy_quota_window_color() {
     local remaining="$1" is_long="${2:-0}" severity
-    severity="$(showy_quota_color_key "${remaining}")"
+    severity="$(showy_quota_color_key "${remaining}" "${3:-}" "${4:-}" "${5:-0}")"
     if [[ "${is_long}" == "1" ]]; then
         showy_quota_dim_palette "${severity}"
     else

@@ -2,6 +2,31 @@ use std::collections::BTreeMap;
 
 const GLYPH_MAX_CHARS: usize = 16;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct ThresholdPolicy {
+    pub good: i32,
+    pub warn: i32,
+    pub time: i64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ThresholdOverride {
+    pub good: Option<i32>,
+    pub warn: Option<i32>,
+    pub time: Option<i64>,
+}
+
+impl ThresholdPolicy {
+    fn apply(&mut self, value: &ThresholdOverride) {
+        self.good = value.good.unwrap_or(self.good);
+        self.warn = value.warn.unwrap_or(self.warn);
+        self.time = value.time.unwrap_or(self.time);
+        if self.good < self.warn {
+            std::mem::swap(&mut self.good, &mut self.warn);
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct RenderConfig {
     pub providers: Vec<String>,
@@ -38,6 +63,15 @@ pub struct RenderConfig {
     pub good_min_remaining: i32,
     pub warn_min_remaining: i32,
     pub time_warn_minutes: i64,
+    pub provider_thresholds: BTreeMap<String, ThresholdOverride>,
+    pub window_thresholds: BTreeMap<String, ThresholdOverride>,
+    pub windows: Vec<String>,
+    pub window_mode: String,
+    pub compact_provider_count: usize,
+    pub width_budget: usize,
+    pub compact_order: String,
+    pub theme: String,
+    pub theme_error: Option<String>,
     pub dim_window_minutes: i64,
 
     pub zellij_bar_width: usize,
@@ -63,58 +97,8 @@ pub struct RenderConfig {
     pub cap_right: String,
 }
 
-impl Default for RenderConfig {
-    fn default() -> Self {
-        Self {
-            providers: Vec::new(),
-            providers_exclude: Vec::new(),
-            provider_order: crate::providers::default_order(),
-            include_status: true,
-            freshness: "off".into(),
-            severity_glyphs: false,
-            palette_primary_good: "25be6a".into(),
-            palette_primary_warn: "f0af00".into(),
-            palette_primary_bad: "ee5396".into(),
-            palette_primary_unknown: "6c7086".into(),
-            palette_dim_good: None,
-            palette_dim_warn: None,
-            palette_dim_bad: None,
-            palette_dim_unknown: None,
-            palette_dim_scale: "0.55".into(),
-            palette_bg: "161616".into(),
-            palette_surface: "2a2a2a".into(),
-            palette_track: "3a3a4a".into(),
-            palette_icon_text: "f2f4f8".into(),
-            palette_countdown: "7b8496".into(),
-            palette_countdown_warn: "ee5396".into(),
-            palette_stale: "6c7086".into(),
-            palette_elapsed: "be95ff".into(),
-            palette_elapsed_long: "3ddbd9".into(),
-            stale_glyph: "⚠".into(),
-            degraded_cli_glyph: "⚠cli".into(),
-            error_glyph: "⚠".into(),
-            reset_description_timezone_offset_minutes: None,
-            good_min_remaining: 40,
-            warn_min_remaining: 15,
-            time_warn_minutes: 30,
-            dim_window_minutes: 10080,
-            zellij_bar_width: 12,
-            tmux_bar_width: None,
-            vertical_bar_width: 16,
-            vertical_sort: "provider".into(),
-            vertical_reset_clock: true,
-            terminal_bar_mode: "auto".into(),
-            provider_modes: vec![
-                ("gemini".into(), "mono3".into()),
-                ("cursor".into(), "mono3".into()),
-            ],
-            mono_color_mode: "lowest".into(),
-            mono_markers: vec!["primary".into()],
-            cap_left: "".into(),
-            cap_right: "".into(),
-        }
-    }
-}
+include!("config_generated.rs");
+include!("themes_generated.rs");
 
 impl RenderConfig {
     pub fn from_env() -> Self {
@@ -124,198 +108,40 @@ impl RenderConfig {
 
     pub fn from_env_map(env: &BTreeMap<String, String>) -> Self {
         let mut config = Self::default();
-        config.apply_getter(|name| env.get(name).cloned());
+        config.apply_getter(&|name| env.get(name).cloned());
         config
     }
 
     pub fn from_kdl_config(kdl: &BTreeMap<String, String>) -> Self {
         let mut config = Self::default();
-        config.apply_getter(|name| get_from_kdl(kdl, name));
+        config.apply_getter(&|name| get_from_kdl(kdl, name));
         config
     }
 
-    fn apply_getter<F>(&mut self, get: F)
-    where
-        F: Fn(&str) -> Option<String>,
-    {
-        self.providers = get_csv(&get, "SHOWY_QUOTA_PROVIDERS", &self.providers);
-        self.providers_exclude = get_csv(
-            &get,
-            "SHOWY_QUOTA_PROVIDERS_EXCLUDE",
-            &self.providers_exclude,
-        );
-        self.provider_order = get_csv(&get, "SHOWY_QUOTA_PROVIDER_ORDER", &self.provider_order);
-        self.include_status = get_bool(&get, "SHOWY_QUOTA_INCLUDE_STATUS", self.include_status);
-        if let Some(value) = get("SHOWY_QUOTA_FRESHNESS") {
-            let value = value.trim().to_ascii_lowercase();
-            if matches!(value.as_str(), "off" | "age" | "source" | "age+source") {
-                self.freshness = value;
+    fn apply_getter(&mut self, get: &dyn Fn(&str) -> Option<String>) {
+        let theme = get("SHOWY_QUOTA_THEME").filter(|name| !name.is_empty());
+        if let Some(name) = &theme {
+            self.theme.clone_from(name);
+            if !known_theme(name) {
+                self.theme_error = Some(format!("unknown theme: {name}"));
             }
         }
-        self.severity_glyphs = get_bool(&get, "SHOWY_QUOTA_SEVERITY_GLYPHS", self.severity_glyphs);
-
-        assign_string(
-            &get,
-            "SHOWY_QUOTA_PALETTE_PRIMARY_GOOD",
-            &mut self.palette_primary_good,
-        );
-        assign_string(
-            &get,
-            "SHOWY_QUOTA_PALETTE_PRIMARY_WARN",
-            &mut self.palette_primary_warn,
-        );
-        assign_string(
-            &get,
-            "SHOWY_QUOTA_PALETTE_PRIMARY_BAD",
-            &mut self.palette_primary_bad,
-        );
-        assign_string(
-            &get,
-            "SHOWY_QUOTA_PALETTE_PRIMARY_UNKNOWN",
-            &mut self.palette_primary_unknown,
-        );
-        assign_option(
-            &get,
-            "SHOWY_QUOTA_PALETTE_DIM_GOOD",
-            &mut self.palette_dim_good,
-        );
-        assign_option(
-            &get,
-            "SHOWY_QUOTA_PALETTE_DIM_WARN",
-            &mut self.palette_dim_warn,
-        );
-        assign_option(
-            &get,
-            "SHOWY_QUOTA_PALETTE_DIM_BAD",
-            &mut self.palette_dim_bad,
-        );
-        assign_option(
-            &get,
-            "SHOWY_QUOTA_PALETTE_DIM_UNKNOWN",
-            &mut self.palette_dim_unknown,
-        );
-        assign_string(
-            &get,
-            "SHOWY_QUOTA_PALETTE_DIM_SCALE",
-            &mut self.palette_dim_scale,
-        );
-        assign_string(&get, "SHOWY_QUOTA_PALETTE_BG", &mut self.palette_bg);
-        assign_string(
-            &get,
-            "SHOWY_QUOTA_PALETTE_SURFACE",
-            &mut self.palette_surface,
-        );
-        assign_string(&get, "SHOWY_QUOTA_PALETTE_TRACK", &mut self.palette_track);
-        assign_string(
-            &get,
-            "SHOWY_QUOTA_PALETTE_ICON_TEXT",
-            &mut self.palette_icon_text,
-        );
-        assign_string(
-            &get,
-            "SHOWY_QUOTA_PALETTE_COUNTDOWN",
-            &mut self.palette_countdown,
-        );
-        if let Some(value) = get("SHOWY_QUOTA_PALETTE_COUNTDOWN_WARN") {
-            self.palette_countdown_warn = value;
-        } else {
-            self.palette_countdown_warn
-                .clone_from(&self.palette_primary_bad);
-        }
-        if let Some(value) = get("SHOWY_QUOTA_PALETTE_STALE") {
-            self.palette_stale = value;
-        } else {
-            self.palette_stale.clone_from(&self.palette_primary_unknown);
-        }
-        assign_string(
-            &get,
-            "SHOWY_QUOTA_PALETTE_ELAPSED",
-            &mut self.palette_elapsed,
-        );
-        assign_string(
-            &get,
-            "SHOWY_QUOTA_PALETTE_ELAPSED_LONG",
-            &mut self.palette_elapsed_long,
-        );
-        assign_glyph(&get, "SHOWY_QUOTA_STALE_GLYPH", &mut self.stale_glyph);
-        assign_glyph(
-            &get,
-            "SHOWY_QUOTA_DEGRADED_CLI_GLYPH",
-            &mut self.degraded_cli_glyph,
-        );
-        assign_glyph(&get, "SHOWY_QUOTA_ERROR_GLYPH", &mut self.error_glyph);
-        self.reset_description_timezone_offset_minutes = get_timezone_offset_minutes(
-            &get,
-            "SHOWY_QUOTA_RESET_DESCRIPTION_TIMEZONE_OFFSET",
-            self.reset_description_timezone_offset_minutes,
-        );
-
-        self.good_min_remaining = get_i32(
-            &get,
-            "SHOWY_QUOTA_GOOD_MIN_REMAINING",
-            self.good_min_remaining,
-        );
-        self.warn_min_remaining = get_i32(
-            &get,
-            "SHOWY_QUOTA_WARN_MIN_REMAINING",
-            self.warn_min_remaining,
-        );
-        // Keep the Warn band reachable: if a user inverts the thresholds
-        // (good_min < warn_min), the `remaining >= good_min` test in color_key
-        // would win first and Warn could never fire. Swap them so both
-        // thresholds stay meaningful instead of silently dropping a state.
+        self.apply_manifest(&|key| {
+            get(key).or_else(|| {
+                theme
+                    .as_deref()
+                    .and_then(|name| theme_value(name, key))
+                    .map(str::to_owned)
+            })
+        });
         if self.good_min_remaining < self.warn_min_remaining {
             std::mem::swap(&mut self.good_min_remaining, &mut self.warn_min_remaining);
         }
-        self.time_warn_minutes = get_i64(
-            &get,
-            "SHOWY_QUOTA_TIME_WARN_MINUTES",
-            self.time_warn_minutes,
-        );
-        self.dim_window_minutes = get_i64(
-            &get,
-            "SHOWY_QUOTA_DIM_WINDOW_MINUTES",
-            self.dim_window_minutes,
-        );
-
-        self.zellij_bar_width =
-            get_usize(&get, "SHOWY_QUOTA_ZELLIJ_BAR_WIDTH", self.zellij_bar_width);
-        self.tmux_bar_width = get("SHOWY_QUOTA_TMUX_BAR_WIDTH")
-            .and_then(|value| value.parse().ok())
-            .or(self.tmux_bar_width);
-        self.vertical_bar_width = get_usize(
-            &get,
-            "SHOWY_QUOTA_VERTICAL_BAR_WIDTH",
-            self.vertical_bar_width,
-        );
-        // Only the two documented orders are accepted; an unknown value keeps
-        // provider blocks rather than silently inventing a third layout.
-        if let Some(value) = get("SHOWY_QUOTA_VERTICAL_SORT") {
-            let value = value.trim().to_ascii_lowercase();
-            if value == "provider" || value == "urgency" {
-                self.vertical_sort = value;
-            }
+        if self.windows.len() == 1
+            && matches!(self.windows[0].as_str(), "session-only" | "weekly" | "all")
+        {
+            self.window_mode.clone_from(&self.windows[0]);
         }
-        self.vertical_reset_clock = get_bool(
-            &get,
-            "SHOWY_QUOTA_VERTICAL_RESET_CLOCK",
-            self.vertical_reset_clock,
-        );
-        assign_string(
-            &get,
-            "SHOWY_QUOTA_TERMINAL_BAR_MODE",
-            &mut self.terminal_bar_mode,
-        );
-        self.provider_modes =
-            get_provider_modes(&get, "SHOWY_QUOTA_PROVIDER_MODES", &self.provider_modes);
-        assign_string(
-            &get,
-            "SHOWY_QUOTA_MONO_COLOR_MODE",
-            &mut self.mono_color_mode,
-        );
-        self.mono_markers = get_csv(&get, "SHOWY_QUOTA_MONO_MARKERS", &self.mono_markers);
-        assign_glyph(&get, "SHOWY_QUOTA_CAP_LEFT", &mut self.cap_left);
-        assign_glyph(&get, "SHOWY_QUOTA_CAP_RIGHT", &mut self.cap_right);
     }
 
     /// Explicit per-provider terminal body override, if any.
@@ -325,6 +151,196 @@ impl RenderConfig {
             .find(|(name, _)| name == provider)
             .map(|(_, mode)| mode.as_str())
     }
+
+    pub fn policy(&self, provider: &str, slot: &str, minutes: Option<i64>) -> ThresholdPolicy {
+        let mut policy = ThresholdPolicy {
+            good: self.good_min_remaining,
+            warn: self.warn_min_remaining,
+            time: self.time_warn_minutes,
+        };
+        if let Some(value) = self.provider_thresholds.get(provider) {
+            policy.apply(value);
+        }
+        if self.window_thresholds.is_empty() {
+            return policy;
+        }
+        let horizon = if minutes.is_some_and(|m| m >= self.dim_window_minutes) {
+            "cap"
+        } else {
+            "live"
+        };
+        let mut scoped = String::with_capacity(provider.len() + 1 + horizon.len().max(slot.len()));
+        scoped.push_str(provider);
+        scoped.push('.');
+        let prefix_len = scoped.len();
+        for key in [horizon, slot] {
+            if let Some(value) = self.window_thresholds.get(key) {
+                policy.apply(value);
+            }
+            scoped.truncate(prefix_len);
+            scoped.push_str(key);
+            if let Some(value) = self.window_thresholds.get(&scoped) {
+                policy.apply(value);
+            }
+        }
+        policy
+    }
+
+    pub fn window_enabled(&self, slot: &str, minutes: Option<i64>) -> bool {
+        match self.window_mode.as_str() {
+            "session-only" => minutes.map_or(slot == "primary", |m| m < self.dim_window_minutes),
+            "weekly" => minutes.is_some_and(|m| m >= self.dim_window_minutes),
+            _ => self
+                .windows
+                .iter()
+                .any(|value| value == slot || value == "all"),
+        }
+    }
+
+    /// Apply visibility before any layout, countdown, marker or severity decision.
+    pub(crate) fn filter_windows(&self, records: &mut Vec<crate::codexbar::ProviderRecord>) {
+        if self.window_mode == "all"
+            && ["primary", "secondary", "tertiary"].iter().all(|slot| {
+                self.windows
+                    .iter()
+                    .any(|value| value == slot || value == "all")
+            })
+        {
+            return;
+        }
+        records.retain_mut(|record| {
+            let originally_renderable = crate::codexbar::is_renderable(record);
+            if crate::codexbar::is_errored(record) {
+                return true;
+            }
+            let Some(usage) = record.usage.as_mut() else {
+                return true;
+            };
+            for (slot, window) in [
+                ("primary", &mut usage.primary),
+                ("secondary", &mut usage.secondary),
+                ("tertiary", &mut usage.tertiary),
+            ] {
+                if !self.window_enabled(slot, window.as_ref().and_then(|w| w.window_minutes())) {
+                    *window = None;
+                }
+            }
+            // Keep each family's identity before hiding its horizons. Removing
+            // the named entry would renumber pools and merge adjacent families.
+            for named in &mut usage.extra_rate_windows {
+                let minutes = named.window.as_ref().and_then(|w| w.window_minutes());
+                let slot = if minutes.is_some_and(|m| m >= self.dim_window_minutes) {
+                    "secondary"
+                } else {
+                    "primary"
+                };
+                if !self.window_enabled(slot, minutes) {
+                    named.window = None;
+                }
+            }
+            // Preserve a renderable provider whose selected horizon exists only
+            // in a pool. Do not make an originally extras-only payload renderable.
+            if originally_renderable
+                && usage.primary.is_none()
+                && usage.secondary.is_none()
+                && usage.tertiary.is_none()
+            {
+                if let Some(window) = usage
+                    .extra_rate_windows
+                    .iter()
+                    .filter(|named| named.usage_known != Some(false))
+                    .filter_map(|named| named.window.as_ref())
+                    .find(|window| window.used_percent.is_some_and(f64::is_finite))
+                {
+                    if window
+                        .window_minutes()
+                        .is_some_and(|m| m >= self.dim_window_minutes)
+                    {
+                        usage.secondary = Some(window.clone());
+                    } else {
+                        usage.primary = Some(window.clone());
+                    }
+                }
+            }
+            usage.primary.is_some()
+                || usage.secondary.is_some()
+                || usage.tertiary.is_some()
+                || usage
+                    .extra_rate_windows
+                    .iter()
+                    .any(|named| named.window.is_some())
+        });
+    }
+
+    pub(crate) fn window_policy(
+        &self,
+        record: &crate::codexbar::ProviderRecord,
+        window: Option<&crate::codexbar::UsageWindow>,
+    ) -> ThresholdPolicy {
+        let slot = record
+            .usage
+            .as_ref()
+            .and_then(|usage| {
+                [
+                    ("primary", usage.primary.as_ref()),
+                    ("secondary", usage.secondary.as_ref()),
+                    ("tertiary", usage.tertiary.as_ref()),
+                ]
+                .into_iter()
+                .find_map(|(slot, candidate)| match (candidate, window) {
+                    (Some(a), Some(b)) if std::ptr::eq(a, b) => Some(slot),
+                    _ => None,
+                })
+            })
+            .unwrap_or("");
+        self.policy(
+            &record.provider,
+            slot,
+            window.and_then(|w| w.window_minutes()),
+        )
+    }
+}
+
+/// Semicolons separate providers; commas separate fields. A new `name=`
+/// also starts a provider, preserving the existing provider-map CSV idiom.
+fn parse_thresholds(value: &str) -> BTreeMap<String, ThresholdOverride> {
+    let mut result = BTreeMap::new();
+    let mut scope = "";
+    for token in value.split([';', ',']) {
+        let token = token.trim();
+        let field = if let Some((name, field)) = token.split_once('=') {
+            scope = name.trim();
+            field
+        } else {
+            token
+        };
+        if scope.is_empty() {
+            continue;
+        }
+        let Some((key, raw)) = field.split_once(':') else {
+            continue;
+        };
+        let entry: &mut ThresholdOverride = result.entry(scope.to_owned()).or_default();
+        match key.trim() {
+            "good" => {
+                entry.good = raw
+                    .trim()
+                    .parse::<i32>()
+                    .ok()
+                    .filter(|n| (0..=100).contains(n))
+            }
+            "warn" => {
+                entry.warn = raw
+                    .trim()
+                    .parse::<i32>()
+                    .ok()
+                    .filter(|n| (0..=100).contains(n))
+            }
+            "time" => entry.time = raw.trim().parse::<i64>().ok().filter(|n| *n >= 0),
+            _ => {}
+        }
+    }
+    result
 }
 
 fn get_from_kdl(kdl: &BTreeMap<String, String>, env_name: &str) -> Option<String> {
@@ -341,19 +357,6 @@ fn get_from_kdl(kdl: &BTreeMap<String, String>, env_name: &str) -> Option<String
         .unwrap_or(env_name)
         .to_ascii_lowercase();
     kdl.get(&lower).cloned()
-}
-
-fn kdl_aliases(env_name: &str) -> &'static [&'static str] {
-    match env_name {
-        "SHOWY_QUOTA_ZELLIJ_BAR_WIDTH" => &["bar_width"],
-        "SHOWY_QUOTA_PROVIDERS" => &["providers"],
-        "SHOWY_QUOTA_PROVIDERS_EXCLUDE" => &["providers_exclude"],
-        "SHOWY_QUOTA_PROVIDER_ORDER" => &["provider_order"],
-        "SHOWY_QUOTA_DEGRADED_CLI_GLYPH" => &["degraded_cli_glyph"],
-        "SHOWY_QUOTA_ERROR_GLYPH" => &["error_glyph"],
-        "SHOWY_QUOTA_RESET_DESCRIPTION_TIMEZONE_OFFSET" => &["reset_description_timezone_offset"],
-        _ => &[],
-    }
 }
 
 fn assign_string<F>(get: &F, name: &str, target: &mut String)

@@ -76,6 +76,11 @@ jobs:
       - name: make check-deps
         run: make check-deps
 
+      - name: Generated configuration contract
+        run: |
+          python3 scripts/generate-config.py --check
+          python3 scripts/generate-themes.py --check
+
       - name: make lint
         run: make lint
 

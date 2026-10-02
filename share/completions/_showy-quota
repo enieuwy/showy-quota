@@ -8,7 +8,7 @@ _showy-quota() {
 
     case "${words[1]:t}" in
         showy-quota-fetch)
-            options=(--refresh --json --cache-only --age --path --stop-serve --serve-status --restart-serve -h --help)
+            options=(--refresh --json --cache-only --age --path --stop-serve --serve-status --restart-serve --record --fixture-dir --sanitize --replay -h --help)
             _describe 'option' options
             return ;;
         showy-quota-state)
@@ -24,6 +24,25 @@ _showy-quota() {
         return
     fi
     case "${mode}" in
+        config)
+            (( CURRENT == 3 )) || return
+            options=(get set unset list) ;;
+        theme)
+            (( CURRENT == 3 )) || return
+            options=(list show validate new import-base16 import-iterm) ;;
+        tmux)
+            options=(sync doctor --socket --dry-run --json) ;;
+        preview)
+            if [[ "${previous}" == --surface ]]; then
+                options=(zellij tmux sketchybar plan rows vertical)
+            elif [[ "${previous}" == --fixture ]]; then
+                _files
+                return
+            else
+                options=(--surface --fixture --theme)
+            fi ;;
+        --check-terminal) options=(--json) ;;
+        --tmux-doctor) options=(--socket --json) ;;
         guard|run|next-reset|pick)
             if [[ "${mode}" == run ]]; then
                 dashdash=${words[(i)--]}
@@ -79,6 +98,7 @@ _showy-quota() {
         *)
             (( CURRENT == 2 )) || return
             options=(--set --unset --current --list --preview --diagnose --check-config --grant-zellij
+                --check-terminal --tmux-doctor --diagnose-zellij config theme tmux preview
                 guard prompt serve next-reset run pick refresh -h --help) ;;
     esac
     _describe 'option' options

@@ -354,6 +354,43 @@ primary palette with `SHOWY_QUOTA_PALETTE_DIM_SCALE` after
 `SHOWY_QUOTA_DIM_WINDOW_MINUTES`. There are no separate secondary/tertiary
 palette overrides; see `share/config.env.example` for the full palette surface.
 
+### Configuration and theme commands
+
+The management commands require Python 3, Bash 4+, and jq. They do not contact providers.
+
+```sh
+showy-quota config list
+showy-quota config set REFRESH_SECONDS 60
+showy-quota config get REFRESH_SECONDS
+showy-quota config unset REFRESH_SECONDS
+showy-quota theme new my-theme
+showy-quota theme import-base16 palette.yaml imported-theme
+showy-quota theme import-iterm palette.itermcolors terminal-theme
+showy-quota --set my-theme
+showy-quota --check-terminal
+```
+
+`config set` validates keys and values before it changes `config.env`.
+It preserves unrelated lines. Keys accept the full `SHOWY_QUOTA_` prefix or the short name.
+
+Custom themes now use JSON at `~/.config/showy-quota/themes/NAME.json`.
+They contain palette and glyph values, not shell commands.
+Existing custom `.env` themes need conversion to JSON; the loader does not execute them.
+`share/themes/catalog.json` defines the bundled themes.
+Explicit palette overrides take precedence over theme values.
+
+The glyph doctor prints samples and recommends a conservative fallback.
+It does not infer font coverage from the terminal name.
+
+For fixture previews, use `showy-quota preview --surface tmux --fixture FILE`.
+The surfaces are `zellij`, `tmux`, `sketchybar`, `plan`, `rows`, and `vertical`.
+Use `--fixture -` for standard input. The renderer does not fetch provider data.
+These previews need the matching `showy-quota-render` binary.
+
+Configuration developers edit `share/config-manifest.json`, then run
+`python3 scripts/generate-config.py`. Theme developers edit the catalog, then run
+`python3 scripts/generate-themes.py`. Both generators accept `--check`.
+
 ## Theme gallery
 
 | theme name | SketchyBar image | terminal / Zellij image |

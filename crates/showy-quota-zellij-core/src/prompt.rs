@@ -18,6 +18,7 @@ struct PromptCandidate<'a> {
     used: i32,
     remaining: i32,
     minutes: Option<i64>,
+    severity: crate::palette::Severity,
 }
 
 pub fn emit_prompt_segment(
@@ -56,7 +57,7 @@ pub fn emit_formatted_prompt_segment(
     if options.ansi && std::env::var_os("NO_COLOR").is_none() {
         Ok(format!(
             "\u{1b}[{}m{}\u{1b}[0m",
-            config.severity_ansi_code(candidate.remaining),
+            candidate.severity.ansi_code(),
             segment
         ))
     } else {
@@ -82,7 +83,7 @@ fn render_prompt_segment(
     let mut out = if options.ansi && std::env::var_os("NO_COLOR").is_none() {
         format!(
             "\u{1b}[{}m{}\u{1b}[0m",
-            config.severity_ansi_code(candidate.remaining),
+            candidate.severity.ansi_code(),
             segment
         )
     } else {
@@ -138,6 +139,7 @@ fn select_candidate<'a>(
                 used,
                 remaining,
                 minutes: extra.minutes_until_reset,
+                severity: extra.severity.unwrap_or(crate::palette::Severity::Good),
             };
             if selected
                 .is_none_or(|current: PromptCandidate<'_>| candidate.remaining < current.remaining)
@@ -155,6 +157,7 @@ fn candidate<'a>(provider: &'a str, window: &WindowMetric) -> PromptCandidate<'a
         used: window.used_percent,
         remaining: window.remaining_percent,
         minutes: window.minutes_until_reset,
+        severity: window.severity,
     }
 }
 

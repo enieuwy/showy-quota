@@ -22,7 +22,7 @@ use crate::codexbar::{
 use crate::config::RenderConfig;
 use crate::metrics::{error_kind, normalized_status_indicator, sanitize_error_message, ErrorKind};
 use crate::providers::{font_icon, sigil};
-use crate::render::{format_countdown, RenderError};
+use crate::render::{extra_families, format_countdown, RenderError};
 use crate::reset::{epoch_clock, minutes_until, reset_clock, reset_epoch};
 use crate::sketchybar::{
     elapsed_marker_x, marker_percentage_from_x, passes_filters, sort_records, SketchybarOptions,
@@ -31,6 +31,7 @@ use crate::sketchybar::{
 /// One window in a ring unit: the ring itself or one bar.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RingWindow {
+    pub policy: crate::config::ThresholdPolicy,
     /// Window name (`Weekly`, `Session`, `Total`, …).
     pub title: String,
     /// Window length in minutes, when CodexBar reports it.
@@ -103,6 +104,7 @@ pub struct RingUnit {
     pub label: String,
     /// Countdown minutes behind the label, when the reset parses.
     pub label_minutes: Option<i64>,
+    pub time_warn_minutes: i64,
     /// Title of the window the label counts down to.
     pub shortest_title: String,
     /// Grey note under the popup rows.
@@ -145,7 +147,7 @@ pub fn ring_units(
     now_epoch: i64,
     options: SketchybarOptions,
 ) -> Result<Vec<RingUnit>, RenderError> {
-    let indexed = parse_ring_payload(payload)?;
+    let indexed = parse_ring_payload(payload, config)?;
     let mut visible: Vec<&(ProviderRecord, Value)> = indexed
         .iter()
         .filter(|(record, _)| {
@@ -177,7 +179,10 @@ pub fn ring_units(
 /// record’s raw element for the fields the typed record does not carry
 /// (`rateWindowLabels`, `codexResetCredits`, `status.description`,
 /// `usage.updatedAt`).
-fn parse_ring_payload(payload: &[u8]) -> Result<Vec<(ProviderRecord, Value)>, RenderError> {
+fn parse_ring_payload(
+    payload: &[u8],
+    config: &RenderConfig,
+) -> Result<Vec<(ProviderRecord, Value)>, RenderError> {
     if payload.len() > MAX_USAGE_JSON_BYTES {
         return Err(RenderError::InvalidPayload);
     }
@@ -188,10 +193,18 @@ fn parse_ring_payload(payload: &[u8]) -> Result<Vec<(ProviderRecord, Value)>, Re
     Ok(records
         .into_iter()
         .filter_map(|raw| {
-            serde_json::from_value::<ProviderRecord>(raw.clone())
-                .ok()
-                .filter(|record| valid_provider_id(&record.provider))
-                .map(|record| (record, raw))
+            let record = serde_json::from_value::<ProviderRecord>(raw.clone()).ok()?;
+            if !valid_provider_id(&record.provider) {
+                return None;
+            }
+            if config.window_mode == "all" && config.windows == ["primary", "secondary", "tertiary"]
+            {
+                Some((record, raw))
+            } else {
+                let mut records = vec![record];
+                config.filter_windows(&mut records);
+                records.pop().map(|record| (record, raw))
+            }
         })
         .collect())
 }
@@ -222,6 +235,12 @@ fn provider_units(
         if !pools.is_empty() {
             return pools;
         }
+    } else if !record
+        .usage
+        .as_ref()
+        .is_none_or(|usage| usage.extra_rate_windows.is_empty())
+    {
+        return pooled_units(record, raw, config, tick);
     }
     vec![family_unit(
         &record.provider,
@@ -254,6 +273,7 @@ fn positional_windows(record: &ProviderRecord, raw: &Value) -> Vec<RawWindow> {
             let window = window?;
             let used = window.used_percent?;
             Some(RawWindow {
+                slot: *slot,
                 title: labels
                     .get(*slot)
                     .cloned()
@@ -268,6 +288,7 @@ fn positional_windows(record: &ProviderRecord, raw: &Value) -> Vec<RawWindow> {
 }
 
 struct RawWindow {
+    slot: &'static str,
     title: String,
     minutes: Option<i64>,
     used: f64,
@@ -313,13 +334,24 @@ fn family_unit(
         .filter(|index| Some(*index) != ring_index)
         .map(|index| {
             let breakdown = raws[index].minutes == ring_minutes;
-            assemble(&raws[index], breakdown, tick)
+            assemble(
+                &raws[index],
+                breakdown,
+                tick,
+                config.policy(&record.provider, raws[index].slot, raws[index].minutes),
+            )
         })
         .collect();
     // A lone window draws the ring only; a missing window draws nothing.
     let ring = match ring_index.and_then(|index| raws.get(index)) {
-        Some(raw) => assemble(raw, false, tick),
+        Some(raw) => assemble(
+            raw,
+            false,
+            tick,
+            config.policy(&record.provider, raw.slot, raw.minutes),
+        ),
         None => RingWindow {
+            policy: config.policy(&record.provider, "", None),
             title: String::new(),
             minutes: None,
             remaining: 0,
@@ -380,13 +412,14 @@ fn family_unit(
     };
     let shortest_title = counted.title.clone();
     let shortest_remaining = counted.remaining;
+    let time_warn_minutes = counted.policy.time;
     let refill_glyph = if refill.is_some() { REFILL_GLYPH } else { "" };
     let label = if tick.stale_mark {
         format!("{}{countdown_text}", config.stale_glyph)
     } else if config.severity_glyphs && !tick.stale {
         format!(
             "{}{refill_glyph}{countdown_text}",
-            config.severity(shortest_remaining as i32).marker()
+            counted.policy.severity(shortest_remaining as i32).marker()
         )
     } else {
         format!("{refill_glyph}{countdown_text}")
@@ -428,6 +461,7 @@ fn family_unit(
         bars,
         label,
         label_minutes,
+        time_warn_minutes,
         shortest_title,
         note,
         name_width,
@@ -494,7 +528,12 @@ pub fn short_age(seconds: i64) -> String {
     }
 }
 
-fn assemble(raw: &RawWindow, breakdown: bool, tick: TickCtx) -> RingWindow {
+fn assemble(
+    raw: &RawWindow,
+    breakdown: bool,
+    tick: TickCtx,
+    policy: crate::config::ThresholdPolicy,
+) -> RingWindow {
     let remaining = if raw.unknown {
         0
     } else {
@@ -512,6 +551,7 @@ fn assemble(raw: &RawWindow, breakdown: bool, tick: TickCtx) -> RingWindow {
         )
     };
     RingWindow {
+        policy,
         title: sanitize(&raw.title),
         minutes: raw.minutes,
         remaining,
@@ -596,6 +636,102 @@ fn unit_note(
     parts.join(" · ")
 }
 
+/// Extend the same native family model to non-Antigravity model pools.
+fn pooled_units(
+    record: &ProviderRecord,
+    raw: &Value,
+    config: &RenderConfig,
+    tick: TickCtx,
+) -> Vec<RingUnit> {
+    let usage = record.usage.as_ref().expect("pooled provider has usage");
+    let extras: Vec<_> = usage
+        .extra_rate_windows
+        .iter()
+        .filter(|extra| {
+            extra
+                .window
+                .as_ref()
+                .is_some_and(|window| window.used_percent.is_some())
+        })
+        .collect();
+    let mut units = Vec::new();
+    let main: Vec<_> = positional_windows(record, raw)
+        .into_iter()
+        .filter(|window| {
+            !extras.iter().any(|extra| {
+                extra.usage_known != Some(false)
+                    && extra.window.as_ref().is_some_and(|candidate| {
+                        candidate.window_minutes() == window.minutes
+                            && candidate.reset_value().unwrap_or_default() == window.reset
+                    })
+            })
+        })
+        .collect();
+    if !main.is_empty() {
+        units.push(family_unit(
+            &record.provider,
+            &display_name(&record.provider),
+            None,
+            main,
+            record,
+            raw,
+            config,
+            tick,
+        ));
+    }
+    for (index, family) in extra_families(&record.provider, &usage.extra_rate_windows)
+        .into_iter()
+        .enumerate()
+    {
+        if family.windows.is_empty() {
+            continue;
+        }
+        let title = family.title;
+        let pool = title
+            .chars()
+            .find(|c| c.is_ascii_alphanumeric())
+            .map(|c| c.to_ascii_uppercase());
+        let windows = family
+            .windows
+            .iter()
+            .map(|extra| {
+                let window = extra.window.as_ref().expect("pool window exists");
+                RawWindow {
+                    slot: "",
+                    title: sanitize(extra.title.as_deref().unwrap_or("Model pool")),
+                    minutes: window.window_minutes(),
+                    used: window.used_percent.unwrap_or(0.0),
+                    reset: window.reset_value().unwrap_or_default().into(),
+                    unknown: extra.usage_known == Some(false),
+                }
+            })
+            .collect();
+        units.push(family_unit(
+            &format!("{}.p{index}", record.provider),
+            title,
+            pool,
+            windows,
+            record,
+            raw,
+            config,
+            tick,
+        ));
+    }
+    if units.is_empty() {
+        units.push(family_unit(
+            &record.provider,
+            &display_name(&record.provider),
+            None,
+            positional_windows(record, raw),
+            record,
+            raw,
+            config,
+            tick,
+        ));
+    }
+    units
+}
+
 /// Antigravity’s two pools from `extraRateWindows`: Gemini versus the rest.
 /// Each pool with a measured window becomes one unit; the pool letter is the
 /// `ring.marker.badge`.
@@ -631,6 +767,7 @@ fn antigravity_units(
             &mut other
         };
         target.push(RawWindow {
+            slot: "",
             title: sanitize(extra.title.as_deref().unwrap_or_default()),
             minutes: window.window_minutes(),
             used,
@@ -738,6 +875,7 @@ fn error_unit(
         logo_y,
         pool: None,
         ring: RingWindow {
+            policy: config.policy(&record.provider, "", None),
             title: String::new(),
             minutes: None,
             remaining: last_remaining.unwrap_or(0),
@@ -751,6 +889,7 @@ fn error_unit(
         bars: Vec::new(),
         label: kind_label.clone(),
         label_minutes: None,
+        time_warn_minutes: config.policy(&record.provider, "", None).time,
         shortest_title: String::new(),
         note,
         name_width: 6,

@@ -1,0 +1,2137 @@
+{
+  "schemaVersion": 1,
+  "settings": [
+    {
+      "key": "SHOWY_QUOTA_FORCE_COLOR",
+      "kdl": null,
+      "type": "boolean",
+      "default": "0",
+      "scope": ["shell", "native"],
+      "description": "Force ANSI color even when the output is not a terminal.",
+      "example": "1"
+    },
+    {
+      "key": "SHOWY_QUOTA_SKETCHYBAR_FORCE_REDECLARE",
+      "kdl": null,
+      "type": "boolean",
+      "default": "0",
+      "scope": ["shell"],
+      "description": "Recreate the items during the next SketchyBar update.",
+      "example": "1"
+    },
+    {
+      "key": "SHOWY_QUOTA_SKETCHYBAR_ICON_FONT_FILE",
+      "kdl": null,
+      "type": "string",
+      "default": "",
+      "scope": ["shell"],
+      "description": "Override the file used for provider font icons.",
+      "example": ""
+    },
+    {
+      "key": "SHOWY_QUOTA_SKETCHYBAR_ROW_RADIUS",
+      "kdl": null,
+      "type": "integer",
+      "default": 3,
+      "min": 0,
+      "max": 4096,
+      "scope": ["shell", "native"],
+      "description": "Set the corner radius of a native slider row.",
+      "example": "3"
+    },
+    {
+      "key": "SHOWY_QUOTA_DEGRADED_CLI",
+      "kdl": null,
+      "type": "boolean",
+      "default": "0",
+      "scope": ["shell", "native"],
+      "description": "Mark supplied data as degraded CLI fallback data.",
+      "example": "1"
+    },
+    {
+      "key": "SHOWY_QUOTA_SKETCHYBAR_AUTO_COMPACT",
+      "kdl": null,
+      "type": "boolean",
+      "default": "off",
+      "scope": ["shell", "native"],
+      "description": "Hide bar lanes and labels above the compact provider threshold.",
+      "shell": {"operator": ":=", "default": "off"},
+      "example": "on"
+    },
+    {
+      "key": "SHOWY_QUOTA_MAX_USAGE_JSON_BYTES",
+      "kdl": null,
+      "type": "integer",
+      "default": 5242880,
+      "min": 1,
+      "max": 5242880,
+      "scope": ["shell"],
+      "description": "Maximum accepted provider payload size in bytes.",
+      "example": "5242880"
+    },
+    {
+      "key": "SHOWY_QUOTA_REFRESH_SECONDS",
+      "kdl": "refresh_seconds",
+      "type": "integer",
+      "default": "120",
+      "scope": [
+        "shell"
+      ],
+      "description": "Refresh seconds.",
+      "shell": {
+        "operator": ":=",
+        "default": "120"
+      },
+      "min": 0,
+      "example": "120"
+    },
+    {
+      "key": "SHOWY_QUOTA_LOCK_WAIT_TENTHS",
+      "kdl": "lock_wait_tenths",
+      "type": "integer",
+      "default": "100",
+      "scope": [
+        "shell"
+      ],
+      "description": "Lock wait tenths.",
+      "shell": {
+        "operator": ":=",
+        "default": "100"
+      },
+      "min": 0,
+      "example": "100"
+    },
+    {
+      "key": "SHOWY_QUOTA_CACHE_DIR",
+      "kdl": "cache_dir",
+      "type": "string",
+      "default": "${XDG_CACHE_HOME:-${HOME}/.cache}/showy-quota",
+      "scope": [
+        "shell"
+      ],
+      "description": "Cache dir.",
+      "shell": {
+        "operator": ":=",
+        "default": "${XDG_CACHE_HOME:-${HOME}/.cache}/showy-quota"
+      },
+      "example": "${XDG_CACHE_HOME:-${HOME}/.cache}/showy-quota"
+    },
+    {
+      "key": "SHOWY_QUOTA_CODEXBAR_BIN",
+      "kdl": "codexbar_bin",
+      "type": "string",
+      "default": "codexbar",
+      "scope": [
+        "shell"
+      ],
+      "description": "Codexbar bin.",
+      "shell": {
+        "operator": ":=",
+        "default": "codexbar"
+      },
+      "example": "codexbar"
+    },
+    {
+      "key": "SHOWY_QUOTA_CODEXBAR_SERVE_URL",
+      "kdl": "codexbar_serve_url",
+      "type": "string",
+      "default": "http://127.0.0.1:8080",
+      "scope": [
+        "shell"
+      ],
+      "description": "Codexbar serve url.",
+      "shell": {
+        "operator": "=",
+        "default": "http://127.0.0.1:8080"
+      },
+      "example": "http://127.0.0.1:8080"
+    },
+    {
+      "key": "SHOWY_QUOTA_CODEXBAR_SERVE_REFRESH_INTERVAL_SECONDS",
+      "kdl": "codexbar_serve_refresh_interval_seconds",
+      "type": "string",
+      "default": "",
+      "scope": [
+        "shell"
+      ],
+      "description": "Codexbar serve refresh interval seconds.",
+      "shell": {
+        "operator": ":=",
+        "default": ""
+      },
+      "example": ""
+    },
+    {
+      "key": "SHOWY_QUOTA_CODEXBAR_SERVE_START_WAIT_TENTHS",
+      "kdl": "codexbar_serve_start_wait_tenths",
+      "type": "integer",
+      "default": "30",
+      "scope": [
+        "shell"
+      ],
+      "description": "Codexbar serve start wait tenths.",
+      "shell": {
+        "operator": ":=",
+        "default": "30"
+      },
+      "min": 0,
+      "example": "30"
+    },
+    {
+      "key": "SHOWY_QUOTA_MANAGE_SERVE",
+      "kdl": "manage_serve",
+      "type": "integer",
+      "default": "1",
+      "scope": [
+        "shell"
+      ],
+      "description": "Manage serve.",
+      "shell": {
+        "operator": ":=",
+        "default": "1"
+      },
+      "min": 0,
+      "example": "1"
+    },
+    {
+      "key": "SHOWY_QUOTA_CODEXBAR_SERVE_TIMEOUT_SECONDS",
+      "kdl": "codexbar_serve_timeout_seconds",
+      "type": "integer",
+      "default": "10",
+      "scope": [
+        "shell"
+      ],
+      "description": "Codexbar serve timeout seconds.",
+      "shell": {
+        "operator": ":=",
+        "default": "10"
+      },
+      "min": 0,
+      "example": "10"
+    },
+    {
+      "key": "SHOWY_QUOTA_CODEXBAR_SERVE_USAGE_TIMEOUT_SECONDS",
+      "kdl": "codexbar_serve_usage_timeout_seconds",
+      "type": "integer",
+      "default": "30",
+      "scope": [
+        "shell"
+      ],
+      "description": "Codexbar serve usage timeout seconds.",
+      "shell": {
+        "operator": ":=",
+        "default": "30"
+      },
+      "min": 0,
+      "example": "30"
+    },
+    {
+      "key": "SHOWY_QUOTA_CODEXBAR_SERVE_REFRESH_SECONDS",
+      "kdl": "codexbar_serve_refresh_seconds",
+      "type": "string",
+      "default": "",
+      "scope": [
+        "shell"
+      ],
+      "description": "Codexbar serve refresh seconds.",
+      "shell": {
+        "operator": ":=",
+        "default": ""
+      },
+      "example": ""
+    },
+    {
+      "key": "SHOWY_QUOTA_CODEXBAR_CLI_TIMEOUT_SECONDS",
+      "kdl": "codexbar_cli_timeout_seconds",
+      "type": "integer",
+      "default": "20",
+      "scope": [
+        "shell"
+      ],
+      "description": "Codexbar cli timeout seconds.",
+      "shell": {
+        "operator": ":=",
+        "default": "20"
+      },
+      "min": 0,
+      "example": "20"
+    },
+    {
+      "key": "SHOWY_QUOTA_CODEXBAR_SERVE_FAILURES_BEFORE_RESTART",
+      "kdl": "codexbar_serve_failures_before_restart",
+      "type": "integer",
+      "default": "3",
+      "scope": [
+        "shell"
+      ],
+      "description": "Codexbar serve failures before restart.",
+      "shell": {
+        "operator": ":=",
+        "default": "3"
+      },
+      "min": 0,
+      "example": "3"
+    },
+    {
+      "key": "SHOWY_QUOTA_CODEXBAR_SERVE_FAILURES_BEFORE_CLI",
+      "kdl": "codexbar_serve_failures_before_cli",
+      "type": "string",
+      "default": "${SHOWY_QUOTA_CODEXBAR_SERVE_FAILURES_BEFORE_RESTART}",
+      "scope": [
+        "shell"
+      ],
+      "description": "Codexbar serve failures before cli.",
+      "shell": {
+        "operator": ":=",
+        "default": "${SHOWY_QUOTA_CODEXBAR_SERVE_FAILURES_BEFORE_RESTART}"
+      },
+      "example": "${SHOWY_QUOTA_CODEXBAR_SERVE_FAILURES_BEFORE_RESTART}"
+    },
+    {
+      "key": "SHOWY_QUOTA_CODEXBAR_SERVE_FAILURE_BACKOFF_SECONDS",
+      "kdl": "codexbar_serve_failure_backoff_seconds",
+      "type": "integer",
+      "default": "60",
+      "scope": [
+        "shell"
+      ],
+      "description": "Codexbar serve failure backoff seconds.",
+      "shell": {
+        "operator": ":=",
+        "default": "60"
+      },
+      "min": 0,
+      "example": "60"
+    },
+    {
+      "key": "SHOWY_QUOTA_CODEXBAR_CLI_FAILURE_BACKOFF_SECONDS",
+      "kdl": "codexbar_cli_failure_backoff_seconds",
+      "type": "string",
+      "default": "${SHOWY_QUOTA_REFRESH_SECONDS}",
+      "scope": [
+        "shell"
+      ],
+      "description": "Codexbar cli failure backoff seconds.",
+      "shell": {
+        "operator": ":=",
+        "default": "${SHOWY_QUOTA_REFRESH_SECONDS}"
+      },
+      "example": "${SHOWY_QUOTA_REFRESH_SECONDS}"
+    },
+    {
+      "key": "SHOWY_QUOTA_CODEXBAR_CONFIG_PROVIDERS_TIMEOUT_SECONDS",
+      "kdl": "codexbar_config_providers_timeout_seconds",
+      "type": "integer",
+      "default": "5",
+      "scope": [
+        "shell"
+      ],
+      "description": "Codexbar config providers timeout seconds.",
+      "shell": {
+        "operator": ":=",
+        "default": "5"
+      },
+      "min": 0,
+      "example": "5"
+    },
+    {
+      "key": "SHOWY_QUOTA_CODEXBAR_CONFIG_PROVIDERS_BACKOFF_SECONDS",
+      "kdl": "codexbar_config_providers_backoff_seconds",
+      "type": "integer",
+      "default": "60",
+      "scope": [
+        "shell"
+      ],
+      "description": "Codexbar config providers backoff seconds.",
+      "shell": {
+        "operator": ":=",
+        "default": "60"
+      },
+      "min": 0,
+      "example": "60"
+    },
+    {
+      "key": "SHOWY_QUOTA_PROVIDER_FAILURE_BACKOFF_SECONDS",
+      "kdl": "provider_failure_backoff_seconds",
+      "type": "string",
+      "default": "${SHOWY_QUOTA_REFRESH_SECONDS}",
+      "scope": [
+        "shell"
+      ],
+      "description": "Provider failure backoff seconds.",
+      "shell": {
+        "operator": ":=",
+        "default": "${SHOWY_QUOTA_REFRESH_SECONDS}"
+      },
+      "example": "${SHOWY_QUOTA_REFRESH_SECONDS}"
+    },
+    {
+      "key": "SHOWY_QUOTA_PROVIDERS",
+      "kdl": "providers",
+      "type": "csv",
+      "default": "",
+      "scope": [
+        "shell",
+        "native",
+        "zellij"
+      ],
+      "description": "Providers.",
+      "shell": {
+        "operator": ":=",
+        "default": ""
+      },
+      "rust": {
+        "field": "providers",
+        "type": "Vec<String>",
+        "default": []
+      },
+      "example": ""
+    },
+    {
+      "key": "SHOWY_QUOTA_PROVIDERS_EXCLUDE",
+      "kdl": "providers_exclude",
+      "type": "csv",
+      "default": "",
+      "scope": [
+        "shell",
+        "native",
+        "zellij"
+      ],
+      "description": "Providers exclude.",
+      "shell": {
+        "operator": ":=",
+        "default": ""
+      },
+      "rust": {
+        "field": "providers_exclude",
+        "type": "Vec<String>",
+        "default": []
+      },
+      "example": ""
+    },
+    {
+      "key": "SHOWY_QUOTA_PROVIDER_ORDER",
+      "kdl": "provider_order",
+      "type": "csv",
+      "default": "${SHOWY_QUOTA_PROVIDER_DEFAULT_ORDER}",
+      "scope": [
+        "shell",
+        "native",
+        "zellij"
+      ],
+      "description": "Provider order.",
+      "shell": {
+        "operator": ":=",
+        "default": "${SHOWY_QUOTA_PROVIDER_DEFAULT_ORDER}"
+      },
+      "rust": {
+        "field": "provider_order",
+        "type": "Vec<String>",
+        "default": "provider-catalog",
+        "source": "providers"
+      },
+      "example": ""
+    },
+    {
+      "key": "SHOWY_QUOTA_INCLUDE_STATUS",
+      "kdl": "include_status",
+      "type": "boolean",
+      "default": "1",
+      "scope": [
+        "shell",
+        "native",
+        "zellij"
+      ],
+      "description": "Include status.",
+      "shell": {
+        "operator": ":=",
+        "default": "1"
+      },
+      "rust": {
+        "field": "include_status",
+        "type": "bool",
+        "default": true
+      },
+      "example": "1"
+    },
+    {
+      "key": "SHOWY_QUOTA_PALETTE_PRIMARY_GOOD",
+      "kdl": "palette_primary_good",
+      "type": "color",
+      "default": "25be6a",
+      "scope": [
+        "shell",
+        "native",
+        "zellij"
+      ],
+      "description": "Palette primary good.",
+      "shell": {
+        "operator": ":=",
+        "default": "25be6a"
+      },
+      "rust": {
+        "field": "palette_primary_good",
+        "type": "String",
+        "default": "25be6a"
+      },
+      "nullable": false,
+      "example": "25be6a"
+    },
+    {
+      "key": "SHOWY_QUOTA_PALETTE_PRIMARY_WARN",
+      "kdl": "palette_primary_warn",
+      "type": "color",
+      "default": "f0af00",
+      "scope": [
+        "shell",
+        "native",
+        "zellij"
+      ],
+      "description": "Palette primary warn.",
+      "shell": {
+        "operator": ":=",
+        "default": "f0af00"
+      },
+      "rust": {
+        "field": "palette_primary_warn",
+        "type": "String",
+        "default": "f0af00"
+      },
+      "nullable": false,
+      "example": "f0af00"
+    },
+    {
+      "key": "SHOWY_QUOTA_PALETTE_PRIMARY_BAD",
+      "kdl": "palette_primary_bad",
+      "type": "color",
+      "default": "ee5396",
+      "scope": [
+        "shell",
+        "native",
+        "zellij"
+      ],
+      "description": "Palette primary bad.",
+      "shell": {
+        "operator": ":=",
+        "default": "ee5396"
+      },
+      "rust": {
+        "field": "palette_primary_bad",
+        "type": "String",
+        "default": "ee5396"
+      },
+      "nullable": false,
+      "example": "ee5396"
+    },
+    {
+      "key": "SHOWY_QUOTA_PALETTE_PRIMARY_UNKNOWN",
+      "kdl": "palette_primary_unknown",
+      "type": "color",
+      "default": "6c7086",
+      "scope": [
+        "shell",
+        "native",
+        "zellij"
+      ],
+      "description": "Palette primary unknown.",
+      "shell": {
+        "operator": ":=",
+        "default": "6c7086"
+      },
+      "rust": {
+        "field": "palette_primary_unknown",
+        "type": "String",
+        "default": "6c7086"
+      },
+      "nullable": false,
+      "example": "6c7086"
+    },
+    {
+      "key": "SHOWY_QUOTA_PALETTE_DIM_SCALE",
+      "kdl": "palette_dim_scale",
+      "type": "string",
+      "default": "0.55",
+      "scope": [
+        "shell",
+        "native",
+        "zellij"
+      ],
+      "description": "Palette dim scale.",
+      "shell": {
+        "operator": ":=",
+        "default": "0.55"
+      },
+      "rust": {
+        "field": "palette_dim_scale",
+        "type": "String",
+        "default": "0.55"
+      },
+      "example": "0.55"
+    },
+    {
+      "key": "SHOWY_QUOTA_DIM_WINDOW_MINUTES",
+      "kdl": "dim_window_minutes",
+      "type": "integer",
+      "default": "10080",
+      "scope": [
+        "shell",
+        "native",
+        "zellij"
+      ],
+      "description": "Dim window minutes.",
+      "shell": {
+        "operator": ":=",
+        "default": "10080"
+      },
+      "rust": {
+        "field": "dim_window_minutes",
+        "type": "i64",
+        "default": 10080
+      },
+      "min": 0,
+      "example": "10080"
+    },
+    {
+      "key": "SHOWY_QUOTA_PALETTE_BG",
+      "kdl": "palette_bg",
+      "type": "color",
+      "default": "161616",
+      "scope": [
+        "shell",
+        "native",
+        "zellij"
+      ],
+      "description": "Palette bg.",
+      "shell": {
+        "operator": ":=",
+        "default": "161616"
+      },
+      "rust": {
+        "field": "palette_bg",
+        "type": "String",
+        "default": "161616"
+      },
+      "nullable": false,
+      "example": "161616"
+    },
+    {
+      "key": "SHOWY_QUOTA_PALETTE_SURFACE",
+      "kdl": "palette_surface",
+      "type": "color",
+      "default": "2a2a2a",
+      "scope": [
+        "shell",
+        "native",
+        "zellij"
+      ],
+      "description": "Palette surface.",
+      "shell": {
+        "operator": ":=",
+        "default": "2a2a2a"
+      },
+      "rust": {
+        "field": "palette_surface",
+        "type": "String",
+        "default": "2a2a2a"
+      },
+      "nullable": false,
+      "example": "2a2a2a"
+    },
+    {
+      "key": "SHOWY_QUOTA_PALETTE_TRACK",
+      "kdl": "palette_track",
+      "type": "color",
+      "default": "3a3a4a",
+      "scope": [
+        "shell",
+        "native",
+        "zellij"
+      ],
+      "description": "Palette track.",
+      "shell": {
+        "operator": ":=",
+        "default": "3a3a4a"
+      },
+      "rust": {
+        "field": "palette_track",
+        "type": "String",
+        "default": "3a3a4a"
+      },
+      "nullable": false,
+      "example": "3a3a4a"
+    },
+    {
+      "key": "SHOWY_QUOTA_PALETTE_ICON_TEXT",
+      "kdl": "palette_icon_text",
+      "type": "color",
+      "default": "f2f4f8",
+      "scope": [
+        "shell",
+        "native",
+        "zellij"
+      ],
+      "description": "Palette icon text.",
+      "shell": {
+        "operator": ":=",
+        "default": "f2f4f8"
+      },
+      "rust": {
+        "field": "palette_icon_text",
+        "type": "String",
+        "default": "f2f4f8"
+      },
+      "nullable": false,
+      "example": "f2f4f8"
+    },
+    {
+      "key": "SHOWY_QUOTA_PALETTE_COUNTDOWN",
+      "kdl": "palette_countdown",
+      "type": "color",
+      "default": "7b8496",
+      "scope": [
+        "shell",
+        "native",
+        "zellij"
+      ],
+      "description": "Palette countdown.",
+      "shell": {
+        "operator": ":=",
+        "default": "7b8496"
+      },
+      "rust": {
+        "field": "palette_countdown",
+        "type": "String",
+        "default": "7b8496"
+      },
+      "nullable": false,
+      "example": "7b8496"
+    },
+    {
+      "key": "SHOWY_QUOTA_PALETTE_COUNTDOWN_WARN",
+      "kdl": "palette_countdown_warn",
+      "type": "color",
+      "default": "${SHOWY_QUOTA_PALETTE_PRIMARY_BAD}",
+      "scope": [
+        "shell",
+        "native",
+        "zellij"
+      ],
+      "description": "Palette countdown warn.",
+      "shell": {
+        "operator": ":=",
+        "default": "${SHOWY_QUOTA_PALETTE_PRIMARY_BAD}"
+      },
+      "rust": {
+        "field": "palette_countdown_warn",
+        "type": "String",
+        "default": "ee5396"
+      },
+      "nullable": false,
+      "example": "${SHOWY_QUOTA_PALETTE_PRIMARY_BAD}"
+    },
+    {
+      "key": "SHOWY_QUOTA_PALETTE_STALE",
+      "kdl": "palette_stale",
+      "type": "color",
+      "default": "${SHOWY_QUOTA_PALETTE_PRIMARY_UNKNOWN}",
+      "scope": [
+        "shell",
+        "native",
+        "zellij"
+      ],
+      "description": "Palette stale.",
+      "shell": {
+        "operator": ":=",
+        "default": "${SHOWY_QUOTA_PALETTE_PRIMARY_UNKNOWN}"
+      },
+      "rust": {
+        "field": "palette_stale",
+        "type": "String",
+        "default": "6c7086"
+      },
+      "nullable": false,
+      "example": "${SHOWY_QUOTA_PALETTE_PRIMARY_UNKNOWN}"
+    },
+    {
+      "key": "SHOWY_QUOTA_PALETTE_ELAPSED",
+      "kdl": "palette_elapsed",
+      "type": "color",
+      "default": "be95ff",
+      "scope": [
+        "shell",
+        "native",
+        "zellij"
+      ],
+      "description": "Palette elapsed.",
+      "shell": {
+        "operator": ":=",
+        "default": "be95ff"
+      },
+      "rust": {
+        "field": "palette_elapsed",
+        "type": "String",
+        "default": "be95ff"
+      },
+      "nullable": false,
+      "example": "be95ff"
+    },
+    {
+      "key": "SHOWY_QUOTA_PALETTE_ELAPSED_LONG",
+      "kdl": "palette_elapsed_long",
+      "type": "color",
+      "default": "3ddbd9",
+      "scope": [
+        "shell",
+        "native",
+        "zellij"
+      ],
+      "description": "Palette elapsed long.",
+      "shell": {
+        "operator": ":=",
+        "default": "3ddbd9"
+      },
+      "rust": {
+        "field": "palette_elapsed_long",
+        "type": "String",
+        "default": "3ddbd9"
+      },
+      "nullable": false,
+      "example": "3ddbd9"
+    },
+    {
+      "key": "SHOWY_QUOTA_STALE_GLYPH",
+      "kdl": "stale_glyph",
+      "type": "glyph",
+      "default": "⚠",
+      "scope": [
+        "shell",
+        "native",
+        "zellij"
+      ],
+      "description": "Stale glyph.",
+      "shell": {
+        "operator": ":=",
+        "default": "⚠"
+      },
+      "rust": {
+        "field": "stale_glyph",
+        "type": "String",
+        "default": "⚠"
+      },
+      "example": "⚠"
+    },
+    {
+      "key": "SHOWY_QUOTA_DEGRADED_CLI_GLYPH",
+      "kdl": "degraded_cli_glyph",
+      "type": "glyph",
+      "default": "⚠cli",
+      "scope": [
+        "shell",
+        "native",
+        "zellij"
+      ],
+      "description": "Degraded cli glyph.",
+      "shell": {
+        "operator": ":=",
+        "default": "⚠cli"
+      },
+      "rust": {
+        "field": "degraded_cli_glyph",
+        "type": "String",
+        "default": "⚠cli"
+      },
+      "example": "⚠cli"
+    },
+    {
+      "key": "SHOWY_QUOTA_GOOD_MIN_REMAINING",
+      "kdl": "good_min_remaining",
+      "type": "integer",
+      "default": "40",
+      "scope": [
+        "shell",
+        "native",
+        "zellij"
+      ],
+      "description": "Good min remaining.",
+      "shell": {
+        "operator": ":=",
+        "default": "40"
+      },
+      "rust": {
+        "field": "good_min_remaining",
+        "type": "i32",
+        "default": 40
+      },
+      "min": 0,
+      "example": "40"
+    },
+    {
+      "key": "SHOWY_QUOTA_WARN_MIN_REMAINING",
+      "kdl": "warn_min_remaining",
+      "type": "integer",
+      "default": "15",
+      "scope": [
+        "shell",
+        "native",
+        "zellij"
+      ],
+      "description": "Warn min remaining.",
+      "shell": {
+        "operator": ":=",
+        "default": "15"
+      },
+      "rust": {
+        "field": "warn_min_remaining",
+        "type": "i32",
+        "default": 15
+      },
+      "min": 0,
+      "example": "15"
+    },
+    {
+      "key": "SHOWY_QUOTA_TIME_WARN_MINUTES",
+      "kdl": "time_warn_minutes",
+      "type": "integer",
+      "default": "30",
+      "scope": [
+        "shell",
+        "native",
+        "zellij"
+      ],
+      "description": "Time warn minutes.",
+      "shell": {
+        "operator": ":=",
+        "default": "30"
+      },
+      "rust": {
+        "field": "time_warn_minutes",
+        "type": "i64",
+        "default": 30
+      },
+      "min": 0,
+      "example": "30"
+    },
+    {
+      "key": "SHOWY_QUOTA_CODEXBAR_RESOURCES",
+      "kdl": "codexbar_resources",
+      "type": "string",
+      "default": "/Applications/CodexBar.app/Contents/Resources",
+      "scope": [
+        "shell"
+      ],
+      "description": "Codexbar resources.",
+      "shell": {
+        "operator": ":=",
+        "default": "/Applications/CodexBar.app/Contents/Resources"
+      },
+      "example": "/Applications/CodexBar.app/Contents/Resources"
+    },
+    {
+      "key": "SHOWY_QUOTA_SKETCHYBAR_IMAGE_CACHE",
+      "kdl": "sketchybar_image_cache",
+      "type": "string",
+      "default": "${SHOWY_QUOTA_CACHE_DIR}/sketchybar",
+      "scope": [
+        "shell"
+      ],
+      "description": "Sketchybar image cache.",
+      "shell": {
+        "operator": ":=",
+        "default": "${SHOWY_QUOTA_CACHE_DIR}/sketchybar"
+      },
+      "example": "${SHOWY_QUOTA_CACHE_DIR}/sketchybar"
+    },
+    {
+      "key": "SHOWY_QUOTA_SKETCHYBAR_CLICK",
+      "kdl": "sketchybar_click",
+      "type": "string",
+      "default": "open -b com.steipete.codexbar",
+      "scope": [
+        "shell"
+      ],
+      "description": "Sketchybar click.",
+      "shell": {
+        "operator": ":=",
+        "default": "open -b com.steipete.codexbar"
+      },
+      "example": "open -b com.steipete.codexbar"
+    },
+    {
+      "key": "SHOWY_QUOTA_SKETCHYBAR_UPDATE_FREQ",
+      "kdl": "sketchybar_update_freq",
+      "type": "integer",
+      "default": "10",
+      "scope": [
+        "shell"
+      ],
+      "description": "Sketchybar update freq.",
+      "shell": {
+        "operator": ":=",
+        "default": "10"
+      },
+      "min": 0,
+      "example": "10"
+    },
+    {
+      "key": "SHOWY_QUOTA_PNG_BAR_W",
+      "kdl": "png_bar_w",
+      "type": "integer",
+      "default": "80",
+      "scope": [
+        "shell"
+      ],
+      "description": "Png bar w.",
+      "shell": {
+        "operator": ":=",
+        "default": "80"
+      },
+      "min": 0,
+      "example": "80"
+    },
+    {
+      "key": "SHOWY_QUOTA_PNG_BAR_H",
+      "kdl": "png_bar_h",
+      "type": "integer",
+      "default": "18",
+      "scope": [
+        "shell"
+      ],
+      "description": "Png bar h.",
+      "shell": {
+        "operator": ":=",
+        "default": "18"
+      },
+      "min": 0,
+      "example": "18"
+    },
+    {
+      "key": "SHOWY_QUOTA_SKETCHYBAR_ICON_WIDTH",
+      "kdl": "sketchybar_icon_width",
+      "type": "integer",
+      "default": "22",
+      "scope": [
+        "shell"
+      ],
+      "description": "Sketchybar icon width.",
+      "shell": {
+        "operator": ":=",
+        "default": "22"
+      },
+      "min": 0,
+      "example": "22"
+    },
+    {
+      "key": "SHOWY_QUOTA_SKETCHYBAR_ICON_PADDING_LEFT",
+      "kdl": "sketchybar_icon_padding_left",
+      "type": "integer",
+      "default": "5",
+      "scope": [
+        "shell"
+      ],
+      "description": "Sketchybar icon padding left.",
+      "shell": {
+        "operator": ":=",
+        "default": "5"
+      },
+      "min": 0,
+      "example": "5"
+    },
+    {
+      "key": "SHOWY_QUOTA_SKETCHYBAR_ICON_SCALE",
+      "kdl": "sketchybar_icon_scale",
+      "type": "string",
+      "default": "0.28",
+      "scope": [
+        "shell"
+      ],
+      "description": "Sketchybar icon scale.",
+      "shell": {
+        "operator": ":=",
+        "default": "0.28"
+      },
+      "example": "0.28"
+    },
+    {
+      "key": "SHOWY_QUOTA_SKETCHYBAR_PROVIDER_ICON_MODE",
+      "kdl": "sketchybar_provider_icon_mode",
+      "type": "string",
+      "default": "svg",
+      "scope": [
+        "shell"
+      ],
+      "description": "Sketchybar provider icon mode.",
+      "shell": {
+        "operator": ":=",
+        "default": "svg"
+      },
+      "example": "svg"
+    },
+    {
+      "key": "SHOWY_QUOTA_SKETCHYBAR_PROVIDER_ICON_FONT",
+      "kdl": "sketchybar_provider_icon_font",
+      "type": "string",
+      "default": "sketchybar-app-font:Regular:14.0",
+      "scope": [
+        "shell"
+      ],
+      "description": "Sketchybar provider icon font.",
+      "shell": {
+        "operator": ":=",
+        "default": "sketchybar-app-font:Regular:14.0"
+      },
+      "example": "sketchybar-app-font:Regular:14.0"
+    },
+    {
+      "key": "SHOWY_QUOTA_SKETCHYBAR_PROVIDER_ICON_FONT_PADDING_RIGHT",
+      "kdl": "sketchybar_provider_icon_font_padding_right",
+      "type": "integer",
+      "default": "2",
+      "scope": [
+        "shell"
+      ],
+      "description": "Sketchybar provider icon font padding right.",
+      "shell": {
+        "operator": ":=",
+        "default": "2"
+      },
+      "min": 0,
+      "example": "2"
+    },
+    {
+      "key": "SHOWY_QUOTA_SKETCHYBAR_BAR_WIDTH",
+      "kdl": "sketchybar_bar_width",
+      "type": "string",
+      "default": "$((SHOWY_QUOTA_PNG_BAR_W + 3))",
+      "scope": [
+        "shell"
+      ],
+      "description": "Sketchybar bar width.",
+      "shell": {
+        "operator": ":=",
+        "default": "$((SHOWY_QUOTA_PNG_BAR_W + 3))"
+      },
+      "example": "$((SHOWY_QUOTA_PNG_BAR_W + 3))"
+    },
+    {
+      "key": "SHOWY_QUOTA_SKETCHYBAR_LABEL_WIDTH",
+      "kdl": "sketchybar_label_width",
+      "type": "integer",
+      "default": "32",
+      "scope": [
+        "shell"
+      ],
+      "description": "Sketchybar label width.",
+      "shell": {
+        "operator": ":=",
+        "default": "32"
+      },
+      "min": 0,
+      "example": "32"
+    },
+    {
+      "key": "SHOWY_QUOTA_SKETCHYBAR_PLACEMENT",
+      "kdl": "sketchybar_placement",
+      "type": "string",
+      "default": "left",
+      "scope": [
+        "shell"
+      ],
+      "description": "Sketchybar placement.",
+      "shell": {
+        "operator": ":=",
+        "default": "left"
+      },
+      "allowed": [
+        "left",
+        "notch"
+      ],
+      "example": "left"
+    },
+    {
+      "key": "SHOWY_QUOTA_SKETCHYBAR_BODY",
+      "kdl": "sketchybar_body",
+      "type": "string",
+      "default": "rows",
+      "scope": [
+        "shell"
+      ],
+      "description": "Sketchybar body.",
+      "shell": {
+        "operator": ":=",
+        "default": "rows"
+      },
+      "allowed": [
+        "rows",
+        "ring"
+      ],
+      "example": "rows"
+    },
+    {
+      "key": "SHOWY_QUOTA_SKETCHYBAR_POPUP",
+      "kdl": "sketchybar_popup",
+      "type": "string",
+      "default": "click",
+      "scope": [
+        "shell"
+      ],
+      "description": "Sketchybar popup.",
+      "shell": {
+        "operator": ":=",
+        "default": "click"
+      },
+      "allowed": [
+        "click",
+        "hover",
+        "off"
+      ],
+      "example": "click"
+    },
+    {
+      "key": "SHOWY_QUOTA_SKETCHYBAR_NOTCH_MARGIN",
+      "kdl": "sketchybar_notch_margin",
+      "type": "integer",
+      "default": "4",
+      "scope": [
+        "shell"
+      ],
+      "description": "Sketchybar notch margin.",
+      "shell": {
+        "operator": ":=",
+        "default": "4"
+      },
+      "min": 0,
+      "example": "4"
+    },
+    {
+      "key": "SHOWY_QUOTA_SKETCHYBAR_COMPACT_PROVIDER_COUNT",
+      "kdl": "sketchybar_compact_provider_count",
+      "type": "integer",
+      "default": "5",
+      "scope": [
+        "shell"
+      ],
+      "description": "Sketchybar compact provider count.",
+      "shell": {
+        "operator": ":=",
+        "default": "5"
+      },
+      "min": 0,
+      "example": "5"
+    },
+    {
+      "key": "SHOWY_QUOTA_SKETCHYBAR_PILL_RADIUS",
+      "kdl": "sketchybar_pill_radius",
+      "type": "integer",
+      "default": "14",
+      "scope": [
+        "shell"
+      ],
+      "description": "Sketchybar pill radius.",
+      "shell": {
+        "operator": ":=",
+        "default": "14"
+      },
+      "min": 0,
+      "example": "14"
+    },
+    {
+      "key": "SHOWY_QUOTA_SKETCHYBAR_PILL_HEIGHT",
+      "kdl": "sketchybar_pill_height",
+      "type": "integer",
+      "default": "28",
+      "scope": [
+        "shell"
+      ],
+      "description": "Sketchybar pill height.",
+      "shell": {
+        "operator": ":=",
+        "default": "28"
+      },
+      "min": 0,
+      "example": "28"
+    },
+    {
+      "key": "SHOWY_QUOTA_SKETCHYBAR_PILL_COLOR",
+      "kdl": "sketchybar_pill_color",
+      "type": "string",
+      "default": "0xcc24273a",
+      "scope": [
+        "shell"
+      ],
+      "description": "Sketchybar pill color.",
+      "shell": {
+        "operator": ":=",
+        "default": "0xcc24273a"
+      },
+      "example": "0xcc24273a"
+    },
+    {
+      "key": "SHOWY_QUOTA_ZELLIJ_WIDGET",
+      "kdl": "zellij_widget",
+      "type": "string",
+      "default": "pipe_showy_quota",
+      "scope": [
+        "shell"
+      ],
+      "description": "Zellij widget.",
+      "shell": {
+        "operator": ":=",
+        "default": "pipe_showy_quota"
+      },
+      "example": "pipe_showy_quota"
+    },
+    {
+      "key": "SHOWY_QUOTA_ZELLIJ_PIPE_NAME",
+      "kdl": "zellij_pipe_name",
+      "type": "string",
+      "default": "showy-quota",
+      "scope": [
+        "shell"
+      ],
+      "description": "Zellij pipe name.",
+      "shell": {
+        "operator": ":=",
+        "default": "showy-quota"
+      },
+      "example": "showy-quota"
+    },
+    {
+      "key": "SHOWY_QUOTA_ZELLIJ_PIPE_INTERVAL",
+      "kdl": "zellij_pipe_interval",
+      "type": "integer",
+      "default": "10",
+      "scope": [
+        "shell"
+      ],
+      "description": "Zellij pipe interval.",
+      "shell": {
+        "operator": ":=",
+        "default": "10"
+      },
+      "min": 0,
+      "example": "10"
+    },
+    {
+      "key": "SHOWY_QUOTA_ZELLIJ_PIPE_TIMEOUT_TENTHS",
+      "kdl": "zellij_pipe_timeout_tenths",
+      "type": "integer",
+      "default": "20",
+      "scope": [
+        "shell"
+      ],
+      "description": "Zellij pipe timeout tenths.",
+      "shell": {
+        "operator": ":=",
+        "default": "20"
+      },
+      "min": 0,
+      "example": "20"
+    },
+    {
+      "key": "SHOWY_QUOTA_ZELLIJ_BAR_WIDTH",
+      "kdl": "bar_width",
+      "type": "integer",
+      "default": "12",
+      "scope": [
+        "shell",
+        "native",
+        "zellij"
+      ],
+      "description": "Zellij bar width.",
+      "shell": {
+        "operator": ":=",
+        "default": "12"
+      },
+      "rust": {
+        "field": "zellij_bar_width",
+        "type": "usize",
+        "default": 12
+      },
+      "min": 0,
+      "example": "12"
+    },
+    {
+      "key": "SHOWY_QUOTA_TERMINAL_BAR_MODE",
+      "kdl": "terminal_bar_mode",
+      "type": "string",
+      "default": "auto",
+      "scope": [
+        "shell",
+        "native",
+        "zellij"
+      ],
+      "description": "Terminal bar mode.",
+      "shell": {
+        "operator": ":=",
+        "default": "auto"
+      },
+      "rust": {
+        "field": "terminal_bar_mode",
+        "type": "String",
+        "default": "auto"
+      },
+      "allowed": [
+        "auto",
+        "dual",
+        "dual2",
+        "mono3",
+        "sextant3",
+        "mono4",
+        "portable"
+      ],
+      "example": "auto"
+    },
+    {
+      "key": "SHOWY_QUOTA_PROVIDER_MODES",
+      "kdl": "provider_modes",
+      "type": "provider_modes",
+      "default": "gemini=mono3,cursor=mono3",
+      "scope": [
+        "shell",
+        "native",
+        "zellij"
+      ],
+      "description": "Provider modes.",
+      "shell": {
+        "operator": ":=",
+        "default": "gemini=mono3,cursor=mono3"
+      },
+      "rust": {
+        "field": "provider_modes",
+        "type": "Vec<(String, String)>",
+        "default": [
+          "gemini",
+          "mono3"
+        ]
+      },
+      "example": "gemini=mono3,cursor=mono3"
+    },
+    {
+      "key": "SHOWY_QUOTA_MONO_COLOR_MODE",
+      "kdl": "mono_color_mode",
+      "type": "string",
+      "default": "lowest",
+      "scope": [
+        "shell",
+        "native",
+        "zellij"
+      ],
+      "description": "Mono color mode.",
+      "shell": {
+        "operator": ":=",
+        "default": "lowest"
+      },
+      "rust": {
+        "field": "mono_color_mode",
+        "type": "String",
+        "default": "lowest"
+      },
+      "allowed": [
+        "lowest",
+        "primary"
+      ],
+      "example": "lowest"
+    },
+    {
+      "key": "SHOWY_QUOTA_MONO_MARKERS",
+      "kdl": "mono_markers",
+      "type": "csv",
+      "default": "primary",
+      "scope": [
+        "shell",
+        "native",
+        "zellij"
+      ],
+      "description": "Mono markers.",
+      "shell": {
+        "operator": ":=",
+        "default": "primary"
+      },
+      "rust": {
+        "field": "mono_markers",
+        "type": "Vec<String>",
+        "default": [
+          "primary"
+        ]
+      },
+      "example": "primary"
+    },
+    {
+      "key": "SHOWY_QUOTA_PROVIDER_THRESHOLDS",
+      "kdl": "provider_thresholds",
+      "type": "thresholds",
+      "default": "",
+      "scope": [
+        "shell",
+        "native",
+        "zellij"
+      ],
+      "description": "Provider thresholds.",
+      "shell": {
+        "operator": ":=",
+        "default": ""
+      },
+      "rust": {
+        "field": "provider_thresholds",
+        "type": "BTreeMap<String, ThresholdOverride>",
+        "default": {}
+      },
+      "example": ""
+    },
+    {
+      "key": "SHOWY_QUOTA_WINDOW_THRESHOLDS",
+      "kdl": "window_thresholds",
+      "type": "thresholds",
+      "default": "",
+      "scope": [
+        "shell",
+        "native",
+        "zellij"
+      ],
+      "description": "Window thresholds.",
+      "shell": {
+        "operator": ":=",
+        "default": ""
+      },
+      "rust": {
+        "field": "window_thresholds",
+        "type": "BTreeMap<String, ThresholdOverride>",
+        "default": {}
+      },
+      "example": ""
+    },
+    {
+      "key": "SHOWY_QUOTA_WINDOWS",
+      "kdl": "windows",
+      "type": "csv",
+      "default": "primary,secondary,tertiary",
+      "scope": [
+        "shell",
+        "native",
+        "zellij"
+      ],
+      "description": "Windows.",
+      "shell": {
+        "operator": ":=",
+        "default": "primary,secondary,tertiary"
+      },
+      "rust": {
+        "field": "windows",
+        "type": "Vec<String>",
+        "default": [
+          "primary",
+          "secondary",
+          "tertiary"
+        ]
+      },
+      "example": "primary,secondary,tertiary"
+    },
+    {
+      "key": "SHOWY_QUOTA_WINDOW_MODE",
+      "kdl": "window_mode",
+      "type": "string",
+      "default": "all",
+      "scope": [
+        "shell",
+        "native",
+        "zellij"
+      ],
+      "description": "Window mode.",
+      "shell": {
+        "operator": ":=",
+        "default": "all"
+      },
+      "rust": {
+        "field": "window_mode",
+        "type": "String",
+        "default": "all"
+      },
+      "allowed": [
+        "all",
+        "session-only",
+        "weekly"
+      ],
+      "example": "all"
+    },
+    {
+      "key": "SHOWY_QUOTA_COMPACT_PROVIDER_COUNT",
+      "kdl": "compact_provider_count",
+      "type": "integer",
+      "default": "0",
+      "scope": [
+        "shell",
+        "native",
+        "zellij"
+      ],
+      "description": "Compact provider count.",
+      "shell": {
+        "operator": ":=",
+        "default": "0"
+      },
+      "rust": {
+        "field": "compact_provider_count",
+        "type": "usize",
+        "default": 0
+      },
+      "min": 0,
+      "example": "0"
+    },
+    {
+      "key": "SHOWY_QUOTA_WIDTH_BUDGET",
+      "kdl": "width_budget",
+      "type": "integer",
+      "default": "0",
+      "scope": [
+        "shell",
+        "native",
+        "zellij"
+      ],
+      "description": "Width budget.",
+      "shell": {
+        "operator": ":=",
+        "default": "0"
+      },
+      "rust": {
+        "field": "width_budget",
+        "type": "usize",
+        "default": 0
+      },
+      "min": 0,
+      "example": "0"
+    },
+    {
+      "key": "SHOWY_QUOTA_COMPACT_ORDER",
+      "kdl": "compact_order",
+      "type": "string",
+      "default": "ordered",
+      "scope": [
+        "shell",
+        "native",
+        "zellij"
+      ],
+      "description": "Compact order.",
+      "shell": {
+        "operator": ":=",
+        "default": "ordered"
+      },
+      "rust": {
+        "field": "compact_order",
+        "type": "String",
+        "default": "ordered"
+      },
+      "allowed": [
+        "ordered",
+        "urgency"
+      ],
+      "example": "ordered"
+    },
+    {
+      "key": "SHOWY_QUOTA_ZELLIJ_BIN",
+      "kdl": "zellij_bin",
+      "type": "string",
+      "default": "zellij",
+      "scope": [
+        "shell"
+      ],
+      "description": "Zellij bin.",
+      "shell": {
+        "operator": ":=",
+        "default": "zellij"
+      },
+      "example": "zellij"
+    },
+    {
+      "key": "SHOWY_QUOTA_ZELLIJ_PLUGIN",
+      "kdl": "zellij_plugin",
+      "type": "string",
+      "default": "",
+      "scope": [
+        "shell"
+      ],
+      "description": "Zellij plugin.",
+      "shell": {
+        "operator": ":=",
+        "default": ""
+      },
+      "example": ""
+    },
+    {
+      "key": "SHOWY_QUOTA_USAGE_FILE",
+      "kdl": "usage_file",
+      "type": "string",
+      "default": "${SHOWY_QUOTA_CACHE_DIR}/usage.json",
+      "scope": [
+        "shell"
+      ],
+      "description": "Usage file.",
+      "shell": {
+        "operator": ":=",
+        "default": "${SHOWY_QUOTA_CACHE_DIR}/usage.json"
+      },
+      "example": "${SHOWY_QUOTA_CACHE_DIR}/usage.json"
+    },
+    {
+      "key": "SHOWY_QUOTA_USAGE_STAMP",
+      "kdl": "usage_stamp",
+      "type": "string",
+      "default": "${SHOWY_QUOTA_CACHE_DIR}/usage.json.updated-at",
+      "scope": [
+        "shell"
+      ],
+      "description": "Usage stamp.",
+      "shell": {
+        "operator": ":=",
+        "default": "${SHOWY_QUOTA_CACHE_DIR}/usage.json.updated-at"
+      },
+      "example": "${SHOWY_QUOTA_CACHE_DIR}/usage.json.updated-at"
+    },
+    {
+      "key": "SHOWY_QUOTA_CODEXBAR_SERVE_PID_FILE",
+      "kdl": "codexbar_serve_pid_file",
+      "type": "string",
+      "default": "${SHOWY_QUOTA_CACHE_DIR}/codexbar-serve.pid",
+      "scope": [
+        "shell"
+      ],
+      "description": "Codexbar serve pid file.",
+      "shell": {
+        "operator": ":=",
+        "default": "${SHOWY_QUOTA_CACHE_DIR}/codexbar-serve.pid"
+      },
+      "example": "${SHOWY_QUOTA_CACHE_DIR}/codexbar-serve.pid"
+    },
+    {
+      "key": "SHOWY_QUOTA_USAGE_LOCK",
+      "kdl": "usage_lock",
+      "type": "string",
+      "default": "${SHOWY_QUOTA_CACHE_DIR}/usage.lock",
+      "scope": [
+        "shell"
+      ],
+      "description": "Usage lock.",
+      "shell": {
+        "operator": ":=",
+        "default": "${SHOWY_QUOTA_CACHE_DIR}/usage.lock"
+      },
+      "example": "${SHOWY_QUOTA_CACHE_DIR}/usage.lock"
+    },
+    {
+      "key": "SHOWY_QUOTA_CODEXBAR_SERVE_FAILURE_STAMP",
+      "kdl": "codexbar_serve_failure_stamp",
+      "type": "string",
+      "default": "${SHOWY_QUOTA_CACHE_DIR}/serve-failed-at",
+      "scope": [
+        "shell"
+      ],
+      "description": "Codexbar serve failure stamp.",
+      "shell": {
+        "operator": ":=",
+        "default": "${SHOWY_QUOTA_CACHE_DIR}/serve-failed-at"
+      },
+      "example": "${SHOWY_QUOTA_CACHE_DIR}/serve-failed-at"
+    },
+    {
+      "key": "SHOWY_QUOTA_CODEXBAR_SERVE_FAILURE_COUNT_FILE",
+      "kdl": "codexbar_serve_failure_count_file",
+      "type": "string",
+      "default": "${SHOWY_QUOTA_CACHE_DIR}/serve-failed-count",
+      "scope": [
+        "shell"
+      ],
+      "description": "Codexbar serve failure count file.",
+      "shell": {
+        "operator": ":=",
+        "default": "${SHOWY_QUOTA_CACHE_DIR}/serve-failed-count"
+      },
+      "example": "${SHOWY_QUOTA_CACHE_DIR}/serve-failed-count"
+    },
+    {
+      "key": "SHOWY_QUOTA_CODEXBAR_CLI_FAILURE_STAMP",
+      "kdl": "codexbar_cli_failure_stamp",
+      "type": "string",
+      "default": "${SHOWY_QUOTA_CACHE_DIR}/cli-failed-at",
+      "scope": [
+        "shell"
+      ],
+      "description": "Codexbar cli failure stamp.",
+      "shell": {
+        "operator": ":=",
+        "default": "${SHOWY_QUOTA_CACHE_DIR}/cli-failed-at"
+      },
+      "example": "${SHOWY_QUOTA_CACHE_DIR}/cli-failed-at"
+    },
+    {
+      "key": "SHOWY_QUOTA_CODEXBAR_CONFIG_PROVIDERS_FAILURE_STAMP",
+      "kdl": "codexbar_config_providers_failure_stamp",
+      "type": "string",
+      "default": "${SHOWY_QUOTA_CACHE_DIR}/config-providers-failed-at",
+      "scope": [
+        "shell"
+      ],
+      "description": "Codexbar config providers failure stamp.",
+      "shell": {
+        "operator": ":=",
+        "default": "${SHOWY_QUOTA_CACHE_DIR}/config-providers-failed-at"
+      },
+      "example": "${SHOWY_QUOTA_CACHE_DIR}/config-providers-failed-at"
+    },
+    {
+      "key": "SHOWY_QUOTA_PROVIDER_FAILURE_DIR",
+      "kdl": "provider_failure_dir",
+      "type": "string",
+      "default": "${SHOWY_QUOTA_CACHE_DIR}/provider-failures",
+      "scope": [
+        "shell"
+      ],
+      "description": "Provider failure dir.",
+      "shell": {
+        "operator": ":=",
+        "default": "${SHOWY_QUOTA_CACHE_DIR}/provider-failures"
+      },
+      "example": "${SHOWY_QUOTA_CACHE_DIR}/provider-failures"
+    },
+    {
+      "key": "SHOWY_QUOTA_FRESHNESS",
+      "kdl": "freshness",
+      "default": "off",
+      "scope": [
+        "native",
+        "zellij"
+      ],
+      "description": "Freshness.",
+      "rust": {
+        "field": "freshness",
+        "type": "String",
+        "default": "off"
+      },
+      "type": "string",
+      "allowed": [
+        "off",
+        "age",
+        "source",
+        "age+source"
+      ],
+      "example": "off"
+    },
+    {
+      "key": "SHOWY_QUOTA_SEVERITY_GLYPHS",
+      "kdl": "severity_glyphs",
+      "default": false,
+      "scope": [
+        "native",
+        "zellij"
+      ],
+      "description": "Severity glyphs.",
+      "rust": {
+        "field": "severity_glyphs",
+        "type": "bool",
+        "default": false
+      },
+      "type": "boolean",
+      "example": "False"
+    },
+    {
+      "key": "SHOWY_QUOTA_PALETTE_DIM_GOOD",
+      "kdl": "palette_dim_good",
+      "default": null,
+      "scope": [
+        "native",
+        "zellij"
+      ],
+      "description": "Palette dim good.",
+      "rust": {
+        "field": "palette_dim_good",
+        "type": "Option<String>",
+        "default": null
+      },
+      "type": "color",
+      "nullable": true,
+      "example": ""
+    },
+    {
+      "key": "SHOWY_QUOTA_PALETTE_DIM_WARN",
+      "kdl": "palette_dim_warn",
+      "default": null,
+      "scope": [
+        "native",
+        "zellij"
+      ],
+      "description": "Palette dim warn.",
+      "rust": {
+        "field": "palette_dim_warn",
+        "type": "Option<String>",
+        "default": null
+      },
+      "type": "color",
+      "nullable": true,
+      "example": ""
+    },
+    {
+      "key": "SHOWY_QUOTA_PALETTE_DIM_BAD",
+      "kdl": "palette_dim_bad",
+      "default": null,
+      "scope": [
+        "native",
+        "zellij"
+      ],
+      "description": "Palette dim bad.",
+      "rust": {
+        "field": "palette_dim_bad",
+        "type": "Option<String>",
+        "default": null
+      },
+      "type": "color",
+      "nullable": true,
+      "example": ""
+    },
+    {
+      "key": "SHOWY_QUOTA_PALETTE_DIM_UNKNOWN",
+      "kdl": "palette_dim_unknown",
+      "default": null,
+      "scope": [
+        "native",
+        "zellij"
+      ],
+      "description": "Palette dim unknown.",
+      "rust": {
+        "field": "palette_dim_unknown",
+        "type": "Option<String>",
+        "default": null
+      },
+      "type": "color",
+      "nullable": true,
+      "example": ""
+    },
+    {
+      "key": "SHOWY_QUOTA_ERROR_GLYPH",
+      "kdl": "error_glyph",
+      "default": "⚠",
+      "scope": [
+        "native",
+        "zellij"
+      ],
+      "description": "Error glyph.",
+      "rust": {
+        "field": "error_glyph",
+        "type": "String",
+        "default": "⚠"
+      },
+      "type": "glyph",
+      "example": "⚠"
+    },
+    {
+      "key": "SHOWY_QUOTA_RESET_DESCRIPTION_TIMEZONE_OFFSET",
+      "kdl": "reset_description_timezone_offset",
+      "default": null,
+      "scope": [
+        "native",
+        "zellij"
+      ],
+      "description": "Reset description timezone offset minutes.",
+      "rust": {
+        "field": "reset_description_timezone_offset_minutes",
+        "type": "Option<i16>",
+        "default": null
+      },
+      "type": "timezone",
+      "min": 0,
+      "nullable": true,
+      "example": ""
+    },
+    {
+      "key": "SHOWY_QUOTA_THEME",
+      "kdl": "theme",
+      "default": "default",
+      "scope": [
+        "native",
+        "zellij"
+      ],
+      "description": "Theme.",
+      "rust": {
+        "field": "theme",
+        "type": "String",
+        "default": "default"
+      },
+      "type": "string",
+      "example": "default"
+    },
+    {
+      "key": "SHOWY_QUOTA_TMUX_BAR_WIDTH",
+      "kdl": "tmux_bar_width",
+      "default": null,
+      "scope": [
+        "native",
+        "zellij"
+      ],
+      "description": "Tmux bar width.",
+      "rust": {
+        "field": "tmux_bar_width",
+        "type": "Option<usize>",
+        "default": null
+      },
+      "type": "integer",
+      "min": 0,
+      "nullable": true,
+      "example": ""
+    },
+    {
+      "key": "SHOWY_QUOTA_VERTICAL_BAR_WIDTH",
+      "kdl": "vertical_bar_width",
+      "default": 16,
+      "scope": [
+        "native",
+        "zellij"
+      ],
+      "description": "Vertical bar width.",
+      "rust": {
+        "field": "vertical_bar_width",
+        "type": "usize",
+        "default": 16
+      },
+      "type": "integer",
+      "min": 0,
+      "example": "16"
+    },
+    {
+      "key": "SHOWY_QUOTA_VERTICAL_SORT",
+      "kdl": "vertical_sort",
+      "default": "provider",
+      "scope": [
+        "native",
+        "zellij"
+      ],
+      "description": "Vertical sort.",
+      "rust": {
+        "field": "vertical_sort",
+        "type": "String",
+        "default": "provider"
+      },
+      "type": "string",
+      "allowed": [
+        "provider",
+        "urgency"
+      ],
+      "example": "provider"
+    },
+    {
+      "key": "SHOWY_QUOTA_VERTICAL_RESET_CLOCK",
+      "kdl": "vertical_reset_clock",
+      "default": true,
+      "scope": [
+        "native",
+        "zellij"
+      ],
+      "description": "Vertical reset clock.",
+      "rust": {
+        "field": "vertical_reset_clock",
+        "type": "bool",
+        "default": true
+      },
+      "type": "boolean",
+      "example": "True"
+    },
+    {
+      "key": "SHOWY_QUOTA_CAP_LEFT",
+      "kdl": "cap_left",
+      "default": "",
+      "scope": [
+        "native",
+        "zellij"
+      ],
+      "description": "Cap left.",
+      "rust": {
+        "field": "cap_left",
+        "type": "String",
+        "default": ""
+      },
+      "type": "glyph",
+      "example": ""
+    },
+    {
+      "key": "SHOWY_QUOTA_CAP_RIGHT",
+      "kdl": "cap_right",
+      "default": "",
+      "scope": [
+        "native",
+        "zellij"
+      ],
+      "description": "Cap right.",
+      "rust": {
+        "field": "cap_right",
+        "type": "String",
+        "default": ""
+      },
+      "type": "glyph",
+      "example": ""
+    },
+    {
+      "key": "SHOWY_QUOTA_RENDER_BIN",
+      "kdl": null,
+      "type": "string",
+      "default": "",
+      "scope": [
+        "shell"
+      ],
+      "description": "Render bin.",
+      "example": ""
+    },
+    {
+      "key": "SHOWY_QUOTA_FETCH_BIN",
+      "kdl": null,
+      "type": "string",
+      "default": "",
+      "scope": [
+        "shell"
+      ],
+      "description": "Fetch bin.",
+      "example": ""
+    },
+    {
+      "key": "SHOWY_QUOTA_FIXTURE",
+      "kdl": null,
+      "type": "string",
+      "default": "",
+      "scope": [
+        "shell"
+      ],
+      "description": "Fixture.",
+      "example": ""
+    },
+    {
+      "key": "SHOWY_QUOTA_ZELLIJ_PERMISSIONS_FILE",
+      "kdl": null,
+      "type": "string",
+      "default": "",
+      "scope": [
+        "shell"
+      ],
+      "description": "Zellij permissions file.",
+      "example": ""
+    },
+    {
+      "key": "SHOWY_QUOTA_NO_CONFIG",
+      "kdl": null,
+      "type": "string",
+      "default": "",
+      "scope": [
+        "shell"
+      ],
+      "description": "No config.",
+      "example": ""
+    },
+    {
+      "key": "SHOWY_QUOTA_NOW_EPOCH",
+      "kdl": null,
+      "type": "integer",
+      "default": null,
+      "nullable": true,
+      "min": 0,
+      "max": 4102444800,
+      "scope": [
+        "shell"
+      ],
+      "description": "Override the clock for deterministic fixture rendering.",
+      "example": "4070908800"
+    }
+  ]
+}

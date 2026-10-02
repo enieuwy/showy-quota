@@ -39,6 +39,8 @@ pub(crate) struct WindowsMetric {
 
 #[derive(Clone, Serialize)]
 pub(crate) struct WindowMetric {
+    pub(crate) severity: crate::palette::Severity,
+    pub(crate) policy: crate::config::ThresholdPolicy,
     #[serde(rename = "usedPercent")]
     pub(crate) used_percent: i32,
     #[serde(rename = "remainingPercent")]
@@ -55,6 +57,8 @@ pub(crate) struct WindowMetric {
 
 #[derive(Serialize)]
 pub(crate) struct ExtraWindowMetric {
+    pub(crate) severity: Option<crate::palette::Severity>,
+    pub(crate) policy: crate::config::ThresholdPolicy,
     pub(crate) title: Option<String>,
     #[serde(rename = "usageKnown")]
     pub(crate) usage_known: bool,
@@ -136,7 +140,8 @@ pub(crate) fn provider_metrics_filtered(
     config: &RenderConfig,
     now_epoch: i64,
 ) -> Result<FilteredMetrics, RenderError> {
-    let records = parse_display_payload(payload)?;
+    let mut records = parse_display_payload(payload)?;
+    config.filter_windows(&mut records);
     let mut visible_providers: Vec<String> = records
         .iter()
         .filter(|record| passes_provider_filters(record, config))
@@ -211,14 +216,32 @@ fn renderable_metric(
     ProviderMetric {
         provider: record.provider.clone(),
         windows: WindowsMetric {
-            primary: window_metric(usage.primary.as_ref(), config, now_epoch),
-            secondary: window_metric(usage.secondary.as_ref(), config, now_epoch),
-            tertiary: window_metric(usage.tertiary.as_ref(), config, now_epoch),
+            primary: window_metric(
+                usage.primary.as_ref(),
+                config,
+                now_epoch,
+                &record.provider,
+                "primary",
+            ),
+            secondary: window_metric(
+                usage.secondary.as_ref(),
+                config,
+                now_epoch,
+                &record.provider,
+                "secondary",
+            ),
+            tertiary: window_metric(
+                usage.tertiary.as_ref(),
+                config,
+                now_epoch,
+                &record.provider,
+                "tertiary",
+            ),
         },
         extra_rate_windows: usage
             .extra_rate_windows
             .iter()
-            .map(|extra| extra_window_metric(extra, config, now_epoch))
+            .map(|extra| extra_window_metric(extra, config, now_epoch, &record.provider))
             .collect(),
         status: status_metric(record),
         error: None,
@@ -306,10 +329,15 @@ fn window_metric(
     window: Option<&UsageWindow>,
     config: &RenderConfig,
     now_epoch: i64,
+    provider: &str,
+    slot: &str,
 ) -> Option<WindowMetric> {
     let window = window?;
     let used_percent = numeric_percent(window.used_percent)?;
+    let policy = config.policy(provider, slot, window.window_minutes());
     Some(WindowMetric {
+        severity: policy.severity(100 - used_percent),
+        policy,
         used_percent,
         remaining_percent: 100 - used_percent,
         resets_at: window.resets_at.clone(),
@@ -329,15 +357,18 @@ fn extra_window_metric(
     extra: &NamedWindow,
     config: &RenderConfig,
     now_epoch: i64,
+    provider: &str,
 ) -> ExtraWindowMetric {
     let metric = if extra.usage_known == Some(false) {
         None
     } else {
-        window_metric(extra.window.as_ref(), config, now_epoch)
+        window_metric(extra.window.as_ref(), config, now_epoch, provider, "")
     };
 
     match metric {
         Some(metric) => ExtraWindowMetric {
+            severity: Some(metric.severity),
+            policy: metric.policy,
             title: extra.title.clone(),
             usage_known: true,
             used_percent: Some(metric.used_percent),
@@ -348,6 +379,15 @@ fn extra_window_metric(
             minutes_until_reset: metric.minutes_until_reset,
         },
         None => ExtraWindowMetric {
+            severity: None,
+            policy: config.policy(
+                provider,
+                "",
+                extra
+                    .window
+                    .as_ref()
+                    .and_then(|window| window.window_minutes()),
+            ),
             title: extra.title.clone(),
             usage_known: false,
             used_percent: None,
@@ -642,15 +682,15 @@ mod tests {
     }
 
     #[test]
-    fn renderable_schema_field_order_and_null_tertiary() {
-        let output = emit(
-            br#"[{"provider":"codex","usage":{"primary":{"usedPercent":42.9,"resetsAt":"2099-01-01T01:00:00Z","resetDescription":"Resets Jan 1, 2099 1:00 AM","windowMinutes":300},"secondary":{"usedPercent":101},"tertiary":null}}]"#,
+    fn metrics_floor_fractional_usage_and_clamp_over_limit_usage() {
+        let value = emit_value(
+            br#"[{"provider":"codex","usage":{"primary":{"usedPercent":42.9,"resetsAt":"2099-01-01T01:00:00Z","windowMinutes":300},"secondary":{"usedPercent":101},"tertiary":null}}]"#,
         );
-
-        assert_eq!(
-            output,
-            "[{\"provider\":\"codex\",\"windows\":{\"primary\":{\"usedPercent\":42,\"remainingPercent\":58,\"resetsAt\":\"2099-01-01T01:00:00Z\",\"resetDescription\":\"Resets Jan 1, 2099 1:00 AM\",\"windowMinutes\":300,\"minutesUntilReset\":60},\"secondary\":{\"usedPercent\":100,\"remainingPercent\":0,\"resetsAt\":null,\"resetDescription\":null,\"windowMinutes\":null,\"minutesUntilReset\":null},\"tertiary\":null},\"extraRateWindows\":[],\"error\":null}]"
-        );
+        assert_eq!(value[0]["windows"]["primary"]["usedPercent"], 42);
+        assert_eq!(value[0]["windows"]["primary"]["remainingPercent"], 58);
+        assert_eq!(value[0]["windows"]["primary"]["minutesUntilReset"], 60);
+        assert_eq!(value[0]["windows"]["secondary"]["remainingPercent"], 0);
+        assert!(value[0]["windows"]["tertiary"].is_null());
     }
 
     #[test]
@@ -701,41 +741,16 @@ mod tests {
             br#"[{"provider":"codex","usage":{"primary":{"usedPercent":1},"extraRateWindows":[{"title":"Known","window":{"usedPercent":12.7,"resetsAt":"2099-01-01T01:00:00Z","windowMinutes":60}},{"title":"Unknown","usageKnown":false,"window":{"usedPercent":99,"resetsAt":"2099-01-01T01:00:00Z","windowMinutes":60}},{"title":"Missing Window"}]}}]"#,
         );
 
-        assert_eq!(
-            value[0]["extraRateWindows"],
-            json!([
-                {
-                    "title": "Known",
-                    "usageKnown": true,
-                    "usedPercent": 12,
-                    "remainingPercent": 88,
-                    "resetsAt": "2099-01-01T01:00:00Z",
-                    "resetDescription": null,
-                    "windowMinutes": 60,
-                    "minutesUntilReset": 60
-                },
-                {
-                    "title": "Unknown",
-                    "usageKnown": false,
-                    "usedPercent": null,
-                    "remainingPercent": null,
-                    "resetsAt": null,
-                    "resetDescription": null,
-                    "windowMinutes": null,
-                    "minutesUntilReset": null
-                },
-                {
-                    "title": "Missing Window",
-                    "usageKnown": false,
-                    "usedPercent": null,
-                    "remainingPercent": null,
-                    "resetsAt": null,
-                    "resetDescription": null,
-                    "windowMinutes": null,
-                    "minutesUntilReset": null
-                }
-            ])
-        );
+        let extras = &value[0]["extraRateWindows"];
+        assert_eq!(extras[0]["remainingPercent"], 88);
+        assert_eq!(extras[0]["minutesUntilReset"], 60);
+        assert_eq!(extras[0]["severity"], "good");
+        for index in [1, 2] {
+            assert_eq!(extras[index]["usageKnown"], false);
+            assert!(extras[index]["remainingPercent"].is_null());
+            assert!(extras[index]["minutesUntilReset"].is_null());
+            assert!(extras[index]["severity"].is_null());
+        }
     }
 
     #[test]

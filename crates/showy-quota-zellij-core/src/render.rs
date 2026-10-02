@@ -1,7 +1,9 @@
 use std::borrow::Cow;
 use std::cmp::Ordering;
+use std::collections::BTreeMap;
 
 use serde::Serialize;
+use unicode_width::UnicodeWidthStr;
 
 use crate::codexbar::{is_errored, is_renderable, NamedWindow, ProviderRecord, Usage, UsageWindow};
 use crate::config::RenderConfig;
@@ -91,8 +93,16 @@ fn render_with_format(
     options: RenderOptions,
     output_format: OutputFormat,
 ) -> Result<String, RenderError> {
-    let records = parse_render_payload(payload).map_err(|_| RenderError::InvalidPayload)?;
-    Ok(render_records(&records, config, options, output_format))
+    let mut records = parse_render_payload(payload).map_err(|_| RenderError::InvalidPayload)?;
+    let total = records.len();
+    config.filter_windows(&mut records);
+    Ok(render_records(
+        &records,
+        total,
+        config,
+        options,
+        output_format,
+    ))
 }
 
 /// Parse the array transport. `render_records` filters per-record via
@@ -102,6 +112,345 @@ fn render_with_format(
 fn parse_render_payload(payload: &[u8]) -> Result<Vec<ProviderRecord>, serde_json::Error> {
     let records: Vec<ProviderRecord> = serde_json::from_slice(payload)?;
     Ok(records)
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderRenderPlan {
+    pub provider: String,
+    pub requested_mode: String,
+    pub effective_mode: String,
+    pub collapse_reason: Option<String>,
+    pub shared_cycle: bool,
+    pub marker_slots: Vec<String>,
+    pub families: Vec<PoolRenderPlan>,
+    pub windows: Vec<WindowRenderPlan>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PoolRenderPlan {
+    pub label: String,
+    pub lanes: Vec<WindowRenderPlan>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WindowRenderPlan {
+    pub slot: String,
+    pub remaining_percent: i32,
+    pub window_minutes: Option<i64>,
+    pub reset: Option<String>,
+    pub severity: Severity,
+    pub policy: crate::config::ThresholdPolicy,
+}
+
+fn planned_window(
+    record: &ProviderRecord,
+    window: &UsageWindow,
+    slot: &str,
+    config: &RenderConfig,
+) -> WindowRenderPlan {
+    let policy = match slot {
+        "live" => config.policy(&record.provider, "primary", window.window_minutes()),
+        "cap" => config.policy(&record.provider, "secondary", window.window_minutes()),
+        _ => config.window_policy(record, Some(window)),
+    };
+    let remaining_percent = 100 - window.used_pct_floor();
+    WindowRenderPlan {
+        slot: slot.into(),
+        remaining_percent,
+        window_minutes: window.window_minutes(),
+        reset: window.reset_value().map(str::to_owned),
+        severity: policy.severity(remaining_percent),
+        policy,
+    }
+}
+
+/// Resolve mode, family assembly and marker deduplication without rendering or I/O.
+pub fn render_plan(records: &[ProviderRecord], config: &RenderConfig) -> Vec<ProviderRenderPlan> {
+    let mut filtered;
+    let source =
+        if config.window_mode != "all" || config.windows != ["primary", "secondary", "tertiary"] {
+            filtered = records.to_vec();
+            config.filter_windows(&mut filtered);
+            &filtered
+        } else {
+            records
+        };
+    let mut visible: Vec<&ProviderRecord> = source
+        .iter()
+        .filter(|record| is_renderable(record) || is_errored(record))
+        .collect();
+    filter_and_sort(&mut visible, config);
+    visible
+        .into_iter()
+        .map(|record| {
+            let Some(usage) = record.usage.as_ref().filter(|_| !is_errored(record)) else {
+                return ProviderRenderPlan {
+                    provider: record.provider.clone(),
+                    requested_mode: config.terminal_bar_mode.clone(),
+                    effective_mode: "error".into(),
+                    collapse_reason: Some("quota-unavailable".into()),
+                    shared_cycle: false,
+                    marker_slots: Vec::new(),
+                    families: Vec::new(),
+                    windows: Vec::new(),
+                };
+            };
+            let slots = usage.render_slots();
+            let assembled = distinct_render_windows(&slots, &usage.extra_rate_windows, 4);
+            let pooled = pooled_auto(&slots, &usage.extra_rate_windows);
+            let requested = if config.terminal_bar_mode == "auto" {
+                config
+                    .mode_for(&record.provider)
+                    .unwrap_or(if pooled { "dual2" } else { "dual" })
+            } else {
+                &config.terminal_bar_mode
+            };
+            let mut effective = terminal_mode_for_provider(
+                config,
+                &record.provider,
+                slots[2].is_some(),
+                pooled,
+                assembled.len(),
+            );
+            let shared = shared_cycle(&[slots[0], slots[1], slots[2], assembled.get(3).copied()]);
+            let mut reason = (requested != effective).then(|| "insufficient-windows".to_owned());
+            let family_data = family_windows(&record.provider, &slots, &usage.extra_rate_windows);
+            if effective == "dual2" && family_data.len() < 2 {
+                effective = "dual".into();
+                reason = Some("single-family".into());
+            }
+            let families = family_data
+                .into_iter()
+                .map(|family| {
+                    let mut lanes = vec![planned_window(record, &family.primary, "live", config)];
+                    if let Some(window) = family.secondary.as_ref() {
+                        lanes.push(planned_window(record, window, "cap", config));
+                    }
+                    PoolRenderPlan {
+                        label: family.label.to_string(),
+                        lanes,
+                    }
+                })
+                .collect();
+            let windows = assembled
+                .iter()
+                .enumerate()
+                .map(|(index, window)| {
+                    planned_window(
+                        record,
+                        window,
+                        ["primary", "secondary", "tertiary", "quaternary"][index],
+                        config,
+                    )
+                })
+                .collect();
+            let marker_slots = slots
+                .iter()
+                .enumerate()
+                .filter_map(|(index, window)| {
+                    (effective != "portable"
+                        && window.is_some_and(|window| {
+                            window.reset_value().is_some()
+                                && window.window_minutes().is_some_and(|minutes| minutes > 0)
+                        })
+                        && (!shared || index == 0)
+                        && ((effective == "dual" && index < 2)
+                            || (effective != "dual"
+                                && config.mono_markers.iter().any(|name| {
+                                    name == ["primary", "secondary", "tertiary"][index]
+                                }))))
+                    .then(|| ["primary", "secondary", "tertiary"][index].to_owned())
+                })
+                .collect();
+            ProviderRenderPlan {
+                provider: record.provider.clone(),
+                requested_mode: requested.into(),
+                effective_mode: effective,
+                collapse_reason: reason,
+                shared_cycle: shared,
+                marker_slots,
+                families,
+                windows,
+            }
+        })
+        .collect()
+}
+
+pub fn emit_plan(payload: &[u8], config: &RenderConfig) -> Result<String, RenderError> {
+    let records = parse_render_payload(payload).map_err(|_| RenderError::InvalidPayload)?;
+    serde_json::to_string(&render_plan(&records, config)).map_err(|_| RenderError::InvalidPayload)
+}
+
+struct FinalMarkers<'a> {
+    freshness: Option<String>,
+    stale: Option<&'a str>,
+    degraded: Option<&'a str>,
+}
+
+impl<'a> FinalMarkers<'a> {
+    fn new(config: &'a RenderConfig, options: RenderOptions) -> Self {
+        let portable = config.terminal_bar_mode == "portable";
+        Self {
+            freshness: if options.stale {
+                None
+            } else {
+                freshness_suffix(config, options.freshness)
+            },
+            stale: options.stale.then_some(if portable {
+                "stale"
+            } else {
+                &config.stale_glyph
+            }),
+            degraded: options.degraded_cli.then_some(if portable {
+                "cli"
+            } else {
+                &config.degraded_cli_glyph
+            }),
+        }
+    }
+
+    fn iter(&self) -> impl Iterator<Item = (&str, bool)> {
+        [
+            (self.freshness.as_deref(), false),
+            (self.stale, true),
+            (self.degraded, true),
+        ]
+        .into_iter()
+        .filter_map(|(text, state)| text.map(|text| (text, state)))
+    }
+
+    fn width(&self) -> usize {
+        self.iter().map(|(text, _)| 1 + text.width()).sum()
+    }
+}
+
+fn overflow_width(count: usize) -> usize {
+    if count == 0 {
+        0
+    } else {
+        2 + count.ilog10() as usize
+    }
+}
+
+/// Tmux styles and escaped hashes do not occupy their source-text width.
+fn terminal_cell_width(text: &str, format: OutputFormat) -> usize {
+    if format == OutputFormat::Zellij {
+        return text.width();
+    }
+    let mut rest = text;
+    let mut width = 0;
+    while let Some(index) = rest.find('#') {
+        width += rest[..index].width();
+        rest = &rest[index..];
+        if rest.starts_with("##") {
+            width += 1;
+            rest = &rest[2..];
+        } else if rest.starts_with("#[") {
+            if let Some(end) = rest.find(']') {
+                rest = &rest[end + 1..];
+            } else {
+                width += 1;
+                rest = &rest[1..];
+            }
+        } else {
+            width += 1;
+            rest = &rest[1..];
+        }
+    }
+    width + rest.width()
+}
+
+fn adaptive_records(
+    records: &mut Vec<&ProviderRecord>,
+    config: &RenderConfig,
+    options: RenderOptions,
+    format: OutputFormat,
+    marker_width: usize,
+) -> usize {
+    if config.compact_provider_count == 0 && config.width_budget == 0 {
+        return 0;
+    }
+    if config.compact_order == "urgency" {
+        records.sort_by_key(|record| {
+            record
+                .usage
+                .as_ref()
+                .map(|usage| {
+                    distinct_render_windows(
+                        &usage.render_slots(),
+                        &usage.extra_rate_windows,
+                        usize::MAX,
+                    )
+                    .iter()
+                    .map(|window| 100 - window.used_pct_floor())
+                    .min()
+                    .unwrap_or(100)
+                })
+                .unwrap_or(-1)
+        });
+    }
+    let total = records.len();
+    let limit = if config.compact_provider_count == 0 {
+        total
+    } else {
+        config.compact_provider_count.min(total)
+    };
+    if config.width_budget == 0 {
+        records.truncate(limit);
+        return total - limit;
+    }
+    let mut width = 0;
+    let mut kept = 0;
+    for record in records.iter().take(limit) {
+        let mut text = String::new();
+        for (index, unit) in collect_units(&[*record], config).iter().enumerate() {
+            if index > 0 {
+                text.push(' ');
+            }
+            match unit {
+                RenderUnit::Provider(record, sigil) => {
+                    render_provider(
+                        &mut text,
+                        record,
+                        sigil,
+                        config,
+                        RenderOptions {
+                            color: false,
+                            ..options
+                        },
+                        format,
+                    );
+                }
+                RenderUnit::Error(record, sigil) => render_error_provider(
+                    &mut text,
+                    record,
+                    sigil,
+                    config,
+                    RenderOptions {
+                        color: false,
+                        ..options
+                    },
+                    format,
+                    &config.palette_bg,
+                ),
+            }
+        }
+        let next = width + usize::from(kept > 0) + terminal_cell_width(&text, format);
+        let reserve = if kept + 1 < total {
+            1 + overflow_width(total - kept - 1)
+        } else {
+            0
+        };
+        if next + reserve + marker_width > config.width_budget {
+            break;
+        }
+        width = next;
+        kept += 1;
+    }
+    records.truncate(kept);
+    total - kept
 }
 
 enum RenderUnit<'a> {
@@ -158,15 +507,17 @@ pub fn render_rows(
     options: RenderOptions,
     output_format: OutputFormat,
 ) -> Result<Vec<RenderedRow>, RenderError> {
-    let records = parse_render_payload(payload).map_err(|_| RenderError::InvalidPayload)?;
+    let mut records = parse_render_payload(payload).map_err(|_| RenderError::InvalidPayload)?;
+    config.filter_windows(&mut records);
     let mut records: Vec<&ProviderRecord> = records
         .iter()
         .filter(|record| is_renderable(record) || is_errored(record))
         .collect();
     filter_and_sort(&mut records, config);
+    let overflow = adaptive_records(&mut records, config, options, output_format);
 
     let chunk_bg = &config.palette_bg;
-    Ok(collect_units(&records, config)
+    let mut rows: Vec<RenderedRow> = collect_units(&records, config)
         .iter()
         .map(|unit| {
             let mut text = String::new();
@@ -174,7 +525,7 @@ pub fn render_rows(
                 RenderUnit::Provider(record, sigil) => {
                     let band =
                         render_provider(&mut text, record, sigil, config, options, output_format);
-                    let severity = config.severity(band.remaining);
+                    let severity = band.severity;
                     RenderedRow {
                         provider: record.provider.clone(),
                         sigil: sigil.clone(),
@@ -207,7 +558,19 @@ pub fn render_rows(
                 }
             }
         })
-        .collect())
+        .collect();
+    if overflow > 0 {
+        rows.push(RenderedRow {
+            provider: String::new(),
+            sigil: format!("+{overflow}"),
+            text: format!("+{overflow}"),
+            severity: None,
+            dim: false,
+            color: normalized_hex(&config.palette_countdown),
+            error: false,
+        });
+    }
+    Ok(rows)
 }
 
 /// One line per quota window, for a surface that owns vertical space (an SSH
@@ -231,8 +594,18 @@ pub fn render_vertical(
     config: &RenderConfig,
     options: RenderOptions,
 ) -> Result<String, RenderError> {
-    let records = parse_render_payload(payload).map_err(|_| RenderError::InvalidPayload)?;
+    if config.terminal_bar_mode == "portable" {
+        let rows = render_rows(payload, config, options, OutputFormat::Zellij)?;
+        return Ok(rows
+            .into_iter()
+            .map(|row| row.text)
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n");
+    }
+    let mut records = parse_render_payload(payload).map_err(|_| RenderError::InvalidPayload)?;
     let total = records.len();
+    config.filter_windows(&mut records);
     let mut records: Vec<&ProviderRecord> = records
         .iter()
         .filter(|record| is_renderable(record) || is_errored(record))
@@ -414,6 +787,7 @@ pub fn render_vertical(
 struct VerticalWindow<'a> {
     label: String,
     remaining: i32,
+    policy: crate::config::ThresholdPolicy,
     reset: Option<&'a str>,
     window: Option<i64>,
     /// Minutes until this window's own reset, for its countdown and for
@@ -520,6 +894,7 @@ fn vertical_windows<'a>(
         out.push(VerticalWindow {
             label,
             remaining: 100 - entry.window.used_pct_floor(),
+            policy: config.window_policy(record, Some(entry.window)),
             reset,
             window: entry.window.window_minutes(),
             minutes: reset.and_then(|value| {
@@ -608,7 +983,7 @@ fn render_vertical_line(
     let color = if stale {
         config.palette_stale.clone()
     } else {
-        config.window_color(window.remaining, false)
+        config.severity_color(window.policy.severity(window.remaining), false)
     };
     // A stale snapshot cannot place a pacing marker, matching the strip's marker
     // suppression. The countdown still renders — it is the reading, not the
@@ -623,7 +998,7 @@ fn render_vertical_line(
         config.palette_stale.as_str()
     } else if window
         .minutes
-        .is_some_and(|value| value < config.time_warn_minutes)
+        .is_some_and(|value| value < window.policy.time)
     {
         config.palette_countdown_warn.as_str()
     } else {
@@ -729,7 +1104,7 @@ fn render_vertical_line(
     if config.severity_glyphs && !stale {
         style_text(
             out,
-            config.severity(window.remaining).marker(),
+            window.policy.severity(window.remaining).marker(),
             Some(&color),
             Some(chunk_bg),
             Weight::Bold,
@@ -843,7 +1218,9 @@ fn empty_reason(total: usize, candidates: usize, config: &RenderConfig) -> Empty
         return EmptyReason::NoProviders;
     }
     let filtering = !config.providers.is_empty() || !config.providers_exclude.is_empty();
-    if candidates > 0 && filtering {
+    let window_filtering =
+        config.window_mode != "all" || config.windows != ["primary", "secondary", "tertiary"];
+    if (candidates > 0 && filtering) || window_filtering {
         return EmptyReason::Filtered;
     }
     EmptyReason::Idle
@@ -851,24 +1228,50 @@ fn empty_reason(total: usize, candidates: usize, config: &RenderConfig) -> Empty
 
 fn render_records(
     records: &[ProviderRecord],
+    total: usize,
     config: &RenderConfig,
     options: RenderOptions,
     output_format: OutputFormat,
 ) -> String {
-    let total = records.len();
     let mut records: Vec<&ProviderRecord> = records
         .iter()
         .filter(|record| is_renderable(record) || is_errored(record))
         .collect();
     let candidates = records.len();
     filter_and_sort(&mut records, config);
+    let markers = FinalMarkers::new(config, options);
+    let overflow = adaptive_records(
+        &mut records,
+        config,
+        options,
+        output_format,
+        markers.width(),
+    );
+    let empty_label = (records.is_empty() && overflow == 0)
+        .then(|| empty_reason(total, candidates, config).label());
+    if records.is_empty() && config.width_budget > 0 {
+        let body_width = empty_label.map_or_else(|| overflow_width(overflow), str::width);
+        let marker_width = if empty_label.is_some() && output_format == OutputFormat::Tmux {
+            0
+        } else {
+            markers.width()
+        };
+        if body_width + marker_width > config.width_budget {
+            // Never truncate a provider, overflow count, or state marker.
+            // An impossibly small budget produces an empty strip.
+            return if output_format == OutputFormat::Zellij {
+                "\n".into()
+            } else {
+                String::new()
+            };
+        }
+    }
 
     let chunk_bg = &config.palette_bg;
     let countdown_warn = &config.palette_countdown_warn;
     let mut out = String::new();
 
-    if records.is_empty() {
-        let label = empty_reason(total, candidates, config).label();
+    if let Some(label) = empty_label {
         dim(&mut out, output_format, options.color);
         match output_format {
             OutputFormat::Zellij => {
@@ -909,14 +1312,13 @@ fn render_records(
                 ),
             }
         }
-    }
-
-    if !options.stale {
-        if let Some(suffix) = freshness_suffix(config, options.freshness) {
-            separator_space(&mut out, output_format, chunk_bg, options.color);
+        if overflow > 0 {
+            if !units.is_empty() {
+                separator_space(&mut out, output_format, chunk_bg, options.color);
+            }
             style_text(
                 &mut out,
-                &suffix,
+                &format!("+{overflow}"),
                 Some(&config.palette_countdown),
                 Some(chunk_bg),
                 Weight::Normal,
@@ -925,26 +1327,19 @@ fn render_records(
             );
         }
     }
-    if options.stale {
+
+    for (text, state) in markers.iter() {
         separator_space(&mut out, output_format, chunk_bg, options.color);
         style_text(
             &mut out,
-            &config.stale_glyph,
-            Some(countdown_warn),
+            text,
+            Some(if state {
+                countdown_warn
+            } else {
+                &config.palette_countdown
+            }),
             Some(chunk_bg),
-            Weight::Bold,
-            output_format,
-            options.color,
-        );
-    }
-    if options.degraded_cli {
-        separator_space(&mut out, output_format, chunk_bg, options.color);
-        style_text(
-            &mut out,
-            &config.degraded_cli_glyph,
-            Some(countdown_warn),
-            Some(chunk_bg),
-            Weight::Bold,
+            if state { Weight::Bold } else { Weight::Normal },
             output_format,
             options.color,
         );
@@ -1030,6 +1425,13 @@ fn render_error_provider(
     chunk_bg: &str,
 ) {
     debug_assert!(is_errored(record));
+    if config.terminal_bar_mode == "portable"
+        || config.mode_for(&record.provider) == Some("portable")
+    {
+        out.extend(sigil.chars().filter(char::is_ascii));
+        out.push_str(" err");
+        return;
+    }
     let error_color = &config.palette_countdown_warn;
     let cap_left = cap_text(output_format, &config.cap_left);
     style_text(
@@ -1115,6 +1517,7 @@ fn status_color<'a>(config: &'a RenderConfig, record: &ProviderRecord) -> Option
 struct RowBand {
     remaining: i32,
     dim: bool,
+    severity: Severity,
 }
 
 fn render_provider(
@@ -1142,6 +1545,39 @@ fn render_provider(
     // countdown (see Usage::render_slots).
     let slots = usage.render_slots();
     let [primary, secondary, tertiary] = slots;
+    let primary_policy = config.window_policy(record, primary);
+    let secondary_policy = config.window_policy(record, secondary);
+    if config.terminal_bar_mode == "portable"
+        || config.mode_for(&record.provider) == Some("portable")
+    {
+        let mut remaining = 100;
+        let mut severity = primary_policy.severity(remaining);
+        out.extend(sigil.chars().filter(char::is_ascii));
+        for window in distinct_render_windows(&slots, &usage.extra_rate_windows, usize::MAX) {
+            let value = 100 - window.used_pct_floor();
+            if value <= remaining {
+                remaining = value;
+                severity = config.window_policy(record, Some(window)).severity(value);
+            }
+            let minutes = window.reset_value().and_then(|reset| {
+                minutes_until(
+                    reset,
+                    options.now_epoch,
+                    config.reset_description_timezone_offset_minutes,
+                )
+            });
+            out.push_str(&format!(
+                " {}%/{}",
+                value.clamp(0, 100),
+                primary_label(minutes, value, window.reset_value())
+            ));
+        }
+        return RowBand {
+            remaining,
+            dim: false,
+            severity,
+        };
+    }
 
     // Cursor-style shared-cycle pools (Total/Auto/API) report one resetsAt and
     // windowMinutes across their slots: parallel usage categories within a
@@ -1189,7 +1625,7 @@ fn render_provider(
 
     let time_color = if options.stale {
         config.palette_stale.as_str()
-    } else if minutes.is_some_and(|m| m < config.time_warn_minutes) {
+    } else if minutes.is_some_and(|m| m < primary_policy.time) {
         config.palette_countdown_warn.as_str()
     } else {
         config.palette_countdown.as_str()
@@ -1208,12 +1644,18 @@ fn render_provider(
     // Only mono4 still assembles per-pool family lanes here; dual2 pooled
     // providers are pre-expanded into standalone dual records upstream.
     let families = if bar_mode == "mono4" {
-        pool_families(&slots, &usage.extra_rate_windows, config, options.stale)
+        pool_families(
+            &record.provider,
+            &slots,
+            &usage.extra_rate_windows,
+            config,
+            options.stale,
+        )
     } else {
         Vec::new()
     };
-    let mut primary_color = config.window_color(p_remaining, p_long);
-    let mut secondary_color = config.window_color(s_remaining, s_long);
+    let mut primary_color = config.severity_color(primary_policy.severity(p_remaining), p_long);
+    let mut secondary_color = config.severity_color(secondary_policy.severity(s_remaining), s_long);
 
     // Lanes for the single-color stacked bodies. mono3 uses the three positional
     // slots (absent slots stay empty and never shift up); mono4 uses the
@@ -1259,13 +1701,28 @@ fn render_provider(
     let mut band = RowBand {
         remaining: p_remaining,
         dim: p_long,
+        severity: primary_policy.severity(p_remaining),
     };
     let mut mono_color = if mono_lanes.is_empty() {
         String::new()
     } else {
         let (remaining, dim) = mono_chunk_band(config, &mono_lanes);
-        band = RowBand { remaining, dim };
-        let color = mono_chunk_color(config, &mono_lanes);
+        let representative = if config.mono_color_mode == "primary" {
+            mono_lanes.first()
+        } else {
+            mono_lanes
+                .iter()
+                .filter(|lane| lane.present)
+                .min_by_key(|lane| lane.remaining)
+        };
+        let policy = config.window_policy(record, representative.and_then(|lane| lane.source));
+        let severity = policy.severity(remaining);
+        band = RowBand {
+            remaining,
+            dim,
+            severity,
+        };
+        let color = config.severity_color(severity, dim);
         primary_color.clone_from(&color);
         color
     };
@@ -1385,7 +1842,7 @@ fn render_provider(
     if config.severity_glyphs && !options.stale {
         style_text(
             out,
-            config.severity(band.remaining).marker(),
+            band.severity.marker(),
             Some(&primary_color),
             Some(surface_color),
             Weight::Bold,
@@ -1586,6 +2043,7 @@ fn single_metric_bar(
 #[derive(Clone, Copy)]
 struct Lane<'a> {
     remaining: i32,
+    source: Option<&'a UsageWindow>,
     reset: Option<&'a str>,
     window: Option<i64>,
     is_long: bool,
@@ -1596,6 +2054,7 @@ impl<'a> Lane<'a> {
     fn empty() -> Lane<'a> {
         Lane {
             remaining: 0,
+            source: None,
             reset: None,
             window: None,
             is_long: false,
@@ -1606,6 +2065,7 @@ impl<'a> Lane<'a> {
     fn from_window(window: &'a UsageWindow, config: &RenderConfig, stale: bool) -> Lane<'a> {
         Lane {
             remaining: 100 - window.used_pct_floor(),
+            source: Some(window),
             reset: if stale { None } else { window.reset_value() },
             window: if stale { None } else { window.window_minutes() },
             is_long: window
@@ -1620,6 +2080,7 @@ impl<'a> Lane<'a> {
             Some(window) => Lane::from_window(window, config, stale),
             None => Lane {
                 remaining: 0,
+                source: None,
                 reset: None,
                 window: None,
                 is_long: false,
@@ -1635,6 +2096,7 @@ impl<'a> Lane<'a> {
             }
             _ => Lane {
                 remaining: 0,
+                source: None,
                 reset: None,
                 window: None,
                 is_long: false,
@@ -1665,13 +2127,6 @@ fn mono_chunk_band(config: &RenderConfig, lanes: &[Lane<'_>]) -> (i32, bool) {
         all_long &= lane.is_long;
     }
     (remaining, any && all_long)
-}
-
-/// One color for the whole stacked chunk (mono3/mono4): the representative
-/// window's severity, dimmed only when every present lane is a long-horizon cap.
-fn mono_chunk_color(config: &RenderConfig, lanes: &[Lane<'_>]) -> String {
-    let (remaining, dim) = mono_chunk_band(config, lanes);
-    config.window_color(remaining, dim)
 }
 
 /// Resolve the configured marker slots to (column, color) pairs. The first
@@ -1811,47 +2266,37 @@ struct Family<'a> {
     bottom: Lane<'a>,
 }
 
-/// Group a provider's quota pools into per-family duals (top = short/live
-/// horizon, bottom = long/cap horizon). Present `extraRateWindows` are paired
-/// two-at-a-time in CodexBar's per-family session→weekly emission order;
-/// positional slots not already carried by a known extra (matched on the
-/// render-window dedup key) form a leading "main" family. A provider whose
-/// pools live entirely in the extras (e.g. Antigravity) yields one family per
-/// pool; a provider with a secondary extra pool (e.g. Codex + Spark) yields its
-/// main slots plus the extra pool. `usageKnown:false` windows keep their empty
-/// visual lane but cannot replace a measured positional slot.
+/// Group semantic model families into short/live and long/cap lanes.
+/// Positional slots not carried by a measured extra form a leading main family.
+/// Unknown extras keep their empty lane but cannot replace a measured slot.
 fn pool_families<'a>(
+    provider: &str,
     slots: &[Option<&'a UsageWindow>; 3],
     extras: &'a [NamedWindow],
     config: &RenderConfig,
     stale: bool,
 ) -> Vec<Family<'a>> {
-    let present_extras: Vec<&'a NamedWindow> = extras
-        .iter()
-        .filter(|named| {
-            named
-                .window
-                .as_ref()
-                .is_some_and(|window| window.used_percent.is_some())
-        })
-        .collect();
-
     let mut families: Vec<Family<'a>> = Vec::new();
     let unmatched: Vec<&'a UsageWindow> = slots
         .iter()
         .flatten()
         .copied()
-        .filter(|slot| !extra_contains(&present_extras, slot))
+        .filter(|slot| !extra_contains(extras, slot))
         .collect();
     if let Some(main) = main_family(&unmatched, config, stale) {
         families.push(main);
     }
-    for pair in present_extras.chunks(2) {
+    for family in extra_families(provider, extras) {
+        let Some(first) = family.windows.first() else {
+            continue;
+        };
         families.push(Family {
-            top: Lane::from_named(pair[0], config, stale),
-            bottom: pair
-                .get(1)
-                .map_or_else(Lane::empty, |named| Lane::from_named(named, config, stale)),
+            top: Lane::from_named(first, config, stale),
+            bottom: if family.windows.len() > 1 {
+                Lane::from_named(family.windows.last().unwrap(), config, stale)
+            } else {
+                Lane::empty()
+            },
         });
     }
     families
@@ -1868,7 +2313,7 @@ fn has_known_extra_usage(named: &NamedWindow) -> bool {
 
 /// True when a positional slot is already carried by a known extra window,
 /// matched on the render-window dedup key (windowMinutes + canonical reset).
-fn extra_contains(extras: &[&NamedWindow], slot: &UsageWindow) -> bool {
+fn extra_contains(extras: &[NamedWindow], slot: &UsageWindow) -> bool {
     extras.iter().any(|named| {
         has_known_extra_usage(named)
             && named.window.as_ref().is_some_and(|window| {
@@ -1945,11 +2390,11 @@ fn distinct_render_windows<'a>(
 /// families drive the bar instead of the (possibly cross-family) positional
 /// slots.
 fn pooled_auto(slots: &[Option<&UsageWindow>; 3], extras: &[NamedWindow]) -> bool {
-    let present_extras: Vec<&NamedWindow> = extras
+    let present_extras = extras
         .iter()
         .filter(|named| has_known_extra_usage(named))
-        .collect();
-    if present_extras.is_empty() {
+        .count();
+    if present_extras == 0 {
         return false;
     }
     // A coincidental (windowMinutes, reset) collision between a positional slot
@@ -1958,13 +2403,105 @@ fn pooled_auto(slots: &[Option<&UsageWindow>; 3], extras: &[NamedWindow]) -> boo
     // view exposes, so they are genuinely the canonical superset rather than a
     // same-shaped parallel pool.
     let present_positional = slots.iter().flatten().count();
-    if present_extras.len() <= present_positional {
+    if present_extras <= present_positional {
         return false;
     }
     slots
         .iter()
         .flatten()
-        .all(|slot| extra_contains(&present_extras, slot))
+        .all(|slot| extra_contains(extras, slot))
+}
+
+/// Keep every named family, including families whose windows visibility hides.
+/// Stable semantic order preserves pool item identities across horizon filters.
+pub(crate) struct ExtraFamily<'a> {
+    pub title: &'a str,
+    pub windows: Vec<&'a NamedWindow>,
+}
+
+pub(crate) fn extra_families<'a>(
+    provider: &str,
+    extras: &'a [NamedWindow],
+) -> Vec<ExtraFamily<'a>> {
+    let mut families: BTreeMap<String, ExtraFamily<'a>> = BTreeMap::new();
+    for (index, extra) in extras.iter().enumerate() {
+        let title = extra.title.as_deref().map(family_stem).unwrap_or_default();
+        let id = extra.id.as_deref().map(family_stem).unwrap_or_default();
+        let (key, title) = if provider == "antigravity" {
+            if [extra.id.as_deref(), extra.title.as_deref()]
+                .into_iter()
+                .flatten()
+                .any(|value| {
+                    value
+                        .as_bytes()
+                        .windows(6)
+                        .any(|part| part.eq_ignore_ascii_case(b"gemini"))
+                })
+            {
+                ("0-gemini".to_owned(), "Gemini")
+            } else {
+                ("1-other".to_owned(), "Claude + GPT")
+            }
+        } else if !title.is_empty() {
+            (title.to_lowercase(), title)
+        } else if !id.is_empty() {
+            (id.to_lowercase(), id)
+        } else {
+            (format!("~{index}"), "Model pool")
+        };
+        let family = families.entry(key).or_insert_with(|| ExtraFamily {
+            title,
+            windows: Vec::new(),
+        });
+        if extra
+            .window
+            .as_ref()
+            .is_some_and(|window| window.used_percent.is_some())
+        {
+            family.windows.push(extra);
+        }
+    }
+    families
+        .into_values()
+        .map(|mut family| {
+            family.windows.sort_by(|a, b| {
+                a.window
+                    .as_ref()
+                    .and_then(UsageWindow::window_minutes)
+                    .cmp(&b.window.as_ref().and_then(UsageWindow::window_minutes))
+                    .then_with(|| a.id.cmp(&b.id))
+                    .then_with(|| a.title.cmp(&b.title))
+            });
+            family
+        })
+        .collect()
+}
+
+/// Strip only trailing horizon words; never pair unrelated adjacent extras.
+fn family_stem(mut value: &str) -> &str {
+    value = value.trim();
+    while let Some((index, separator)) = value
+        .char_indices()
+        .rev()
+        .find(|(_, c)| matches!(*c, ' ' | '-' | '_'))
+    {
+        let suffix = &value[index + separator.len_utf8()..];
+        let horizon = [
+            "session", "cap", "weekly", "daily", "monthly", "window", "week", "day", "month",
+        ]
+        .iter()
+        .any(|word| suffix.eq_ignore_ascii_case(word))
+            || suffix
+                .strip_suffix(['m', 'h', 'd', 'w'])
+                .is_some_and(|number| {
+                    !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit())
+                });
+        if !horizon {
+            break;
+        }
+        value = value[..index].trim_end_matches([' ', '-', '_']);
+    }
+    value
 }
 
 /// Owned per-family windows for the split: a model-pooled provider becomes one
@@ -1983,22 +2520,12 @@ fn family_windows(
     slots: &[Option<&UsageWindow>; 3],
     extras: &[NamedWindow],
 ) -> Vec<FamilyWindows> {
-    let present_extras: Vec<&NamedWindow> = extras
-        .iter()
-        .filter(|named| {
-            named
-                .window
-                .as_ref()
-                .is_some_and(|window| window.used_percent.is_some())
-        })
-        .collect();
-
     let mut families: Vec<FamilyWindows> = Vec::new();
     let mut unmatched: Vec<&UsageWindow> = slots
         .iter()
         .flatten()
         .copied()
-        .filter(|slot| !extra_contains(&present_extras, slot))
+        .filter(|slot| !extra_contains(extras, slot))
         .collect();
     if !unmatched.is_empty() {
         unmatched.sort_by_key(|window| window.window_minutes().unwrap_or(i64::MAX));
@@ -2013,11 +2540,15 @@ fn family_windows(
             secondary,
         });
     }
-    for pair in present_extras.chunks(2) {
+    for family in extra_families(provider, extras) {
+        let Some(first) = family.windows.first() else {
+            continue;
+        };
         families.push(FamilyWindows {
-            label: family_label(pair[0].title.as_deref()),
-            primary: named_window(pair[0]),
-            secondary: pair.get(1).map(|named| named_window(named)),
+            label: family_label(Some(family.title)),
+            primary: named_window(first),
+            secondary: (family.windows.len() > 1)
+                .then(|| named_window(family.windows.last().unwrap())),
         });
     }
     families
@@ -2177,6 +2708,9 @@ fn terminal_mode_for_provider(
     pooled: bool,
     assembled_window_count: usize,
 ) -> String {
+    if config.terminal_bar_mode == "portable" || config.mode_for(provider) == Some("portable") {
+        return "portable".into();
+    }
     let requested = match config.terminal_bar_mode.as_str() {
         "dual" => "dual",
         "dual2" => "dual2",
@@ -2800,6 +3334,7 @@ mod tests {
             Lane::empty(),
             Lane {
                 remaining: 90,
+                source: None,
                 reset: Some("2024-01-01T02:00:00Z"),
                 window: Some(120),
                 is_long: false,
@@ -3096,8 +3631,11 @@ mod tests {
             usage_known: None,
         };
 
-        assert!(!extra_contains(&[&different_reset], &slot));
-        assert!(extra_contains(&[&matching_reset], &slot));
+        assert!(!extra_contains(
+            std::slice::from_ref(&different_reset),
+            &slot
+        ));
+        assert!(extra_contains(std::slice::from_ref(&matching_reset), &slot));
 
         let other_slot = UsageWindow {
             used_percent: Some(15.0),

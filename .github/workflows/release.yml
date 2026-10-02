@@ -143,9 +143,9 @@ jobs:
           CARGO_TARGET: ${{ matrix.cargo_target }}
         run: |
           if [ -n "${CARGO_TARGET}" ]; then
-            cargo build --release --target "${CARGO_TARGET}" -p showy-quota-zellij-core --bin showy-quota-render
+            cargo build --release --target "${CARGO_TARGET}" -p showy-quota-zellij-core --bins
           else
-            cargo build --release -p showy-quota-zellij-core --bin showy-quota-render
+            cargo build --release -p showy-quota-zellij-core --bins
           fi
       - name: Derive package version
         id: version

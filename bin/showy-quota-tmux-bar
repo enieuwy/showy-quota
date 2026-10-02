@@ -24,10 +24,10 @@ REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd -P)"
 FETCH="${SHOWY_QUOTA_FETCH_BIN:-${SCRIPT_DIR}/showy-quota-fetch}"
 FETCH="$(showy_quota_valid_bin "${FETCH}")" || FETCH="${SCRIPT_DIR}/showy-quota-fetch"
 
-json_input=""
+json_input="${SHOWY_QUOTA_FIXTURE:-}"
 while (($#)); do
     case "$1" in
-        --json)
+        --json|--fixture)
             shift
             [[ $# -gt 0 ]] || showy_quota_die "--json requires path or -"
             json_input="$1"

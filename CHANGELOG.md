@@ -7,12 +7,25 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Upgrading
+- Custom themes now use declarative JSON, not executable `.env` files.
+  Convert custom themes under `~/.config/showy-quota/themes/` to `NAME.json`.
+  The cold-path configuration, theme, and tmux commands require Python 3.
+- The fetch script now requires `showy-quota-fetch-native`. `make render-bin`
+  builds both native binaries. The prototype's native and WASM execution checks
+  remain blocked by the resource stop; do not treat source changes as runtime proof.
 - **Rebuild `showy-quota-render` with the SketchyBar plugin.** The plugin now
   calls `--emit sketchybar-frame`, `sketchybar-query`, and `sketchybar-layout`;
   an older binary leaves the pill frozen. Run `make render-bin` (or
   `make install-bin`). `--emit sketchybar` (the old row format) is removed.
 
 ### Added
+- Typed `config get/set/unset/list` commands, JSON theme authoring, Base16 and
+  iTerm palette imports, and a terminal glyph doctor.
+- A read-only tmux doctor and a reversible TPM/CLI reconciler. Repeated syncs,
+  side changes, renderer updates, and `off` preserve unrelated user settings.
+- Configuration and bundled theme generators with `--check` drift detection.
+- tmux synchronization validates popup dimensions before mutation and rolls
+  back owned option/binding changes if a later command fails.
 - SketchyBar `SHOWY_QUOTA_SKETCHYBAR_BODY=ring` (opt-in; default `rows` is
   unchanged): one ring per model family — the longest window as a 26 pt ring
   with the provider logo inside, shorter windows as stacked bars, pace ticks

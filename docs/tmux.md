@@ -112,6 +112,27 @@ set -g @showy-quota-popup-interval '30'
 Set `@showy-quota-popup-key` only if you want the plugin to bind a key; tmux's
 default `<prefix>/` binding is otherwise left alone.
 
+The wrapper and `showy-quota tmux sync` use the same reconciler.
+It tracks only the status segment, length, and popup binding it owns.
+Changing sides removes the old managed segment. Setting the position to `off`
+restores prior values when the current values still match the managed values.
+Later user edits take precedence.
+Popup dimensions accept positive cell counts or percentages through `100%`.
+The reconciler validates dimensions before it changes tmux.
+If a later command fails, it restores earlier changes when they still match
+the values it applied. It reports any rollback failure.
+
+```sh
+showy-quota --tmux-doctor --json
+showy-quota tmux sync --dry-run --json
+showy-quota tmux sync
+```
+
+The doctor reports the renderer path, status settings, duplicate segments, and
+repair commands without changing tmux. Use `--socket NAME` with a disposable
+server for checks. The reconciler requires Python 3.
+
+
 ## status-right
 
 Append to your existing `status-right` so `showy-quota` cohabits with

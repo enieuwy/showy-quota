@@ -9,8 +9,8 @@ use showy_quota_zellij_core::{
     emit_rows, render_tmux, render_vertical, render_zellij,
     sketchybar_frame::{
         build_frame, build_ring_frame, parse_bar_items, redeclare_reason, ring_extra_items,
-        ring_redeclare_reason, wire_line, Body, FrameInputs, FrameOutput, FrameSettings,
-        RingFrameInputs,
+        ring_item_roles, ring_redeclare_reason, row_item_roles, visibility_redeclare_reason,
+        wire_line, Body, FrameInputs, FrameOutput, FrameSettings, RingFrameInputs,
     },
     sketchybar_notch::{notch_layout, parse_previous_plan, NotchSettings, PreviousPlan},
     sketchybar_ring::{apply_stale_ages, ring_units},
@@ -28,6 +28,7 @@ enum Format {
 enum Emit {
     Render,
     Rows,
+    Plan,
     Vertical,
     Metrics,
     Prompt,
@@ -110,6 +111,9 @@ fn main() {
 
 fn run(cli: &Cli, template: Option<&Template<'_>>) -> Result<(), String> {
     let configured = RenderConfig::from_env();
+    if let Some(error) = &configured.theme_error {
+        return Err(error.clone());
+    }
     let config = if cli.emit == Emit::Pick {
         configured
     } else {
@@ -127,6 +131,11 @@ fn run(cli: &Cli, template: Option<&Template<'_>>) -> Result<(), String> {
         Err(_) if cli.emit == Emit::Prompt => return write_output("AI ?\n"),
         Err(err) => return Err(err),
     };
+    if cli.emit == Emit::Plan {
+        let plan = showy_quota_zellij_core::render::emit_plan(&input.payload, &config)
+            .map_err(render_error)?;
+        return write_output(&format!("{plan}\n"));
+    }
     let stale = cli.stale || input.stale;
     let degraded_cli = cli.degraded_cli || input.degraded_cli;
     let options = RenderOptions {
@@ -301,12 +310,13 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Cli, String> {
             "--emit" => {
                 let value = args.next().ok_or_else(|| {
                     String::from(
-                        "--emit requires render, rows, vertical, metrics, prompt, template, pick, sketchybar-frame, sketchybar-query, or sketchybar-layout",
+                        "--emit requires render, plan, rows, vertical, metrics, prompt, template, pick, sketchybar-frame, sketchybar-query, or sketchybar-layout",
                     )
                 })?;
                 emit = match value.as_str() {
                     "render" => Emit::Render,
                     "rows" => Emit::Rows,
+                    "plan" => Emit::Plan,
                     "vertical" => Emit::Vertical,
                     "metrics" => Emit::Metrics,
                     "prompt" => Emit::Prompt,
@@ -642,8 +652,22 @@ fn run_sketchybar_frame(cli: &Cli, config: &RenderConfig, now_epoch: i64) -> Res
         .map(read_provider_list)
         .unwrap_or_default();
     let desired: Vec<String> = rows.rows.iter().map(|row| row.provider.clone()).collect();
+    let roles: Vec<(String, Vec<&str>)> = rows
+        .rows
+        .iter()
+        .map(|row| (row.provider.clone(), row_item_roles(row, &settings)))
+        .collect();
     let redeclare = if sb.assume_declared {
         None
+    } else if settings.filter_windows {
+        visibility_redeclare_reason(
+            sb.force_redeclare,
+            items.as_deref(),
+            &declared,
+            &roles,
+            &settings,
+            &[],
+        )
     } else {
         redeclare_reason(
             sb.force_redeclare,
@@ -690,7 +714,7 @@ fn run_sketchybar_frame(cli: &Cli, config: &RenderConfig, now_epoch: i64) -> Res
         args: &frame.args,
         units: None,
     };
-    write_output(&output.to_wire())
+    write_output(&frame_wire_with_roles(&roles, output.to_wire()))
 }
 
 /// `--emit sketchybar-frame` with `SHOWY_QUOTA_SKETCHYBAR_BODY=ring`: the same
@@ -765,8 +789,21 @@ fn run_sketchybar_ring_frame(
         }
     }
     let extra = ring_extra_items(&units);
+    let roles: Vec<(String, Vec<&str>)> = units
+        .iter()
+        .map(|unit| (unit.unit.clone(), ring_item_roles(unit, settings)))
+        .collect();
     let redeclare = if sb.assume_declared {
         None
+    } else if settings.filter_windows {
+        visibility_redeclare_reason(
+            sb.force_redeclare,
+            items.as_deref(),
+            &declared,
+            &roles,
+            settings,
+            &extra,
+        )
     } else {
         ring_redeclare_reason(
             sb.force_redeclare,
@@ -804,7 +841,17 @@ fn run_sketchybar_ring_frame(
         args: &frame.args,
         units: Some(&pairs),
     };
-    write_output(&output.to_wire())
+    write_output(&frame_wire_with_roles(&roles, output.to_wire()))
+}
+
+fn frame_wire_with_roles(roles: &[(String, Vec<&str>)], frame: String) -> String {
+    let mut output = String::new();
+    for (unit, roles) in roles {
+        let csv = roles.join(",");
+        wire_line(&mut output, "roles", [unit.as_str(), csv.as_str()]);
+    }
+    output.push_str(&frame);
+    output
 }
 
 /// `--emit sketchybar-query`: the live item names from a `--query bar`
@@ -1012,7 +1059,7 @@ fn png_bar_width_from_env() -> i64 {
 
 fn print_help() {
     println!(
-        "Usage: showy-quota-render [--emit render|rows|vertical|metrics|prompt|template|pick|sketchybar-frame|sketchybar-query|sketchybar-layout] [--format zellij|tmux|SPEC] [--join SEP] [--json <path|-> | --from-cache] [--provider ID[,ID...]] [--ansi] [--stale] [--degraded-cli]\n\nTemplate mode requires --format SPEC and expands once per provider. Prompt accepts --format SPEC for the worst window overall. Fields: {{provider}}, {{sigil}}, {{used}}, {{remaining}}, {{countdown}}, {{class}}, {{window}}, {{stale}}. Escape braces with {{{{ and }}}}.\n\nPick mode accepts --window primary|secondary|tertiary|worst, --min-remaining 0-100, and --pick-format id|json.\n\n--run-bounded SECONDS MAX_BYTES CMD [ARG...] runs CMD in its own session with a hard timeout (exit 124) and an output cap (MAX_BYTES + 1 bytes pass, exit 125), for showy-quota-fetch.\n\nThe sketchybar-* modes serve the SketchyBar plugin: frame accepts --bar PATH|-, --state PATH, --frame PATH, --plan PATH, --force-redeclare, --assume-declared, --icon-maker, and --or-empty; query reads a `--query bar` reply; layout accepts --plan PATH and --layout-providers ID[,ID...] and reads the batched geometry query on stdin."
+        "Usage: showy-quota-render [--emit render|plan|rows|vertical|metrics|prompt|template|pick|sketchybar-frame|sketchybar-query|sketchybar-layout] [--format zellij|tmux|SPEC] [--join SEP] [--json <path|-> | --from-cache] [--provider ID[,ID...]] [--ansi] [--stale] [--degraded-cli]\n\nPlan mode emits resolved modes, collapse reasons, visible windows, pooled families, marker slots, and scoped policies as JSON.\n\nTemplate mode requires --format SPEC and expands once per provider. Prompt accepts --format SPEC for the worst window overall. Fields: {{provider}}, {{sigil}}, {{used}}, {{remaining}}, {{countdown}}, {{class}}, {{window}}, {{stale}}. Escape braces with {{{{ and }}}}.\n\nPick mode accepts --window primary|secondary|tertiary|worst, --min-remaining 0-100, and --pick-format id|json.\n\n--run-bounded SECONDS MAX_BYTES CMD [ARG...] runs CMD in its own session with a hard timeout (exit 124) and an output cap (MAX_BYTES + 1 bytes pass, exit 125), for showy-quota-fetch.\n\nThe sketchybar-* modes serve the SketchyBar plugin: frame accepts --bar PATH|-, --state PATH, --frame PATH, --plan PATH, --force-redeclare, --assume-declared, --icon-maker, and --or-empty; query reads a `--query bar` reply; layout accepts --plan PATH and --layout-providers ID[,ID...] and reads the batched geometry query on stdin."
     );
 }
 

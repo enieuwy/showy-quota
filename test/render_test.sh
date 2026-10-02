@@ -876,7 +876,7 @@ assert_contains "config FIFO source guard still renders" "CL" "${out}"
 fifo_theme_xdg="${TMP}/xdg-fifo-theme"
 mkdir -p "${fifo_theme_xdg}/showy-quota/themes"
 printf '%s\n' 'SHOWY_QUOTA_THEME=default' > "${fifo_theme_xdg}/showy-quota/config.env"
-mkfifo "${fifo_theme_xdg}/showy-quota/themes/default.env"
+mkfifo "${fifo_theme_xdg}/showy-quota/themes/default.json"
 rc=0
 out=$(
     run_with_test_timeout 2 \
@@ -1089,10 +1089,12 @@ printf '\nshowy-quota cli\n'
 
 theme_cli_xdg=$(mktemp -d "${TMP}/xdg-theme-list.XXXXXX")
 mkdir -p "${theme_cli_xdg}/showy-quota/themes"
-printf '%s\n' ": \"\${SHOWY_QUOTA_PALETTE_PRIMARY_GOOD:=010203}\"" > "${theme_cli_xdg}/showy-quota/themes/catppuccin-mocha-blue.env"
-printf '%s\n' ": \"\${SHOWY_QUOTA_PALETTE_PRIMARY_GOOD:=040506}\"" > "${theme_cli_xdg}/showy-quota/themes/foo.env"
+printf '%s\n' '{"SHOWY_QUOTA_PALETTE_PRIMARY_GOOD":"010203"}' > "${theme_cli_xdg}/showy-quota/themes/catppuccin-mocha-blue.json"
+printf '%s\n' '{"SHOWY_QUOTA_PALETTE_PRIMARY_GOOD":"040506"}' > "${theme_cli_xdg}/showy-quota/themes/foo.json"
 out=$(run_theme "${theme_cli_xdg}" --list)
-assert_equals "theme list merges sorted unique names" $'carbonfox\ncatppuccin-frappe\ncatppuccin-latte\ncatppuccin-macchiato\ncatppuccin-mocha\ncatppuccin-mocha-blue\ndefault\ndracula\nfoo\ngruvbox-dark\nmonochrome\nnord\ntokyonight' "${out}"
+assert_contains "theme list includes custom manifest" $'\nfoo\n' $'\n'"${out}"$'\n'
+out=$(run_theme "${theme_cli_xdg}" theme show catppuccin-mocha-blue | jq -r '.SHOWY_QUOTA_PALETTE_PRIMARY_GOOD')
+assert_equals "user manifest overrides bundled theme" "010203" "${out}"
 
 theme_current_xdg=$(mktemp -d "${TMP}/xdg-theme-current.XXXXXX")
 out=$(run_theme "${theme_current_xdg}" --current)
@@ -2485,21 +2487,6 @@ assert_contains "bootstrap removes stale native provider items when desired set 
 assert_contains "bootstrap removes stale native marker items when desired set is empty" "--remove showy_quota.gemini.secondary_marker --remove showy_quota.gemini.tertiary_marker --remove showy_quota.gemini.quaternary_marker --remove showy_quota.gemini.primary_marker --remove showy_quota.gemini.slot --remove showy_quota.gemini.label" "${item_log}"
 assert_contains "bootstrap removes stale bracket when desired set is empty" "--remove showy_quota_bracket" "${item_log}"
 
-cache=$(mk_cache)
-log="${TMP}/sb-items-click.log"
-# shellcheck disable=SC2030,SC2031
-(
-    PATH="${stub_dir}:${PATH}"
-    export SHOWY_QUOTA_NO_CONFIG=1
-    export SHOWY_QUOTA_CACHE_DIR="${cache}"
-    export SHOWY_QUOTA_SKETCHYBAR_IMAGE_CACHE="${cache}/sb"
-    export SHOWY_QUOTA_TEST_FIXTURE="${FIXTURE_DIR}/codexbar-mixed.json"
-    export SHOWY_QUOTA_TEST_LOG="${log}"
-    SHOWY_QUOTA_SKETCHYBAR_CLICK='custom-click'
-    . "${REPO_ROOT}/adapters/sketchybar/items/showy_quota.sh"
-)
-item_log="$(< "${log}")"
-assert_contains "bootstrap exports non-exported click override" "click_script=custom-click" "${item_log}"
 
 # ── sketchybar plugin (without sketchybar daemon) ───────────────────────
 

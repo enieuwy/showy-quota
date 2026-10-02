@@ -48,13 +48,14 @@ endif
 
 REPO          := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
 BIN_NAMES     := showy-quota-fetch showy-quota-state showy-quota showy-quota-tmux-bar showy-quota-zellij-bar showy-quota-zellij-pipe
-COPY_BIN_NAMES := $(BIN_NAMES) showy-quota-render
+COPY_BIN_NAMES := $(BIN_NAMES) showy-quota-render showy-quota-fetch-native
 PLUGIN_CRATE  := showy-quota-zellij
 PLUGIN_WASM   := $(REPO)/target/wasm32-wasip1/release/showy-quota-zellij.wasm
 PLUGIN_TARGET := $(ZELLIJ_PLUGINS)/showy-quota-zellij.wasm
 RENDER_CRATE  := showy-quota-zellij-core
 RENDER_BIN    := $(REPO)/target/release/showy-quota-render
 RENDER_TARGET := $(BIN_DIR)/showy-quota-render
+FETCH_NATIVE_BIN := $(REPO)/target/release/showy-quota-fetch-native
 
 .PHONY: help doctor check-deps diagnose install install-bin install-copy install-copy-sketchybar install-sketchybar install-completions plugin render-bin install-plugin grant-zellij-permissions install-all uninstall test lint ci-gates hooks clean
 
@@ -93,8 +94,9 @@ install-bin: render-bin
 		ln -sfn "$$src" "$$target" || { printf 'ln failed: %s\n' "$$target" >&2; exit 1; }; \
 		printf 'linked %s -> %s\n' "$$target" "$$src"; \
 	done
-	@src="$(RENDER_BIN)"; \
-	target="$(RENDER_TARGET)"; \
+	@for name in showy-quota-render showy-quota-fetch-native; do \
+	src="$(REPO)/target/release/$$name"; \
+	target="$(BIN_DIR)/$$name"; \
 	if [ -L "$$target" ]; then \
 		cur=$$(readlink "$$target"); \
 		if [ "$$cur" = "$$src" ]; then \
@@ -113,7 +115,7 @@ install-bin: render-bin
 	else \
 		ln -sfn "$$src" "$$target" || { printf 'ln failed: %s\n' "$$target" >&2; exit 1; }; \
 		printf 'linked %s -> %s\n' "$$target" "$$src"; \
-	fi
+	fi; done
 
 install-copy: ## Copy runtime tree into DATA_DIR and link commands into BIN_DIR.
 	@set -e; \
@@ -138,6 +140,13 @@ install-copy: ## Copy runtime tree into DATA_DIR and link commands into BIN_DIR.
 	else \
 		rm -f "$(DATA_DIR)/bin/showy-quota-render"; \
 		printf 'warning: showy-quota-render not installed; terminal strips will show "AI ?" with a hint until you run make render-bin or install a release tarball with bin/showy-quota-render\n' >&2; \
+	fi; \
+	if [ -f "$(REPO)/bin/showy-quota-fetch-native" ]; then \
+		chmod +x "$(DATA_DIR)/bin/showy-quota-fetch-native"; \
+	elif [ -x "$(FETCH_NATIVE_BIN)" ]; then \
+		cp "$(FETCH_NATIVE_BIN)" "$(DATA_DIR)/bin/showy-quota-fetch-native"; \
+	else \
+		printf 'showy-quota-fetch-native missing; build both native binaries before installation\n' >&2; exit 1; \
 	fi; \
 	for name in $(BIN_NAMES); do chmod +x "$(DATA_DIR)/bin/$$name"; done; \
 	printf 'copied runtime tree to %s\n' "$(DATA_DIR)"
@@ -261,10 +270,22 @@ RENDER_SOURCES := $(shell find $(REPO)/crates/$(RENDER_CRATE)/src -name '*.rs' 2
                   $(REPO)/Cargo.toml $(REPO)/Cargo.lock
 
 $(RENDER_BIN): $(RENDER_SOURCES)
-	@RUSTC="$(RUSTC)" $(CARGO) build --release -p $(RENDER_CRATE)
-	@printf 'built %s\n' "$(RENDER_BIN)"
+	@python3 scripts/generate-config.py --check
+	@python3 scripts/generate-themes.py --check
+	@RUSTC="$(RUSTC)" $(CARGO) build --release -p $(RENDER_CRATE) --bins
+	@printf 'built %s and %s\n' "$(RENDER_BIN)" "$(FETCH_NATIVE_BIN)"
 
-render-bin: $(RENDER_BIN) ## Build the native terminal strip renderer.
+$(FETCH_NATIVE_BIN): $(RENDER_BIN)
+	@test -x "$@" || RUSTC="$(RUSTC)" $(CARGO) build --release -p $(RENDER_CRATE) --bin showy-quota-fetch-native
+
+render-bin: $(RENDER_BIN) $(FETCH_NATIVE_BIN) ## Build both native runtime binaries.
+
+record-fixture: render-bin ## Capture one validated CodexBar response into the fixture directory.
+	@test -n "$(NAME)" || { printf 'NAME is required\n' >&2; exit 2; }
+	@$(REPO)/bin/showy-quota-fetch --record "$(NAME)" --fixture-dir "$(REPO)/test/fixtures" --sanitize
+
+doctor-terminal: ## Print glyph samples and conservative font recommendations.
+	@$(REPO)/bin/showy-quota --check-terminal
 
 plugin: ## Build the standalone Zellij WASM plugin.
 	@$(PLUGIN_TARGET_ADD) >/dev/null
@@ -305,8 +326,9 @@ uninstall: ## Remove symlinks and copied DATA_DIR that this Makefile created.
 			fi; \
 		fi; \
 	done
-	@target="$(RENDER_TARGET)"; \
-	src="$(RENDER_BIN)"; \
+	@for name in showy-quota-render showy-quota-fetch-native; do \
+	target="$(BIN_DIR)/$$name"; \
+	src="$(REPO)/target/release/$$name"; \
 	if [ -L "$$target" ]; then \
 		cur=$$(readlink "$$target"); \
 		if [ "$$cur" = "$$src" ]; then \
@@ -314,7 +336,7 @@ uninstall: ## Remove symlinks and copied DATA_DIR that this Makefile created.
 		else \
 			printf 'skip %s (points to %s)\n' "$$target" "$$cur" >&2; \
 		fi; \
-	fi
+	fi; done
 	@for pair in \
 		"$(REPO)/adapters/sketchybar/items/showy_quota.sh:$(SBAR_ITEMS)/showy_quota.sh" \
 		"$(REPO)/adapters/sketchybar/plugins/showy_quota.sh:$(SBAR_PLUGINS)/showy_quota.sh" \
@@ -400,6 +422,7 @@ test: $(RENDER_BIN) ## Run the smoke-test suite against fixtures (no live codexb
 check-deps: ## Verify bash and jq meet the documented version floors.
 	@bash -c '(( BASH_VERSINFO[0] >= $(BASH_MIN) ))' || { \
 		printf 'showy-quota: bash %s+ required. macOS /bin/bash is 3.2; install Homebrew bash.\n' "$(BASH_MIN)" >&2; exit 1; }
+	@command -v python3 >/dev/null || { printf 'python3 is required for config, themes and tmux management\n' >&2; exit 1; }
 	@command -v jq >/dev/null || { \
 		printf 'showy-quota: jq %s+ is required (brew install jq / apt-get install jq).\n' "$(JQ_MIN)" >&2; exit 1; }
 	@jq_raw=$$(jq --version 2>/dev/null); \

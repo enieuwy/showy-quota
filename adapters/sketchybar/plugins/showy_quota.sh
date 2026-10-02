@@ -334,10 +334,51 @@ write_state_providers() {
 # failed command inside a batch (`--remove` of an absent item), so one call
 # keeps the old per-call `|| true` semantics.
 SB_QUEUE=()
+declare -A FRAME_ROLES=()
+
+frame_item_enabled() {
+    local item="$1" unit role
+    [[ "${item}" == showy_quota.*.* ]] || return 0
+    unit="${item#showy_quota.}"
+    role="${unit##*.}"
+    unit="${unit%.*}"
+    [[ -v FRAME_ROLES["${unit}"] ]] || return 0
+    [[ ",${FRAME_ROLES[${unit}]}," == *",${role},"* ]]
+}
+
 
 flush_sketchybar_queue() {
     (( ${#SB_QUEUE[@]} > 0 )) || return 0
-    sketchybar "${SB_QUEUE[@]}" >/dev/null 2>&1 || true
+    local i=0 end target argument
+    local -a filtered=()
+    while (( i < ${#SB_QUEUE[@]} )); do
+        end=$((i + 1))
+        while (( end < ${#SB_QUEUE[@]} )) && [[ "${SB_QUEUE[$end]}" != --* ]]; do
+            (( end += 1 ))
+        done
+        target=""
+        case "${SB_QUEUE[$i]}" in
+            --add) target="${SB_QUEUE[$((i + 2))]:-}" ;;
+            --set|--subscribe) target="${SB_QUEUE[$((i + 1))]:-}" ;;
+        esac
+        if [[ -z "${target}" ]] || frame_item_enabled "${target}"; then
+            if [[ "${SB_QUEUE[$i]}" == --add && "${SB_QUEUE[$((i + 1))]:-}" == bracket ]]; then
+                filtered+=("${SB_QUEUE[@]:i:3}")
+                for argument in "${SB_QUEUE[@]:i+3:end-i-3}"; do
+                    frame_item_enabled "${argument}" && filtered+=("${argument}")
+                done
+            elif [[ "${SB_QUEUE[$i]}" == --reorder ]]; then
+                filtered+=(--reorder)
+                for argument in "${SB_QUEUE[@]:i+1:end-i-1}"; do
+                    frame_item_enabled "${argument}" && filtered+=("${argument}")
+                done
+            else
+                filtered+=("${SB_QUEUE[@]:i:end-i}")
+            fi
+        fi
+        i="${end}"
+    done
+    ((${#filtered[@]} == 0)) || sketchybar "${filtered[@]}" >/dev/null 2>&1 || true
     SB_QUEUE=()
 }
 
@@ -1001,8 +1042,13 @@ parse_frame_output() {
     FRAME_QUERY=()
     FRAME_ICONS=()
     FRAME_ARGS=()
+    FRAME_ROLES=()
     while IFS= read -r line; do
         case "${line%%$'\x1f'*}" in
+            roles)
+                wire_fields_into fields "${line}"
+                [[ -n "${fields[0]:-}" ]] && FRAME_ROLES["${fields[0]}"]="${fields[1]:-}"
+                ;;
             state)
                 wire_fields_into fields "${line}"
                 FRAME_REDECLARE="${fields[0]:--}"
@@ -1432,6 +1478,12 @@ case "${SENDER:-}" in
 esac
 
 acquire_render_lock || exit 0
+if [[ "${SHOWY_QUOTA_FIXTURE:-}" == "-" ]]; then
+    fixture_tmp="$(mktemp "${CACHE_DIR}/.fixture.XXXXXX")" || exit 1
+    ICON_TMP_FILES+=("${fixture_tmp}")
+    cat > "${fixture_tmp}" || exit 1
+    SHOWY_QUOTA_FIXTURE="${fixture_tmp}"
+fi
 
 # All per-tick compute lives in the native renderer (`--emit
 # sketchybar-frame`, crates/showy-quota-zellij-core/src/sketchybar_frame.rs):
@@ -1461,6 +1513,11 @@ if [[ "${EFFECTIVE_BODY}" == "ring" ]] \
 fi
 frame_flags=(--emit sketchybar-frame --from-cache --bar -
     --state "${STATE_FILE}" --frame "${FRAME_FILE}" --plan "${NOTCH_PLAN_FILE}")
+if [[ -n "${SHOWY_QUOTA_FIXTURE:-}" ]]; then
+    # Fixture input never starts a provider refresh.
+    frame_flags=(--emit sketchybar-frame --json "${SHOWY_QUOTA_FIXTURE}" --bar -
+        --state "${STATE_FILE}" --frame "${FRAME_FILE}" --plan "${NOTCH_PLAN_FILE}")
+fi
 showy_quota_bool "${SHOWY_QUOTA_SKETCHYBAR_FORCE_REDECLARE-}" 0 && frame_flags+=(--force-redeclare)
 (( body_changed || popup_changed )) && frame_flags+=(--force-redeclare)
 (( HAVE_MAGICK )) && frame_flags+=(--icon-maker)
@@ -1479,13 +1536,17 @@ render_frame() {
 # cache either, the empty frame tears the providers down while stale/degraded
 # still reflect the file.
 frame_out=""
-[[ -s "${SHOWY_QUOTA_USAGE_FILE}" ]] && render_frame
-if [[ -z "${frame_out}" ]]; then
-    "${FETCH}" >/dev/null 2>&1 || true
-    render_frame --or-empty
+if [[ -n "${SHOWY_QUOTA_FIXTURE:-}" ]]; then
+    render_frame
+else
+    [[ -s "${SHOWY_QUOTA_USAGE_FILE}" ]] && render_frame
+    if [[ -z "${frame_out}" ]]; then
+        "${FETCH}" >/dev/null 2>&1 || true
+        render_frame --or-empty
+    fi
 fi
 parse_frame_output "${frame_out}"
-(( FRAME_REFRESH )) && start_background_refresh
+[[ -z "${SHOWY_QUOTA_FIXTURE:-}" ]] && (( FRAME_REFRESH )) && start_background_refresh
 
 desired_providers="${FRAME_PROVIDERS}"
 redeclared=0

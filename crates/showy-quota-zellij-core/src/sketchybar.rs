@@ -85,6 +85,7 @@ impl SketchybarOptions<'_> {
 /// long-horizon dimming, and the shared-cycle key exactly like the shell did.
 struct Lane {
     rem: i64,
+    slot: &'static str,
     reset: String,
     win: String,
 }
@@ -99,7 +100,8 @@ pub fn sketchybar_rows(
         bar_width: options.bar_width.clamp(MIN_BAR_WIDTH, MAX_BAR_WIDTH),
         ..options
     };
-    let records = parse_display_payload(payload)?;
+    let mut records = parse_display_payload(payload)?;
+    config.filter_windows(&mut records);
 
     let mut visible: Vec<&ProviderRecord> = records
         .iter()
@@ -166,7 +168,14 @@ fn provider_row(
     now_epoch: i64,
     options: SketchybarOptions,
 ) -> SketchybarRow {
-    let lanes = provider_lanes(record);
+    let lanes = provider_lanes(record, config);
+    let primary_policy = config.window_policy(
+        record,
+        record
+            .usage
+            .as_ref()
+            .and_then(|usage| usage.render_slots()[0]),
+    );
     let tz = config.reset_description_timezone_offset_minutes;
 
     let rem: Vec<i64> = lanes
@@ -211,7 +220,7 @@ fn provider_row(
                 None => "?".into(),
             };
             let color = match minutes {
-                Some(minutes) if minutes < config.time_warn_minutes => {
+                Some(minutes) if minutes < primary_policy.time => {
                     argb(&config.palette_countdown_warn)
                 }
                 _ => argb(&config.palette_countdown),
@@ -220,19 +229,28 @@ fn provider_row(
         }
     };
 
-    // Parallel pools on one billing cycle (e.g. Cursor Total/Auto/API): keep
-    // only the primary pacing marker and undim every row. Quirk preserved
-    // from the shell: the quaternary marker is not suppressed.
+    // Keep one visible pacing marker for a shared cycle. Preserve the
+    // quaternary marker quirk from the original shell transport.
     if lanes_shared_cycle(&lanes) {
-        markers[1] = None;
-        markers[2] = None;
+        let first = lanes.iter().position(Option::is_some);
+        for (index, marker) in markers.iter_mut().take(3).enumerate() {
+            if Some(index) != first {
+                *marker = None;
+            }
+        }
         long.iter_mut().for_each(|flag| *flag = false);
     }
 
     let mut highlights: Vec<String> = rem
         .iter()
         .zip(long.iter())
-        .map(|(remaining, is_long)| argb(&config.window_color(*remaining as i32, *is_long)))
+        .enumerate()
+        .map(|(index, (remaining, is_long))| {
+            let slot = lanes[index].as_ref().map_or("", |lane| lane.slot);
+            let minutes = lanes[index].as_ref().and_then(|lane| lane.win.parse().ok());
+            let policy = config.policy(&record.provider, slot, minutes);
+            argb(&config.severity_color(policy.severity(*remaining as i32), *is_long))
+        })
         .collect();
 
     if options.stale_for(&record.provider) {
@@ -243,7 +261,7 @@ fn provider_row(
     }
     if config.severity_glyphs && !options.stale_for(&record.provider) {
         if let Some(primary) = label_lane(record) {
-            label.insert_str(0, config.severity(primary.rem as i32).marker());
+            label.insert_str(0, primary_policy.severity(primary.rem as i32).marker());
         }
     }
 
@@ -327,12 +345,22 @@ pub(crate) fn sanitize_field(value: &str) -> String {
 /// pooled layout takes over and lanes come from the extras — a
 /// `usageKnown:false` extra keeps its lane drawn as an empty track (rem 0, no
 /// marker) so a transiently-thin family does not vanish.
-fn provider_lanes(record: &ProviderRecord) -> [Option<Lane>; LANE_COUNT] {
+fn provider_lanes(record: &ProviderRecord, config: &RenderConfig) -> [Option<Lane>; LANE_COUNT] {
     let Some(usage) = record.usage.as_ref() else {
         return [None, None, None, None];
     };
 
-    let slots = usage.render_slots();
+    let slots =
+        if config.window_mode == "all" && config.windows == ["primary", "secondary", "tertiary"] {
+            usage.render_slots()
+        } else {
+            [
+                usage.primary.as_ref(),
+                usage.secondary.as_ref(),
+                usage.tertiary.as_ref(),
+            ]
+            .map(|window| window.filter(|window| window.used_percent.is_some()))
+        };
     let extras: Vec<&NamedWindow> = usage
         .extra_rate_windows
         .iter()
@@ -368,6 +396,7 @@ fn provider_lanes(record: &ProviderRecord) -> [Option<Lane>; LANE_COUNT] {
             lanes[index] = Some(if extra.usage_known == Some(false) {
                 Lane {
                     rem: 0,
+                    slot: "",
                     reset: String::new(),
                     win: String::new(),
                 }
@@ -377,7 +406,22 @@ fn provider_lanes(record: &ProviderRecord) -> [Option<Lane>; LANE_COUNT] {
         }
     } else {
         for (index, window) in slots.into_iter().enumerate() {
-            lanes[index] = window.map(lane_from);
+            lanes[index] = window.map(|window| {
+                let mut lane = lane_from(window);
+                lane.slot = [
+                    ("primary", usage.primary.as_ref()),
+                    ("secondary", usage.secondary.as_ref()),
+                    ("tertiary", usage.tertiary.as_ref()),
+                ]
+                .into_iter()
+                .find_map(|(slot, candidate)| {
+                    candidate
+                        .filter(|candidate| std::ptr::eq(*candidate, window))
+                        .map(|_| slot)
+                })
+                .unwrap_or("");
+                lane
+            });
         }
     }
     lanes
@@ -398,6 +442,7 @@ fn label_lane(record: &ProviderRecord) -> Option<Lane> {
 fn lane_from(window: &UsageWindow) -> Lane {
     Lane {
         rem: i64::from(100 - window.used_pct_floor()),
+        slot: "",
         reset: window
             .resets_at
             .clone()
