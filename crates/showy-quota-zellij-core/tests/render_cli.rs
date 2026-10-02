@@ -240,3 +240,174 @@ fn repo_root() -> PathBuf {
         .expect("workspace root")
         .to_path_buf()
 }
+
+struct TestDir(PathBuf);
+
+impl TestDir {
+    fn new(label: &str) -> Self {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "showy-quota-{label}-{}-{stamp}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&path).unwrap();
+        Self(path)
+    }
+}
+
+impl Drop for TestDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn cli_output(command: &mut Command) -> String {
+    let output = command.output().expect("renderer runs");
+    assert!(
+        output.status.success(),
+        "renderer failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).expect("renderer stdout utf8")
+}
+
+fn assert_frame_acknowledgment(body: &str) {
+    let dir = TestDir::new(body);
+    let input = dir.0.join("usage.json");
+    let frame = dir.0.join("frame.txt");
+    let pending = dir.0.join("frame.txt.pending");
+    let render = || {
+        let mut command = Command::new(renderer_bin(&repo_root()));
+        command
+            .env_clear()
+            .env("SHOWY_QUOTA_NOW_EPOCH", "4070908800")
+            .env("SHOWY_QUOTA_SKETCHYBAR_BODY", body)
+            .args(["--emit", "sketchybar-frame", "--assume-declared", "--json"])
+            .arg(&input)
+            .arg("--frame")
+            .arg(&frame);
+        cli_output(&mut command)
+    };
+    let ack = || {
+        cli_output(
+            Command::new(renderer_bin(&repo_root()))
+                .env_clear()
+                .args(["--emit", "sketchybar-ack", "--frame"])
+                .arg(&frame),
+        )
+    };
+    let set = |wire: &str| {
+        wire.lines()
+            .find(|line| *line == "set" || line.starts_with("set\u{1f}"))
+            .expect("set record")
+            .to_owned()
+    };
+
+    std::fs::write(
+        &input,
+        br#"[{"provider":"codex","usage":{"primary":{"usedPercent":10}}}]"#,
+    )
+    .unwrap();
+    assert!(set(&render()).contains("--set"));
+    assert!(
+        !frame.exists(),
+        "rendering must not acknowledge the first frame"
+    );
+    let first_frame = std::fs::read(&pending).unwrap();
+    assert_eq!(ack(), "");
+    assert_eq!(std::fs::read(&frame).unwrap(), first_frame);
+    assert!(!pending.exists());
+    assert_eq!(set(&render()), "set");
+
+    std::fs::write(
+        &input,
+        br#"[{"provider":"codex","usage":{"primary":{"usedPercent":90}}}]"#,
+    )
+    .unwrap();
+    let changed = set(&render());
+    assert!(changed.contains("--set"));
+    let changed_frame = std::fs::read(&pending).unwrap();
+    assert_ne!(changed_frame, first_frame);
+    assert_eq!(std::fs::read(&frame).unwrap(), first_frame);
+    // A failed send, or a crash before sending, never runs ack. The next
+    // identical tick must therefore repeat the changed arguments.
+    assert_eq!(set(&render()), changed);
+    assert_eq!(std::fs::read(&frame).unwrap(), first_frame);
+    assert_eq!(ack(), "");
+    assert_eq!(std::fs::read(&frame).unwrap(), changed_frame);
+    assert_eq!(set(&render()), "set");
+}
+
+#[test]
+fn rows_frame_resends_until_successful_send_is_acknowledged() {
+    assert_frame_acknowledgment("rows");
+}
+
+#[test]
+fn ring_frame_resends_until_successful_send_is_acknowledged() {
+    assert_frame_acknowledgment("ring");
+}
+
+#[test]
+fn frame_ack_without_pending_preserves_acknowledged_state() {
+    let dir = TestDir::new("missing-pending");
+    let frame = dir.0.join("frame.txt");
+    std::fs::write(&frame, "previous frame\n").unwrap();
+    let output = Command::new(renderer_bin(&repo_root()))
+        .env_clear()
+        .args(["--emit", "sketchybar-ack", "--frame"])
+        .arg(&frame)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert_eq!(std::fs::read_to_string(&frame).unwrap(), "previous frame\n");
+}
+
+#[test]
+fn cached_prompt_marks_the_selected_carried_forward_provider_stale() {
+    let dir = TestDir::new("stale-prompt");
+    let input = dir.0.join("usage.json");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let envelope = serde_json::json!({
+        "schema": "showy-quota/cache@2",
+        "source": "serve",
+        "providers": [
+            {"provider": "codex", "usage": {"primary": {"usedPercent": 90}}},
+            {"provider": "claude", "usage": {"primary": {"usedPercent": 10}}}
+        ],
+        "providerMeta": {
+            "codex": {"source": "serve", "updatedAt": now - 1000},
+            "claude": {"source": "serve", "updatedAt": now}
+        }
+    });
+    std::fs::write(&input, serde_json::to_vec(&envelope).unwrap()).unwrap();
+    for (provider, format, expected) in [
+        (None, None, "CX 90% ⚠\n"),
+        (Some("claude"), None, "CL 10%\n"),
+        (None, Some("{provider}{stale}"), "codex ⚠\n"),
+        (Some("claude"), Some("{provider}{stale}"), "claude\n"),
+    ] {
+        let mut command = Command::new(renderer_bin(&repo_root()));
+        command
+            .env_clear()
+            .env("SHOWY_QUOTA_NOW_EPOCH", now.to_string())
+            .env("SHOWY_QUOTA_USAGE_FILE", &input)
+            .args(["--emit", "prompt", "--from-cache"]);
+        if let Some(provider) = provider {
+            command.args(["--provider", provider]);
+        }
+        if let Some(format) = format {
+            command.args(["--format", format]);
+        }
+        assert_eq!(cli_output(&mut command), expected);
+    }
+}

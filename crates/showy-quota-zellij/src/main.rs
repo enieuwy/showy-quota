@@ -3877,8 +3877,8 @@ wait \"$__p\" 2>/dev/null; rm -rf \"$__d\"' EXIT"
             br#"[{"provider":"../../pwned","attacker":"controlled"},{"provider":"codex","usage":{"primary":{"usedPercent":7}}}]"#;
         assert_eq!(extract_provider_record(payload, "codex"), Err(()));
 
-        // The same shape, but the decoy is itself renderable: dropped by
-        // valid_provider_record (empty `secondary`) yet renderable downstream.
+        // A valid placeholder window must not hide the renderable decoy.
+        // The per-provider contract still rejects this multi-provider array.
         let spoof = br#"[{"provider":"claude","usage":{"primary":{"usedPercent":99},"secondary":{}}},{"provider":"codex","usage":{"primary":{"usedPercent":3}}}]"#;
         assert_eq!(extract_provider_record(spoof, "codex"), Err(()));
     }

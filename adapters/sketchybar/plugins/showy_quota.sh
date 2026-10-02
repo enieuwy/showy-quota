@@ -71,8 +71,8 @@ if [[ ! -d "${CACHE_DIR}" ]]; then
     chmod 700 "${CACHE_DIR}" 2>/dev/null || true
 fi
 STATE_FILE="${CACHE_DIR}/providers.txt"
-# What this plugin last sent to SketchyBar, one hash per provider; the
-# renderer diffs each tick against it and writes the next one.
+# What this plugin last acknowledged after a successful SketchyBar send, one
+# hash per provider. The renderer stages the next frame in frame.txt.pending.
 FRAME_FILE="${CACHE_DIR}/frame.txt"
 # A layout event that found a render in flight, or a plan that got no reply,
 # leaves this note so the next render re-plans instead of the event being lost.
@@ -1470,7 +1470,12 @@ showy_quota_bool "${SHOWY_QUOTA_SKETCHYBAR_FORCE_REDECLARE-}" 0 && frame_flags+=
 bar_items=$(sketchybar --query bar 2>/dev/null) || bar_items=""
 sweep_orphan_probes "${bar_items}"
 render_frame() {
-    frame_out=$("${RENDER_BIN}" "${frame_flags[@]}" "$@" <<< "${bar_items}" 2>/dev/null) || frame_out=""
+    frame_out=$("${RENDER_BIN}" "${frame_flags[@]}" "$@" <<< "${bar_items}" 2>/dev/null) || {
+        frame_out=""
+        # An interrupted renderer may stage hashes without returning usable
+        # arguments, especially on the second icon pass. Never acknowledge them.
+        rm -f -- "${FRAME_FILE}.pending"
+    }
 }
 
 # Cache first. A usable cache costs this tick one renderer run; only a
@@ -1538,8 +1543,8 @@ fi
 fi
 
 frame_args=("${FRAME_ARGS[@]}")
-# The renderer asks for icons it cannot draw yet. Rasterize them, then let it
-# diff again: the second frame adds just the new icons.
+# The renderer asks for icons it cannot draw yet. Rasterize them, then diff
+# against acknowledged state again; the combined send includes the new icons.
 icons_made=0
 for record in "${FRAME_ICONS[@]}"; do
     icon_fields=()
@@ -1556,9 +1561,12 @@ fi
 
 layout_due=0
 if (( ${#frame_args[@]} > 0 )); then
-    # The renderer already stored this frame; forget it if SketchyBar refused
-    # the update, so the next tick sends every provider again.
-    sketchybar "${frame_args[@]}" >/dev/null 2>&1 || rm -f -- "${FRAME_FILE}"
+    # Commit the staged hashes only after SketchyBar accepts the entire send.
+    # Failure or interruption keeps the old frame, so the next tick resends.
+    if sketchybar "${frame_args[@]}" >/dev/null 2>&1; then
+        "${RENDER_BIN}" --emit sketchybar-ack --frame "${FRAME_FILE}" >/dev/null 2>&1 \
+            || showy_quota_log "failed to acknowledge sketchybar frame"
+    fi
     layout_due=1
 fi
 # Wake can change the display set without any row changing.

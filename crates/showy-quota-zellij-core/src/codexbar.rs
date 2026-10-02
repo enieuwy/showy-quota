@@ -173,9 +173,11 @@ pub const MAX_USAGE_JSON_BYTES: usize = 5 * 1024 * 1024;
 
 /// Parse the CodexBar usage array transport. Only transport-level failures
 /// (unparseable JSON, non-array top level, oversize payload) are fatal; a
-/// record failing [`valid_provider_record`] is dropped rather than
-/// discarding the whole payload, so one malformed provider cannot blank the
-/// strip for every other provider. An all-invalid array yields `Ok(vec![])`.
+/// record with an invalid provider id is dropped rather than discarding the
+/// whole payload, so one malformed provider cannot blank the strip for every
+/// other provider. An all-invalid array yields `Ok(vec![])`. A positional
+/// window without `usedPercent` stays available as idle quota; a live sibling
+/// still renders through [`Usage::render_slots`].
 ///
 /// Because invalid records are dropped, the result is a strict SUBSEQUENCE of
 /// the input array. A caller that also needs the raw JSON element a record came
@@ -206,7 +208,7 @@ pub fn parse_usage_payload_indexed(
     Ok(records
         .into_iter()
         .enumerate()
-        .filter(|(_, record)| valid_provider_record(record))
+        .filter(|(_, record)| valid_provider_id(&record.provider))
         .collect())
 }
 
@@ -408,19 +410,6 @@ pub fn valid_provider_id(provider: &str) -> bool {
         && provider
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'-'))
-}
-
-fn valid_provider_record(record: &ProviderRecord) -> bool {
-    valid_provider_id(&record.provider)
-        && record.usage.as_ref().is_none_or(|usage| {
-            valid_window(usage.primary.as_ref())
-                && valid_window(usage.secondary.as_ref())
-                && valid_window(usage.tertiary.as_ref())
-        })
-}
-
-fn valid_window(window: Option<&UsageWindow>) -> bool {
-    window.is_none_or(|window| window.used_percent.is_some())
 }
 
 fn pct(value: Option<f64>) -> i32 {
@@ -710,22 +699,6 @@ mod tests {
     }
 
     #[test]
-    fn valid_window_treats_absent_window_as_valid() {
-        assert!(valid_window(None));
-    }
-
-    #[test]
-    fn valid_window_requires_used_percent_when_present() {
-        let with_pct: UsageWindow =
-            serde_json::from_str(r#"{"usedPercent": 42}"#).expect("window json");
-        assert!(valid_window(Some(&with_pct)));
-
-        let without_pct: UsageWindow =
-            serde_json::from_str(r#"{"resetsAt": "2099-01-01T00:00:00Z"}"#).expect("window json");
-        assert!(!valid_window(Some(&without_pct)));
-    }
-
-    #[test]
     fn parse_usage_payload_rejects_non_array_json() {
         assert!(parse_usage_payload(br#"{"provider": "codex"}"#).is_err());
         assert!(parse_usage_payload(b"not json").is_err());
@@ -744,14 +717,50 @@ mod tests {
     }
 
     #[test]
-    fn parse_usage_payload_drops_window_without_used_percent() {
-        // A present window object missing usedPercent fails per-record validation;
-        // the record is dropped rather than rejecting the whole payload.
-        let payload = br#"[
-            {"provider": "codex", "usage": {"secondary": {"resetsAt": "2099-01-01T00:00:00Z"}}}
-        ]"#;
-        let records = parse_usage_payload(payload).expect("parses");
-        assert!(records.is_empty());
+    fn parse_usage_payload_keeps_live_siblings_of_placeholder_windows() {
+        for placeholder in [r#"{}"#, r#"{"usedPercent":null}"#] {
+            for missing in ["primary", "secondary", "tertiary"] {
+                let mut usage = serde_json::json!({
+                    "primary": {"usedPercent": 10},
+                    "secondary": {"usedPercent": 20},
+                    "tertiary": {"usedPercent": 30}
+                });
+                usage[missing] = serde_json::from_str(placeholder).unwrap();
+                let payload = serde_json::to_vec(&serde_json::json!([
+                    {"provider": "bad/id"},
+                    {"provider": "codex", "usage": usage}
+                ]))
+                .unwrap();
+                let records = parse_usage_payload_indexed(&payload).expect("parses");
+                assert_eq!(records.len(), 1);
+                assert_eq!(records[0].0, 1);
+                let record = &records[0].1;
+                assert_eq!(record.provider, "codex");
+                assert!(is_renderable(record));
+                let slots = record.usage.as_ref().unwrap().render_slots();
+                let expected = match missing {
+                    "primary" => [Some(20), Some(30), None],
+                    "secondary" => [Some(10), None, Some(30)],
+                    _ => [Some(10), Some(20), None],
+                };
+                assert_eq!(
+                    slots.map(|slot| slot.map(UsageWindow::used_pct_floor)),
+                    expected
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn parse_usage_payload_keeps_placeholder_as_idle_not_errored() {
+        let records = parse_usage_payload(
+            br#"[{"provider":"codex","usage":{"primary":{},"secondary":{"usedPercent":null}}}]"#,
+        )
+        .expect("parses");
+        assert_eq!(records.len(), 1);
+        assert!(!is_renderable(&records[0]));
+        assert!(!is_errored(&records[0]));
+        assert!(!is_windowless(&records[0]));
     }
 
     #[test]

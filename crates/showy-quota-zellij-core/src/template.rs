@@ -282,6 +282,7 @@ mod tests {
                         provider_filter: &[],
                         ansi: false,
                         stale,
+                        stale_providers: &[],
                     },
                 )
                 .unwrap();

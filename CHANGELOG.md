@@ -55,6 +55,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   new `showy_quota_layout` event. Reload SketchyBar after enabling.
 
 ### Changed
+- SketchyBar frame hashes advance only after the plugin's final `sketchybar`
+  send succeeds. A failed or interrupted send keeps the last acknowledged
+  frame, so the next tick retries the redraw.
+- Usage parsing keeps positional placeholder windows with no numeric
+  `usedPercent`, so a live sibling window still renders.
+- Prompt output marks the selected provider stale when its carried-forward
+  cache slice exceeds the stale horizon.
 - The tmux and Zellij shell bars render from the cache first. They start
   `showy-quota-fetch` in the background only when the cache is older than the
   refresh interval, as the SketchyBar plugin does; before, every run waited on

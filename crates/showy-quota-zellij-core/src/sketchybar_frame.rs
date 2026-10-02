@@ -3,10 +3,14 @@
 //! The plugin used to build these arguments in shell, forking a subshell per
 //! click script and re-sending every item on every tick. This module builds
 //! them from [`SketchybarRows`] and diffs each provider against the frame the
-//! plugin sent last, so a tick where nothing changed sends nothing. It also
-//! decides whether the items must be declared again. The shell keeps the host
+//! plugin acknowledged after a successful send, so an unchanged tick sends nothing.
+//! It also decides whether the items must be declared again. The shell keeps the host
 //! work: it declares the items, rasterizes provider icons, and runs
 //! `sketchybar`.
+//! The renderer atomically stages `<frame>.pending`. The plugin serializes
+//! frame/send/ack operations and calls `--emit sketchybar-ack --frame <frame>`
+//! only after `sketchybar` succeeds. Ack atomically renames the pending file;
+//! a failed or interrupted send leaves the acknowledged frame unchanged.
 //!
 //! Wire format (`--emit sketchybar-frame`): one record per line, fields
 //! separated by US (`\x1f`), first field a tag.
@@ -231,7 +235,7 @@ pub struct FrameInputs<'a> {
 pub struct Frame {
     /// Arguments for the providers (and stale/degraded items) that changed.
     pub args: Vec<String>,
-    /// The frame file to store for the next tick.
+    /// Stage this file, then acknowledge it only after a successful send.
     pub frame_text: String,
     pub icon_requests: Vec<IconRequest>,
 }

@@ -34,6 +34,7 @@ enum Emit {
     Template,
     Pick,
     SketchybarFrame,
+    SketchybarAck,
     SketchybarQuery,
     SketchybarLayout,
 }
@@ -45,7 +46,7 @@ struct SketchybarCli {
     bar: Option<String>,
     /// Provider list the last redeclare stored (`providers.txt`).
     state: Option<String>,
-    /// Frame file: what the plugin sent last.
+    /// Acknowledged frame file; rendering stages `<frame>.pending`.
     frame: Option<String>,
     /// Notch plan file (`notch-layout.json`).
     plan: Option<String>,
@@ -109,6 +110,14 @@ fn main() {
 }
 
 fn run(cli: &Cli, template: Option<&Template<'_>>) -> Result<(), String> {
+    if cli.emit == Emit::SketchybarAck {
+        return acknowledge_frame(
+            cli.sketchybar
+                .frame
+                .as_deref()
+                .expect("ack requires --frame"),
+        );
+    }
     let configured = RenderConfig::from_env();
     let config = if cli.emit == Emit::Pick {
         configured
@@ -186,6 +195,7 @@ fn run(cli: &Cli, template: Option<&Template<'_>>) -> Result<(), String> {
             provider_filter: &cli.provider_filter,
             ansi: cli.ansi,
             stale,
+            stale_providers: &input.stale_providers,
         };
         let mut rendered = match template.as_ref() {
             Some(spec) => emit_formatted_prompt_segment(
@@ -301,7 +311,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Cli, String> {
             "--emit" => {
                 let value = args.next().ok_or_else(|| {
                     String::from(
-                        "--emit requires render, rows, vertical, metrics, prompt, template, pick, sketchybar-frame, sketchybar-query, or sketchybar-layout",
+                        "--emit requires render, rows, vertical, metrics, prompt, template, pick, sketchybar-frame, sketchybar-ack, sketchybar-query, or sketchybar-layout",
                     )
                 })?;
                 emit = match value.as_str() {
@@ -313,6 +323,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Cli, String> {
                     "template" => Emit::Template,
                     "pick" => Emit::Pick,
                     "sketchybar-frame" => Emit::SketchybarFrame,
+                    "sketchybar-ack" => Emit::SketchybarAck,
                     "sketchybar-query" => Emit::SketchybarQuery,
                     "sketchybar-layout" => Emit::SketchybarLayout,
                     _ => return Err(format!("unknown emit mode: {value}")),
@@ -410,12 +421,18 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Cli, String> {
     if sketchybar_flag_seen
         && !matches!(
             emit,
-            Emit::SketchybarFrame | Emit::SketchybarQuery | Emit::SketchybarLayout
+            Emit::SketchybarFrame
+                | Emit::SketchybarAck
+                | Emit::SketchybarQuery
+                | Emit::SketchybarLayout
         )
     {
         return Err(String::from(
-            "SketchyBar flags require --emit sketchybar-frame, sketchybar-query, or sketchybar-layout",
+            "SketchyBar flags require --emit sketchybar-frame, sketchybar-ack, sketchybar-query, or sketchybar-layout",
         ));
+    }
+    if emit == Emit::SketchybarAck && sketchybar.frame.is_none() {
+        return Err(String::from("--emit sketchybar-ack requires --frame"));
     }
 
     Ok(Cli {
@@ -585,8 +602,8 @@ fn read_bounded_payload(reader: impl Read) -> io::Result<Vec<u8>> {
 
 /// `--emit sketchybar-frame`: the plugin's whole per-tick compute. Reads the
 /// cache, the live item list (`--bar`), the stored provider list (`--state`),
-/// the notch plan (`--plan`), and the last frame (`--frame`); writes the new
-/// frame; prints the wire records described in `sketchybar_frame`.
+/// the notch plan (`--plan`), and the acknowledged frame (`--frame`); stages
+/// the new frame at `<frame>.pending` and prints the frame wire records.
 fn run_sketchybar_frame(cli: &Cli, config: &RenderConfig, now_epoch: i64) -> Result<(), String> {
     let sb = &cli.sketchybar;
     let settings = FrameSettings::from_getter(|name| std::env::var(name).ok(), config);
@@ -674,7 +691,7 @@ fn run_sketchybar_frame(cli: &Cli, config: &RenderConfig, now_epoch: i64) -> Res
         icon_maker: sb.icon_maker,
     });
     if let Some(path) = &sb.frame {
-        write_atomic(path, &frame.frame_text)?;
+        write_atomic(&pending_frame_path(path), &frame.frame_text)?;
     }
 
     // Items a redeclare replaces are gone from `items`; the plugin re-queries.
@@ -789,7 +806,7 @@ fn run_sketchybar_ring_frame(
         previous: previous_frame.as_deref(),
     });
     if let Some(path) = &sb.frame {
-        write_atomic(path, &frame.frame_text)?;
+        write_atomic(&pending_frame_path(path), &frame.frame_text)?;
     }
     let pairs: Vec<String> = units
         .iter()
@@ -911,6 +928,20 @@ fn background_refresh_due(age_seconds: Option<i64>) -> bool {
     age >= threshold
 }
 
+/// Rendering never advances the acknowledged state. The plugin serializes
+/// ticks and calls `sketchybar-ack` only after sending the staged frame.
+fn pending_frame_path(path: &str) -> String {
+    format!("{path}.pending")
+}
+
+/// Rename within the same directory, keeping acknowledgment atomic. A failed
+/// or interrupted send never reaches this operation; a failed rename keeps
+/// the old frame and safely resends the staged changes on the next tick.
+fn acknowledge_frame(path: &str) -> Result<(), String> {
+    std::fs::rename(pending_frame_path(path), path)
+        .map_err(|err| format!("failed to acknowledge frame {path}: {err}"))
+}
+
 /// Replace `path` through a sibling temp file, so a reader never sees a
 /// half-written file.
 fn write_atomic(path: &str, content: &str) -> Result<(), String> {
@@ -1012,7 +1043,7 @@ fn png_bar_width_from_env() -> i64 {
 
 fn print_help() {
     println!(
-        "Usage: showy-quota-render [--emit render|rows|vertical|metrics|prompt|template|pick|sketchybar-frame|sketchybar-query|sketchybar-layout] [--format zellij|tmux|SPEC] [--join SEP] [--json <path|-> | --from-cache] [--provider ID[,ID...]] [--ansi] [--stale] [--degraded-cli]\n\nTemplate mode requires --format SPEC and expands once per provider. Prompt accepts --format SPEC for the worst window overall. Fields: {{provider}}, {{sigil}}, {{used}}, {{remaining}}, {{countdown}}, {{class}}, {{window}}, {{stale}}. Escape braces with {{{{ and }}}}.\n\nPick mode accepts --window primary|secondary|tertiary|worst, --min-remaining 0-100, and --pick-format id|json.\n\n--run-bounded SECONDS MAX_BYTES CMD [ARG...] runs CMD in its own session with a hard timeout (exit 124) and an output cap (MAX_BYTES + 1 bytes pass, exit 125), for showy-quota-fetch.\n\nThe sketchybar-* modes serve the SketchyBar plugin: frame accepts --bar PATH|-, --state PATH, --frame PATH, --plan PATH, --force-redeclare, --assume-declared, --icon-maker, and --or-empty; query reads a `--query bar` reply; layout accepts --plan PATH and --layout-providers ID[,ID...] and reads the batched geometry query on stdin."
+        "Usage: showy-quota-render [--emit render|rows|vertical|metrics|prompt|template|pick|sketchybar-frame|sketchybar-ack|sketchybar-query|sketchybar-layout] [--format zellij|tmux|SPEC] [--join SEP] [--json <path|-> | --from-cache] [--provider ID[,ID...]] [--ansi] [--stale] [--degraded-cli]\n\nTemplate mode requires --format SPEC and expands once per provider. Prompt accepts --format SPEC for the worst window overall. Fields: {{provider}}, {{sigil}}, {{used}}, {{remaining}}, {{countdown}}, {{class}}, {{window}}, {{stale}}. Escape braces with {{{{ and }}}}.\n\nPick mode accepts --window primary|secondary|tertiary|worst, --min-remaining 0-100, and --pick-format id|json.\n\n--run-bounded SECONDS MAX_BYTES CMD [ARG...] runs CMD in its own session with a hard timeout (exit 124) and an output cap (MAX_BYTES + 1 bytes pass, exit 125), for showy-quota-fetch.\n\nThe sketchybar-* modes serve the SketchyBar plugin: frame accepts --bar PATH|-, --state PATH, --frame PATH, --plan PATH, --force-redeclare, --assume-declared, --icon-maker, and --or-empty; query reads a `--query bar` reply; layout accepts --plan PATH and --layout-providers ID[,ID...] and reads the batched geometry query on stdin. Frame reads acknowledged state from PATH and atomically stages PATH.pending. After a successful SketchyBar send, ack requires --frame PATH and atomically renames PATH.pending to PATH without output. The caller must serialize frame/send/ack operations."
     );
 }
 

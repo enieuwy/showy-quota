@@ -10,6 +10,14 @@ pub struct PromptOptions<'a> {
     pub provider_filter: &'a [String],
     pub ansi: bool,
     pub stale: bool,
+    /// Providers whose carried-forward quota crossed the stale horizon.
+    pub stale_providers: &'a [String],
+}
+
+impl PromptOptions<'_> {
+    fn stale_for(self, provider: &str) -> bool {
+        self.stale || self.stale_providers.iter().any(|stale| stale == provider)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,8 +59,13 @@ pub fn emit_formatted_prompt_segment(
     let Some(candidate) = select_candidate(&metrics, &[]) else {
         return Ok(String::from(UNKNOWN_SEGMENT));
     };
-    let segment =
-        template.render_metrics(&metrics, config, " ", options.stale, TemplateScope::Worst);
+    let segment = template.render_metrics(
+        &metrics,
+        config,
+        " ",
+        options.stale_for(candidate.provider),
+        TemplateScope::Worst,
+    );
     if options.ansi && std::env::var_os("NO_COLOR").is_none() {
         Ok(format!(
             "\u{1b}[{}m{}\u{1b}[0m",
@@ -89,7 +102,7 @@ fn render_prompt_segment(
         segment
     };
 
-    if options.stale {
+    if options.stale_for(candidate.provider) {
         out.push(' ');
         out.push_str(&config.stale_glyph);
     }
@@ -202,6 +215,7 @@ mod tests {
             provider_filter,
             ansi: false,
             stale: false,
+            stale_providers: &[],
         }
     }
 
@@ -245,6 +259,39 @@ mod tests {
         )
         .unwrap();
         assert_eq!(output, "claude");
+    }
+
+    #[test]
+    fn prompt_marks_only_the_selected_carried_forward_provider_stale() {
+        let payload = br#"[
+            {"provider":"codex","usage":{"primary":{"usedPercent":90}}},
+            {"provider":"claude","usage":{"primary":{"usedPercent":10}}}
+        ]"#;
+        let stale_providers = [String::from("codex")];
+        let requested = [String::from("claude")];
+        for filter in [&[][..], requested.as_slice()] {
+            let options = PromptOptions {
+                stale_providers: &stale_providers,
+                ..options(filter)
+            };
+            let expected = if filter.is_empty() {
+                "CX 90% ⚠"
+            } else {
+                "CL 10%"
+            };
+            assert_eq!(prompt(payload, options), expected);
+            assert_eq!(
+                emit_formatted_prompt_segment(
+                    payload,
+                    &config(),
+                    NOW,
+                    options,
+                    &Template::parse("{sigil} {used}%{stale}").unwrap(),
+                )
+                .unwrap(),
+                expected
+            );
+        }
     }
 
     #[test]
@@ -303,6 +350,7 @@ mod tests {
                 provider_filter: &[],
                 ansi: false,
                 stale: true,
+                stale_providers: &[],
             },
         )
         .expect("prompt");
