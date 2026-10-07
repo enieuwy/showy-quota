@@ -19,6 +19,8 @@ set -uo pipefail
 
 REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 FIXTURE_DIR="${REPO_ROOT}/test/fixtures"
+# Inline Python servers and detached stubs share the DNS-free fixture server.
+export PYTHONPATH="${REPO_ROOT}/test${PYTHONPATH:+:${PYTHONPATH}}"
 
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/showy-quota-test.XXXXXX")
 # Managed-serve tests start detached `codexbar serve` stubs from ${TMP}, and
@@ -2810,7 +2812,8 @@ if command -v magick >/dev/null 2>&1; then
     policy_http_log="${TMP}/policy-http-requests.log"
     cat > "${policy_http_server}" <<'PY'
 import sys
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
+from serve_fixture import LoopbackHTTPServer
 
 port_file, request_log = sys.argv[1], sys.argv[2]
 
@@ -2830,7 +2833,7 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass
 
-server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+server = LoopbackHTTPServer(("127.0.0.1", 0), Handler)
 with open(port_file, "w", encoding="utf-8") as fh:
     fh.write(str(server.server_address[1]))
 server.serve_forever()
@@ -3577,6 +3580,23 @@ assert_equals "secondary-only provider is renderable state" "antigravity" "$(pri
 # 3. Non-array JSON must be rejected by the fetcher (refresh path).
 printf '\ncache fetcher\n'
 
+# A failing resolver must not affect numeric-loopback fixture startup.
+if python3 <<'PY'
+from unittest.mock import patch
+from serve_fixture import server
+
+with patch("socket.getfqdn", side_effect=AssertionError("fixture attempted reverse DNS")):
+    with server(None) as fixture:
+        assert fixture.server_name == "127.0.0.1"
+        assert fixture.server_port > 0
+        assert fixture.socket.getsockname() == ("127.0.0.1", fixture.server_port)
+PY
+then
+    ok "loopback HTTP fixtures start without reverse DNS"
+else
+    fail "loopback HTTP fixtures start without reverse DNS"
+fi
+
 cache=$(mk_cache)
 rc=0
 out=$(
@@ -3938,6 +3958,7 @@ if [[ "${1:-}" == "serve" ]]; then
         python3 - "${port}" <<'PY' &
 import http.server
 import sys
+from serve_fixture import LoopbackHTTPServer
 
 port = int(sys.argv[1])
 
@@ -3962,8 +3983,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, _format, *args):
         return
 
-http.server.ThreadingHTTPServer.allow_reuse_address = True
-http.server.ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()
+LoopbackHTTPServer(("127.0.0.1", port), Handler).serve_forever()
 PY
         child=$!
         trap 'kill "${child}" 2>/dev/null || true' EXIT TERM INT
@@ -3976,6 +3996,7 @@ PY
 import http.server
 import sys
 import time
+from serve_fixture import LoopbackHTTPServer
 
 port = int(sys.argv[1])
 
@@ -3995,8 +4016,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, _format, *args):
         return
 
-http.server.ThreadingHTTPServer.allow_reuse_address = True
-http.server.ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()
+LoopbackHTTPServer(("127.0.0.1", port), Handler).serve_forever()
 PY
         child=$!
         trap 'kill "${child}" 2>/dev/null || true' EXIT TERM INT
@@ -4007,6 +4027,7 @@ PY
     python3 - "${port}" "${SHOWY_QUOTA_TEST_SERVE_FIXTURE}" <<'PY' &
 import http.server
 import sys
+from serve_fixture import LoopbackHTTPServer
 
 port = int(sys.argv[1])
 fixture = sys.argv[2]
@@ -4033,8 +4054,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, _format, *args):
         return
 
-http.server.ThreadingHTTPServer.allow_reuse_address = True
-http.server.ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()
+LoopbackHTTPServer(("127.0.0.1", port), Handler).serve_forever()
 PY
     child=$!
     trap 'kill "${child}" 2>/dev/null || true' EXIT TERM INT
@@ -4273,6 +4293,7 @@ if [[ "${1:-}" == "serve" ]]; then
 import http.server
 import json
 import sys
+from serve_fixture import LoopbackHTTPServer
 
 port = int(sys.argv[1])
 fixture = sys.argv[2]
@@ -4305,8 +4326,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, _format, *args):
         return
 
-http.server.ThreadingHTTPServer.allow_reuse_address = True
-http.server.ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()
+LoopbackHTTPServer(("127.0.0.1", port), Handler).serve_forever()
 PY
     child=$!
     trap 'kill "${child}" 2>/dev/null || true' EXIT TERM INT
@@ -4479,6 +4499,7 @@ if [[ "${1:-}" == "serve" ]]; then
 import http.server
 import json
 import sys
+from serve_fixture import LoopbackHTTPServer
 
 port = int(sys.argv[1])
 fixture = sys.argv[2]
@@ -4511,8 +4532,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, _format, *args):
         return
 
-http.server.ThreadingHTTPServer.allow_reuse_address = True
-http.server.ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()
+LoopbackHTTPServer(("127.0.0.1", port), Handler).serve_forever()
 PY
     child=$!
     trap 'kill "${child}" 2>/dev/null || true' EXIT TERM INT
@@ -6511,6 +6531,7 @@ python3 - "${recycle_port}" "${recycle_usage}" <<'PY' &
 import http.server
 import json
 import sys
+from serve_fixture import LoopbackHTTPServer
 
 port = int(sys.argv[1])
 fixture = sys.argv[2]
@@ -6535,8 +6556,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, _format, *args):
         return
 
-http.server.ThreadingHTTPServer.allow_reuse_address = True
-http.server.ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()
+LoopbackHTTPServer(("127.0.0.1", port), Handler).serve_forever()
 PY
 recycle_listener_pid=$!
 

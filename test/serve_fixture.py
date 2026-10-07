@@ -4,11 +4,22 @@ import http.server
 import os
 from pathlib import Path
 import socket
+import socketserver
 import subprocess
 import sys
 import threading
 import time
 from urllib.parse import urlsplit
+
+
+class LoopbackHTTPServer(http.server.ThreadingHTTPServer):
+    """Bind numeric loopback addresses without a reverse-DNS lookup."""
+
+    def server_bind(self):
+        # HTTPServer.server_bind calls socket.getfqdn(), which can stall for
+        # tens of seconds on hosted macOS runners before the server listens.
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
 
 
 def server(fixture, health=b"{}", log=None, delay=0):
@@ -38,7 +49,7 @@ def server(fixture, health=b"{}", log=None, delay=0):
         def log_message(self, *_args):
             pass
 
-    result = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    result = LoopbackHTTPServer(("127.0.0.1", 0), Handler)
     result.daemon_threads = True
     return result
 
