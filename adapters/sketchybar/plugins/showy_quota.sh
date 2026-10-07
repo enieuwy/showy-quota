@@ -337,8 +337,10 @@ SB_QUEUE=()
 
 flush_sketchybar_queue() {
     (( ${#SB_QUEUE[@]} > 0 )) || return 0
-    sketchybar "${SB_QUEUE[@]}" >/dev/null 2>&1 || true
+    local status=0
+    sketchybar "${SB_QUEUE[@]}" >/dev/null 2>&1 || status=$?
     SB_QUEUE=()
+    return "${status}"
 }
 
 queue_provider_removal() {
@@ -1396,7 +1398,10 @@ ring_tick() {
         done <<< "$(printf '%s\n' ${FRAME_UNITS[@]+"${FRAME_UNITS[@]}"})"
         queue_ring_bracket "${desired_units}"
         queue_popup_closer
-        flush_sketchybar_queue
+        if ! flush_sketchybar_queue; then
+            showy_quota_log "failed to declare sketchybar ring items; retrying next tick"
+            return 1
+        fi
         write_state_providers "${desired_units}" \
             || showy_quota_log "failed to update sketchybar ring state"
         printf '%s\n' "ring" > "${BODY_FILE}" 2>/dev/null || true

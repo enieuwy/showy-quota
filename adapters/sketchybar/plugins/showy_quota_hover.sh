@@ -39,16 +39,10 @@ readonly RING_POPUPS='/^showy_quota\..*\.ring$/'
 # sketchybar only when a popup is open.
 open_file="${TMPDIR:-/tmp}/showy-quota-popup.open"
 
-if [[ "${parent}" == "--close-all" ]]; then
-    [[ -e "${open_file}" ]] || exit 0
-    rm -f -- "${open_file}" 2>/dev/null
-    "${SB}" --set "${RING_POPUPS}" popup.drawing=off >/dev/null 2>&1
-    exit 0
-fi
-
 # The parent becomes part of a temp path and a sketchybar argument; only the
 # unit-id charset the renderer emits may pass.
 case "${parent}" in
+    --close-all) ;;
     "" | *[!A-Za-z0-9_.-]* | .* | *..*) exit 0 ;;
 esac
 
@@ -100,6 +94,52 @@ claim_hover_state() {
     }
     return 0
 }
+
+# Keep the claim, open note and daemon send in one critical section.
+# Like the render lock, only a dead owner (or an old ownerless directory)
+# permits recovery. Never expire a live handler while it talks to the daemon.
+acquire_popup_lock() {
+    popup_lock="${TMPDIR:-/tmp}/showy-quota-popup.lock"
+    local owner mtime lock_now
+    while ! mkdir "${popup_lock}" 2>/dev/null; do
+        owner=$(cat "${popup_lock}/owner.pid" 2>/dev/null) || owner=""
+        if [[ "${owner}" =~ ^[0-9]+$ ]] && ! kill -0 "${owner}" 2>/dev/null; then
+            rm -f -- "${popup_lock}/owner.pid" 2>/dev/null
+            rmdir "${popup_lock}" 2>/dev/null || true
+        elif [[ -z "${owner}" ]]; then
+            mtime=$(stat -f %m "${popup_lock}" 2>/dev/null) \
+                || mtime=$(stat -c %Y "${popup_lock}" 2>/dev/null) || mtime="${now}"
+            lock_now="${EPOCHSECONDS:-$(date +%s)}"
+            if (( lock_now - mtime >= 30 )); then
+                rmdir "${popup_lock}" 2>/dev/null || true
+            fi
+        fi
+        sleep 0.02
+    done
+    printf '%s\n' "$$" > "${popup_lock}/owner.pid" || {
+        rmdir "${popup_lock}" 2>/dev/null
+        return 1
+    }
+    trap 'rm -f -- "${popup_lock}/owner.pid"; rmdir "${popup_lock}" 2>/dev/null' EXIT
+    trap 'exit 0' HUP INT TERM
+}
+
+# Clicks and the global closer share one event stream across all units.
+# Record even an empty exit, so an older delayed click cannot reopen a popup.
+if [[ "${parent}" == "--close-all" || "${SENDER:-}" == "mouse.clicked" ]]; then
+    state="${TMPDIR:-/tmp}/showy-quota-popup.event"
+    [[ "${parent}" == "--close-all" || "${BUTTON:-left}" == "left" ]] || exit 0
+    acquire_popup_lock || exit 0
+    if [[ "${parent}" == "--close-all" ]]; then
+        claim_hover_state "out" "$$" || exit 0
+        [[ -e "${open_file}" ]] || exit 0
+        rm -f -- "${open_file}" 2>/dev/null
+        "${SB}" --set "${RING_POPUPS}" popup.drawing=off >/dev/null 2>&1
+        exit 0
+    fi
+    [[ "${BUTTON:-left}" == "left" ]] || exit 0
+    claim_hover_state "in" "$$" || exit 0
+fi
 
 case "${SENDER:-}" in
     mouse.clicked)

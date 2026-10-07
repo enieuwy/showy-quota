@@ -208,6 +208,11 @@ log="${SHOWY_QUOTA_TEST_LOG:-/dev/null}"
 state_dir="${SHOWY_QUOTA_TEST_STATE_DIR:-}"
 [ -n "${state_dir}" ] && mkdir -p "${state_dir}"
 echo "sketchybar $*" >> "${log}"
+if [ -n "${SHOWY_QUOTA_TEST_FAIL_RING_DECLARE:-}" ]; then
+    case "$*" in
+        *"--add ring showy_quota.codex.ring"*) exit 1 ;;
+    esac
+fi
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --query)
@@ -526,7 +531,7 @@ run_sketchybar_plugin_without_magick() {
     no_magick_path="${TMP}/no-magick-bin"
     mkdir -p "${no_magick_path}"
     # grep and paste back the stateful sketchybar stub's item list.
-    for tool in bash jq readlink dirname mkdir mktemp mv rm rmdir date stat sed tr cat python3 grep paste; do
+    for tool in bash jq readlink dirname mkdir mktemp mv rm rmdir date stat sed tr cat python3 ps grep paste; do
         if [[ "${tool}" == "bash" && -x /opt/homebrew/bin/bash ]]; then
             tool_path=/opt/homebrew/bin/bash
         else
@@ -2742,7 +2747,7 @@ assert_contains "status URL guard falls back for rejected URL" "click_script=tru
 # restrictive policy (SSRF defense) before any magick invocation.
 mp_bin="${TMP}/magick-policy-bin"
 mkdir -p "${mp_bin}"
-for tool in bash jq readlink dirname mkdir mktemp mv rm rmdir date stat sed tr cat python3; do
+for tool in bash jq readlink dirname mkdir mktemp mv rm rmdir date stat sed tr cat python3 ps; do
     if [[ "${tool}" == "bash" && -x /opt/homebrew/bin/bash ]]; then
         ln -sf /opt/homebrew/bin/bash "${mp_bin}/bash"
     else
@@ -3209,6 +3214,15 @@ run_sketchybar_plugin codexbar-mixed.json "${popup_cache}" "${popup_log}" SHOWY_
 assert_contains "a popup mode change redeclares with hover subscriptions" "--subscribe showy_quota.codex.ring mouse.entered mouse.exited mouse.exited.global" "$(< "${popup_log}")"
 assert_equals "hover popups drop the closer" "0" "$(count_live_items "${popup_cache}/sb-state" 'showy_quota.popup_close')"
 assert_equals "the popup mode stamp follows the setting" "hover" "$(cat "${popup_cache}/sb/popup.txt")"
+run_sketchybar_plugin codexbar-mixed.json "${popup_cache}" "${TMP}/sb-popup-failed.log" \
+    SHOWY_QUOTA_SKETCHYBAR_BODY=ring SHOWY_QUOTA_SKETCHYBAR_POPUP=click \
+    SHOWY_QUOTA_TEST_FAIL_RING_DECLARE=1
+assert_equals "failed popup redeclaration preserves the last applied mode" "hover" "$(cat "${popup_cache}/sb/popup.txt")"
+run_sketchybar_plugin codexbar-mixed.json "${popup_cache}" "${TMP}/sb-popup-retry.log" \
+    SHOWY_QUOTA_SKETCHYBAR_BODY=ring SHOWY_QUOTA_SKETCHYBAR_POPUP=click
+assert_contains "popup subscription change retries after declaration failure" \
+    "--subscribe showy_quota.codex.ring mouse.clicked" "$(< "${TMP}/sb-popup-retry.log")"
+assert_equals "successful popup retry applies the new mode" "click" "$(cat "${popup_cache}/sb/popup.txt")"
 popup_log="${TMP}/sb-popup-off.log"
 run_sketchybar_plugin codexbar-mixed.json "${popup_cache}" "${popup_log}" SHOWY_QUOTA_SKETCHYBAR_BODY=ring SHOWY_QUOTA_SKETCHYBAR_POPUP=off
 assert_contains "popups off still redeclares the units" "--add ring showy_quota.codex.ring" "$(< "${popup_log}")"
@@ -3279,6 +3293,8 @@ rm -f -- "${hover_state}"
 # second left click closes it; a right click belongs to the click action.
 # The closer asks sketchybar only while a click opened a popup.
 popup_open_file="${TMPDIR:-/tmp}/showy-quota-popup.open"
+popup_event_file="${TMPDIR:-/tmp}/showy-quota-popup.event"
+rm -f -- "${popup_event_file}"
 rm -f -- "${popup_open_file}"
 run_click() {
     SENDER="$1" BUTTON="${2:-left}" SKETCHYBAR="${TMP}/hover-sketchybar-stub" TMPDIR="${TMPDIR:-/tmp}" \
@@ -3300,7 +3316,53 @@ run_click mouse.clicked left
 : > "${hover_sb_log}"
 run_click mouse.exited.global left --close-all
 assert_equals "closer closes an open popup" "--set /^showy_quota\\..*\\.ring\$/ popup.drawing=off" "$(< "${hover_sb_log}")"
-rm -f -- "${popup_open_file}"
+# A later global exit must win even when no popup was open at the time.
+popup_newer_pid=$(( ($(sh -c 'echo $$') + 1000) % 100000 ))
+printf 'out %s %s' "${popup_newer_pid}" "$(date +%s)" > "${popup_event_file}"
+: > "${hover_sb_log}"
+run_click mouse.clicked left
+assert_equals "delayed click after a newer exit never reopens a popup" "" "$(< "${hover_sb_log}")"
+assert_equals "delayed click leaves no open popup" "0" "$([[ -e "${popup_open_file}" ]] && printf 1 || printf 0)"
+rm -f -- "${popup_event_file}"
+run_click mouse.exited.global left --close-all
+assert_contains "empty global exit still records event order" "out " "$(cat "${popup_event_file}")"
+rm -f -- "${popup_open_file}" "${popup_event_file}"
+
+# Pause the older click after it claims state but before it reads open_file.
+# A newer exit must finish after that click, even though no popup exists yet.
+popup_race_dir="${TMP}/popup-race"
+mkdir -p "${popup_race_dir}/bin"
+cat > "${popup_race_dir}/bin/cat" <<'EOF'
+#!/bin/sh
+case "${1:-}" in
+    *showy-quota-popup.open)
+        touch "${TMPDIR}/claimed"
+        while [ ! -e "${TMPDIR}/release" ]; do sleep 0.01; done
+        ;;
+esac
+exec /bin/cat "$@"
+EOF
+chmod +x "${popup_race_dir}/bin/cat"
+: > "${hover_sb_log}"
+env PATH="${popup_race_dir}/bin:${PATH}" TMPDIR="${popup_race_dir}" \
+    SENDER=mouse.clicked BUTTON=left SKETCHYBAR="${TMP}/hover-sketchybar-stub" \
+    bash "${REPO_ROOT}/adapters/sketchybar/plugins/showy_quota_hover.sh" "${hover_parent}" &
+popup_click_pid=$!
+for ((popup_wait = 0; popup_wait < 500; popup_wait++)); do
+    [[ -e "${popup_race_dir}/claimed" ]] && break
+    sleep 0.01
+done
+env TMPDIR="${popup_race_dir}" SENDER=mouse.exited.global SKETCHYBAR="${TMP}/hover-sketchybar-stub" \
+    bash "${REPO_ROOT}/adapters/sketchybar/plugins/showy_quota_hover.sh" --close-all &
+popup_exit_pid=$!
+touch "${popup_race_dir}/release"
+wait "${popup_click_pid}"
+wait "${popup_exit_pid}"
+assert_equals "exit after a claimed click closes the popup last" \
+    "--set /^showy_quota\\..*\\.ring\$/ popup.drawing=off --set ${hover_parent} popup.drawing=on
+--set /^showy_quota\\..*\\.ring\$/ popup.drawing=off" "$(< "${hover_sb_log}")"
+assert_equals "exit after a claimed click clears the open note" "0" \
+    "$([[ -e "${popup_race_dir}/showy-quota-popup.open" ]] && printf 1 || printf 0)"
 
 # Regression: a plugin run that outlives `sketchybar --reload` can re-add
 # provider items before the rc re-adds front_app, so the pill drew over the

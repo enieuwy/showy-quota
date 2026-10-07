@@ -55,6 +55,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   new `showy_quota_layout` event. Reload SketchyBar after enabling.
 
 ### Changed
+- SketchyBar popup mode changes retry after a failed declaration. Click and
+  global-exit handlers serialize their state changes and daemon sends, so an
+  older delayed click cannot reopen a popup after the pointer leaves the bar.
 - SketchyBar frame hashes advance only after the plugin's final `sketchybar`
   send succeeds. A failed or interrupted send keeps the last acknowledged
   frame, so the next tick retries the redraw.
