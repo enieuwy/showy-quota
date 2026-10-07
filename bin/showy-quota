@@ -38,6 +38,13 @@ usage() {
         '  --current         Print the persisted theme name, or (none)' \
         '  --list            Print available theme names, one per line' \
         '  --preview <name>  Print one ANSI preview strip for a theme' \
+        '  preview [NAME] --surface zellij|tmux|sketchybar|plan|rows|vertical --fixture FILE|-  Render without fetching' \
+        '  config get|set|unset|list [KEY] [VALUE]  Inspect or edit typed configuration' \
+        '  theme list|show|validate|new|import-base16|import-iterm [args]  Manage JSON themes' \
+        '  --check-terminal [--json]  Print glyph samples and conservative fallback guidance' \
+        '  --tmux-doctor [--socket NAME] [--json]  Inspect tmux without changing it' \
+        '  tmux sync [--socket NAME] [--dry-run] [--json]  Reconcile managed tmux settings' \
+        '  --diagnose-zellij  Inspect the configured plugin and permission file' \
         '  --diagnose        Print runtime state useful for bug reports (--json for machines, --redact for paste-safe output)' \
         '  --check-config    Show ignored or clamped config values and unknown keys (--json, --redact); exit 1 if any' \
         '  --grant-zellij [opts] [p] Pre-grant or inspect Zellij permissions; opts: --dry-run, --check, --manage-serve, --cli-fallback, --force' \
@@ -155,40 +162,12 @@ with_file_write_lock() {
 
 
 list_theme_names() {
-    local dir path name
-    local -a names=()
-    declare -A seen=()
-
-    for dir in "${CONFIG_DIR}/themes" "${REPO_ROOT}/share/themes"; do
-        [[ -d "${dir}" ]] || continue
-        for path in "${dir}"/*.env; do
-            [[ -e "${path}" ]] || continue
-            name="${path##*/}"
-            name="${name%.env}"
-            if [[ -z "${seen["${name}"]+x}" ]]; then
-                seen["${name}"]=1
-                names+=("${name}")
-            fi
-        done
-    done
-
-    ((${#names[@]} > 0)) || return 0
-    printf '%s\n' "${names[@]}" | LC_ALL=C sort
+    python3 "${REPO_ROOT}/lib/manage.py" theme list
 }
 
 find_theme_path() {
-    local name="$1" path
-    [[ "${name}" =~ ${THEME_NAME_RE} ]] || return 1
-    for path in \
-        "${CONFIG_DIR}/themes/${name}.env" \
-        "${REPO_ROOT}/share/themes/${name}.env"
-    do
-        if [[ -r "${path}" ]]; then
-            printf '%s\n' "${path}"
-            return 0
-        fi
-    done
-    return 1
+    python3 "${REPO_ROOT}/lib/manage.py" theme validate "$1" || return 1
+    printf '%s\n' "$1"
 }
 
 print_available_themes() {
@@ -256,59 +235,7 @@ print_current_theme() {
 }
 
 write_config_lines() {
-    local mode="$1" theme="${2:-}"
-    local tmp line last_index
-    local -a lines=()
-    local matched=0
-    local wrote=0
-    local i
-
-    if [[ -f "${CONFIG_FILE}" ]]; then
-        while IFS= read -r line || [[ -n "${line}" ]]; do
-            lines+=("${line}")
-        done < "${CONFIG_FILE}"
-    fi
-
-    for line in "${lines[@]}"; do
-        if [[ "${line}" =~ ^[[:space:]]*(export[[:space:]]+)?SHOWY_QUOTA_THEME= ]]; then
-            matched=1
-            break
-        fi
-    done
-
-    if [[ "${mode}" == "unset" && "${matched}" == 0 ]]; then
-        return 0
-    fi
-
-    tmp=$(umask 077 && mktemp "${CONFIG_FILE}.tmp.XXXXXX") || die "cannot create temporary config next to ${CONFIG_FILE}"
-    track_temp_file "${tmp}"
-    if ! {
-        for i in "${!lines[@]}"; do
-            line="${lines[$i]}"
-            if [[ "${line}" =~ ^([[:space:]]*)(export[[:space:]]+)?SHOWY_QUOTA_THEME= ]]; then
-                if [[ "${mode}" == "set" && "${wrote}" == 0 ]]; then
-                    printf '%s%sSHOWY_QUOTA_THEME=%s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]:-}" "${theme}"
-                    wrote=1
-                fi
-                continue
-            fi
-            printf '%s\n' "${line}"
-        done
-
-        if [[ "${mode}" == "set" && "${matched}" == 0 ]]; then
-            if ((${#lines[@]} > 0)); then
-                last_index=$((${#lines[@]} - 1))
-                [[ -z "${lines[$last_index]}" ]] || printf '\n'
-            fi
-            printf 'SHOWY_QUOTA_THEME=%s\n' "${theme}"
-        fi
-    } > "${tmp}"; then
-        die "cannot write temporary config next to ${CONFIG_FILE}"
-    fi
-
-    if ! mv -f -- "${tmp}" "${CONFIG_FILE}"; then
-        die "cannot replace ${CONFIG_FILE}"
-    fi
+    python3 "${REPO_ROOT}/lib/manage.py" config-write "$1" SHOWY_QUOTA_THEME "${2:-}"
 }
 
 set_theme() {
@@ -575,30 +502,11 @@ config_issues_prepare() {
         && ! find_theme_path "${SHOWY_QUOTA_THEME}" >/dev/null; then
         showy_quota_record_config_issue SHOWY_QUOTA_THEME "${SHOWY_QUOTA_THEME}" "" missing_theme
     fi
-    local line key in_defaults=0
+    local line key
     local -A known=() seen=()
-    while IFS= read -r line; do
-        case "${line}" in
-            '# ── defaults ──'*) in_defaults=1; continue ;;
-            '# ── numeric config validation ──'*) break ;;
-        esac
-        (( in_defaults )) || continue
-        # shellcheck disable=SC2016
-        if [[ "${line}" == ': "${SHOWY_QUOTA_'* ]]; then
-            # shellcheck disable=SC2016
-            key="${line#*'${'}"
-            known["${key%%[:=]*}"]=1
-        elif [[ "${line}" =~ ^[[:space:]]*(SHOWY_QUOTA_[A-Z0-9_]+)= ]]; then
-            known["${BASH_REMATCH[1]}"]=1
-        fi
-    done < "${REPO_ROOT}/lib/common.sh"
-    if [[ -r "${REPO_ROOT}/share/config.env.example" ]]; then
-        while IFS= read -r line; do
-            if [[ "${line}" =~ ^#[[:space:]]+(SHOWY_QUOTA_[A-Z0-9_]+)= ]]; then
-                known["${BASH_REMATCH[1]}"]=1
-            fi
-        done < "${REPO_ROOT}/share/config.env.example"
-    fi
+    while IFS= read -r key; do
+        known["${key}"]=1
+    done < <(jq -r '.settings[].key' "${REPO_ROOT}/share/config-manifest.json")
     if [[ "${SHOWY_QUOTA_CONFIG_LOADED:-0}" == 1 ]]; then
         while IFS= read -r line || [[ -n "${line}" ]]; do
             if [[ "${line}" =~ ^[[:space:]]*(export[[:space:]]+)?(SHOWY_QUOTA_[A-Z0-9_]+)= ]]; then
@@ -1900,8 +1808,9 @@ cmd_refresh() {
             done < <(tmux list-clients -F '#{client_tty}' 2>/dev/null)
         fi
     fi
-    # The advanced zjstatus feeder has a pipe; the standalone WASM plugin does
-    # not. Only address a named live session, never create one while refreshing.
+    # The advanced zjstatus feeder has a pipe; the standalone WASM plugin has
+    # one only when its KDL sets control_pipe_name, and this path does not use
+    # it. Only address a named live session, never create one while refreshing.
     if [[ -n "${ZELLIJ_SESSION_NAME:-}" ]] && showy_quota_have "${SHOWY_QUOTA_ZELLIJ_BIN}"; then
         local render_bin payload session found=0
         while IFS= read -r session; do
@@ -1946,6 +1855,81 @@ cmd_serve() {
     exit 2
 }
 
+cmd_config() {
+    local action="${1:-list}" key="${2:-}" value="${3:-}"
+    [[ "${key}" == SHOWY_QUOTA_* ]] || key="SHOWY_QUOTA_${key}"
+    case "${action}" in
+        list)
+            (($# <= 1)) || usage_error 'config list accepts no key'
+            jq -r '.settings[] | [.key, .type, (.default | tostring)] | @tsv' "${REPO_ROOT}/share/config-manifest.json"
+            return ;;
+        get|unset) (($# == 2)) || usage_error "config ${action} requires KEY" ;;
+        set) (($# == 3)) || usage_error 'config set requires KEY VALUE' ;;
+        *) usage_error 'config expects get, set, unset, or list' ;;
+    esac
+    jq -e --arg key "${key}" '.settings | any(.key == $key)' "${REPO_ROOT}/share/config-manifest.json" >/dev/null \
+        || usage_error "unknown config key: ${key}"
+    if [[ "${action}" == get ]]; then
+        load_state_libs
+        if [[ -v "${key}" ]]; then
+            printf '%s\n' "${!key}"
+        else
+            jq -r --arg key "${key}" '.settings[] | select(.key == $key) | .default | if . == null then "" elif type == "array" then join(",") else tostring end' "${REPO_ROOT}/share/config-manifest.json"
+        fi
+    else
+        if [[ "${action}" == set ]]; then
+            python3 "${REPO_ROOT}/lib/manage.py" config-validate "${key}" "${value}" || return
+            [[ "${key}" != SHOWY_QUOTA_THEME || -z "${value}" ]] || validate_theme_or_die "${value}"
+        fi
+        (umask 077 && mkdir -p -- "${CONFIG_DIR}") || die "cannot create ${CONFIG_DIR}"
+        with_file_write_lock "${CONFIG_FILE}" python3 "${REPO_ROOT}/lib/manage.py" config-write "${action}" "${key}" "${value}"
+    fi
+}
+
+cmd_diagnose_zellij() {
+    local plugin="${SHOWY_QUOTA_ZELLIJ_PLUGIN:-${ZELLIJ_PLUGINS:-${HOME}/.config/zellij/plugins}/showy-quota-zellij.wasm}"
+    local permissions
+    permissions="$(zellij_permissions_file)"
+    printf 'plugin: %s\npermissions: %s\n' "${plugin}" "${permissions}"
+    [[ -f "${plugin}" ]] && printf 'plugin file: present\n' || printf 'plugin file: missing\n'
+    read_zellij_permission_status "${permissions}" "$(resolve_abs_path "${plugin}")" -- WebAccess || true
+    printf 'With control_pipe_name="showy-quota": zellij pipe --name showy-quota diagnostics\n'
+    printf 'Static check does not inspect the in-memory plugin state.\n'
+}
+
+cmd_preview() {
+    local surface=zellij fixture="${SHOWY_QUOTA_FIXTURE:-}" theme="" render_bin
+    if (($#)) && [[ "$1" != --* ]]; then theme="$1"; shift; fi
+    while (($#)); do
+        case "$1" in
+            --surface|--fixture|--theme)
+                (($# >= 2)) || usage_error "$1 requires a value"
+                case "$1" in
+                    --surface) surface="$2" ;;
+                    --fixture) fixture="$2" ;;
+                    --theme) theme="$2" ;;
+                esac
+                shift 2 ;;
+            *) usage_error "unknown preview argument: $1" ;;
+        esac
+    done
+    [[ -n "${fixture}" ]] || usage_error 'preview requires --fixture FILE|-'
+    if [[ -n "${theme}" ]]; then
+        validate_theme_or_die "${theme}"
+        export SHOWY_QUOTA_THEME="${theme}"
+    fi
+    export SHOWY_QUOTA_NO_CONFIG=1
+    load_state_libs
+    showy_quota_export_config
+    render_bin="$(showy_quota_resolve_render_bin "${SCRIPT_DIR}" "${REPO_ROOT}")" || die 'build showy-quota-render first'
+    case "${surface}" in
+        zellij|tmux) "${render_bin}" --format "${surface}" --json "${fixture}" ;;
+        sketchybar) "${render_bin}" --emit sketchybar-frame --json "${fixture}" --force-redeclare ;;
+        plan|rows|vertical) "${render_bin}" --emit "${surface}" --json "${fixture}" ;;
+        *) usage_error 'preview surfaces: zellij, tmux, sketchybar, plan, rows, vertical' ;;
+    esac
+}
+
 main() {
     if (($# == 0)); then
         run_selector
@@ -1953,6 +1937,41 @@ main() {
     fi
 
     case "$1" in
+        config)
+            shift
+            cmd_config "$@"
+            ;;
+        theme)
+            shift
+            python3 "${REPO_ROOT}/lib/manage.py" theme "$@"
+            ;;
+        --new-theme)
+            (($# == 2)) || usage_error '--new-theme requires NAME'
+            python3 "${REPO_ROOT}/lib/manage.py" theme new "$2"
+            preview_theme "$2"
+            ;;
+        --import-base16|--import-iterm)
+            (($# == 3)) || usage_error "$1 requires FILE NAME"
+            python3 "${REPO_ROOT}/lib/manage.py" theme "${1#--}" "$2" "$3"
+            preview_theme "$3"
+            ;;
+        --check-terminal|--font-check)
+            shift
+            python3 "${REPO_ROOT}/lib/manage.py" terminal-doctor "$@"
+            ;;
+        --tmux-doctor)
+            shift
+            python3 "${REPO_ROOT}/lib/tmux.py" doctor "$@"
+            ;;
+        tmux)
+            shift
+            python3 "${REPO_ROOT}/lib/tmux.py" "$@"
+            ;;
+        --diagnose-zellij)
+            shift
+            (($# == 0)) || usage_error '--diagnose-zellij accepts no arguments'
+            cmd_diagnose_zellij
+            ;;
         --set)
             (($# == 2)) || usage_error '--set requires exactly one theme name'
             set_theme "$2"
@@ -1969,9 +1988,13 @@ main() {
             (($# == 1)) || usage_error '--list does not accept arguments'
             list_theme_names
             ;;
-        --preview)
-            (($# == 2)) || usage_error '--preview requires exactly one theme name'
-            preview_theme "$2"
+        --preview|preview)
+            if (($# == 2)) && [[ "$1" == --preview && "$2" != --* ]]; then
+                preview_theme "$2"
+            else
+                shift
+                cmd_preview "$@"
+            fi
             ;;
         --check-config)
             check_config "$@"

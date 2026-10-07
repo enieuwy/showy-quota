@@ -100,7 +100,9 @@ empty_reason_for() {
     fi
     printf '%s' "${payload}" | jq -r \
         --arg allow "${SHOWY_QUOTA_PROVIDERS:-}" \
-        --arg exclude "${SHOWY_QUOTA_PROVIDERS_EXCLUDE:-}" '
+        --arg exclude "${SHOWY_QUOTA_PROVIDERS_EXCLUDE:-}" \
+        --arg windows "${SHOWY_QUOTA_WINDOWS:-primary,secondary,tertiary}" \
+        --arg window_mode "${SHOWY_QUOTA_WINDOW_MODE:-all}" '
         def valid_provider_id:
             type == "string"
             and (length <= 64)
@@ -127,7 +129,7 @@ empty_reason_for() {
         | ([ $records[] | select(renderable or errored) ] | length) as $candidates
         | (($allow | length) > 0 or ($exclude | length) > 0) as $filtering
         | if $total == 0 then "no-providers"
-          elif $candidates > 0 and $filtering then "filtered"
+          elif ($candidates > 0 and $filtering) or $windows != "primary,secondary,tertiary" or $window_mode != "all" then "filtered"
           else "idle"
           end' 2>/dev/null || printf 'idle'
 }
@@ -192,6 +194,26 @@ fi
 if [[ "${mode}" == "explain" ]]; then
     if [[ "${available}" == true ]]; then
         decisions=$(printf '%s' "${data}" | showy_quota_explain_providers)
+        showy_quota_export_config
+        render_bin=$(showy_quota_resolve_render_bin "${SCRIPT_DIR}" "${SCRIPT_DIR}/..") \
+            || showy_quota_die "the native renderer is required for --explain"
+        plan_file=$(mktemp "${TMPDIR:-/tmp}/showy-quota-plan.XXXXXX")
+        if ! printf '%s' "${data}" | "${render_bin}" --emit plan --json - > "${plan_file}"; then
+            rm -f -- "${plan_file}"
+            showy_quota_die "cannot resolve the provider render plan"
+        fi
+        decisions=$(printf '%s' "${decisions}" | jq -c --slurpfile plans "${plan_file}" '
+            [ .[] | select(.reason == "included") | .provider ] as $included
+            | ($plans[0] | map(.provider)
+               | map(select(. as $p | $included | index($p) != null))) as $visible
+            | map(. as $decision | . + {renderPlan:
+                ([$plans[0][] | select(.provider == $decision.provider)][0] // null)}
+                | if .reason == "included" and .renderPlan == null then
+                    .reason = "excluded_by_windows" | .position = null
+                  elif .reason == "included" then
+                    .position = ($visible | index($decision.provider))
+                  else . end)')
+        rm -f -- "${plan_file}"
     else
         decisions='[]'
     fi
@@ -202,7 +224,11 @@ if [[ "${mode}" == "explain" ]]; then
             .[] | [(.provider | tojson), .reason,
                   (if .position == null then "-" else (.position | tostring) end),
                   .rankSource,
-                  (if .orderRank == null then "-" else (.orderRank | tostring) end)]
+                  (if .orderRank == null then "-" else (.orderRank | tostring) end),
+                  (.renderPlan.requestedMode // "-"),
+                  (.renderPlan.effectiveMode // "-"),
+                  (.renderPlan.collapseReason // "-"),
+                  ((.renderPlan.families // []) | map(.label) | join(","))]
             | @tsv'
     fi
     exit 0
@@ -215,6 +241,9 @@ if [[ "${available}" == true ]]; then
     if render_bin=$(showy_quota_resolve_render_bin "${SCRIPT_DIR}" "${SCRIPT_DIR}/.."); then
         provider_metrics_json=$(printf '%s' "${data}" | "${render_bin}" --emit metrics --json - 2>/dev/null) || provider_metrics_json='[]'
         [[ -n "${provider_metrics_json}" ]] || provider_metrics_json='[]'
+        # Native metrics apply per-window visibility, but also include errors.
+        # Only usage rows belong in the stable provider list and count.
+        provider_ids_json=$(printf '%s' "${provider_metrics_json}" | jq -c '[.[] | select(.error == null) | .provider]')
     else
         provider_metrics_json='[]'
     fi

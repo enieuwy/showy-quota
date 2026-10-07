@@ -11,7 +11,17 @@ publish = false
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
 time = { version = "0.3.53", features = ["formatting", "local-offset", "macros", "parsing"] }
+unicode-width = "0.2.2"
 
 [[bin]]
 name = "showy-quota-render"
 path = "src/bin/showy-quota-render.rs"
+
+[[bin]]
+name = "showy-quota-fetch-native"
+path = "src/bin/showy-quota-fetch-native.rs"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+ureq = { version = "2.12", default-features = false, features = ["json"] }
+libc = "0.2"
+sha2 = "0.10"

@@ -37,7 +37,7 @@ bin/showy-quota-fetch  ← shared cache envelope + flock + atomic publish
 
 The shell data plane is still the reliability boundary for tmux, SketchyBar, and advanced zjstatus composition.
 
-- File: `${SHOWY_QUOTA_CACHE_DIR}/usage.json` (default: `${XDG_CACHE_HOME:-$HOME/.cache}/showy-quota/usage.json`) — a cache envelope object `{"schema":"showy-quota/cache@2","source":"serve"|"cli"|"unknown","providerMeta":{...},"providers":[...]}`, where `providers` is the verbatim CodexBar usage array. `providerMeta` maps each published provider id to `{"source":..., "updatedAt": <epoch>}`: the fetch that actually measured that slice, not the publish that republished it (see "Per-provider freshness" below). A legacy bare top-level array (pre-envelope cache) is still read, with `source` treated as `unknown`; it is upgraded to an envelope on the next successful refresh.
+- File: `${SHOWY_QUOTA_CACHE_DIR}/usage.json` (default: `${XDG_CACHE_HOME:-$HOME/.cache}/showy-quota/usage.json`) — a cache envelope object `{"schema":"showy-quota/cache@2","source":"serve"|"cli"|"unknown","providerMeta":{...},"providers":[...]}`, where `providers` carries the CodexBar usage array. `providerMeta` maps each published provider id to `{"source":..., "updatedAt": <epoch>}`: the fetch that actually measured that slice, not the publish that republished it (see "Per-provider freshness" below). Readers also accept legacy bare arrays and `cache@1` envelopes. Bare arrays use `source = "unknown"`; envelopes without provider metadata use the file's freshness. The next successful refresh upgrades either legacy format to `cache@2`.
 - Stamp file: `${SHOWY_QUOTA_CACHE_DIR}/usage.json.updated-at`
 - Payload and source commit via a **single atomic `rename(2)`**: the fetcher builds the whole envelope (payload + source) in one temp file and publishes it with one `mv`, so a reader can never observe a NEW payload paired with STALE (or missing) source metadata — there is no second file whose independent commit order could reopen that race. The generation stamp still commits last, since `cache_payload_marker` is derived from the published payload's on-disk identity (inode/mtime/size) and can only be minted once that identity is stable. CLI source is visibly degraded as `⚠cli`.
 - `flock` path: `${SHOWY_QUOTA_CACHE_DIR}/usage.lock`
@@ -49,7 +49,10 @@ The shell data plane is still the reliability boundary for tmux, SketchyBar, and
   without signaling the unrelated process. Dead, stopped, zombie, and
   sufficiently old ambiguous owners still permit recovery. PID-only records
   lack a verified identity and follow the ambiguous-owner wait horizon.
-- Validation: `jq` must accept either shape — a bare array of provider objects, or an envelope whose `providers` field is one. If a usage window is present, its `usedPercent` must be numeric before publication.
+- Validation: cache readers accept an empty provider array or an array with at least one usable record. They keep malformed siblings in the raw array so `state --explain` can report every provider's decision; display emitters ignore those siblings. Native provider acquisition and publication remain strict: every published record has a valid, unique provider id and typed usage fields, and every `cache@2` record has complete measurement metadata.
+  Native refreshes seed only valid, unique cached records into the coordinator;
+  malformed siblings remain available on the read/explain path but never enter
+  a synthesized publication.
 - Corrupt cache quarantine: if the existing usage cache fails validation before
   a fetcher-owned refresh path runs, it is moved to
   `usage.json.corrupt.<epoch>.<pid>` and old quarantine files are pruned
@@ -74,6 +77,10 @@ chunk, no pacing marker) while its fresh neighbors keep their colors. A
 `serve` source with a `cli`-sourced slice still shows the degraded marker.
 Providers without metadata inherit the file's freshness rather than
 inventing their own.
+
+`SHOWY_QUOTA_NOW_EPOCH` pins the timestamps of new cache measurements. Native
+coordinator timers still advance with monotonic elapsed time, so managed startup
+and CLI fallback deadlines do not stop when the cache clock is pinned.
 
 Refreshes prefer `${SHOWY_QUOTA_CODEXBAR_SERVE_URL%/}/usage` with `curl`.
 The default base URL is `http://127.0.0.1:8080`. The `/health` probe uses

@@ -109,6 +109,9 @@ pub struct FrameSettings {
     pub primary_good: String,
     pub good_min_remaining: i64,
     pub warn_min_remaining: i64,
+    pub auto_compact: bool,
+    pub compact_provider_count: usize,
+    pub filter_windows: bool,
 }
 
 impl FrameSettings {
@@ -131,6 +134,16 @@ impl FrameSettings {
             .filter(|dir| !dir.chars().any(char::is_control))
             .unwrap_or_default();
         Self {
+            filter_windows: config.window_mode != "all"
+                || config.windows != ["primary", "secondary", "tertiary"],
+            auto_compact: get("SHOWY_QUOTA_SKETCHYBAR_AUTO_COMPACT").is_some_and(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            }),
+            compact_provider_count: uint("SHOWY_QUOTA_SKETCHYBAR_COMPACT_PROVIDER_COUNT", 5)
+                as usize,
             body: match get("SHOWY_QUOTA_SKETCHYBAR_BODY").as_deref() {
                 Some("ring") => Body::Ring,
                 _ => Body::Rows,
@@ -261,7 +274,7 @@ pub fn build_frame(inputs: &FrameInputs<'_>) -> Frame {
     };
 
     for row in &inputs.rows.rows {
-        let unit = if inputs.hidden.iter().any(|hidden| hidden == &row.provider) {
+        let mut unit = if inputs.hidden.iter().any(|hidden| hidden == &row.provider) {
             vec![
                 "--set".into(),
                 provider_item_regex(&row.provider),
@@ -274,6 +287,31 @@ pub fn build_frame(inputs: &FrameInputs<'_>) -> Frame {
             }
             row_args(row, inputs.settings, inputs.label_drawing, &icon)
         };
+        if inputs.settings.auto_compact
+            && inputs.rows.rows.len() > inputs.settings.compact_provider_count
+            && !row.error
+        {
+            for role in [
+                "primary",
+                "secondary",
+                "tertiary",
+                "quaternary",
+                "primary_marker",
+                "secondary_marker",
+                "tertiary_marker",
+                "quaternary_marker",
+                "slot",
+            ] {
+                unit.extend([
+                    "--set".into(),
+                    format!("showy_quota.{}.{role}", row.provider),
+                    "drawing=off".into(),
+                ]);
+            }
+        }
+        if inputs.settings.filter_windows {
+            unit = retain_role_updates(unit, &row.provider, &row_item_roles(row, inputs.settings));
+        }
         push_unit(&row.provider, unit);
     }
     push_unit(TAIL_KEY, tail_args(inputs.rows, inputs.settings));
@@ -426,8 +464,8 @@ fn row_args(
             "click_script={}",
             slider_click_script(&item, lane.remaining, &settings.click)
         );
-        // The primary lane always draws unless the provider errored.
-        let drawn = if index == 0 { !row.error } else { has(lane) };
+        // Visibility applies to the primary lane as well as the other lanes.
+        let drawn = has(lane);
         let props = if drawn {
             vec![
                 "drawing=on".into(),
@@ -644,27 +682,22 @@ const RING_DARK: &str = "0xff161616";
 impl FrameSettings {
     /// Status colour of a window at full brightness. The rows dim
     /// long-horizon windows; rings never do.
-    pub(crate) fn ring_window_hex(&self, remaining: i64) -> String {
-        if remaining >= self.good_min_remaining {
-            self.primary_good.clone()
-        } else if remaining >= self.warn_min_remaining {
-            self.primary_warn.clone()
-        } else {
-            self.primary_bad.clone()
+    pub(crate) fn ring_window_hex(&self, window: &crate::sketchybar_ring::RingWindow) -> String {
+        match window.policy.severity(window.remaining as i32) {
+            crate::palette::Severity::Good => self.primary_good.clone(),
+            crate::palette::Severity::Warn => self.primary_warn.clone(),
+            crate::palette::Severity::Bad => self.primary_bad.clone(),
         }
     }
 
-    pub(crate) fn ring_window_argb(&self, remaining: i64) -> String {
-        format!("0xff{}", self.ring_window_hex(remaining))
+    pub(crate) fn ring_window_argb(&self, window: &crate::sketchybar_ring::RingWindow) -> String {
+        format!("0xff{}", self.ring_window_hex(window))
     }
 
     /// A blocked window: its status colour at the dim shade the rows use
     /// for long windows.
-    pub(crate) fn ring_blocked_argb(&self, remaining: i64) -> String {
-        format!(
-            "0xff{}",
-            scale_hex(&self.ring_window_hex(remaining), "0.55")
-        )
+    pub(crate) fn ring_blocked_argb(&self, window: &crate::sketchybar_ring::RingWindow) -> String {
+        format!("0xff{}", scale_hex(&self.ring_window_hex(window), "0.55"))
     }
 
     /// Stale data that may still be right: the status warning colour, not
@@ -733,8 +766,30 @@ pub fn build_ring_frame(inputs: &RingFrameInputs<'_>) -> Frame {
         frame_text.push('\n');
     };
 
+    let provider_count = inputs
+        .units
+        .iter()
+        .enumerate()
+        .filter(|(index, unit)| *index == 0 || inputs.units[*index - 1].provider != unit.provider)
+        .count();
     for unit in inputs.units {
-        push_unit(&unit.unit, ring_unit_args(unit, inputs.settings));
+        let mut args = ring_unit_args(unit, inputs.settings);
+        if inputs.settings.auto_compact
+            && provider_count > inputs.settings.compact_provider_count
+            && unit.error.is_none()
+        {
+            for role in ["bar0", "bar0_pace", "bar1", "bar1_pace", "label"] {
+                args.extend([
+                    "--set".into(),
+                    format!("showy_quota.{}.{role}", unit.unit),
+                    "drawing=off".into(),
+                ]);
+            }
+        }
+        if inputs.settings.filter_windows {
+            args = retain_role_updates(args, &unit.unit, &ring_item_roles(unit, inputs.settings));
+        }
+        push_unit(&unit.unit, args);
     }
     push_unit(
         TAIL_KEY,
@@ -848,7 +903,7 @@ fn ring_unit_args(unit: &RingUnit, settings: &FrameSettings) -> Vec<String> {
     } else if stale {
         settings.ring_stale_argb()
     } else {
-        settings.ring_window_argb(unit.ring.remaining)
+        settings.ring_window_argb(&unit.ring)
     };
     // An empty ring keeps the plain grey track: no arc is the whole signal.
     let ring_track = settings.ring_track_argb();
@@ -992,9 +1047,9 @@ fn ring_unit_args(unit: &RingUnit, settings: &FrameSettings) -> Vec<String> {
                 let color = if stale {
                     settings.ring_stale_argb()
                 } else if bar.blocked {
-                    settings.ring_blocked_argb(bar.remaining)
+                    settings.ring_blocked_argb(bar)
                 } else {
-                    settings.ring_window_argb(bar.remaining)
+                    settings.ring_window_argb(bar)
                 };
                 // An empty bar keeps the plain track, as an empty ring does:
                 // no fill is the whole signal.
@@ -1101,7 +1156,7 @@ fn ring_unit_args(unit: &RingUnit, settings: &FrameSettings) -> Vec<String> {
         settings.ring_stale_argb()
     } else if unit
         .label_minutes
-        .is_some_and(|minutes| minutes < settings.time_warn_minutes)
+        .is_some_and(|minutes| minutes < unit.time_warn_minutes)
     {
         settings.ring_warn_argb()
     } else {
@@ -1210,9 +1265,9 @@ fn ring_popup_args(
         let color = if unit.stale {
             settings.ring_stale_argb()
         } else if window.blocked {
-            settings.ring_blocked_argb(window.remaining)
+            settings.ring_blocked_argb(window)
         } else {
-            settings.ring_window_argb(window.remaining)
+            settings.ring_window_argb(window)
         };
         let track = settings.ring_track_argb();
         let pace = match window.expected {
@@ -1265,7 +1320,7 @@ fn ring_popup_args(
             let gauge_color = if window.breakdown {
                 format!(
                     "0xff{}",
-                    scale_hex(&settings.ring_window_hex(window.remaining), "0.55")
+                    scale_hex(&settings.ring_window_hex(window), "0.55")
                 )
             } else {
                 color.clone()
@@ -1690,6 +1745,125 @@ pub fn ring_redeclare_reason(
     // Same ordering rule as the rows body: any set or order change redeclares
     // everything, so the pill keeps `--add` order.
     (desired != declared).then_some("set")
+}
+
+pub fn row_item_roles(row: &SketchybarRow, settings: &FrameSettings) -> Vec<&'static str> {
+    PROVIDER_ITEM_ROLES
+        .iter()
+        .copied()
+        .filter(|role| {
+            if !settings.filter_windows {
+                return true;
+            }
+            let lane_role = role.strip_suffix("_marker").unwrap_or(role);
+            LANE_ROLES
+                .iter()
+                .position(|lane| *lane == lane_role)
+                .is_none_or(|index| row.lanes[index].present)
+        })
+        .collect()
+}
+
+pub fn ring_item_roles(unit: &RingUnit, settings: &FrameSettings) -> Vec<&'static str> {
+    RING_UNIT_ROLES
+        .iter()
+        .copied()
+        .filter(|role| {
+            if !settings.filter_windows {
+                return true;
+            }
+            match *role {
+                "bar0" | "bar0_pace" => !unit.bars.is_empty(),
+                "bar1" | "bar1_pace" => unit.bars.len() > 1,
+                "pop_row1" => !unit.bars.is_empty(),
+                "pop_row2" => unit.bars.len() > 1,
+                _ => true,
+            }
+        })
+        .collect()
+}
+
+fn retain_role_updates(args: Vec<String>, unit: &str, roles: &[&str]) -> Vec<String> {
+    let prefix = format!("showy_quota.{unit}.");
+    let mut kept = Vec::with_capacity(args.len());
+    let mut args = args.into_iter().peekable();
+    while let Some(arg) = args.next() {
+        if arg == "--set" {
+            let enabled = args
+                .peek()
+                .and_then(|item| item.strip_prefix(&prefix))
+                .is_none_or(|role| roles.contains(&role));
+            if !enabled {
+                while args.peek().is_some_and(|arg| arg != "--set") {
+                    args.next();
+                }
+                continue;
+            }
+        }
+        kept.push(arg);
+    }
+    kept
+}
+
+/// Exact role presence for a visibility-filtered declaration. This detects
+/// both missing enabled lanes and old disabled lanes that require removal.
+pub fn visibility_redeclare_reason(
+    force: bool,
+    items: Option<&[String]>,
+    declared: &[String],
+    plans: &[(String, Vec<&str>)],
+    settings: &FrameSettings,
+    extra: &[String],
+) -> Option<&'static str> {
+    if force {
+        return Some("forced");
+    }
+    if plans.iter().map(|(unit, _)| unit).ne(declared.iter()) {
+        return Some("set");
+    }
+    let items = items?;
+    let live: HashSet<&str> = items.iter().map(String::as_str).collect();
+    if live.iter().any(|item| {
+        if settings.body == Body::Ring {
+            is_rows_body_item(item)
+        } else {
+            is_ring_body_item(item)
+        }
+    }) {
+        return Some("body");
+    }
+    for (unit, roles) in plans {
+        let all: &[&str] = if settings.body == Body::Ring {
+            &RING_UNIT_ROLES
+        } else {
+            &PROVIDER_ITEM_ROLES
+        };
+        for role in all {
+            let name = format!("showy_quota.{unit}.{role}");
+            if live.contains(name.as_str()) != roles.contains(role) {
+                return Some("window-visibility");
+            }
+        }
+    }
+    if !plans.is_empty() {
+        let mut tail = vec![
+            "showy_quota.stale",
+            "showy_quota.degraded",
+            "showy_quota_bracket",
+        ];
+        if settings.body == Body::Rows {
+            tail.push("showy_quota.overflow");
+        }
+        if settings.notch && settings.body == Body::Rows {
+            tail.extend(["showy_quota.notch_q", "showy_quota.notch_e"]);
+        }
+        if tail.iter().any(|item| !live.contains(item))
+            || extra.iter().any(|item| !live.contains(item.as_str()))
+        {
+            return Some("missing");
+        }
+    }
+    (!items_follow_trigger(items)).then_some("order")
 }
 
 /// The bootstrap adds `showy_quota.trigger` where the user's sketchybarrc

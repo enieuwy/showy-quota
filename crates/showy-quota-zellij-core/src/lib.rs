@@ -1,6 +1,7 @@
 pub mod cache;
 pub mod codexbar;
 pub mod config;
+pub mod coordinator;
 pub mod metrics;
 pub mod palette;
 pub mod pick;
@@ -25,8 +26,8 @@ pub use palette::Severity;
 pub use pick::{emit_pick, PickOptions};
 pub use prompt::{emit_formatted_prompt_segment, emit_prompt_segment, PromptOptions};
 pub use render::{
-    emit_rows, render_rows, render_tmux, render_vertical, render_zellij, Freshness, OutputFormat,
-    RenderError, RenderOptions, RenderedRow,
+    emit_plan, emit_rows, render_plan, render_rows, render_tmux, render_vertical, render_zellij,
+    Freshness, OutputFormat, RenderError, RenderOptions, RenderedRow,
 };
 pub use sketchybar::{sketchybar_rows, SketchybarOptions, SketchybarRow, SketchybarRows};
 pub use template::{Template, TemplateScope, DEFAULT_PROMPT_FORMAT};

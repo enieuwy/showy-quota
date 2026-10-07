@@ -7,12 +7,27 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Upgrading
+- Custom themes now use declarative JSON, not executable `.env` files.
+  Convert custom themes under `~/.config/showy-quota/themes/` to `NAME.json`.
+  The cold-path configuration, theme, and tmux commands require Python 3.
+- The fetch script now requires `showy-quota-fetch-native`. `make render-bin`
+  builds both native binaries.
 - **Rebuild `showy-quota-render` with the SketchyBar plugin.** The plugin now
   calls `--emit sketchybar-frame`, `sketchybar-query`, and `sketchybar-layout`;
   an older binary leaves the pill frozen. Run `make render-bin` (or
   `make install-bin`). `--emit sketchybar` (the old row format) is removed.
 
 ### Added
+- An opt-in Zellij session broker shares fetched data across matching plugin
+  instances, with control and emit pipes and JSON plugin diagnostics.
+- `showy-quota-fetch-native` handles native fetching with fixture record/replay.
+- Typed `config get/set/unset/list` commands, JSON theme authoring, Base16 and
+  iTerm palette imports, and a terminal glyph doctor.
+- A read-only tmux doctor and a reversible TPM/CLI reconciler. Repeated syncs,
+  side changes, renderer updates, and `off` preserve unrelated user settings.
+- Configuration and bundled theme generators with `--check` drift detection.
+- tmux synchronization validates popup dimensions before mutation and rolls
+  back owned option/binding changes if a later command fails.
 - SketchyBar `SHOWY_QUOTA_SKETCHYBAR_BODY=ring` (opt-in; default `rows` is
   unchanged): one ring per model family — the longest window as a 26 pt ring
   with the provider logo inside, shorter windows as stacked bars, pace ticks
@@ -89,8 +104,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `usedPercent` is null is still unused quota and stays idle.
   Muse Code reports no quota while its server withholds it; the bar used to
   drop it, and the pill jumped when it came back. The metrics JSON gives it
-  the error message `quota unavailable`. `showy-quota-state` counts it the
-  same way.
+  the error message `quota unavailable`. `showy-quota-state` keeps it in
+  `providerMetrics`, but excludes it from `providers` and `providerCount`.
 - The SketchyBar plugin's per-tick work moved into `showy-quota-render`
   (`--emit sketchybar-frame`): the `sketchybar --set` arguments, click
   scripts, icon choice, the check for lost or misplaced items, and a diff
@@ -105,6 +120,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   included) no longer forks once per config variable.
 
 ### Fixed
+- Native cache reads retain legacy `cache@1` envelopes and mixed-validity
+  provider arrays. State explanations keep every raw record, while metrics
+  and render plans retain usable siblings. New publications still require
+  validated records and complete provider measurement metadata.
 - The fetcher no longer lets CodexBar's offline fallback wipe a provider's
   last-known usage. When Antigravity's live probes fail (seen under heavy
   load), CodexBar answers with no error, no positional window, and one

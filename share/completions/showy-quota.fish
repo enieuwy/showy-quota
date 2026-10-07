@@ -26,7 +26,23 @@ complete -c showy-quota -n '__showy_quota_at_root' -l diagnose
 complete -c showy-quota -n '__showy_quota_at_root' -l check-config
 complete -c showy-quota -n '__showy_quota_at_root' -l grant-zellij
 complete -c showy-quota -n '__showy_quota_at_root' -s h -l help
-complete -c showy-quota -n '__showy_quota_at_root' -a 'guard prompt serve next-reset run pick refresh'
+complete -c showy-quota -n '__showy_quota_at_root' -a 'config theme tmux preview guard prompt serve next-reset run pick refresh'
+complete -c showy-quota -n '__showy_quota_at_root' -l check-terminal
+complete -c showy-quota -n '__showy_quota_at_root' -l tmux-doctor
+complete -c showy-quota -n '__showy_quota_at_root' -l diagnose-zellij
+complete -c showy-quota -n '__showy_quota_mode_is config' -a 'get set unset list'
+complete -c showy-quota -n '__showy_quota_mode_is theme' -a 'list show validate new import-base16 import-iterm'
+complete -c showy-quota -n '__showy_quota_mode_is tmux' -a 'sync doctor'
+complete -c showy-quota -n '__showy_quota_mode_is preview' -l surface -r -a 'zellij tmux sketchybar plan rows vertical'
+complete -c showy-quota -n '__showy_quota_mode_is preview' -l fixture -r -F
+complete -c showy-quota -n '__showy_quota_mode_is preview' -l theme -r -a '(showy-quota --list)'
+for mode in --check-terminal --tmux-doctor tmux
+    complete -c showy-quota -n "__showy_quota_mode_is $mode" -l json
+end
+for mode in --tmux-doctor tmux
+    complete -c showy-quota -n "__showy_quota_mode_is $mode" -l socket -r
+end
+complete -c showy-quota -n '__showy_quota_mode_is tmux' -l dry-run
 for mode in --diagnose --check-config
     complete -c showy-quota -n "__showy_quota_mode_is $mode" -l json
     complete -c showy-quota -n "__showy_quota_mode_is $mode" -l redact
@@ -73,6 +89,10 @@ complete -c showy-quota-fetch -l path
 complete -c showy-quota-fetch -l stop-serve
 complete -c showy-quota-fetch -l serve-status
 complete -c showy-quota-fetch -l restart-serve
+complete -c showy-quota-fetch -l record -r
+complete -c showy-quota-fetch -l fixture-dir -r -F
+complete -c showy-quota-fetch -l sanitize
+complete -c showy-quota-fetch -l replay -r -F
 complete -c showy-quota-fetch -s h -l help
 
 complete -c showy-quota-state -f

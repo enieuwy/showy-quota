@@ -18,6 +18,7 @@ VERSION="${VERSION:-}"
 TARGET="${TARGET:-}"
 OUT_DIR="${OUT_DIR:-${REPO_ROOT}/dist}"
 RENDER_BIN="${RENDER_BIN:-${REPO_ROOT}/target/release/showy-quota-render}"
+FETCH_NATIVE_BIN="${FETCH_NATIVE_BIN:-$(dirname -- "${RENDER_BIN}")/showy-quota-fetch-native}"
 
 if [[ -z "${VERSION}" || -z "${TARGET}" ]]; then
     usage
@@ -39,6 +40,10 @@ if [[ ! "${TARGET}" =~ ^[A-Za-z0-9._-]+$ ]]; then
 fi
 if [[ ! -x "${RENDER_BIN}" ]]; then
     printf 'showy-quota: render binary is missing or not executable: %s\n' "${RENDER_BIN}" >&2
+    exit 1
+fi
+if [[ ! -x "${FETCH_NATIVE_BIN}" ]]; then
+    printf 'showy-quota: native fetch binary is missing: %s\n' "${FETCH_NATIVE_BIN}" >&2
     exit 1
 fi
 
@@ -68,6 +73,7 @@ for path in showy-quota.tmux Makefile LICENSE README.md; do
 done
 
 cp "${RENDER_BIN}" "${stage_root}/bin/showy-quota-render"
+cp "${FETCH_NATIVE_BIN}" "${stage_root}/bin/showy-quota-fetch-native"
 chmod +x "${stage_root}"/bin/showy-quota* "${stage_root}/bin/showy-quota-render"
 
 rm -f "${OUT_DIR}/${artifact}" "${OUT_DIR}/${artifact}.sha256"

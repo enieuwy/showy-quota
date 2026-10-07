@@ -83,6 +83,9 @@ if [[ ! -x "${RENDER_BIN}" ]]; then
         exit 1
     fi
 fi
+# Shell consumers otherwise prefer an installed renderer on PATH, which may
+# belong to an older checkout. Every assertion must exercise this build.
+export SHOWY_QUOTA_RENDER_BIN="${RENDER_BIN}"
 # ── stub codexbar that validates fetcher argv and prints the fixture ──
 
 stub_dir="${TMP}/bin"
@@ -153,50 +156,6 @@ jq --arg p "${saw_provider}" '
 EOF
 chmod +x "${stub_dir}/codexbar"
 
-cat > "${stub_dir}/curl" <<'EOF'
-#!/bin/sh
-[ -n "${SHOWY_QUOTA_TEST_SERVE_FIXTURE:-}" ] || exit 88
-url=""
-while [ "$#" -gt 0 ]; do
-    case "$1" in
-        --fail|--silent|--show-error)
-            ;;
-        --max-time)
-            shift
-            case "${1:-}" in
-                ""|*[!0-9.]*)
-                    exit 89
-                    ;;
-            esac
-            if [ -n "${SHOWY_QUOTA_TEST_CURL_MAX_TIME_FILE:-}" ]; then
-                printf '%s\n' "$1" > "${SHOWY_QUOTA_TEST_CURL_MAX_TIME_FILE}"
-            fi
-            ;;
-        --max-filesize)
-            shift
-            case "${1:-}" in
-                ""|*[!0-9]*)
-                    exit 89
-                    ;;
-            esac
-            ;;
-        http://*)
-            url="$1"
-            ;;
-        *)
-            exit 90
-            ;;
-    esac
-    shift
-done
-if [ "${url}" = "${SHOWY_QUOTA_TEST_SERVE_URL%/}/health" ]; then
-    printf '{}'
-    exit 0
-fi
-[ "${url}" = "${SHOWY_QUOTA_TEST_SERVE_URL%/}/usage" ] || exit 91
-cat "${SHOWY_QUOTA_TEST_SERVE_FIXTURE}"
-EOF
-chmod +x "${stub_dir}/curl"
 
 # Stub sketchybar with enough statefulness for plugin lifecycle tests. Each
 # declared item is a file in the state dir; `.order` keeps SketchyBar's item
@@ -881,7 +840,7 @@ assert_contains "config FIFO source guard still renders" "CL" "${out}"
 fifo_theme_xdg="${TMP}/xdg-fifo-theme"
 mkdir -p "${fifo_theme_xdg}/showy-quota/themes"
 printf '%s\n' 'SHOWY_QUOTA_THEME=default' > "${fifo_theme_xdg}/showy-quota/config.env"
-mkfifo "${fifo_theme_xdg}/showy-quota/themes/default.env"
+mkfifo "${fifo_theme_xdg}/showy-quota/themes/default.json"
 rc=0
 out=$(
     run_with_test_timeout 2 \
@@ -1094,10 +1053,12 @@ printf '\nshowy-quota cli\n'
 
 theme_cli_xdg=$(mktemp -d "${TMP}/xdg-theme-list.XXXXXX")
 mkdir -p "${theme_cli_xdg}/showy-quota/themes"
-printf '%s\n' ": \"\${SHOWY_QUOTA_PALETTE_PRIMARY_GOOD:=010203}\"" > "${theme_cli_xdg}/showy-quota/themes/catppuccin-mocha-blue.env"
-printf '%s\n' ": \"\${SHOWY_QUOTA_PALETTE_PRIMARY_GOOD:=040506}\"" > "${theme_cli_xdg}/showy-quota/themes/foo.env"
+printf '%s\n' '{"SHOWY_QUOTA_PALETTE_PRIMARY_GOOD":"010203"}' > "${theme_cli_xdg}/showy-quota/themes/catppuccin-mocha-blue.json"
+printf '%s\n' '{"SHOWY_QUOTA_PALETTE_PRIMARY_GOOD":"040506"}' > "${theme_cli_xdg}/showy-quota/themes/foo.json"
 out=$(run_theme "${theme_cli_xdg}" --list)
-assert_equals "theme list merges sorted unique names" $'carbonfox\ncatppuccin-frappe\ncatppuccin-latte\ncatppuccin-macchiato\ncatppuccin-mocha\ncatppuccin-mocha-blue\ndefault\ndracula\nfoo\ngruvbox-dark\nmonochrome\nnord\ntokyonight' "${out}"
+assert_contains "theme list includes custom manifest" $'\nfoo\n' $'\n'"${out}"$'\n'
+out=$(run_theme "${theme_cli_xdg}" theme show catppuccin-mocha-blue | jq -r '.SHOWY_QUOTA_PALETTE_PRIMARY_GOOD')
+assert_equals "user manifest overrides bundled theme" "010203" "${out}"
 
 theme_current_xdg=$(mktemp -d "${TMP}/xdg-theme-current.XXXXXX")
 out=$(run_theme "${theme_current_xdg}" --current)
@@ -1978,10 +1939,11 @@ cat > "${tmux_stub_dir}/tmux" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "tmux $*" >> "${SHOWY_QUOTA_TEST_TMUX_LOG}"
 case "$1" in
-    show-options)
-        printf '%s\n' '@showy-quota-bin'
-        ;;
-    show-option)
+    show-options|show-option)
+        if [[ "$2" == "-g" ]]; then
+            printf '%s\n' '@showy-quota-bin'
+            exit
+        fi
         if [[ "${*: -1}" == "@showy-quota-bin" ]]; then
             printf '%s\n' "${SHOWY_QUOTA_TEST_TMUX_BAR_BIN}"
         else
@@ -2014,17 +1976,18 @@ cat > "${tmux_injection_stub_dir}/tmux" <<'EOF'
 printf '%s\n' "tmux $*" >> "${SHOWY_QUOTA_TEST_TMUX_LOG}"
 option="${*: -1}"
 case "$1" in
-    show-options)
-        case "${SHOWY_QUOTA_TEST_TMUX_MODE}" in
-            escape)
-                printf '%s\n' '@showy-quota-separator' '@showy-quota-popup-key' '@showy-quota-popup-title'
-                ;;
-            bad-bin)
-                printf '%s\n' '@showy-quota-bin'
-                ;;
-        esac
-        ;;
-    show-option)
+    show-options|show-option)
+        if [[ "$2" == "-g" ]]; then
+            case "${SHOWY_QUOTA_TEST_TMUX_MODE}" in
+                escape)
+                    printf '%s\n' '@showy-quota-separator' '@showy-quota-popup-key' '@showy-quota-popup-title'
+                    ;;
+                bad-bin)
+                    printf '%s\n' '@showy-quota-bin'
+                    ;;
+            esac
+            exit
+        fi
         case "${option}" in
             @showy-quota-separator) printf '%s\n' 'x#(id)' ;;
             @showy-quota-popup-key) printf '%s\n' 'Q' ;;
@@ -2050,9 +2013,9 @@ out=$(
         "${REPO_ROOT}/showy-quota.tmux" 2>&1
 )
 tmux_wrapper_log="$(< "${tmux_escape_log}")"
-assert_contains "tmux wrapper escapes separator format command" "set-option -gq -a status-right x##(id)#(" "${tmux_wrapper_log}"
-assert_not_contains "tmux wrapper does not keep raw separator format command" "set-option -gq -a status-right x#(id)#(" "${tmux_wrapper_log}"
-assert_contains "tmux wrapper escapes popup title format command" "bind-key Q display-popup -E -h 36 -w 92 -T x##(id)" "${tmux_wrapper_log}"
+assert_contains "tmux wrapper escapes separator format command" "set-option -gq status-right x##(id)#(" "${tmux_wrapper_log}"
+assert_not_contains "tmux wrapper does not keep raw separator format command" "set-option -gq status-right x#(id)#(" "${tmux_wrapper_log}"
+assert_contains "tmux wrapper escapes popup title format command" "bind-key -T prefix Q display-popup -E -h 36 -w 92 -T x##(id)" "${tmux_wrapper_log}"
 assert_not_contains "tmux wrapper does not keep raw popup title format command" " -T x#(id) " "${tmux_wrapper_log}"
 
 tmux_bad_bin_log="${TMP}/tmux-wrapper-bad-bin.log"
@@ -2068,7 +2031,7 @@ tmux_wrapper_log="$(< "${tmux_bad_bin_log}")"
 # shellcheck disable=SC2016  # literal $(id) is the injection payload being asserted
 assert_contains "tmux wrapper rejects command-substitution renderer path" 'display-message showy-quota: renderer path contains shell metacharacters: $(id)' "${tmux_wrapper_log}"
 # shellcheck disable=SC2016  # literal $(id) is the injection payload being asserted
-assert_not_contains "tmux wrapper does not embed command-substitution renderer path" 'set-option -gq -a status-right $(id)#(' "${tmux_wrapper_log}"
+assert_not_contains "tmux wrapper does not embed command-substitution renderer path" 'set-option -gq status-right $(id)#(' "${tmux_wrapper_log}"
 
 # ── filter ───────────────────────────────────────────────────────────
 
@@ -2169,7 +2132,7 @@ for validator_case_index in "${!validator_case_names[@]}"; do
         SHOWY_QUOTA_CODEXBAR_SERVE_URL="${validator_serve_url}" \
         SHOWY_QUOTA_TEST_SERVE_URL="${validator_serve_url}" \
         SHOWY_QUOTA_TEST_SERVE_FIXTURE="${validator_case_file}" \
-        "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
+        python3 "${REPO_ROOT}/test/serve_fixture.py" "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
     ) || validator_rc=$?
     if (( validator_rc != 0 )) && [[ -z "${validator_out}" ]] && [[ ! -e "${validator_cache}/usage.json" ]]; then
         validator_fetch_results+=("reject")
@@ -2383,6 +2346,33 @@ out=$(run_state codexbar-error-only.json SHOWY_QUOTA_PROVIDERS_EXCLUDE=cursor)
 assert_equals "state exclude drops errored providerMetrics" "factory" "$(printf '%s' "${out}" | jq -r '.providerMetrics | map(.provider) | join(",")')"
 assert_equals "state exclude keeps renderable providers empty" "[]" "$(printf '%s' "${out}" | jq -c '.providers')"
 
+# State counts only renderable providers after selecting visible windows.
+# Errors stay in metrics, but do not consume explanation positions.
+state_windows_cache=$(mk_cache)
+cat > "${state_windows_cache}/usage.json" <<'EOF'
+[
+  {"provider":"cursor","error":{"message":"No Cursor session found."}},
+  {"provider":"codex","usage":{"primary":{"usedPercent":25}}},
+  {"provider":"claude","usage":{"secondary":{"usedPercent":40}}}
+]
+EOF
+state_windows_json=$(env SHOWY_QUOTA_NO_CONFIG=1 \
+    SHOWY_QUOTA_CACHE_DIR="${state_windows_cache}" \
+    SHOWY_QUOTA_PROVIDER_ORDER=cursor,codex,claude SHOWY_QUOTA_WINDOWS=secondary \
+    "${REPO_ROOT}/bin/showy-quota-state" --no-fetch --json)
+assert_equals "state window selection counts only visible renderable providers" "claude|1" \
+    "$(printf '%s' "${state_windows_json}" | jq -r '[(.providers | join(",")), (.providerCount | tostring)] | join("|")')"
+assert_equals "state window selection retains errors only in metrics" "cursor,claude" \
+    "$(printf '%s' "${state_windows_json}" | jq -r '.providerMetrics | map(.provider) | join(",")')"
+state_windows_explain=$(env SHOWY_QUOTA_NO_CONFIG=1 \
+    SHOWY_QUOTA_CACHE_DIR="${state_windows_cache}" \
+    SHOWY_QUOTA_PROVIDER_ORDER=cursor,codex,claude SHOWY_QUOTA_WINDOWS=secondary \
+    "${REPO_ROOT}/bin/showy-quota-state" --no-fetch --explain --json)
+assert_equals "state explanation keeps error and hidden-window reasons" "error_record,excluded_by_windows,included" \
+    "$(printf '%s' "${state_windows_explain}" | jq -r 'map(.reason) | join(",")')"
+assert_equals "state explanation positions skip errors and hidden windows" "null,null,0" \
+    "$(printf '%s' "${state_windows_explain}" | jq -r 'map(.position | tostring) | join(",")')"
+
 out=$(run_state "${sanitized_error_fixture}")
 assert_equals "state sanitizes and truncates provider error message" "160|true|true" "$(printf '%s' "${out}" | jq -r '.providerMetrics[] | select(.provider == "cursor") | .error.message | [(length | tostring), (contains("\u0001") | not | tostring), (startswith("Tokenbad ") | tostring)] | join("|")')"
 
@@ -2490,21 +2480,6 @@ assert_contains "bootstrap removes stale native provider items when desired set 
 assert_contains "bootstrap removes stale native marker items when desired set is empty" "--remove showy_quota.gemini.secondary_marker --remove showy_quota.gemini.tertiary_marker --remove showy_quota.gemini.quaternary_marker --remove showy_quota.gemini.primary_marker --remove showy_quota.gemini.slot --remove showy_quota.gemini.label" "${item_log}"
 assert_contains "bootstrap removes stale bracket when desired set is empty" "--remove showy_quota_bracket" "${item_log}"
 
-cache=$(mk_cache)
-log="${TMP}/sb-items-click.log"
-# shellcheck disable=SC2030,SC2031
-(
-    PATH="${stub_dir}:${PATH}"
-    export SHOWY_QUOTA_NO_CONFIG=1
-    export SHOWY_QUOTA_CACHE_DIR="${cache}"
-    export SHOWY_QUOTA_SKETCHYBAR_IMAGE_CACHE="${cache}/sb"
-    export SHOWY_QUOTA_TEST_FIXTURE="${FIXTURE_DIR}/codexbar-mixed.json"
-    export SHOWY_QUOTA_TEST_LOG="${log}"
-    SHOWY_QUOTA_SKETCHYBAR_CLICK='custom-click'
-    . "${REPO_ROOT}/adapters/sketchybar/items/showy_quota.sh"
-)
-item_log="$(< "${log}")"
-assert_contains "bootstrap exports non-exported click override" "click_script=custom-click" "${item_log}"
 
 # ── sketchybar plugin (without sketchybar daemon) ───────────────────────
 
@@ -3793,7 +3768,7 @@ out=$(
     SHOWY_QUOTA_CODEXBAR_SERVE_URL='' \
     SHOWY_QUOTA_TEST_SERVE_URL="${serve_url}" \
     SHOWY_QUOTA_TEST_SERVE_FIXTURE="${FIXTURE_DIR}/codexbar-realistic.json" \
-    "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
+    python3 "${REPO_ROOT}/test/serve_fixture.py" "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
 ) || rc=$?
 if (( rc != 0 )) && [[ -z "${out}" ]] && ! [[ -f "${cache}/usage.json" ]]; then
     ok "fetcher empty serve URL disables default HTTP probe"
@@ -3813,8 +3788,7 @@ out=$(
     SHOWY_QUOTA_CODEXBAR_SERVE_URL="${serve_url}" \
     SHOWY_QUOTA_TEST_SERVE_URL="${serve_url}" \
     SHOWY_QUOTA_TEST_SERVE_FIXTURE="${FIXTURE_DIR}/codexbar-realistic.json" \
-    SHOWY_QUOTA_TEST_CURL_MAX_TIME_FILE="${cache}/curl-max-time" \
-    "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
+    python3 "${REPO_ROOT}/test/serve_fixture.py" "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
 ) || rc=$?
 if (( rc == 0 )) && printf '%s' "${out}" | jq -e 'type == "array" and any(.provider == "codex")' >/dev/null 2>&1; then
     ok "fetcher reads codexbar serve usage endpoint"
@@ -3822,11 +3796,19 @@ else
     fail "fetcher reads codexbar serve usage endpoint" "rc=${rc}; out=${out}"
 fi
 assert_equals "fetcher records serve cache source" "serve" "$(cache_source_value "${cache}")"
-assert_equals "fetcher uses production-safe default usage probe timeout" "30" "$(< "${cache}/curl-max-time")"
+# Measure the native HTTP deadline against a hanging fixture, not curl argv.
+assert_equals "fetcher uses production-safe default usage probe timeout" "30" "$(
+    env SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_CACHE_DIR="$(mk_cache)" \
+        SHOWY_QUOTA_CODEXBAR_BIN="${missing_bin}" SHOWY_QUOTA_CODEXBAR_SERVE_URL="${serve_url}" \
+        SHOWY_QUOTA_TEST_SERVE_URL="${serve_url}" \
+        SHOWY_QUOTA_TEST_SERVE_FIXTURE="${FIXTURE_DIR}/codexbar-realistic.json" \
+        python3 "${REPO_ROOT}/test/serve_fixture.py" --timeout-check 30 \
+        "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
+)"
 
-# A pathological serve timeout is clamped so curl --max-time stays bounded.
+# A pathological timeout must still bound the real HTTP request.
 clamp_cache=$(mk_cache)
-env \
+clamp_timeout=$(env \
     PATH="${stub_dir}:${PATH}" \
     SHOWY_QUOTA_NO_CONFIG=1 \
     SHOWY_QUOTA_CACHE_DIR="${clamp_cache}" \
@@ -3834,13 +3816,13 @@ env \
     SHOWY_QUOTA_CODEXBAR_SERVE_URL="${serve_url}" \
     SHOWY_QUOTA_TEST_SERVE_URL="${serve_url}" \
     SHOWY_QUOTA_TEST_SERVE_FIXTURE="${FIXTURE_DIR}/codexbar-realistic.json" \
-    SHOWY_QUOTA_TEST_CURL_MAX_TIME_FILE="${clamp_cache}/curl-max-time" \
     SHOWY_QUOTA_CODEXBAR_SERVE_USAGE_TIMEOUT_SECONDS=999999999 \
-    "${REPO_ROOT}/bin/showy-quota-fetch" >/dev/null 2>&1 || true
-assert_equals "fetcher clamps a pathological usage probe timeout" "60" "$(< "${clamp_cache}/curl-max-time")"
+    python3 "${REPO_ROOT}/test/serve_fixture.py" --timeout-check 60 \
+    "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null) || true
+assert_equals "fetcher clamps a pathological usage probe timeout" "60" "${clamp_timeout}"
 
 zero_timeout_cache=$(mk_cache)
-env \
+zero_timeout=$(env \
     PATH="${stub_dir}:${PATH}" \
     SHOWY_QUOTA_NO_CONFIG=1 \
     SHOWY_QUOTA_CACHE_DIR="${zero_timeout_cache}" \
@@ -3848,10 +3830,10 @@ env \
     SHOWY_QUOTA_CODEXBAR_SERVE_URL="${serve_url}" \
     SHOWY_QUOTA_TEST_SERVE_URL="${serve_url}" \
     SHOWY_QUOTA_TEST_SERVE_FIXTURE="${FIXTURE_DIR}/codexbar-realistic.json" \
-    SHOWY_QUOTA_TEST_CURL_MAX_TIME_FILE="${zero_timeout_cache}/curl-max-time" \
     SHOWY_QUOTA_CODEXBAR_SERVE_USAGE_TIMEOUT_SECONDS=0 \
-    "${REPO_ROOT}/bin/showy-quota-fetch" >/dev/null 2>&1 || true
-assert_equals "fetcher rejects zero usage probe timeout back to default" "30" "$(< "${zero_timeout_cache}/curl-max-time")"
+    python3 "${REPO_ROOT}/test/serve_fixture.py" --timeout-check 30 \
+    "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null) || true
+assert_equals "fetcher rejects zero usage probe timeout back to default" "30" "${zero_timeout}"
 
 large_payload_fixture="${TMP}/codexbar-large-payload.json"
 python3 -c '
@@ -3886,7 +3868,7 @@ out=$(
         SHOWY_QUOTA_CODEXBAR_SERVE_URL="${serve_url}" \
         SHOWY_QUOTA_TEST_SERVE_URL="${serve_url}" \
         SHOWY_QUOTA_TEST_SERVE_FIXTURE="${large_payload_fixture}" \
-        "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
+        python3 "${REPO_ROOT}/test/serve_fixture.py" "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
 ) || rc=$?
 if (( rc == 0 )) && printf '%s' "${out}" | jq -e 'type == "array" and (length == 2) and any(.[]; .provider == "codex" and (.pad | length == 600)) and any(.[]; .provider == "claude" and (.pad | length == 601))' >/dev/null 2>&1; then
     ok "fetcher validates large serve payload without hanging"
@@ -4587,7 +4569,7 @@ out=$(
     SHOWY_QUOTA_CODEXBAR_SERVE_REFRESH_SECONDS=0 \
     SHOWY_QUOTA_TEST_SERVE_URL="${serve_url}" \
     SHOWY_QUOTA_TEST_SERVE_FIXTURE="${FIXTURE_DIR}/codexbar-low.json" \
-    "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
+    python3 "${REPO_ROOT}/test/serve_fixture.py" "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
 ) || rc=$?
 if (( rc == 0 )) && printf '%s' "${out}" | jq -e 'type == "array" and any(.provider == "claude") and all(.[]; .provider != "codex")' >/dev/null 2>&1; then
     ok "fetcher refreshes fresh cache from codexbar serve cadence"
@@ -4606,7 +4588,7 @@ out=$(
     SHOWY_QUOTA_CODEXBAR_SERVE_REFRESH_SECONDS=08 \
     SHOWY_QUOTA_TEST_SERVE_URL="${serve_url}" \
     SHOWY_QUOTA_TEST_SERVE_FIXTURE="${FIXTURE_DIR}/codexbar-low.json" \
-    "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
+    python3 "${REPO_ROOT}/test/serve_fixture.py" "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
 ) || rc=$?
 if (( rc == 0 )) && printf '%s' "${out}" | jq -e 'type == "array" and any(.provider == "codex") and any(.provider == "gemini")' >/dev/null 2>&1; then
     ok "fetcher treats leading-zero serve cadence as decimal"
@@ -4626,7 +4608,7 @@ out=$(
     SHOWY_QUOTA_TEST_SERVE_URL="${serve_url}" \
     SHOWY_QUOTA_TEST_SERVE_FIXTURE="${FIXTURE_DIR}/codexbar-non-array.json" \
     SHOWY_QUOTA_TEST_FIXTURE="${FIXTURE_DIR}/codexbar-realistic.json" \
-    "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
+    python3 "${REPO_ROOT}/test/serve_fixture.py" "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
 ) || rc=$?
 if (( rc == 0 )) && printf '%s' "${out}" | jq -e 'type == "array" and any(.provider == "codex") and any(.provider == "gemini")' >/dev/null 2>&1; then
     ok "fetcher skips CLI fallback after failed fast serve probe"
@@ -4654,7 +4636,7 @@ out=$(
     SHOWY_QUOTA_TEST_SERVE_URL="${serve_url}" \
     SHOWY_QUOTA_TEST_SERVE_FIXTURE="${FIXTURE_DIR}/codexbar-non-array.json" \
     SHOWY_QUOTA_TEST_FIXTURE="${FIXTURE_DIR}/codexbar-realistic.json" \
-    "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
+    python3 "${REPO_ROOT}/test/serve_fixture.py" "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
 ) || rc=$?
 source_value="missing"
 source_value="$(cache_source_value "${cache}")"
@@ -4687,7 +4669,7 @@ out=$(
     SHOWY_QUOTA_TEST_SERVE_URL="${serve_url}" \
     SHOWY_QUOTA_TEST_SERVE_FIXTURE="${FIXTURE_DIR}/codexbar-non-array.json" \
     SHOWY_QUOTA_TEST_FIXTURE="${FIXTURE_DIR}/codexbar-realistic.json" \
-    "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
+    python3 "${REPO_ROOT}/test/serve_fixture.py" "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
 ) || rc=$?
 source_value="missing"
 source_value="$(cache_source_value "${cache}")"
@@ -4726,7 +4708,7 @@ out=$(
     SHOWY_QUOTA_TEST_SERVE_URL="${serve_url}" \
     SHOWY_QUOTA_TEST_SERVE_FIXTURE="${FIXTURE_DIR}/codexbar-realistic.json" \
     SHOWY_QUOTA_TEST_FIXTURE="${FIXTURE_DIR}/codexbar-realistic.json" \
-    "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
+    python3 "${REPO_ROOT}/test/serve_fixture.py" "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
 ) || rc=$?
 source_value="missing"
 source_value="$(cache_source_value "${cache}")"
@@ -4761,7 +4743,7 @@ out=$(
     SHOWY_QUOTA_TEST_SERVE_URL="${serve_url}" \
     SHOWY_QUOTA_TEST_SERVE_FIXTURE="${FIXTURE_DIR}/codexbar-non-array.json" \
     SHOWY_QUOTA_TEST_FIXTURE="${FIXTURE_DIR}/codexbar-realistic.json" \
-    "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
+    python3 "${REPO_ROOT}/test/serve_fixture.py" "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
 ) || rc=$?
 source_value="missing"
 source_value="$(cache_source_value "${cache}")"
@@ -4798,7 +4780,7 @@ out=$(
     SHOWY_QUOTA_TEST_SERVE_URL="http://127.0.0.1:18081" \
     SHOWY_QUOTA_TEST_SERVE_FIXTURE="${FIXTURE_DIR}/codexbar-non-array.json" \
     SHOWY_QUOTA_TEST_FIXTURE="${FIXTURE_DIR}/codexbar-realistic.json" \
-    "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
+    python3 "${REPO_ROOT}/test/serve_fixture.py" "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
 ) || rc=$?
 source_value="missing"
 source_value="$(cache_source_value "${cache}")"
@@ -4826,7 +4808,7 @@ out=$(
     SHOWY_QUOTA_CODEXBAR_SERVE_REFRESH_SECONDS=0 \
     SHOWY_QUOTA_TEST_SERVE_URL="${serve_url}" \
     SHOWY_QUOTA_TEST_SERVE_FIXTURE="${FIXTURE_DIR}/codexbar-non-array.json" \
-    "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
+    python3 "${REPO_ROOT}/test/serve_fixture.py" "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
 ) || rc=$?
 if (( rc == 0 )) && [[ -r "${cache}/serve-failed-at" ]] && printf '%s' "${out}" | jq -e 'type == "array" and any(.provider == "codex") and any(.provider == "gemini")' >/dev/null 2>&1; then
     ok "fetcher records failed fast serve probe backoff"
@@ -4843,7 +4825,7 @@ out=$(
     SHOWY_QUOTA_CODEXBAR_SERVE_REFRESH_SECONDS=0 \
     SHOWY_QUOTA_TEST_SERVE_URL="${serve_url}" \
     SHOWY_QUOTA_TEST_SERVE_FIXTURE="${FIXTURE_DIR}/codexbar-low.json" \
-    "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
+    python3 "${REPO_ROOT}/test/serve_fixture.py" "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
 ) || rc=$?
 if (( rc == 0 )) && printf '%s' "${out}" | jq -e 'type == "array" and any(.provider == "codex") and any(.provider == "gemini") and any(.provider == "cursor")' >/dev/null 2>&1; then
     ok "fetcher backs off repeated fast serve probes"
@@ -4862,7 +4844,7 @@ out=$(
     SHOWY_QUOTA_TEST_SERVE_URL="${serve_url}" \
     SHOWY_QUOTA_TEST_SERVE_FIXTURE="${FIXTURE_DIR}/codexbar-low.json" \
     SHOWY_QUOTA_TEST_FIXTURE="${FIXTURE_DIR}/codexbar-low.json" \
-    "${REPO_ROOT}/bin/showy-quota-fetch" --refresh 2>/dev/null
+    python3 "${REPO_ROOT}/test/serve_fixture.py" "${REPO_ROOT}/bin/showy-quota-fetch" --refresh 2>/dev/null
 ) || rc=$?
 if (( rc == 0 )) && printf '%s' "${out}" | jq -e 'type == "array" and length == 1 and .[0].provider == "claude"' >/dev/null 2>&1; then
     ok "fetcher forced refresh bypasses serve backoff"
@@ -4882,7 +4864,7 @@ out=$(
     SHOWY_QUOTA_TEST_SERVE_URL="${serve_url}" \
     SHOWY_QUOTA_TEST_SERVE_FIXTURE="${FIXTURE_DIR}/codexbar-non-array.json" \
     SHOWY_QUOTA_TEST_FIXTURE="${FIXTURE_DIR}/codexbar-realistic.json" \
-    "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
+    python3 "${REPO_ROOT}/test/serve_fixture.py" "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
 ) || rc=$?
 if (( rc == 0 )) && printf '%s' "${out}" | jq -e 'type == "array" and any(.provider == "claude")' >/dev/null 2>&1; then
     ok "fetcher falls back when serve returns non-array JSON"
@@ -4901,7 +4883,7 @@ out=$(
     SHOWY_QUOTA_TEST_SERVE_URL="${serve_url}" \
     SHOWY_QUOTA_TEST_SERVE_FIXTURE="${FIXTURE_DIR}/codexbar-empty.json" \
     SHOWY_QUOTA_TEST_FIXTURE="${FIXTURE_DIR}/codexbar-realistic.json" \
-    "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
+    python3 "${REPO_ROOT}/test/serve_fixture.py" "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
 ) || rc=$?
 if (( rc == 0 )) && printf '%s' "${out}" | jq -e 'type == "array" and any(.provider == "codex")' >/dev/null 2>&1; then
     ok "fetcher falls back when serve returns no renderable providers"
@@ -4919,7 +4901,7 @@ out=$(
     SHOWY_QUOTA_TEST_SERVE_URL="${serve_url}" \
     SHOWY_QUOTA_TEST_SERVE_FIXTURE="${bad_provider}" \
     SHOWY_QUOTA_TEST_FIXTURE="${FIXTURE_DIR}/codexbar-realistic.json" \
-    "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
+    python3 "${REPO_ROOT}/test/serve_fixture.py" "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
 ) || rc=$?
 if (( rc == 0 )) && printf '%s' "${out}" | jq -e 'type == "array" and any(.provider == "claude")' >/dev/null 2>&1; then
     ok "fetcher falls back when serve fails publish validation"
@@ -4938,7 +4920,7 @@ out=$(
     SHOWY_QUOTA_CODEXBAR_SERVE_URL="${userinfo_url}" \
     SHOWY_QUOTA_TEST_SERVE_URL="${userinfo_url}" \
     SHOWY_QUOTA_TEST_SERVE_FIXTURE="${FIXTURE_DIR}/codexbar-realistic.json" \
-    "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
+    python3 "${REPO_ROOT}/test/serve_fixture.py" "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
 ) || rc=$?
 if (( rc != 0 )) && [[ -z "${out}" ]] && ! [[ -f "${cache}/usage.json" ]]; then
     ok "fetcher rejects serve URL userinfo host spoofing"
@@ -4975,30 +4957,12 @@ sleep 5
 cat "${SHOWY_QUOTA_TEST_FIXTURE}"
 EOF
 chmod +x "${timeout_cli_dir}/codexbar"
-cat > "${timeout_cli_dir}/timeout" <<'EOF'
-#!/usr/bin/env bash
-set -eu
-seconds="$1"
-shift
-printf '%s\n' "${seconds}" > "${SHOWY_QUOTA_TEST_TIMEOUT_ARGS_FILE}"
-"$@" &
-pid=$!
-sleep 0.1
-if kill -0 "${pid}" 2>/dev/null; then
-    kill "${pid}" 2>/dev/null || true
-    wait "${pid}" 2>/dev/null || true
-    exit 124
-fi
-wait "${pid}"
-EOF
-chmod +x "${timeout_cli_dir}/timeout"
 
 cache=$(mk_cache)
 cp "${FIXTURE_DIR}/codexbar-low.json" "${cache}/usage.json"
 touch -t 198801010000 "${cache}/usage.json"
 expected_stale=$(< "${cache}/usage.json")
 timeout_counter="${cache}/timeout-cli-call-count"
-timeout_args="${cache}/timeout-cli-seconds"
 : > "${timeout_counter}"
 rc=0
 out=$(
@@ -5011,16 +4975,13 @@ out=$(
     SHOWY_QUOTA_CODEXBAR_CLI_TIMEOUT_SECONDS=1 \
     SHOWY_QUOTA_CODEXBAR_CONFIG_PROVIDERS_TIMEOUT_SECONDS=1 \
     SHOWY_QUOTA_TEST_COUNTER="${timeout_counter}" \
-    SHOWY_QUOTA_TEST_TIMEOUT_ARGS_FILE="${timeout_args}" \
     SHOWY_QUOTA_TEST_FIXTURE="${FIXTURE_DIR}/codexbar-realistic.json" \
     "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
 ) || rc=$?
 if (( rc == 0 )) && [[ "${out}" == "${expected_stale}" ]] && [[ -s "${timeout_counter}" ]] && [[ -r "${cache}/cli-failed-at" ]]; then
     ok "fetcher bounds hanging CLI fallback and emits stale cache"
 else
-    timeout_value="missing"
-    [[ -r "${timeout_args}" ]] && timeout_value=$(< "${timeout_args}")
-    fail "fetcher bounds hanging CLI fallback and emits stale cache" "rc=${rc}; out=${out}; timeout=${timeout_value}"
+    fail "fetcher bounds hanging CLI fallback and emits stale cache" "rc=${rc}; out=${out}"
 fi
 calls_before=$(< "${timeout_counter}")
 rc=0
@@ -5034,7 +4995,6 @@ out=$(
     SHOWY_QUOTA_CODEXBAR_CLI_TIMEOUT_SECONDS=1 \
     SHOWY_QUOTA_CODEXBAR_CONFIG_PROVIDERS_TIMEOUT_SECONDS=1 \
     SHOWY_QUOTA_TEST_COUNTER="${timeout_counter}" \
-    SHOWY_QUOTA_TEST_TIMEOUT_ARGS_FILE="${timeout_args}" \
     SHOWY_QUOTA_TEST_FIXTURE="${FIXTURE_DIR}/codexbar-realistic.json" \
     "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
 ) || rc=$?
@@ -5640,7 +5600,7 @@ out=$(
     SHOWY_QUOTA_REFRESH_SECONDS=0 \
     SHOWY_QUOTA_TEST_SERVE_URL="${serve_url}" \
     SHOWY_QUOTA_TEST_SERVE_FIXTURE="${FIXTURE_DIR}/codexbar-mixed.json" \
-    "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
+    python3 "${REPO_ROOT}/test/serve_fixture.py" "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
 ) || rc=$?
 if (( rc == 0 )) && [[ "${out}" == "[]" ]] && [[ "$(cache_source_value "${cache}")" == "cli" ]]; then
     ok "fetcher rejects stale serve payload when inventory is empty"
@@ -5660,7 +5620,7 @@ out=$(
     SHOWY_QUOTA_REFRESH_SECONDS=0 \
     SHOWY_QUOTA_TEST_SERVE_URL="${serve_url}" \
     SHOWY_QUOTA_TEST_SERVE_FIXTURE="${FIXTURE_DIR}/codexbar-empty.json" \
-    "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
+    python3 "${REPO_ROOT}/test/serve_fixture.py" "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
 ) || rc=$?
 if (( rc == 0 )) && [[ "${out}" == "[]" ]] && [[ "$(cache_source_value "${cache}")" == "cli" ]]; then
     ok "fetcher rejects empty serve payload when inventory is empty"
@@ -5680,7 +5640,7 @@ out=$(
     SHOWY_QUOTA_REFRESH_SECONDS=0 \
     SHOWY_QUOTA_TEST_SERVE_URL="${serve_url}" \
     SHOWY_QUOTA_TEST_SERVE_FIXTURE="${FIXTURE_DIR}/codexbar-non-array.json" \
-    "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
+    python3 "${REPO_ROOT}/test/serve_fixture.py" "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
 ) || rc=$?
 if (( rc == 0 )) && [[ "${out}" == "[]" ]] && [[ "$(cache_source_value "${cache}")" == "cli" ]]; then
     ok "fetcher rejects invalid serve payload when inventory is empty"
@@ -5700,7 +5660,7 @@ out=$(
     SHOWY_QUOTA_REFRESH_SECONDS=0 \
     SHOWY_QUOTA_TEST_SERVE_URL="http://127.0.0.1:18081" \
     SHOWY_QUOTA_TEST_SERVE_FIXTURE="${FIXTURE_DIR}/codexbar-mixed.json" \
-    "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
+    python3 "${REPO_ROOT}/test/serve_fixture.py" "${REPO_ROOT}/bin/showy-quota-fetch" 2>/dev/null
 ) || rc=$?
 if (( rc == 0 )) && [[ "${out}" == "[]" ]] && [[ "$(cache_source_value "${cache}")" == "cli" ]]; then
     ok "fetcher skips unreachable serve probe when inventory is empty"
@@ -7471,47 +7431,47 @@ printf '\nmanaged serve controls\n'
 serve_control_cache=$(mk_cache)
 serve_control_stub="${TMP}/serve-control-stub"
 mkdir -p "${serve_control_stub}"
-cat > "${serve_control_stub}/curl" <<'EOF'
-#!/usr/bin/env bash
-url="${*: -1}"
-printf '%s\n' "${url}" >> "${SHOWY_QUOTA_TEST_STATUS_CURL_LOG}"
-[[ "${url}" == "${SHOWY_QUOTA_TEST_SERVE_URL}/health" ]] || exit 91
-printf '{"version":"CodexBar v9.8.7"}\n'
-EOF
 cat > "${serve_control_stub}/ps" <<'EOF'
 #!/usr/bin/env bash
 if [[ "${2:-}" == "${SHOWY_QUOTA_TEST_STATUS_PID:-none}" ]]; then
     case "${4:-}" in
         lstart=) printf 'Mon Jan  1 00:00:00 2024\n'; exit 0 ;;
-        command=) printf 'codexbar serve --port 18183\n'; exit 0 ;;
+        command=) printf 'codexbar serve --port %s\n' "${SHOWY_QUOTA_TEST_STATUS_PORT}"; exit 0 ;;
     esac
 fi
 exec /bin/ps "$@"
 EOF
 cat > "${serve_control_stub}/lsof" <<'EOF'
 #!/usr/bin/env bash
-[[ "$*" == *'tcp:18183'* ]] || exit 91
+[[ "$*" == *"tcp:${SHOWY_QUOTA_TEST_STATUS_PORT}"* ]] || exit 91
 printf '%s\n' "${SHOWY_QUOTA_TEST_STATUS_LISTENER_PID:-99999999}"
 EOF
-chmod +x "${serve_control_stub}/curl" "${serve_control_stub}/ps" "${serve_control_stub}/lsof"
-serve_control_url='http://127.0.0.1:18183'
+chmod +x "${serve_control_stub}/ps" "${serve_control_stub}/lsof"
 serve_control_log="${TMP}/serve-control-curl.log"
 : > "${serve_control_log}"
+serve_control_ready="${TMP}/serve-control-http.ready"
+python3 "${REPO_ROOT}/test/serve_fixture.py" --server "${serve_control_ready}" "${serve_control_log}" &
+serve_control_http_pid=$!
+for _ in {1..100}; do
+    [[ -s "${serve_control_ready}" ]] && break
+    sleep 0.01
+done
+serve_control_url=$(< "${serve_control_ready}")
+serve_control_port="${serve_control_url##*:}"
 serve_control_status() {
     env TZ=UTC PATH="${serve_control_stub}:${PATH}" SHOWY_QUOTA_NO_CONFIG=1 \
         SHOWY_QUOTA_CACHE_DIR="${serve_control_cache}" \
         SHOWY_QUOTA_CODEXBAR_BIN=codexbar \
         SHOWY_QUOTA_CODEXBAR_SERVE_URL="${serve_control_url}" \
-        SHOWY_QUOTA_TEST_SERVE_URL="${serve_control_url}" \
-        SHOWY_QUOTA_TEST_STATUS_CURL_LOG="${serve_control_log}" \
+        SHOWY_QUOTA_TEST_STATUS_PORT="${serve_control_port}" \
         SHOWY_QUOTA_NOW_EPOCH=1704067300 \
         "$@" "${REPO_ROOT}/bin/showy-quota" serve status --json
 }
 serve_control_rc=0
 serve_control_out=$(serve_control_status env) || serve_control_rc=$?
 if (( serve_control_rc == 1 )) && printf '%s' "${serve_control_out}" |
-    jq -e '.healthy == false and .managed == {pidfileState:"missing",pid:null,alive:false,owned:false}
-        and .serve.localOnly == true and .serve.port == 18183
+    jq -e --argjson port "${serve_control_port}" '.healthy == false and .managed == {pidfileState:"missing",pid:null,alive:false,owned:false}
+        and .serve.localOnly == true and .serve.port == $port
         and .serve.healthReachable == true and .serve.version == "9.8.7"
         and .failure.count == 0 and .cache.ageSeconds == null' >/dev/null; then
     ok "serve status reports a reachable unmanaged responder without creating a pidfile"
@@ -7528,8 +7488,6 @@ serve_control_rc=0
 serve_control_out=$(env PATH="${serve_control_stub}:${PATH}" SHOWY_QUOTA_NO_CONFIG=1 \
     SHOWY_QUOTA_CACHE_DIR="${serve_control_absent}" \
     SHOWY_QUOTA_CODEXBAR_SERVE_URL="${serve_control_url}" \
-    SHOWY_QUOTA_TEST_SERVE_URL="${serve_control_url}" \
-    SHOWY_QUOTA_TEST_STATUS_CURL_LOG="${serve_control_log}" \
     "${REPO_ROOT}/bin/showy-quota" serve status) || serve_control_rc=$?
 if (( serve_control_rc == 1 )) && [[ ! -e "${serve_control_absent}" ]] \
     && [[ "${serve_control_out}" == *'managed serve: missing'* ]] \
@@ -7554,8 +7512,8 @@ if (( serve_control_rc == 1 )) && printf '%s' "${serve_control_out}" |
 else
     fail "serve status keeps stale pidfile and backoff stamps while reporting cache freshness" "rc=${serve_control_rc}; ${serve_control_out}"
 fi
-sleep 30 &
-serve_control_pid=$!
+# Native ownership also requires a session leader; the old sleep stub lacked it.
+serve_control_pid=$(python3 -c 'import subprocess; print(subprocess.Popen(["/bin/sleep", "30"], start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).pid)')
 printf '%s:1704067200:codexbar\n' "${serve_control_pid}" > "${serve_control_cache}/codexbar-serve.pid"
 serve_control_rc=0
 serve_control_out=$(serve_control_status env SHOWY_QUOTA_TEST_STATUS_PID="${serve_control_pid}" \
@@ -7590,6 +7548,8 @@ if (( serve_control_rc == 0 )) && [[ ! -e "${serve_control_cache}/codexbar-serve
 else
     fail "serve stop removes a stale pidfile without signaling a foreign process" "rc=${serve_control_rc}; ${serve_control_out}"
 fi
+kill "${serve_control_http_pid}" 2>/dev/null || true
+wait "${serve_control_http_pid}" 2>/dev/null || true
 for serve_control_refusal in unmanaged nonlocal; do
     serve_control_rc=0
     if [[ "${serve_control_refusal}" == unmanaged ]]; then
@@ -7645,27 +7605,23 @@ serve_control_wait_url="http://127.0.0.1:${serve_control_wait_port}"
 serve_control_wait_lock="${serve_control_wait_cache}/usage.lock.d"
 mkdir "${serve_control_wait_lock}"
 printf '%s\n' "$$" > "${serve_control_wait_lock}/owner.pid"
-serve_control_wait_stub="${TMP}/serve-control-wait-stub"
-mkdir "${serve_control_wait_stub}"
-cat > "${serve_control_wait_stub}/sleep" <<'EOF'
-#!/usr/bin/env bash
-if [[ ! -e "${SHOWY_QUOTA_TEST_RELEASE_MARKER}" && -f "${SHOWY_QUOTA_TEST_RELEASE_LOCK}/owner.pid" ]]; then
-    : > "${SHOWY_QUOTA_TEST_RELEASE_MARKER}"
-    rm -f -- "${SHOWY_QUOTA_TEST_RELEASE_LOCK}/owner.pid"
-    rmdir -- "${SHOWY_QUOTA_TEST_RELEASE_LOCK}"
-fi
-exec /bin/sleep "$@"
-EOF
-chmod +x "${serve_control_wait_stub}/sleep"
+# Release the actual lease from an independent process, not a stubbed sleep.
+(
+    sleep 0.2
+    : > "${serve_control_wait_cache}/lock-released"
+    rm -f -- "${serve_control_wait_lock}/owner.pid"
+    rmdir -- "${serve_control_wait_lock}"
+) &
+serve_control_release_pid=$!
 serve_control_rc=0
-serve_control_out=$(env PATH="${serve_control_wait_stub}:${managed_bin_dir}:${PATH}" SHOWY_QUOTA_NO_CONFIG=1 \
+serve_control_out=$(env PATH="${managed_bin_dir}:${PATH}" SHOWY_QUOTA_NO_CONFIG=1 \
     SHOWY_QUOTA_CACHE_DIR="${serve_control_wait_cache}" SHOWY_QUOTA_MANAGE_SERVE=1 \
     SHOWY_QUOTA_CODEXBAR_BIN="${managed_bin_dir}/codexbar" \
     SHOWY_QUOTA_CODEXBAR_SERVE_URL="${serve_control_wait_url}" \
-    SHOWY_QUOTA_LOCK_WAIT_TENTHS=20 SHOWY_QUOTA_TEST_RELEASE_LOCK="${serve_control_wait_lock}" \
-    SHOWY_QUOTA_TEST_RELEASE_MARKER="${serve_control_wait_cache}/lock-released" \
+    SHOWY_QUOTA_LOCK_WAIT_TENTHS=20 \
     SHOWY_QUOTA_TEST_SERVE_FIXTURE="${FIXTURE_DIR}/codexbar-mixed.json" \
     "${REPO_ROOT}/bin/showy-quota" serve restart 2>&1) || serve_control_rc=$?
+wait "${serve_control_release_pid}"
 if (( serve_control_rc == 0 )) && [[ "${serve_control_out}" == *'managed codexbar serve restarted'* ]] \
     && [[ -s "${serve_control_wait_cache}/codexbar-serve.pid" ]] \
     && [[ -f "${serve_control_wait_cache}/lock-released" ]] && [[ ! -e "${serve_control_wait_lock}" ]]; then

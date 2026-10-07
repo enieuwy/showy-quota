@@ -11,7 +11,7 @@ _showy_quota_complete() {
 
     case "${command_name}" in
         showy-quota-fetch)
-            mapfile -t COMPREPLY < <(compgen -W '--refresh --json --cache-only --age --path --stop-serve --serve-status --restart-serve -h --help' -- "${current}")
+            mapfile -t COMPREPLY < <(compgen -W '--refresh --json --cache-only --age --path --stop-serve --serve-status --restart-serve --record --fixture-dir --sanitize --replay -h --help' -- "${current}")
             return ;;
         showy-quota-state)
             mapfile -t COMPREPLY < <(compgen -W '--json --count --providers --explain --no-fetch -h --help' -- "${current}")
@@ -28,6 +28,28 @@ _showy_quota_complete() {
         return
     fi
     case "${mode}" in
+        config)
+            if (( COMP_CWORD == 2 )); then
+                mapfile -t COMPREPLY < <(compgen -W 'get set unset list' -- "${current}")
+            fi ;;
+        theme)
+            if (( COMP_CWORD == 2 )); then
+                mapfile -t COMPREPLY < <(compgen -W 'list show validate new import-base16 import-iterm' -- "${current}")
+            fi ;;
+        tmux)
+            mapfile -t COMPREPLY < <(compgen -W 'sync doctor --socket --dry-run --json' -- "${current}") ;;
+        preview)
+            if [[ "${previous}" == --surface ]]; then
+                mapfile -t COMPREPLY < <(compgen -W 'zellij tmux sketchybar plan rows vertical' -- "${current}")
+            elif [[ "${previous}" == --fixture ]]; then
+                mapfile -t COMPREPLY < <(compgen -f -- "${current}")
+            else
+                mapfile -t COMPREPLY < <(compgen -W '--surface --fixture --theme' -- "${current}")
+            fi ;;
+        --check-terminal)
+            mapfile -t COMPREPLY < <(compgen -W '--json' -- "${current}") ;;
+        --tmux-doctor)
+            mapfile -t COMPREPLY < <(compgen -W '--socket --json' -- "${current}") ;;
         guard|run|next-reset|pick)
             if [[ "${mode}" == 'run' ]]; then
                 for (( i = 2; i < COMP_CWORD; i++ )); do
@@ -78,7 +100,7 @@ _showy_quota_complete() {
             fi ;;
         *)
             if (( COMP_CWORD == 1 )); then
-                mapfile -t COMPREPLY < <(compgen -W '--set --unset --current --list --preview --diagnose --check-config --grant-zellij guard prompt serve next-reset run pick refresh -h --help' -- "${current}")
+                mapfile -t COMPREPLY < <(compgen -W '--set --unset --current --list --preview --diagnose --check-config --grant-zellij --check-terminal --tmux-doctor --diagnose-zellij config theme tmux preview guard prompt serve next-reset run pick refresh -h --help' -- "${current}")
             fi ;;
     esac
 }

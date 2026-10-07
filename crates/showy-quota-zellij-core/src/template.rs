@@ -155,7 +155,7 @@ impl<'a> Template<'a> {
                             output.push_str(&format_countdown(minutes));
                         }
                     }
-                    Field::Class => output.push_str(config.severity(candidate.remaining).as_str()),
+                    Field::Class => output.push_str(candidate.severity.as_str()),
                     Field::Window => push_payload_text(output, candidate.window),
                     Field::Stale => {
                         if stale {
@@ -190,6 +190,7 @@ struct Candidate<'a> {
     used: i32,
     remaining: i32,
     minutes: Option<i64>,
+    severity: crate::palette::Severity,
 }
 
 fn worst_window(metric: &ProviderMetric) -> Option<Candidate<'_>> {
@@ -217,6 +218,7 @@ fn worst_window(metric: &ProviderMetric) -> Option<Candidate<'_>> {
                     used,
                     remaining,
                     minutes: extra.minutes_until_reset,
+                    severity: extra.severity.unwrap_or(crate::palette::Severity::Good),
                 },
             );
         }
@@ -240,6 +242,7 @@ fn candidate<'a>(provider: &'a str, name: &'a str, window: &WindowMetric) -> Can
         used: window.used_percent,
         remaining: window.remaining_percent,
         minutes: window.minutes_until_reset,
+        severity: window.severity,
     }
 }
 

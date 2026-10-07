@@ -130,6 +130,75 @@ once. It refreshes data only when its last successful result is at least one
 interval old and no request is running, so switching between fresh tabs adds
 no probes.
 
+## Session broker, pipes, and diagnostics
+
+These optional KDL keys belong inside the `plugin` block:
+
+| Key | Default | Behavior |
+| --- | --- | --- |
+| `session_broker` | `false` | Elects one fetching owner among plugin instances in the same session with exactly the same configuration. Followers render the owner's data. |
+| `control_pipe_name` | Empty | Enables a named command pipe for `refresh`, `dump_rendered`, and `diagnostics`. |
+| `pipe_name` | Empty | Sends rendered output to other plugins on this named pipe after a successful local refresh. |
+| `emit_pipe_format` | `"ansi"` | Sets output for `pipe_name` and `dump_rendered`: `ansi`, `plain`, or `json`. Unknown values use `ansi`. |
+| `fixture` | Unset | Reads a CodexBar usage JSON file on the Zellij server instead of fetching live data. |
+| `SHOWY_QUOTA_FIXTURE` | Unset | Alias for the `fixture` KDL key; `fixture` takes precedence. This is a configuration key, not an environment lookup. |
+| `fixture_json` | Unset | Loads inline CodexBar usage JSON without running a command. |
+| `debug` | `false` | Renders JSON diagnostics in the pane instead of the quota strip. |
+
+Boolean keys accept `1`, `true`, `yes`, or `on`. Pipe names must contain
+1 to 128 ASCII letters, digits, hyphens, underscores, or periods. Invalid
+names disable that pipe. JSON emissions contain `rendered` and `diagnostics`;
+plain emissions omit ANSI styling.
+
+The broker groups instances by the whole configuration, including render and
+pipe settings. It elects the lowest plugin ID and replaces an owner after
+10 seconds without an owner message. CLI pipe input cannot acquire ownership.
+Fixture mode disables the broker and live fetching.
+
+For example:
+
+```kdl
+pane size=1 borderless=true {
+    plugin location="file:~/.config/zellij/plugins/showy-quota-zellij.wasm" {
+        session_broker true
+        control_pipe_name "showy-quota-control"
+        pipe_name "showy-quota-output"
+        emit_pipe_format "json"
+    }
+}
+```
+
+Send commands from a terminal in that session:
+
+```sh
+zellij pipe --name showy-quota-control -- diagnostics
+zellij pipe --name showy-quota-control -- refresh
+zellij pipe --name showy-quota-control -- dump_rendered
+```
+
+Replace `showy-quota-control` with your `control_pipe_name`. `diagnostics`
+returns JSON with coordinator state, permission status, broker role and leader,
+and fixture status. `dump_rendered` returns the selected emission format.
+`refresh` starts a refresh; a broker follower forwards it to the owner.
+A file fixture refresh rereads the file; an inline fixture has no file to reread.
+
+### Fixture preview on the host
+
+The native `showy-quota-zellij` binary is a Cargo-built debug helper, not a
+`make plugin` or installed runtime output. Build and use it with:
+
+```sh
+cargo build -p showy-quota-zellij --bin showy-quota-zellij
+target/debug/showy-quota-zellij --fixture FILE
+target/debug/showy-quota-zellij --fixture FILE --diagnostics --config debug=true
+cat FILE | target/debug/showy-quota-zellij --fixture -
+```
+
+Its command syntax is
+`showy-quota-zellij --fixture FILE|- [--diagnostics] [--config key=value]`.
+Repeat `--config` for multiple keys. The helper requires a fixture and does not
+fetch live data.
+
 ## Permissions
 
 The default configuration requests these permissions:
@@ -140,13 +209,28 @@ OpenTerminalsOrPlugins
 RunCommands
 ```
 
-`WebAccess` is always needed for localhost `/health` and `/usage`.
+In live mode, `WebAccess` is always needed for localhost `/health` and `/usage`.
 `OpenTerminalsOrPlugins` is requested only when `manage_serve` is enabled,
 because that path starts the managed `codexbar serve` background command pane.
 `RunCommands` is requested only when degraded CLI fallback is enabled, for
 provider discovery (`codexbar config providers --format json --pretty`) and
 one `codexbar usage --provider <id> --format json --pretty` call per enabled
 provider.
+
+An active `session_broker`, a valid `control_pipe_name`, or a valid
+`pipe_name` adds both `ReadCliPipes` and `MessageAndLaunchOtherPlugins`.
+`emit_pipe_format` and `debug` add no permissions. File fixtures (`fixture`
+or `SHOWY_QUOTA_FIXTURE`) request `RunCommands` instead of the live-mode
+permissions, to read the file. Inline `fixture_json` alone requests no base
+permissions. Pipe keys still add both pipe permissions in fixture mode.
+
+If Zellij denies the optional permissions, the plugin disables the broker and
+both pipes, then requests only its base permissions. It uses self-contained
+mode if the user grants that second request.
+
+`showy-quota --grant-zellij` does not grant `ReadCliPipes` or
+`MessageAndLaunchOtherPlugins`. Accept the Zellij permission prompt when you
+enable the broker or pipes, or add both permissions to the manual grants below.
 
 The grant is **not** invalidated when you cut a new release or rebuild the
 `.wasm` — Zellij keys it on the plugin's path, not the binary's contents. A

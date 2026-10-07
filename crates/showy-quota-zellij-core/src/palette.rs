@@ -30,6 +30,26 @@ impl Severity {
             Severity::Bad => "x",
         }
     }
+
+    pub fn ansi_code(self) -> i32 {
+        match self {
+            Self::Good => 32,
+            Self::Warn => 33,
+            Self::Bad => 31,
+        }
+    }
+}
+
+impl crate::config::ThresholdPolicy {
+    pub fn severity(self, remaining: i32) -> Severity {
+        if remaining >= self.good {
+            Severity::Good
+        } else if remaining >= self.warn {
+            Severity::Warn
+        } else {
+            Severity::Bad
+        }
+    }
 }
 
 impl RenderConfig {
