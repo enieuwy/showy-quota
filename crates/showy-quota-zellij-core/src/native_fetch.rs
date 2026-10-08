@@ -3470,7 +3470,15 @@ esac
                 dir.0.join("serve"),
                 r#"import argparse
 import http.server
+import socketserver
 from pathlib import Path
+
+class LoopbackHTTPServer(http.server.HTTPServer):
+    def server_bind(self):
+        # HTTPServer.server_bind performs reverse DNS before it starts listening.
+        # Bind numerically so slow runner DNS cannot consume the startup deadline.
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--port", type=int, required=True)
@@ -3491,7 +3499,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(body)
     def log_message(self, *args):
         pass
-http.server.HTTPServer(("127.0.0.1", args.port), Handler).serve_forever()
+LoopbackHTTPServer(("127.0.0.1", args.port), Handler).serve_forever()
 "#,
             )
             .expect("fake endpoint process");
@@ -3576,6 +3584,42 @@ http.server.HTTPServer(("127.0.0.1", args.port), Handler).serve_forever()
                 }
             }
         }
+    }
+
+    #[test]
+    fn native_serve_fixture_starts_without_reverse_dns() {
+        let fixture = FakeNativeServe::new();
+        std::fs::write(
+            fixture.dir.0.join("sitecustomize.py"),
+            r#"import socket
+from pathlib import Path
+Path("dns-guard-loaded").touch()
+def reject_reverse_dns(*args, **kwargs):
+    raise AssertionError("numeric loopback fixtures must not resolve reverse DNS")
+socket.getfqdn = reject_reverse_dns
+"#,
+        )
+        .expect("reverse DNS guard");
+        let mut child = std::process::Command::new(&fixture.config.bin)
+            .args(["serve", "--port", &fixture.config.serve_port])
+            .env("PYTHONPATH", &fixture.dir.0)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("guarded fixture process");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !health_ok(&fixture.config) {
+            assert!(
+                child.try_wait().expect("guarded fixture state").is_none(),
+                "the fixture must not call socket.getfqdn"
+            );
+            assert!(Instant::now() < deadline, "fixture did not become healthy");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(fixture.dir.0.join("dns-guard-loaded").exists());
+        assert_eq!(fixture.started_pids(), vec![child.id()]);
+        child.kill().expect("stop guarded fixture");
+        child.wait().expect("reap guarded fixture");
     }
 
     #[test]
