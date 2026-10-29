@@ -9,8 +9,8 @@
 #
 # Residual exposure, reported but not waived: RUSTSEC-2026-0221
 # (`event-listener 5.4.1`, unsound, `!Send` tags crossing thread boundaries via
-# `StackSlot`) reaches us through `isahc 1.8.2 -> zellij-utils 0.45.0 ->
-# zellij-tile 0.45.0`. `zellij-tile` pulls `zellij-utils` non-optionally with no
+# `StackSlot`) reaches us through `isahc 1.8.2 -> zellij-utils 0.45.1 ->
+# zellij-tile 0.45.1`. `zellij-tile` pulls `zellij-utils` non-optionally with no
 # feature flag to shed it, so the HTTP client is not independently removable.
 # cargo-audit classes it as a warning, not a vulnerability, so bare `cargo audit`
 # still exits 0 and CI needs no waiver. The plugin never constructs an `isahc`
