@@ -16,6 +16,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   calls `--emit sketchybar-frame`, `sketchybar-query`, and `sketchybar-layout`;
   an older binary leaves the pill frozen. Run `make render-bin` (or
   `make install-bin`). `--emit sketchybar` (the old row format) is removed.
+- **Rebuild `showy-quota-render` with `showy-quota pick`.** `--emit pick` now
+  exits 3 when no provider qualifies; `pick` maps that to its documented exit 1.
+  With an older binary, `pick` reports exit 2 instead of 1 for that case.
 
 ### Added
 - An opt-in Zellij session broker shares fetched data across matching plugin
@@ -124,6 +127,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   included) no longer forks once per config variable.
 
 ### Fixed
+- `showy-quota serve stop` exits 1 and names the PID when the managed
+  `codexbar serve` will not exit, instead of exiting 0 with no message. The PID
+  record is kept for `showy-quota serve status`.
+- A failed generation-stamp write after the cache payload is published no
+  longer reports the refresh as failed. Fetch removes the stale stamp, prints a
+  warning, and clears the serve and CLI failure records.
+- `showy-quota pick` tells "no provider qualifies" (exit 1) apart from a
+  missing renderer or an unreadable cache (exit 2, with the cause on stderr).
+- `showy-quota guard` exits 2 (unusable data), not 3 (usage error), when `jq`
+  is missing. `run -h` lists `run`'s own exit codes.
+- The SketchyBar plugin refuses an image cache directory that is a symlink, not
+  owned by you, or group/world-writable, matching the fetch cache check.
 - Native cache reads retain legacy `cache@1` envelopes and mixed-validity
   provider arrays. State explanations keep every raw record, while metrics
   and render plans retain usable siblings. New publications still require

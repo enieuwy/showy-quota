@@ -2974,6 +2974,23 @@ log="${TMP}/sb-urgent.log"
 run_sketchybar_plugin "${urgent_fixture}" "${cache}" "${log}" SHOWY_QUOTA_NOW_EPOCH=4070908800
 assert_contains "plugin uses bad label color for urgent countdown" "label.color=0xffee5396" "$(< "${log}")"
 
+cache=$(mk_cache)
+mkdir -p "${cache}/sb"
+chmod 777 "${cache}/sb"
+log="${TMP}/sb-open-cache.log"
+: > "${log}"
+open_cache_err="${TMP}/sb-open-cache.err"
+open_cache_rc=0
+run_sketchybar_plugin "${urgent_fixture}" "${cache}" "${log}" 2> "${open_cache_err}" || open_cache_rc=$?
+assert_equals "plugin exits 0 for a group/world-writable image cache" "0" "${open_cache_rc}"
+assert_equals "plugin issues no sketchybar commands for an unsafe image cache" "" "$(< "${log}")"
+assert_contains "plugin names the unsafe image cache directory" "${cache}/sb" "$(< "${open_cache_err}")"
+if [[ -e "${cache}/sb/frame.txt" || -e "${cache}/sb/providers.txt" ]]; then
+    fail "plugin writes no state into an unsafe image cache"
+else
+    ok "plugin writes no state into an unsafe image cache"
+fi
+
 printf '\nsketchybar plugin (lifecycle diff)\n'
 
 cache=$(mk_cache)
@@ -6687,6 +6704,22 @@ rc=0
 out=$(run_guard codexbar-mixed.json --no-fetch --wait-max 18446744073709551616 2>&1) || rc=$?
 assert_equals "guard rejects an overflowing wait budget with usage exit 3" "3" "${rc}"
 
+# Missing jq is unusable data (exit 2), not a usage error.
+nojq_bin="${TMP}/guard-nojq-bin"
+mkdir -p "${nojq_bin}"
+ln -s "$(command -v bash)" "${nojq_bin}/bash"
+for nojq_dir in /usr/bin /bin; do
+    for nojq_tool in "${nojq_dir}"/*; do
+        nojq_name="${nojq_tool##*/}"
+        [[ "${nojq_name}" == jq || -e "${nojq_bin}/${nojq_name}" ]] || ln -s "${nojq_tool}" "${nojq_bin}/${nojq_name}"
+    done
+done
+rc=0
+out=$(env PATH="${nojq_bin}" SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_CACHE_DIR="${TMP}/guard-nojq-cache" \
+    "${REPO_ROOT}/bin/showy-quota" guard --no-fetch 2>&1) || rc=$?
+assert_equals "guard without jq exits 2" "2" "${rc}"
+assert_contains "guard without jq says jq is required" "jq is required" "${out}"
+
 # --wait-max 0 never sleeps: an immediate breach exits 1 straight away
 # (timing-based waits are intentionally not exercised).
 rc=0
@@ -7750,6 +7783,44 @@ env SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_CACHE_DIR="${automation_cache}" \
     SHOWY_QUOTA_NOW_EPOCH=4070908800 SHOWY_QUOTA_REFRESH_SECONDS=9999999999 \
     "${REPO_ROOT}/bin/showy-quota" pick --no-fetch --min-remaining 61 >/dev/null 2>&1 || automation_rc=$?
 assert_equals "pick exits 1 above available floor" "1" "${automation_rc}"
+# pick must tell "cannot evaluate" (2) apart from "nothing qualifies" (1).
+automation_norender="${TMP}/automation-no-render"
+mkdir -p "${automation_norender}"
+cp -R "${REPO_ROOT}/bin" "${REPO_ROOT}/lib" "${REPO_ROOT}/share" "${automation_norender}/"
+rm -f "${automation_norender}/bin/showy-quota-render"
+# Private PATH: system tools plus bash and jq only, so a host-installed
+# showy-quota-render (e.g. under /opt/homebrew/bin) can never be found.
+automation_norender_path="${TMP}/automation-no-render-path"
+mkdir -p "${automation_norender_path}"
+ln -s "$(command -v bash)" "${automation_norender_path}/bash"
+ln -s "$(command -v jq)" "${automation_norender_path}/jq"
+for automation_dir in /usr/bin /bin; do
+    for automation_tool in "${automation_dir}"/*; do
+        automation_name="${automation_tool##*/}"
+        [[ "${automation_name}" == showy-quota-render || -e "${automation_norender_path}/${automation_name}" ]] \
+            || ln -s "${automation_tool}" "${automation_norender_path}/${automation_name}"
+    done
+done
+automation_rc=0
+automation_out=$(env -i HOME="${TMP}" TMPDIR="${TMP}" PATH="${automation_norender_path}" \
+    SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_CACHE_DIR="${automation_cache}" \
+    "${automation_norender}/bin/showy-quota" pick --no-fetch 2>"${TMP}/automation-pick-err") || automation_rc=$?
+assert_equals "pick exits 2 when no renderer is reachable" "2" "${automation_rc}"
+assert_equals "pick keeps stdout empty without a renderer" "" "${automation_out}"
+assert_contains "pick names the missing renderer" "showy-quota-render" "$(< "${TMP}/automation-pick-err")"
+automation_bad_cache=$(mk_cache)
+printf 'not json{' > "${automation_bad_cache}/usage.json"
+automation_rc=0
+automation_out=$(env SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_CACHE_DIR="${automation_bad_cache}" \
+    SHOWY_QUOTA_RENDER_BIN="${RENDER_BIN}" SHOWY_QUOTA_NOW_EPOCH=4070908800 \
+    "${REPO_ROOT}/bin/showy-quota" pick --no-fetch 2>"${TMP}/automation-pick-err") || automation_rc=$?
+assert_equals "pick exits 2 for an invalid cache" "2" "${automation_rc}"
+assert_equals "pick keeps stdout empty for an invalid cache" "" "${automation_out}"
+assert_contains "pick reports the cache failure cause" "cannot evaluate" "$(< "${TMP}/automation-pick-err")"
+automation_out=$("${REPO_ROOT}/bin/showy-quota" pick -h)
+assert_contains "pick help documents exit 2" "2 cannot evaluate" "${automation_out}"
+automation_out=$("${REPO_ROOT}/bin/showy-quota" run -h)
+assert_contains "run help lists its own exit codes" "2 unusable data or bad arguments" "${automation_out}"
 automation_rc=0
 automation_out=$(env SHOWY_QUOTA_NO_CONFIG=1 SHOWY_QUOTA_CACHE_DIR="${automation_cache}" \
     "${REPO_ROOT}/bin/showy-quota" pick --no-fetch --min-remaining 18446744073709551616 2>&1) || automation_rc=$?

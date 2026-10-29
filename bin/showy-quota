@@ -1461,7 +1461,8 @@ cmd_guard_or_run() {
     G_COMMAND="${mode}"
     shift
     load_state_libs
-    showy_quota_have jq || { printf 'showy-quota %s: jq is required\n' "${mode}" >&2; if [[ "${mode}" == guard ]]; then exit 3; else exit 2; fi; }
+    # Missing jq means the request cannot be evaluated: unusable data (2) for guard and run alike.
+    showy_quota_have jq || { printf 'showy-quota %s: jq is required (install jq, e.g. brew install jq)\n' "${mode}" >&2; exit 2; }
 
     PROVIDER_IDS=()
     local window="worst" threshold_kind="" threshold_value=""
@@ -1509,8 +1510,11 @@ cmd_guard_or_run() {
             -h|--help)
                 if [[ "${mode}" == run ]]; then
                     printf '%s\n' 'Usage: showy-quota run [guard options] -- <command...>' \
-                        'Uses guard thresholds and exit codes; passes the child exit code on success.' \
-                        'On breach, --wait-max waits for known resets and retries while the budget remains.'
+                        'Uses guard thresholds; passes the child exit code on success.' \
+                        'On breach, --wait-max waits for known resets and retries while the budget remains.' \
+                        'Exit codes: 0 child passed; 1 breach without a usable reset budget;' \
+                        '  2 unusable data or bad arguments; otherwise the child exit code.' \
+                        'A forwarded child exit code can collide with 1 or 2.'
                 else
                     guard_help
                 fi
@@ -1765,14 +1769,19 @@ cmd_pick() {
             --no-fetch) no_fetch=1; shift ;;
             -h|--help)
                 printf '%s\n' 'Usage: showy-quota pick [--min-remaining N] [--window primary|secondary|tertiary|worst] [--format id|json] [--no-fetch] [--providers a,b]' \
-                    'Selects the provider with the most remaining quota; exit 1 when none qualifies.'
+                    'Selects the provider with the most remaining quota.' \
+                    'Exit codes: 0 picked; 1 no provider qualifies; 2 cannot evaluate (missing' \
+                    'showy-quota-render, unusable cache, renderer failure) or bad arguments.'
                 return 0 ;;
             *) automation_usage_error pick "unknown argument: $1" ;;
         esac
     done
     showy_quota_export_config
     local render_bin
-    render_bin="$(showy_quota_resolve_render_bin "${SCRIPT_DIR}" "${SCRIPT_DIR}/..")" || return 1
+    if ! render_bin="$(showy_quota_resolve_render_bin "${SCRIPT_DIR}" "${SCRIPT_DIR}/..")"; then
+        printf 'showy-quota pick: showy-quota-render not found; make render-bin builds it, make install-bin installs it\n' >&2
+        return 2
+    fi
     if (( ! no_fetch )); then
         local fetch; fetch="$(automation_fetch_bin)"
         "${fetch}" >/dev/null 2>&1 || true
@@ -1781,7 +1790,24 @@ cmd_pick() {
     if ((${#PROVIDER_IDS[@]})); then
         args+=(--provider "$(IFS=,; printf '%s' "${PROVIDER_IDS[*]}")")
     fi
-    "${render_bin}" "${args[@]}" 2>/dev/null
+    # The renderer exits 3 when the cache is valid but nothing qualifies; any
+    # other failure (unreadable/invalid cache, runtime error) cannot be evaluated.
+    local pick_rc=0 pick_out pick_err
+    pick_err="$(mktemp "${TMPDIR:-/tmp}/showy-quota-pick.XXXXXX")" || {
+        printf 'showy-quota pick: cannot create a temporary file\n' >&2
+        return 2
+    }
+    track_temp_file "${pick_err}"
+    pick_out="$("${render_bin}" "${args[@]}" 2>"${pick_err}")" || pick_rc=$?
+    case "${pick_rc}" in
+        0) rm -f "${pick_err}"; printf '%s\n' "${pick_out}"; return 0 ;;
+        3) rm -f "${pick_err}"; return 1 ;;
+        *)
+            printf 'showy-quota pick: cannot evaluate quota (showy-quota-render exited %s)\n' "${pick_rc}" >&2
+            cat "${pick_err}" >&2
+            rm -f "${pick_err}"
+            return 2 ;;
+    esac
 }
 
 cmd_refresh() {

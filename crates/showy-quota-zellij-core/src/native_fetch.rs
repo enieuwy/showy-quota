@@ -130,9 +130,9 @@ pub fn run() -> Result<i32, String> {
         "stop" => {
             ensure_cache_dir(&config)?;
             let guard = acquire_lock(&config)?;
-            let result = stop_owned_serve(&config);
+            let result = serve_stop_command(&config, &terminate_owned_pid);
             drop(guard);
-            return result.map(|_| 0);
+            return result;
         }
         "restart" => {
             if !config.manage_serve {
@@ -1636,22 +1636,56 @@ fn owned_serve_pid(config: &Config) -> Option<u32> {
     Some(pid)
 }
 
-fn stop_owned_serve(config: &Config) -> Result<bool, String> {
+enum StopOutcome {
+    NotRunning,
+    Stopped,
+    Failed(u32),
+}
+
+fn stop_owned_serve_with(
+    config: &Config,
+    terminate: &dyn Fn(&Config, u32) -> bool,
+) -> Result<StopOutcome, String> {
     let record = read_pid_record(config);
     let Some(pid) = owned_serve_pid(config) else {
         if read_pid_record(config) == record {
             let _ = std::fs::remove_file(&config.pid_file);
         }
-        return Ok(false);
+        return Ok(StopOutcome::NotRunning);
     };
-    if !terminate_owned_pid(config, pid) {
-        return Ok(false);
+    if !terminate(config, pid) {
+        return Ok(StopOutcome::Failed(pid));
     }
     if read_pid_record(config) == record {
         let _ = std::fs::remove_file(&config.pid_file);
     }
     eprintln!("showy-quota-fetch: stopped managed codexbar serve pid {pid}");
-    Ok(true)
+    Ok(StopOutcome::Stopped)
+}
+
+fn stop_owned_serve(config: &Config) -> Result<bool, String> {
+    Ok(matches!(
+        stop_owned_serve_with(config, &terminate_owned_pid)?,
+        StopOutcome::Stopped
+    ))
+}
+
+/// `serve stop`: exit 0 when nothing managed runs or it stopped; exit 1 with a
+/// direct stderr error when an owned serve survives termination.
+fn serve_stop_command(
+    config: &Config,
+    terminate: &dyn Fn(&Config, u32) -> bool,
+) -> Result<i32, String> {
+    match stop_owned_serve_with(config, terminate)? {
+        StopOutcome::Failed(pid) => {
+            eprintln!(
+                "showy-quota-fetch: could not terminate managed codexbar serve pid {pid}; \
+                 the PID record was kept; run `showy-quota serve status` to inspect it"
+            );
+            Ok(1)
+        }
+        StopOutcome::NotRunning | StopOutcome::Stopped => Ok(0),
+    }
 }
 
 fn terminate_owned_pid(config: &Config, pid: u32) -> bool {
@@ -2699,15 +2733,35 @@ fn publish_payload(config: &Config, guard: &LockGuard, fetched: FetchResult) -> 
         return Err("refresh lease lost; skipping publication".into());
     }
     atomic_write(&config.usage_file, &bytes)?;
-    write_stamp(config)?;
+    // The payload write above is the commit point. A stamp failure must not
+    // fail the publish: drop the stale stamp so readers fall back to the
+    // payload marker, and warn.
+    let stamp_written = match write_stamp(config) {
+        Ok(()) => true,
+        Err(error) => {
+            if std::fs::remove_file(&config.usage_stamp).is_err() {
+                let _ = std::fs::remove_dir(&config.usage_stamp);
+            }
+            eprintln!(
+                "showy-quota-fetch: warning: payload published but generation stamp failed: {error}"
+            );
+            false
+        }
+    };
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let _ =
             std::fs::set_permissions(&config.usage_file, std::fs::Permissions::from_mode(0o600));
-        let _ =
-            std::fs::set_permissions(&config.usage_stamp, std::fs::Permissions::from_mode(0o600));
+        if stamp_written {
+            let _ = std::fs::set_permissions(
+                &config.usage_stamp,
+                std::fs::Permissions::from_mode(0o600),
+            );
+        }
     }
+    #[cfg(not(unix))]
+    let _ = stamp_written;
     Ok(())
 }
 
@@ -2768,6 +2822,14 @@ fn refresh_via_coordinator(config: &Config, guard: &LockGuard) -> Result<(), Str
             return Err(error);
         }
     };
+    publish_and_clear_failures(config, guard, fetched)
+}
+
+fn publish_and_clear_failures(
+    config: &Config,
+    guard: &LockGuard,
+    fetched: FetchResult,
+) -> Result<(), String> {
     let source = fetched.source;
     publish_payload(config, guard, fetched)?;
     if source == Source::Serve {
@@ -3819,6 +3881,29 @@ socket.getfqdn = reject_reverse_dns
     }
 
     #[test]
+    fn serve_stop_fails_nonzero_and_keeps_pid_record_when_owner_will_not_exit() {
+        let fixture = FakeNativeServe::new();
+        let pid = fixture.managed_start();
+        let record = read_pid_record(&fixture.config);
+        assert!(record.is_some());
+        let refuse = |_: &Config, _: u32| false;
+        assert_eq!(serve_stop_command(&fixture.config, &refuse), Ok(1));
+        assert!(fixture.config.pid_file.exists());
+        assert_eq!(read_pid_record(&fixture.config), record);
+        assert_eq!(owned_serve_pid(&fixture.config), Some(pid));
+        let allow = |_: &Config, _: u32| true;
+        assert_eq!(serve_stop_command(&fixture.config, &allow), Ok(0));
+        assert!(!fixture.config.pid_file.exists());
+    }
+
+    #[test]
+    fn serve_stop_without_a_managed_serve_exits_zero() {
+        let fixture = FakeNativeServe::new();
+        let refuse = |_: &Config, _: u32| false;
+        assert_eq!(serve_stop_command(&fixture.config, &refuse), Ok(0));
+    }
+
+    #[test]
     fn restart_does_not_claim_a_foreign_endpoint_that_becomes_healthy_during_startup() {
         let endpoint = TestEndpoint::new(503);
         let mut fixture = FakeNativeServe::new();
@@ -4414,6 +4499,40 @@ esac"#);
             config.usage_lock.exists(),
             "the persistent fence must never be unlinked"
         );
+    }
+
+    #[test]
+    fn stamp_failure_after_payload_commit_still_publishes_and_clears_failures() {
+        let dir = TestDir::new();
+        let config = dir.config();
+        std::fs::create_dir_all(&config.cache_dir).expect("cache dir");
+        let guard = acquire_lock(&config).expect("lease");
+        std::fs::create_dir(&config.usage_stamp).expect("stamp path blocked by a directory");
+        record_cli_failure(&config);
+        record_serve_failure(&config);
+        publish_and_clear_failures(
+            &config,
+            &guard,
+            FetchResult {
+                payload: br#"[{"provider":"codex"}]"#.to_vec(),
+                source: Source::Serve,
+                provider_meta: BTreeMap::from([(
+                    "codex".to_string(),
+                    Measurement {
+                        source: Source::Serve,
+                        updated_at: 1_000,
+                    },
+                )]),
+            },
+        )
+        .expect("payload committed, so publish succeeds");
+        let cache = read_valid_cache(&config).expect("new payload is live");
+        assert_eq!(cache.providers[0]["provider"], "codex");
+        assert!(!config.usage_stamp.exists(), "no stale stamp is kept");
+        assert!(!config.cli_failure_stamp.exists());
+        assert!(!config.serve_failure_stamp.exists());
+        assert!(cache_generation(&config).stamp.is_none());
+        assert!(cache_generation(&config).payload.is_some());
     }
 
     #[test]

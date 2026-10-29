@@ -56,15 +56,17 @@ For example, a provider window sitting at exactly 95% remaining **passes**
 |---|---|---|
 | `0` | Pass — no selected provider breaches the threshold. | quota healthy |
 | `1` | Breach — at least one selected provider is over the limit (the worst is reported). | remaining below `--min-remaining` |
-| `2` | Unusable data — the request could not be evaluated. | no/empty cache; unknown provider; a selected provider errored; a stale cache without `--allow-stale`; an explicit window that is null |
+| `2` | Unusable data — the request could not be evaluated. | no/empty cache; `jq` missing from `PATH`; unknown provider; a selected provider errored; a stale cache without `--allow-stale`; an explicit window that is null |
 | `3` | Usage error — bad flags. | `--min-remaining` and `--max-used` together; a non-integer or out-of-range percentage; an unknown flag |
 
-Only exit `3` prints nothing machine-readable; every other outcome (`0`/`1`/`2`)
-emits the `--json` object when `--json` is set.
+Exit `3` prints nothing machine-readable. Every other outcome (`0`/`1`/`2`)
+emits the `--json` object when `--json` is set, with one exception: a missing
+`jq` exits `2` before any evaluation, so only a message on stderr is printed and
+no JSON object is emitted (building the object needs `jq`).
 
 ### `--json` output
 
-One object on stdout for exit `0`, `1`, and `2`:
+One object on stdout for exit `0`, `1`, and `2` (except exit `2` caused by a missing `jq`, which prints no JSON):
 
 ```json
 {
@@ -159,7 +161,9 @@ showy-quota run --provider codex --min-remaining 5 --wait-max 3600 -- \
 ```
 
 `run` exits `1` on a breach without a usable reset budget, `2` for unusable
-data or bad arguments, and otherwise forwards the child exit code. Use
+data or bad arguments (including a missing `jq`), and otherwise forwards the
+child exit code. A forwarded child code can collide with `1` or `2`, so a
+caller cannot always tell a child failure from a gate failure. Use
 `--no-fetch` only if another process updates the cache during the wait.
 
 ## `showy-quota next-reset`
@@ -212,9 +216,14 @@ showy-quota pick [--min-remaining N] [--window primary|secondary|tertiary|worst]
 window. With `worst`, each provider contributes its least-remaining window.
 It honors the configured provider allow and exclude lists. `--providers`
 narrows the selection further. `--format json` prints `provider`, `window`,
-`remainingPercent`, and `minutesUntilReset`. Exit `1` means that no provider
-meets the floor; exit `2` means bad arguments. It checks the normal fetch
+`remainingPercent`, and `minutesUntilReset`. It checks the normal fetch
 window by default. Use `--no-fetch` for cache-only routing.
+
+| Code | Meaning |
+|---|---|
+| `0` | A provider was picked; stdout holds only the id or JSON. |
+| `1` | No provider meets the floor. Nothing is printed. |
+| `2` | `pick` cannot evaluate the request: bad arguments, `showy-quota-render` missing (`make render-bin` builds it, `make install-bin` installs it), or a missing, unreadable, or invalid cache. The cause is on stderr. |
 
 ## `showy-quota refresh`
 
