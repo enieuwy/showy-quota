@@ -80,6 +80,10 @@ struct Cli {
     sketchybar: SketchybarCli,
 }
 
+/// Exit code of `--emit pick` when the cache is valid but no provider meets the
+/// floor. Runtime failures keep exit 1.
+const PICK_NONE_QUALIFIES_EXIT: i32 = 3;
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().map(String::as_str) == Some("--run-bounded") {
@@ -176,7 +180,7 @@ fn run(cli: &Cli, template: Option<&Template<'_>>) -> Result<(), String> {
     }
 
     if cli.emit == Emit::Pick {
-        let selected = emit_pick(
+        let Some(selected) = emit_pick(
             &input.payload,
             &config,
             now_epoch,
@@ -188,7 +192,13 @@ fn run(cli: &Cli, template: Option<&Template<'_>>) -> Result<(), String> {
             },
         )
         .map_err(render_error)?
-        .ok_or_else(|| String::from("no provider meets the requested quota floor"))?;
+        else {
+            // Distinct from a runtime failure (exit 1) so callers can tell
+            // "nothing qualifies" apart from "could not evaluate" without
+            // parsing stderr.
+            eprintln!("showy-quota-render: no provider meets the requested quota floor");
+            process::exit(PICK_NONE_QUALIFIES_EXIT);
+        };
         return write_output(&format!("{selected}\n"));
     }
 

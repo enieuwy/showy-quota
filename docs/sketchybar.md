@@ -360,7 +360,9 @@ color. Serve recovery clears the marker on the next successful fetch.
 
 Only SVG fallback icons are PNG-cached in `${SHOWY_QUOTA_SKETCHYBAR_IMAGE_CACHE}`
 (default `~/.cache/showy-quota/sketchybar`). Native bars and mapped font icons
-are not rasterized.
+are not rasterized. The plugin refuses to run, printing one line on stderr, if
+that directory is a symlink, is not owned by you, or is group- or
+world-writable.
 
 ## Provider icons and `SHOWY_QUOTA_CODEXBAR_RESOURCES`
 

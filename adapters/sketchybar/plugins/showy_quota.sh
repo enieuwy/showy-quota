@@ -70,6 +70,16 @@ if [[ ! -d "${CACHE_DIR}" ]]; then
     mkdir -p -- "${CACHE_DIR}" || exit 0
     chmod 700 "${CACHE_DIR}" 2>/dev/null || true
 fi
+# A pre-existing image cache is replayed to sketchybar (frame, layout, provider
+# list, icons), so refuse one another local user could have planted files in.
+if [[ -L "${CACHE_DIR}" ]]; then
+    printf 'showy-quota: ignoring SketchyBar image cache %s: it is a symlink\n' "${CACHE_DIR}" >&2
+    exit 0
+fi
+if ! showy_quota_dir_is_private "${CACHE_DIR}"; then
+    printf 'showy-quota: ignoring SketchyBar image cache %s: not owned by you or group/world-writable\n' "${CACHE_DIR}" >&2
+    exit 0
+fi
 STATE_FILE="${CACHE_DIR}/providers.txt"
 # What this plugin last acknowledged after a successful SketchyBar send, one
 # hash per provider. The renderer stages the next frame in frame.txt.pending.
