@@ -70,6 +70,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   new `showy_quota_layout` event. Reload SketchyBar after enabling.
 
 ### Changed
+- **The standalone Zellij plugin now requires Zellij 0.45.1 or newer.**
+  `zellij-tile` moved 0.45.0 → 0.45.1. The plugin's `wasm32-wasip1` normal
+  dependency graph stays at 160 crates. `cargo audit` produces identical output
+  with and without an ignore list, so `.cargo/audit.toml` still waives nothing.
 - SketchyBar popup mode changes retry after a failed declaration. Click and
   global-exit handlers serialize their state changes and daemon sends, so an
   older delayed click cannot reopen a popup after the pointer leaves the bar.
